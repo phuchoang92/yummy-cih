@@ -110,7 +110,6 @@ impl ServerHandler for CihServer {
             instructions: Some(
                 "Code Intelligence Hub — query the call graph: `context`, `impact`.".into(),
             ),
-            ..Default::default()
         }
     }
 }
