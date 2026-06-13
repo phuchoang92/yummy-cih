@@ -1,4 +1,4 @@
-use std::sync::{Mutex, MutexGuard};
+use std::cell::RefCell;
 
 use once_cell::sync::Lazy;
 use tree_sitter::{Language, Node, Parser, Query};
@@ -10,13 +10,22 @@ pub const JAVA_SCOPE_QUERY: &str = include_str!("query.scm");
 static QUERY: Lazy<Query> =
     Lazy::new(|| Query::new(&language(), JAVA_SCOPE_QUERY).expect("Java scope query must compile"));
 
-static PARSER: Lazy<Mutex<Parser>> = Lazy::new(|| {
+thread_local! {
+    // `tree_sitter::Parser` is `Send` but not `Sync`, so it cannot be shared across
+    // threads. Each thread (e.g. each rayon worker in `cih-parse`) gets its own
+    // parser, reused across the files it processes — no lock, no per-file rebuild.
+    static PARSER: RefCell<Parser> = RefCell::new(make_parser());
+}
+
+/// Build a fresh Java parser. Callers that want to own a parser per task
+/// (instead of using the thread-local `parse`) can use this directly.
+pub fn make_parser() -> Parser {
     let mut parser = Parser::new();
     parser
         .set_language(&language())
         .expect("Java parser language must load");
-    Mutex::new(parser)
-});
+    parser
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JavaProvider;
@@ -26,12 +35,8 @@ impl JavaProvider {
         Self
     }
 
-    pub fn parser(&self) -> MutexGuard<'static, Parser> {
-        PARSER.lock().expect("Java parser mutex poisoned")
-    }
-
     pub fn parse(&self, src: &str) -> Option<tree_sitter::Tree> {
-        self.parser().parse(src, None)
+        PARSER.with(|parser| parser.borrow_mut().parse(src, None))
     }
 }
 
@@ -164,6 +169,11 @@ class OwnerController {
         assert!(found.contains("declaration.class"));
         assert!(found.contains("declaration.method"));
         assert!(found.iter().any(|name| name.starts_with("reference.call.")));
+        // Captures the parse driver (cih-parse) actually consumes — guard against
+        // a grammar/query drift silently dropping them.
+        assert!(found.contains("import.statement"));
+        assert!(found.contains("declaration.variable")); // `private OwnerService service;`
+        assert!(found.contains("type-binding.type")); // field type binding
     }
 
     #[test]

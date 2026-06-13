@@ -112,7 +112,7 @@
     object: (identifier) @type-binding.type)) @type-binding.alias
 
 ;; Type bindings — var u = new User(); (Java 10+ local variable type inference)
-;; tree-sitter-java parses \`var\` as a \`type_identifier\` with text "var".
+;; tree-sitter-java parses `var` as a `type_identifier` with text "var".
 ;; The type-binding.constructor anchor fires when the rhs is an
 ;; object_creation_expression so interpretJavaTypeBinding can infer
 ;; the concrete type from the constructor call.
@@ -163,8 +163,8 @@
   (identifier) @type-binding.name) @type-binding.pattern
 
 ;; References — all method calls: foo() and obj.method()
-;; tree-sitter-java's query engine drops negation-based \`!object\`
-;; patterns when a positive \`object:\` pattern exists for the same
+;; tree-sitter-java's query engine drops negation-based `!object`
+;; patterns when a positive `object:` pattern exists for the same
 ;; node type, so we match all calls here and classify free vs
 ;; member in captures.ts based on the presence of @reference.receiver.
 (method_invocation
@@ -183,9 +183,9 @@
     (type_identifier) @reference.name)) @reference.call.constructor
 
 ;; References — qualified constructor calls: new pkg.Foo(), new a.b.Foo() (F35 #1928)
-;; tree-sitter-java parses \`pkg.Foo\` as a scoped_type_identifier whose final
-;; child is the simple type. Bind that tail as @reference.name (trailing \`.\`
-;; anchor = last child) so resolution targets \`Foo\`, not the raw \`pkg.Foo\` text.
+;; tree-sitter-java parses `pkg.Foo` as a scoped_type_identifier whose final
+;; child is the simple type. Bind that tail as @reference.name (trailing `.`
+;; anchor = last child) so resolution targets `Foo`, not the raw `pkg.Foo` text.
 ;; Mirrors the TS/JS new-expression qualified-constructor capture.
 (object_creation_expression
   type: (scoped_type_identifier

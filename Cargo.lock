@@ -265,6 +265,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "cih-core",
+ "cih-parse",
  "clap",
  "globset",
  "ignore",
@@ -307,6 +308,19 @@ dependencies = [
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-java",
+]
+
+[[package]]
+name = "cih-parse"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cih-core",
+ "cih-lang",
+ "rayon",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter",
 ]
 
 [[package]]

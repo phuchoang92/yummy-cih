@@ -50,11 +50,11 @@ pub(crate) fn resolve(
         bail!("choose a scope before resolving files");
     }
 
-    let module_by_name = module_rel_by_name(repo_map);
+    let rels_by_name = rels_by_name(repo_map);
     let module_by_rel = module_name_by_rel(repo_map);
     let include_globs = build_globs(&request.include)?;
     let exclude_globs = build_globs(&request.exclude)?;
-    let selected_module_rels = selected_module_rels(&request, &module_by_name)?;
+    let selected_module_rels = selected_module_rels(&request, &rels_by_name)?;
 
     let mut files = Vec::new();
     let mut touched_module_rels = BTreeSet::new();
@@ -111,12 +111,16 @@ pub(crate) fn write_scope_file(scope_file: &ScopeFile) -> Result<PathBuf> {
     Ok(output_path)
 }
 
-fn module_rel_by_name(repo_map: &RepoMap) -> BTreeMap<String, String> {
-    repo_map
-        .modules
-        .iter()
-        .map(|module| (module.name.clone(), module.rel_path.clone()))
-        .collect()
+/// name -> every rel_path registered under it. A multimap (not a 1:1 map) so two
+/// modules sharing a fallback basename are both selectable by that name.
+fn rels_by_name(repo_map: &RepoMap) -> BTreeMap<String, Vec<String>> {
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for module in &repo_map.modules {
+        map.entry(module.name.clone())
+            .or_default()
+            .push(module.rel_path.clone());
+    }
+    map
 }
 
 fn module_name_by_rel(repo_map: &RepoMap) -> BTreeMap<String, String> {
@@ -129,7 +133,7 @@ fn module_name_by_rel(repo_map: &RepoMap) -> BTreeMap<String, String> {
 
 fn selected_module_rels(
     request: &ScopeRequest,
-    module_by_name: &BTreeMap<String, String>,
+    rels_by_name: &BTreeMap<String, Vec<String>>,
 ) -> Result<BTreeSet<String>> {
     if request.all || request.modules.is_empty() {
         return Ok(BTreeSet::new());
@@ -138,16 +142,26 @@ fn selected_module_rels(
     let mut selected = BTreeSet::new();
     let mut missing = Vec::new();
     for name in &request.modules {
-        if let Some(rel) = module_by_name.get(name) {
-            selected.insert(rel.clone());
-        } else {
-            missing.push(name.clone());
+        match rels_by_name.get(name) {
+            Some(rels) => selected.extend(rels.iter().cloned()),
+            None => missing.push(name.clone()),
         }
     }
     if !missing.is_empty() {
         bail!("unknown module(s): {}", missing.join(", "));
     }
     Ok(selected)
+}
+
+/// A file's owner module matches a selected module when it IS that module or lives
+/// in its subtree — so naming a Maven parent/aggregator pom (which owns no files
+/// directly) pulls in its children's files instead of resolving to nothing.
+fn module_matches(module_rel: Option<&str>, selected: &BTreeSet<String>) -> bool {
+    module_rel.is_some_and(|m| {
+        selected
+            .iter()
+            .any(|r| r == "." || m == r || m.starts_with(&format!("{r}/")))
+    })
 }
 
 fn matches_selector(
@@ -160,10 +174,7 @@ fn matches_selector(
         return true;
     }
     if !request.modules.is_empty() {
-        return file
-            .module_rel
-            .as_ref()
-            .is_some_and(|rel| selected_module_rels.contains(rel));
+        return module_matches(file.module_rel.as_deref(), selected_module_rels);
     }
     include_globs.is_some_and(|globs| globs.is_match(&file.rel))
 }
@@ -346,5 +357,89 @@ include_decompiled = true
         assert_eq!(request.exclude, vec!["**/generated/**"]);
         assert!(request.include_decompiled);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parent_module_selects_descendant_files() {
+        // `payments` is an aggregator (rel "payments") that owns no files directly;
+        // selecting it by name must pull in both child modules' files.
+        let repo_map = RepoMap {
+            root: "/repo".into(),
+            build_system: BuildSystem::Maven,
+            total_java_files: 2,
+            total_loc: 20,
+            modules: vec![
+                module("payments", "payments"),
+                module("api", "payments/api"),
+                module("core", "payments/core"),
+            ],
+            jars: Vec::new(),
+            decompiled_dirs: Vec::new(),
+        };
+        let files = vec![
+            owned("payments/api/src/main/java/Api.java", Some("payments/api")),
+            owned("payments/core/src/main/java/Core.java", Some("payments/core")),
+        ];
+
+        let scope = resolve(
+            &repo_map,
+            &files,
+            ScopeRequest {
+                modules: vec!["payments".into()],
+                ..ScopeRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(scope.file_count, 2);
+        assert_eq!(
+            scope.files,
+            vec![
+                "payments/api/src/main/java/Api.java",
+                "payments/core/src/main/java/Core.java",
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_module_name_selects_all_and_unknown_bails() {
+        // Two distinct modules share the fallback basename "billing".
+        let repo_map = RepoMap {
+            root: "/repo".into(),
+            build_system: BuildSystem::Gradle,
+            total_java_files: 2,
+            total_loc: 20,
+            modules: vec![
+                module("billing", "services/billing"),
+                module("billing", "legacy/billing"),
+            ],
+            jars: Vec::new(),
+            decompiled_dirs: Vec::new(),
+        };
+        let files = vec![
+            owned("services/billing/src/A.java", Some("services/billing")),
+            owned("legacy/billing/src/B.java", Some("legacy/billing")),
+        ];
+
+        let scope = resolve(
+            &repo_map,
+            &files,
+            ScopeRequest {
+                modules: vec!["billing".into()],
+                ..ScopeRequest::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scope.file_count, 2);
+
+        let unknown = resolve(
+            &repo_map,
+            &files,
+            ScopeRequest {
+                modules: vec!["nope".into()],
+                ..ScopeRequest::default()
+            },
+        );
+        assert!(unknown.is_err());
     }
 }

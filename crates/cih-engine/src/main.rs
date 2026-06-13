@@ -7,6 +7,7 @@ use std::process;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use scope::ScopeRequest;
+use serde::Serialize;
 
 #[derive(Debug, Parser)]
 #[command(name = "cih-engine", about = "Code Intelligence Hub engine CLI")]
@@ -105,19 +106,55 @@ fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
     }
 
     let scope_file = scope::resolve(&scan.repo_map, &scan.java_files, request)?;
-    let output_path = scope::write_scope_file(&scope_file)?;
+    let scope_path = scope::write_scope_file(&scope_file)?;
+    let parse_output = cih_parse::parse_files(
+        std::path::Path::new(&scope_file.repo_root),
+        &scope_file.files,
+    )?;
+    let parsed_dir = std::path::Path::new(&scope_file.repo_root)
+        .join(".cih")
+        .join("parsed")
+        .join(&scope_file.version);
+    let parse_artifacts = cih_parse::write_parsed_files(&parsed_dir, &parse_output.parsed_files)?;
 
     if flags.json {
-        println!("{}", serde_json::to_string_pretty(&scope_file)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&AnalyzeSummary {
+                scope: &scope_file,
+                scope_path: scope_path.display().to_string(),
+                parsed_files_path: parse_artifacts.parsed_files_path.display().to_string(),
+                node_count: parse_output.nodes.len(),
+                edge_count: parse_output.edges.len(),
+                parsed_file_count: parse_output.parsed_files.len(),
+            })?
+        );
     } else {
         println!(
-            "Scope: {} .java files across {} modules -> {} (parse/load lands in Task 5/6).",
+            "Scope: {} .java files across {} modules -> {}.",
             scope_file.file_count,
             scope_file.modules.len(),
-            output_path.display()
+            scope_path.display()
+        );
+        println!(
+            "Parsed: {} files -> {} nodes, {} edges, IR {}.",
+            parse_output.parsed_files.len(),
+            parse_output.nodes.len(),
+            parse_output.edges.len(),
+            parse_artifacts.parsed_files_path.display()
         );
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct AnalyzeSummary<'a> {
+    scope: &'a scope::ScopeFile,
+    scope_path: String,
+    parsed_files_path: String,
+    node_count: usize,
+    edge_count: usize,
+    parsed_file_count: usize,
 }
 
 fn build_scope_request(repo: &std::path::Path, flags: &AnalyzeFlags) -> Result<ScopeRequest> {
