@@ -1,13 +1,20 @@
 mod scan;
 mod scope;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use cih_core::{Edge, GraphArtifacts, Node, VersionId};
+use cih_falkor::FalkorStore;
+use cih_graph_store::{GraphStore, LoadStats};
 use clap::{Parser, Subcommand};
 use scope::ScopeRequest;
 use serde::Serialize;
+
+/// Default FalkorDB URL (Homebrew redis squats 6379, FalkorDB on 6380).
+const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
+const DEFAULT_GRAPH_KEY: &str = "cih";
 
 #[derive(Debug, Parser)]
 #[command(name = "cih-engine", about = "Code Intelligence Hub engine CLI")]
@@ -26,7 +33,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Resolve and persist the Java files selected for a future analyze run.
+    /// Parse selected files, emit structure graph, and load into FalkorDB.
     Analyze {
         /// Repository root to analyze.
         repo: PathBuf,
@@ -51,10 +58,26 @@ enum Command {
         /// Print the resolved ScopeFile JSON instead of the human summary.
         #[arg(long)]
         json: bool,
+        /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
+        #[arg(long, env = "FALKOR_URL")]
+        falkor_url: Option<String>,
+        /// FalkorDB graph key. Defaults to $CIH_GRAPH_KEY or "cih".
+        #[arg(long, env = "CIH_GRAPH_KEY")]
+        graph_key: Option<String>,
+        /// Skip the FalkorDB load step (emit JSONL artifacts only).
+        #[arg(long)]
+        no_load: bool,
     },
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let cli = Cli::parse();
     match cli.command {
         Command::Scan { repo, json } => scan::run_scan(&repo, json),
@@ -67,6 +90,9 @@ fn main() -> Result<()> {
             include_decompiled,
             scope,
             json,
+            falkor_url,
+            graph_key,
+            no_load,
         } => run_analyze(
             repo,
             AnalyzeFlags {
@@ -77,6 +103,9 @@ fn main() -> Result<()> {
                 include_decompiled,
                 scope,
                 json,
+                falkor_url,
+                graph_key,
+                no_load,
             },
         ),
     }
@@ -91,9 +120,14 @@ struct AnalyzeFlags {
     include_decompiled: bool,
     scope: Option<PathBuf>,
     json: bool,
+    falkor_url: Option<String>,
+    graph_key: Option<String>,
+    no_load: bool,
 }
 
 fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
+    // Scan + the no-scope-selected gate live here (they exit the process); the
+    // DB-free emit core is `analyze_emit`, so it stays testable without FalkorDB.
     let scan = scan::scan_repo(&repo)?;
     let repo_map_path = scan::write_repo_map(&scan.repo_map)?;
     let request = build_scope_request(&repo, &flags)?;
@@ -105,56 +139,283 @@ fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         process::exit(2);
     }
 
-    let scope_file = scope::resolve(&scan.repo_map, &scan.java_files, request)?;
-    let scope_path = scope::write_scope_file(&scope_file)?;
-    let parse_output = cih_parse::parse_files(
-        std::path::Path::new(&scope_file.repo_root),
-        &scope_file.files,
-    )?;
-    let parsed_dir = std::path::Path::new(&scope_file.repo_root)
-        .join(".cih")
-        .join("parsed")
-        .join(&scope_file.version);
-    let parse_artifacts = cih_parse::write_parsed_files(&parsed_dir, &parse_output.parsed_files)?;
+    let emit = analyze_emit(&scan, request)?;
+
+    // bulk_load is MERGE/upsert — additive, NOT a full replace. Re-running the same
+    // scope is idempotent, but narrowing scope leaves prior out-of-scope nodes in the
+    // graph; pruning those is GraphDelta's job (Phase 4 / incremental re-index).
+    let load = if flags.no_load {
+        tracing::info!("Skipping FalkorDB load (--no-load)");
+        LoadOutcome::Skipped
+    } else {
+        let falkor_url = flags.falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        match load_to_falkor(falkor_url, graph_key, &emit.artifacts) {
+            Ok(stats) => {
+                tracing::info!(
+                    nodes = stats.nodes,
+                    edges = stats.edges,
+                    url = falkor_url,
+                    graph = graph_key,
+                    "FalkorDB bulk load complete"
+                );
+                LoadOutcome::Loaded(stats)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    url = falkor_url,
+                    "FalkorDB bulk load failed — artifacts are on disk, re-run or load manually"
+                );
+                LoadOutcome::Failed(format!("{err:#}"))
+            }
+        }
+    };
 
     if flags.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&AnalyzeSummary {
-                scope: &scope_file,
-                scope_path: scope_path.display().to_string(),
-                parsed_files_path: parse_artifacts.parsed_files_path.display().to_string(),
-                node_count: parse_output.nodes.len(),
-                edge_count: parse_output.edges.len(),
-                parsed_file_count: parse_output.parsed_files.len(),
-            })?
-        );
+        println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
     } else {
+        emit.print_human(&load);
+    }
+
+    // Exit non-zero when the load was attempted and failed, so automation/CI can tell
+    // the graph was NOT updated (artifacts are still on disk for a retry).
+    if matches!(load, LoadOutcome::Failed(_)) {
+        process::exit(3);
+    }
+    Ok(())
+}
+
+/// Outcome of the FalkorDB load step — distinguishes a deliberate skip from a failure.
+enum LoadOutcome {
+    Loaded(LoadStats),
+    Skipped,
+    Failed(String),
+}
+
+impl LoadOutcome {
+    fn status(&self) -> &'static str {
+        match self {
+            LoadOutcome::Loaded(_) => "loaded",
+            LoadOutcome::Skipped => "skipped",
+            LoadOutcome::Failed(_) => "failed",
+        }
+    }
+
+    fn stats(&self) -> Option<&LoadStats> {
+        match self {
+            LoadOutcome::Loaded(stats) => Some(stats),
+            _ => None,
+        }
+    }
+
+    fn error(&self) -> Option<&str> {
+        match self {
+            LoadOutcome::Failed(reason) => Some(reason.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// DB-free core of `analyze`: resolve scope → parse → write IR + GraphArtifacts.
+/// Returns everything the caller needs to load and report. No process exits, no DB.
+fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOutcome> {
+    let scope_file = scope::resolve(&scan.repo_map, &scan.java_files, request)?;
+    let scope_path = scope::write_scope_file(&scope_file)?;
+    let repo_root = PathBuf::from(&scope_file.repo_root);
+
+    let parse_output = cih_parse::parse_files(&repo_root, &scope_file.files)?;
+
+    // Version the graph by the CONTENT of the emitted nodes+edges (deterministic,
+    // already sorted) — not by the scope identity — so a changed file body yields a
+    // new version + a fresh `_CihMeta` node. Same content re-run → same version.
+    let version = content_version(&parse_output.nodes, &parse_output.edges);
+
+    let cih_dir = repo_root.join(".cih");
+    let parsed_dir = cih_dir.join("parsed").join(&version);
+    let parse_artifacts = cih_parse::write_parsed_files(&parsed_dir, &parse_output.parsed_files)?;
+
+    let artifacts_dir = cih_dir.join("artifacts").join(&version);
+    let artifacts = GraphArtifacts::write(
+        &artifacts_dir,
+        VersionId(version.clone()),
+        &parse_output.nodes,
+        &parse_output.edges,
+    )
+    .with_context(|| format!("failed to write graph artifacts to {}", artifacts_dir.display()))?;
+
+    // Old version dirs are re-derivable intermediates; keep only the current one.
+    prune_other_versions(&cih_dir.join("parsed"), &version)?;
+    prune_other_versions(&cih_dir.join("artifacts"), &version)?;
+
+    tracing::info!(
+        nodes = parse_output.nodes.len(),
+        edges = parse_output.edges.len(),
+        version = %version,
+        path = %artifacts_dir.display(),
+        "Graph artifacts written"
+    );
+
+    Ok(EmitOutcome {
+        scope_file,
+        scope_path,
+        artifacts,
+        parsed_files_path: parse_artifacts.parsed_files_path,
+        artifacts_dir,
+        version,
+        node_count: parse_output.nodes.len(),
+        edge_count: parse_output.edges.len(),
+        parsed_file_count: parse_output.parsed_files.len(),
+        skipped_count: parse_output.skipped.len(),
+    })
+}
+
+/// Everything `analyze_emit` produced (DB-free), used to load + report.
+struct EmitOutcome {
+    scope_file: scope::ScopeFile,
+    scope_path: PathBuf,
+    artifacts: GraphArtifacts,
+    parsed_files_path: PathBuf,
+    artifacts_dir: PathBuf,
+    version: String,
+    node_count: usize,
+    edge_count: usize,
+    parsed_file_count: usize,
+    skipped_count: usize,
+}
+
+impl EmitOutcome {
+    fn summary<'a>(&'a self, load: &'a LoadOutcome) -> AnalyzeSummary<'a> {
+        AnalyzeSummary {
+            scope: &self.scope_file,
+            version: &self.version,
+            scope_path: self.scope_path.display().to_string(),
+            parsed_files_path: self.parsed_files_path.display().to_string(),
+            artifacts_path: self.artifacts_dir.display().to_string(),
+            node_count: self.node_count,
+            edge_count: self.edge_count,
+            parsed_file_count: self.parsed_file_count,
+            skipped_count: self.skipped_count,
+            falkor_status: load.status(),
+            falkor_nodes: load.stats().map(|s| s.nodes),
+            falkor_edges: load.stats().map(|s| s.edges),
+            falkor_error: load.error(),
+        }
+    }
+
+    fn print_human(&self, load: &LoadOutcome) {
         println!(
             "Scope: {} .java files across {} modules -> {}.",
-            scope_file.file_count,
-            scope_file.modules.len(),
-            scope_path.display()
+            self.scope_file.file_count,
+            self.scope_file.modules.len(),
+            self.scope_path.display()
         );
         println!(
             "Parsed: {} files -> {} nodes, {} edges, IR {}.",
-            parse_output.parsed_files.len(),
-            parse_output.nodes.len(),
-            parse_output.edges.len(),
-            parse_artifacts.parsed_files_path.display()
+            self.parsed_file_count,
+            self.node_count,
+            self.edge_count,
+            self.parsed_files_path.display()
         );
+        if self.skipped_count > 0 {
+            println!("Skipped: {} files (see logs for details).", self.skipped_count);
+        }
+        println!("Artifacts: {} (version {})", self.artifacts_dir.display(), self.version);
+        match load {
+            LoadOutcome::Loaded(stats) => {
+                println!("FalkorDB: loaded {} nodes, {} edges.", stats.nodes, stats.edges)
+            }
+            LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
+            LoadOutcome::Failed(_) => {
+                println!("FalkorDB: load failed (artifacts on disk — re-run to retry).")
+            }
+        }
+    }
+}
+
+/// blake3 (first 16 hex) over the deterministic, sorted nodes+edges → graph version.
+fn content_version(nodes: &[Node], edges: &[Edge]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for node in nodes {
+        hasher.update(&serde_json::to_vec(node).unwrap_or_default());
+        hasher.update(b"\n");
+    }
+    for edge in edges {
+        hasher.update(&serde_json::to_vec(edge).unwrap_or_default());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex()[..16].to_string()
+}
+
+/// Remove every direct child dir of `parent` except `keep`. Best-effort: failures to
+/// remove a stale dir are logged, not fatal.
+fn prune_other_versions(parent: &Path, keep: &str) -> Result<()> {
+    if !parent.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(parent)
+        .with_context(|| format!("failed to read {}", parent.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && entry.file_name().to_str() != Some(keep) {
+            if let Err(err) = std::fs::remove_dir_all(&path) {
+                tracing::warn!(path = %path.display(), error = %err, "Failed to prune stale version dir");
+            } else {
+                tracing::debug!(path = %path.display(), "Pruned stale version dir");
+            }
+        }
     }
     Ok(())
+}
+
+/// Run the async FalkorDB bulk_load inside a short-lived tokio runtime.
+/// The engine CLI is otherwise synchronous (rayon for parse, blocking I/O for
+/// scan), so we spin up a minimal runtime only for the DB call.
+fn load_to_falkor(
+    url: &str,
+    graph_key: &str,
+    artifacts: &GraphArtifacts,
+) -> Result<cih_graph_store::LoadStats> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime")?;
+
+    rt.block_on(async {
+        let store = FalkorStore::connect(url, graph_key)
+            .map_err(|e| anyhow::anyhow!("FalkorDB connect: {e}"))?;
+        store
+            .ensure_schema()
+            .await
+            .map_err(|e| anyhow::anyhow!("FalkorDB ensure_schema: {e}"))?;
+        let stats = store
+            .bulk_load(artifacts)
+            .await
+            .map_err(|e| anyhow::anyhow!("FalkorDB bulk_load: {e}"))?;
+        Ok(stats)
+    })
 }
 
 #[derive(Serialize)]
 struct AnalyzeSummary<'a> {
     scope: &'a scope::ScopeFile,
+    version: &'a str,
     scope_path: String,
     parsed_files_path: String,
+    artifacts_path: String,
     node_count: usize,
     edge_count: usize,
     parsed_file_count: usize,
+    skipped_count: usize,
+    /// "loaded" | "skipped" | "failed"
+    falkor_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_nodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_edges: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_error: Option<&'a str>,
 }
 
 fn build_scope_request(repo: &std::path::Path, flags: &AnalyzeFlags) -> Result<ScopeRequest> {
@@ -194,3 +455,100 @@ fn build_scope_request(repo: &std::path::Path, flags: &AnalyzeFlags) -> Result<S
 
     Ok(request)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_repo() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("cih-emit-test-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(root.join("src/main/java/com/example")).unwrap();
+        write(&root, "pom.xml", "<project><groupId>com.example</groupId><artifactId>demo</artifactId></project>");
+        write(
+            &root,
+            "src/main/java/com/example/OwnerService.java",
+            "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() {}\n}\n",
+        );
+        root
+    }
+
+    fn write(root: &Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    fn all_scope() -> ScopeRequest {
+        ScopeRequest {
+            all: true,
+            ..ScopeRequest::default()
+        }
+    }
+
+    #[test]
+    fn analyze_emit_writes_artifacts_without_a_database() {
+        let root = temp_repo();
+        let scan = scan::scan_repo(&root).unwrap();
+        let emit = analyze_emit(&scan, all_scope()).unwrap();
+
+        // Structure was emitted and the JSONL artifacts exist on disk.
+        assert!(emit.node_count > 0 && emit.edge_count > 0);
+        assert_eq!(emit.skipped_count, 0);
+        let nodes_jsonl = emit.artifacts_dir.join("nodes.jsonl");
+        let edges_jsonl = emit.artifacts_dir.join("edges.jsonl");
+        assert!(nodes_jsonl.exists(), "nodes.jsonl should exist");
+        assert!(edges_jsonl.exists(), "edges.jsonl should exist");
+        assert_eq!(
+            fs::read_to_string(&nodes_jsonl).unwrap().lines().count(),
+            emit.node_count
+        );
+
+        // Skipped (no DB) maps to the right summary status, no exit.
+        let summary = emit.summary(&LoadOutcome::Skipped);
+        assert_eq!(summary.falkor_status, "skipped");
+        assert!(summary.falkor_error.is_none());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn content_version_is_stable_for_identical_content() {
+        let root = temp_repo();
+        let first = {
+            let scan = scan::scan_repo(&root).unwrap();
+            analyze_emit(&scan, all_scope()).unwrap().version
+        };
+        let second = {
+            let scan = scan::scan_repo(&root).unwrap();
+            analyze_emit(&scan, all_scope()).unwrap().version
+        };
+        assert_eq!(first, second, "same content must yield the same version");
+
+        // Changing a file body changes the version + relocates the artifacts dir.
+        write(
+            &root,
+            "src/main/java/com/example/OwnerService.java",
+            "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() {}\n  public void findOne() {}\n}\n",
+        );
+        let scan = scan::scan_repo(&root).unwrap();
+        let changed = analyze_emit(&scan, all_scope()).unwrap();
+        assert_ne!(changed.version, first, "changed content must yield a new version");
+
+        // Prune keeps only the current version dir.
+        let artifacts_parent = root.join(".cih").join("artifacts");
+        let dirs: Vec<String> = fs::read_dir(&artifacts_parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(dirs, vec![changed.version.clone()]);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
