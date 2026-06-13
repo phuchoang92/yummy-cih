@@ -22,10 +22,13 @@ async-trait = "0.1"
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+globset = "0.4"
 ignore = "0.4"
 quick-xml = "0.38"
 rayon = "1"
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "0.27", features = ["tokio-comp"] }

@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use cih_core::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
@@ -31,7 +31,7 @@ use modules::{
     upsert_candidate,
 };
 use paths::normalize_path;
-use report::print_summary;
+pub(crate) use report::print_summary;
 use walk::walk_repository_paths;
 
 // --- shared data model (used across the scan submodules) ---
@@ -76,8 +76,32 @@ struct ModuleAggregate {
     spring: SpringSignal,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ScanResult {
+    pub repo_map: RepoMap,
+    pub java_files: Vec<OwnedJavaFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OwnedJavaFile {
+    pub rel: String,
+    pub module_rel: Option<String>,
+}
+
 pub fn run_scan(repo: &Path, json: bool) -> Result<()> {
-    let repo_map = scan_repo(repo)?;
+    let scan = scan_repo(repo)?;
+    let output_path = write_repo_map(&scan.repo_map)?;
+    let encoded = serde_json::to_string_pretty(&scan.repo_map)?;
+
+    if json {
+        println!("{encoded}");
+    } else {
+        print_summary(&scan.repo_map, &output_path);
+    }
+    Ok(())
+}
+
+pub(crate) fn write_repo_map(repo_map: &RepoMap) -> Result<PathBuf> {
     let cih_dir = Path::new(&repo_map.root).join(".cih");
     fs::create_dir_all(&cih_dir)
         .with_context(|| format!("failed to create {}", cih_dir.display()))?;
@@ -85,16 +109,10 @@ pub fn run_scan(repo: &Path, json: bool) -> Result<()> {
     let encoded = serde_json::to_string_pretty(&repo_map)?;
     fs::write(&output_path, encoded.as_bytes())
         .with_context(|| format!("failed to write {}", output_path.display()))?;
-
-    if json {
-        println!("{encoded}");
-    } else {
-        print_summary(&repo_map, &output_path);
-    }
-    Ok(())
+    Ok(output_path)
 }
 
-fn scan_repo(repo: &Path) -> Result<RepoMap> {
+pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     let root = repo
         .canonicalize()
         .with_context(|| format!("failed to resolve repo path {}", repo.display()))?;
@@ -144,9 +162,16 @@ fn scan_repo(repo: &Path) -> Result<RepoMap> {
         })
         .collect();
     let mut aggregates: BTreeMap<String, ModuleAggregate> = BTreeMap::new();
+    let mut owned_java_files = Vec::new();
 
     for java in &java_files {
-        if let Some(module_rel) = find_owner_module(&candidates, &java.path) {
+        let module_rel = find_owner_module(&candidates, &java.path).map(str::to_string);
+        owned_java_files.push(OwnedJavaFile {
+            rel: java.path.clone(),
+            module_rel: module_rel.clone(),
+        });
+
+        if let Some(module_rel) = module_rel {
             let aggregate = aggregates.entry(module_rel.to_string()).or_default();
             aggregate.java_files += 1;
             aggregate.loc += java.loc;
@@ -183,8 +208,9 @@ fn scan_repo(repo: &Path) -> Result<RepoMap> {
         })
         .collect();
     modules.sort_by(|a, b| a.rel_path.cmp(&b.rel_path).then(a.name.cmp(&b.name)));
+    owned_java_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 
-    Ok(RepoMap {
+    let repo_map = RepoMap {
         root: normalize_path(root),
         build_system: detect_build_system(&modules),
         total_java_files: java_files.len() as u64,
@@ -192,6 +218,11 @@ fn scan_repo(repo: &Path) -> Result<RepoMap> {
         modules,
         jars: Vec::<JarInfo>::new(),
         decompiled_dirs,
+    };
+
+    Ok(ScanResult {
+        repo_map,
+        java_files: owned_java_files,
     })
 }
 
@@ -277,7 +308,8 @@ mod tests {
             "package com.acme.lib;\n@Service\nclass LibService {}\n",
         );
 
-        let repo_map = scan_repo(&repo.path).unwrap();
+        let scan = scan_repo(&repo.path).unwrap();
+        let repo_map = &scan.repo_map;
         assert_eq!(repo_map.build_system, BuildSystem::Maven);
         assert_eq!(repo_map.total_java_files, 3);
         assert_eq!(repo_map.decompiled_dirs, vec![".workspace-dependencies"]);
@@ -300,5 +332,28 @@ mod tests {
             .unwrap();
         assert_eq!(decompiled.java_files, 1);
         assert_eq!(decompiled.spring.services, 1);
+
+        assert_eq!(scan.java_files.len(), 3);
+        assert_eq!(
+            scan.java_files
+                .iter()
+                .find(|file| file.rel.ends_with("OwnerController.java"))
+                .and_then(|file| file.module_rel.as_deref()),
+            Some("app")
+        );
+        assert_eq!(
+            scan.java_files
+                .iter()
+                .find(|file| file.rel.ends_with("OwnerRepository.java"))
+                .and_then(|file| file.module_rel.as_deref()),
+            Some("infra")
+        );
+        assert_eq!(
+            scan.java_files
+                .iter()
+                .find(|file| file.rel.ends_with("LibService.java"))
+                .and_then(|file| file.module_rel.as_deref()),
+            Some(".workspace-dependencies")
+        );
     }
 }

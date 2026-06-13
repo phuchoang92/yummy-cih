@@ -8,7 +8,7 @@ use cih_core::{ModuleInfo, RepoMap};
 const PARSE_MS_PER_FILE: u64 = 25;
 const EST_NODES_PER_FILE: u64 = 17;
 
-pub(super) fn print_summary(repo_map: &RepoMap, output_path: &Path) {
+pub(crate) fn print_summary(repo_map: &RepoMap, output_path: &Path) {
     println!("Repo: {}", repo_map.root);
     println!("Build system: {:?}", repo_map.build_system);
     println!(
