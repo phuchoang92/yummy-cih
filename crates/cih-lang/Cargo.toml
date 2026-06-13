@@ -1,0 +1,13 @@
+[package]
+name = "cih-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+once_cell.workspace = true
+tree-sitter.workspace = true
+tree-sitter-java.workspace = true
+
+[dev-dependencies]
+streaming-iterator.workspace = true
