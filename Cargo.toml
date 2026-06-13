@@ -1,0 +1,31 @@
+# CIH — Code Intelligence Hub (Rust engine + MCP service)
+# Milestone 1 scaffold: rmcp+axum MCP server with a pluggable GraphStore (FalkorDB adapter).
+[workspace]
+resolver = "2"
+members = [
+  "crates/cih-core",
+  "crates/cih-graph-store",
+  "crates/cih-falkor",
+  "crates/cih-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+redis = { version = "0.27", features = ["tokio-comp"] }
+
+# internal crates
+cih-core = { path = "crates/cih-core" }
+cih-graph-store = { path = "crates/cih-graph-store" }
+cih-falkor = { path = "crates/cih-falkor" }

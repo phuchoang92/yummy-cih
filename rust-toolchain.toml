@@ -1,0 +1,4 @@
+[toolchain]
+# rmcp targets a recent stable (Edition 2024 is stable since Rust 1.85).
+channel = "stable"
+components = ["rustfmt", "clippy"]

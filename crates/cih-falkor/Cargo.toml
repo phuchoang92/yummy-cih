@@ -1,0 +1,16 @@
+[package]
+name = "cih-falkor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cih-core.workspace = true
+cih-graph-store.workspace = true
+async-trait.workspace = true
+redis.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true   # examples/load_sample.rs runtime

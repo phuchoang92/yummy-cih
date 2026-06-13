@@ -1,0 +1,12 @@
+[package]
+name = "cih-graph-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cih-core.workspace = true
+serde.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
