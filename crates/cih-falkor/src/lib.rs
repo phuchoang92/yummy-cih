@@ -79,7 +79,10 @@ impl FalkorStore {
                 "UNWIND {arr} AS row \
                  MERGE (n:Symbol {{id: row.id}}) \
                  SET n.name = row.name, n.kind = row.kind, n.file = row.file, \
-                     n.qualifiedName = row.qn, n.startLine = row.sl, n.endLine = row.el",
+                     n.qualifiedName = row.qn, n.startLine = row.sl, n.endLine = row.el, \
+                     n.props = row.props, n.stereotype = row.stereotype, \
+                     n.httpMethod = row.httpMethod, n.path = row.path, \
+                     n.decorator = row.decorator, n.handler = row.handler",
                 arr = nodes_to_list(chunk)
             );
             self.run(&q).await?;
@@ -349,8 +352,9 @@ fn nodes_to_list(nodes: &[Node]) -> String {
     let items: Vec<String> = nodes
         .iter()
         .map(|n| {
+            let props_json = n.props.as_ref().map(serde_json::Value::to_string);
             format!(
-                "{{id:{}, name:{}, kind:{}, file:{}, qn:{}, sl:{}, el:{}}}",
+                "{{id:{}, name:{}, kind:{}, file:{}, qn:{}, sl:{}, el:{}, props:{}, stereotype:{}, httpMethod:{}, path:{}, decorator:{}, handler:{}}}",
                 cstr(n.id.as_str()),
                 cstr(&n.name),
                 cstr(node_kind_label(n.kind)),
@@ -358,10 +362,20 @@ fn nodes_to_list(nodes: &[Node]) -> String {
                 copt(n.qualified_name.as_deref()),
                 n.range.start_line,
                 n.range.end_line,
+                copt(props_json.as_deref()),
+                copt(prop_str(n, "stereotype")),
+                copt(prop_str(n, "httpMethod")),
+                copt(prop_str(n, "path")),
+                copt(prop_str(n, "decorator")),
+                copt(prop_str(n, "handler")),
             )
         })
         .collect();
     format!("[{}]", items.join(", "))
+}
+
+fn prop_str<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
+    node.props.as_ref()?.get(key)?.as_str()
 }
 
 fn edges_to_list(edges: &[&Edge]) -> String {

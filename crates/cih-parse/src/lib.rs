@@ -218,6 +218,8 @@ import static com.example.Util.*;
 class Base {}
 interface Handler {}
 
+@RestController
+@RequestMapping(path = "/owners")
 class OwnerController extends Base implements Handler {
     private OwnerService service;
 
@@ -225,8 +227,14 @@ class OwnerController extends Base implements Handler {
         this.service = service;
     }
 
+    @GetMapping("/{id}")
     public Owner findOwner(Long id) {
         return service.findOwner(id);
+    }
+
+    @PostMapping(path = "/search", produces = "application/json")
+    public void search() {
+        service.findOwner(1L);
     }
 
     class Inner {
@@ -296,6 +304,21 @@ class OwnerController extends Base implements Handler {
             .nodes
             .iter()
             .any(|node| node.id == file_id(rel) && node.kind == cih_core::NodeKind::File));
+        let controller = output
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id == type_id(cih_core::NodeKind::Class, "com.example.OwnerController")
+            })
+            .unwrap();
+        assert_eq!(
+            controller
+                .props
+                .as_ref()
+                .and_then(|props| props.get("stereotype"))
+                .and_then(|value| value.as_str()),
+            Some("controller")
+        );
         assert!(output.edges.iter().any(|edge| {
             edge.kind == EdgeKind::HasMethod
                 && edge.src == type_id(cih_core::NodeKind::Class, "com.example.OwnerController")
@@ -310,6 +333,26 @@ class OwnerController extends Base implements Handler {
                         "com.example.OwnerController.Inner",
                     )
         }));
+        let route_id = cih_core::NodeId::new("Route:GET /owners/{id}");
+        assert!(output.nodes.iter().any(|node| {
+            node.id == route_id
+                && node.kind == cih_core::NodeKind::Route
+                && node
+                    .props
+                    .as_ref()
+                    .and_then(|props| props.get("httpMethod"))
+                    .and_then(|value| value.as_str())
+                    == Some("GET")
+        }));
+        assert!(output.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::HandlesRoute
+                && edge.src == method_id("com.example.OwnerController", "findOwner", 1)
+                && edge.dst == route_id
+        }));
+        assert!(!output
+            .nodes
+            .iter()
+            .any(|node| node.id.as_str() == "Route:POST /owners/application/json"));
     }
 
     #[test]
@@ -321,11 +364,7 @@ class OwnerController extends Base implements Handler {
         fs::write(&good_path, "package com.example;\nclass Ok {}\n").unwrap();
 
         let missing = "src/main/java/com/example/Missing.java"; // never created on disk
-        let output = parse_files(
-            &root,
-            &[good.to_string(), missing.to_string()],
-        )
-        .unwrap();
+        let output = parse_files(&root, &[good.to_string(), missing.to_string()]).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         // The good file parsed; the missing one was skipped, not fatal.
@@ -360,5 +399,90 @@ class OwnerController extends Base implements Handler {
             def.kind == cih_core::NodeKind::Method
                 && def.id == method_id("com.example.Receiver", "touch", 1)
         }));
+    }
+
+    fn stereotype_of(output: &ParseOutput, fqcn: &str) -> Option<String> {
+        output
+            .nodes
+            .iter()
+            .find(|node| node.id == type_id(cih_core::NodeKind::Class, fqcn))
+            .and_then(|node| node.props.as_ref())
+            .and_then(|props| props.get("stereotype"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn stereotype_uses_own_annotations_not_body() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/Stereotypes.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+package com.example;
+// A @Service whose body has a @GetMapping method must NOT be tagged a controller.
+@Service
+class FooService {
+    @GetMapping("/x")
+    public void m() {}
+}
+@Repository
+class FooRepo {}
+@Entity
+class FooEntity {}
+class Plain {}
+"#,
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(
+            stereotype_of(&output, "com.example.FooService").as_deref(),
+            Some("service"),
+            "a @Service with a @GetMapping body must stay a service"
+        );
+        assert_eq!(
+            stereotype_of(&output, "com.example.FooRepo").as_deref(),
+            Some("repository")
+        );
+        assert_eq!(
+            stereotype_of(&output, "com.example.FooEntity").as_deref(),
+            Some("entity")
+        );
+        assert_eq!(stereotype_of(&output, "com.example.Plain"), None);
+    }
+
+    #[test]
+    fn array_form_mapping_yields_all_routes() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/Multi.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+package com.example;
+@RestController
+class Multi {
+    @GetMapping({"/a", "/b"})
+    public void m() {}
+}
+"#,
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        for path in ["Route:GET /a", "Route:GET /b"] {
+            assert!(
+                output.nodes.iter().any(|node| node.id.as_str() == path),
+                "expected route {path}"
+            );
+        }
     }
 }

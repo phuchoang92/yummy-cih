@@ -17,15 +17,25 @@ struct TypeContext {
     id: NodeId,
     kind: NodeKind,
     fqcn: String,
+    spring_prefix: Option<String>,
     start_byte: usize,
     end_byte: usize,
 }
 
 #[derive(Clone, Debug)]
 struct CallableContext {
+    id: NodeId,
     in_fqcn: String,
     start_byte: usize,
     end_byte: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SpringRoute {
+    annotation: String,
+    http_method: &'static str,
+    path: String,
+    range: Range,
 }
 
 #[derive(Default)]
@@ -60,6 +70,7 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParseUnit> {
     collect_declarations(root, src, &mut builder, None);
     collect_query_ir(&provider, &tree, src, &mut builder);
     collect_heritage_references(root, src, &mut builder);
+    collect_spring_routes(root, src, &mut builder);
     normalize_builder(&mut builder);
 
     Ok(ParseUnit {
@@ -102,7 +113,7 @@ fn collect_declarations(
             qualified_name: Some(fqcn.clone()),
             file: builder.file.clone(),
             range,
-            props: None,
+            props: stereotype_props(class_stereotype(node, src)),
         });
         builder.defs.push(SymbolDef {
             id: id.clone(),
@@ -136,6 +147,7 @@ fn collect_declarations(
             id,
             kind,
             fqcn,
+            spring_prefix: spring_class_prefix(node, src),
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
         };
@@ -200,7 +212,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         reason: "member".into(),
     });
     builder.defs.push(SymbolDef {
-        id,
+        id: id.clone(),
         kind: NodeKind::Method,
         fqcn: owner.fqcn.clone(),
         name: name.clone(),
@@ -209,6 +221,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         modifiers: modifiers(node, src),
     });
     builder.callable_contexts.push(CallableContext {
+        id: id.clone(),
         in_fqcn: format!("{}#{name}/{arity}", owner.fqcn),
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
@@ -241,7 +254,7 @@ fn collect_constructor(
         reason: "member".into(),
     });
     builder.defs.push(SymbolDef {
-        id,
+        id: id.clone(),
         kind: NodeKind::Constructor,
         fqcn: owner.fqcn.clone(),
         name: "<init>".into(),
@@ -250,6 +263,7 @@ fn collect_constructor(
         modifiers: modifiers(node, src),
     });
     builder.callable_contexts.push(CallableContext {
+        id: id.clone(),
         in_fqcn: format!("{}#<init>/{arity}", owner.fqcn),
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
@@ -500,6 +514,250 @@ fn emit_heritage_reference(
     });
 }
 
+fn collect_spring_routes(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    if node.kind() == "method_declaration" {
+        emit_spring_routes_for_method(node, src, builder);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_spring_routes(child, src, builder);
+    }
+}
+
+fn emit_spring_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    let routes = spring_method_routes(node, src);
+    if routes.is_empty() {
+        return;
+    }
+
+    let Some(callable) = callable_context_at(node.start_byte(), builder).cloned() else {
+        return;
+    };
+    let prefix = type_context_at(node.start_byte(), builder)
+        .and_then(|ctx| ctx.spring_prefix.as_deref())
+        .unwrap_or("")
+        .to_string();
+
+    for route in routes {
+        let path = normalize_route_path(&route.path, &prefix);
+        let name = format!("{} {path}", route.http_method);
+        let route_id = NodeId::new(format!("Route:{name}"));
+        builder.nodes.push(Node {
+            id: route_id.clone(),
+            kind: NodeKind::Route,
+            name: name.clone(),
+            qualified_name: Some(name),
+            file: builder.file.clone(),
+            range: route.range,
+            props: Some(serde_json::json!({
+                "httpMethod": route.http_method,
+                "path": path,
+                "decorator": route.annotation,
+                "handler": callable.in_fqcn,
+            })),
+        });
+        builder.edges.push(Edge {
+            src: callable.id.clone(),
+            dst: route_id,
+            kind: EdgeKind::HandlesRoute,
+            confidence: 1.0,
+            reason: format!("spring-{}", route.annotation),
+        });
+    }
+}
+
+fn spring_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> {
+    annotations(node)
+        .into_iter()
+        .find(|annotation| annotation_name(*annotation, src).as_deref() == Some("RequestMapping"))
+        .and_then(|annotation| first_route_value(annotation, src))
+}
+
+fn spring_method_routes(node: TsNode<'_>, src: &str) -> Vec<SpringRoute> {
+    let mut routes = Vec::new();
+    for annotation in annotations(node) {
+        let Some(annotation_name) = annotation_name(annotation, src) else {
+            continue;
+        };
+        let Some(http_method) = spring_http_method(&annotation_name) else {
+            continue;
+        };
+        for path in route_values(annotation, src) {
+            routes.push(SpringRoute {
+                annotation: annotation_name.clone(),
+                http_method,
+                path,
+                range: range_of(annotation),
+            });
+        }
+    }
+    routes
+}
+
+fn annotations(node: TsNode<'_>) -> Vec<TsNode<'_>> {
+    let Some(modifiers) = first_named_child(node, "modifiers") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_annotations(modifiers, &mut out);
+    out
+}
+
+fn collect_annotations<'a>(node: TsNode<'a>, out: &mut Vec<TsNode<'a>>) {
+    if matches!(node.kind(), "annotation" | "marker_annotation") {
+        out.push(node);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_annotations(child, out);
+    }
+}
+
+fn annotation_name(node: TsNode<'_>, src: &str) -> Option<String> {
+    node.child_by_field_name("name")
+        .or_else(|| first_named_child(node, "identifier"))
+        .map(|name| text(name, src))
+        .filter(|name| !name.is_empty())
+}
+
+fn spring_http_method(annotation: &str) -> Option<&'static str> {
+    match annotation {
+        "GetMapping" => Some("GET"),
+        "PostMapping" => Some("POST"),
+        "PutMapping" => Some("PUT"),
+        "DeleteMapping" => Some("DELETE"),
+        "PatchMapping" => Some("PATCH"),
+        // `@RequestMapping` is a class prefix here. Method-level forms need
+        // `method = RequestMethod.X`, which Phase 3 intentionally skips.
+        _ => None,
+    }
+}
+
+fn first_route_value(annotation: TsNode<'_>, src: &str) -> Option<String> {
+    route_values(annotation, src).into_iter().next()
+}
+
+fn route_values(annotation: TsNode<'_>, src: &str) -> Vec<String> {
+    let Some(arguments) = first_named_child(annotation, "annotation_argument_list") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        match child.kind() {
+            "string_literal" => {
+                if let Some(value) = unquote_spring_literal(&text(child, src)) {
+                    out.push(value);
+                }
+            }
+            // Positional array: @GetMapping({"/a", "/b"})
+            "element_value_array_initializer" | "array_initializer" => {
+                for string_node in string_literals(child) {
+                    if let Some(value) = unquote_spring_literal(&text(string_node, src)) {
+                        out.push(value);
+                    }
+                }
+            }
+            "element_value_pair" => {
+                let key = child
+                    .child_by_field_name("key")
+                    .or_else(|| first_named_child(child, "identifier"))
+                    .map(|node| text(node, src));
+                if !is_route_member_key(key.as_deref()) {
+                    continue;
+                }
+                for string_node in string_literals(child) {
+                    if let Some(value) = unquote_spring_literal(&text(string_node, src)) {
+                        out.push(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn string_literals(node: TsNode<'_>) -> Vec<TsNode<'_>> {
+    let mut out = Vec::new();
+    collect_string_literals(node, &mut out);
+    out
+}
+
+fn collect_string_literals<'a>(node: TsNode<'a>, out: &mut Vec<TsNode<'a>>) {
+    if node.kind() == "string_literal" {
+        out.push(node);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_string_literals(child, out);
+    }
+}
+
+fn is_route_member_key(key: Option<&str>) -> bool {
+    key.is_none_or(|key| key == "path" || key == "value")
+}
+
+fn unquote_spring_literal(raw: &str) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+    if (raw.starts_with("\"\"\"") && raw.ends_with("\"\"\""))
+        || (raw.starts_with("'''") && raw.ends_with("'''"))
+    {
+        return Some(raw[3..raw.len().saturating_sub(3)].to_string());
+    }
+
+    let mut chars = raw.chars();
+    let first = chars.next()?;
+    let last = raw.chars().next_back()?;
+    if matches!(first, '"' | '\'' | '`') && first == last && raw.len() >= 2 {
+        let start = first.len_utf8();
+        let end = raw.len() - last.len_utf8();
+        return Some(raw[start..end].to_string());
+    }
+    Some(raw.to_string())
+}
+
+fn normalize_route_path(route_path: &str, prefix: &str) -> String {
+    let path_part = route_path.trim().trim_matches('/');
+    let prefix_part = prefix.trim().trim_matches('/');
+    let joined = if prefix_part.is_empty() {
+        format!("/{path_part}")
+    } else if path_part.is_empty() {
+        format!("/{prefix_part}")
+    } else {
+        format!("/{prefix_part}/{path_part}")
+    };
+    collapse_slashes(&joined)
+}
+
+fn collapse_slashes(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut previous_slash = false;
+    for ch in path.chars() {
+        if ch == '/' {
+            if !previous_slash {
+                out.push(ch);
+            }
+            previous_slash = true;
+        } else {
+            out.push(ch);
+            previous_slash = false;
+        }
+    }
+    if out.is_empty() {
+        "/".into()
+    } else {
+        out
+    }
+}
+
 fn base_name_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
     match node.kind() {
         "type_identifier" => Some(node),
@@ -610,6 +868,14 @@ fn context_for(byte: usize, builder: &FileBuilder) -> Option<String> {
         })
 }
 
+fn callable_context_at(byte: usize, builder: &FileBuilder) -> Option<&CallableContext> {
+    builder
+        .callable_contexts
+        .iter()
+        .filter(|ctx| ctx.start_byte <= byte && byte <= ctx.end_byte)
+        .max_by_key(|ctx| ctx.start_byte)
+}
+
 fn type_context_at(byte: usize, builder: &FileBuilder) -> Option<&TypeContext> {
     builder
         .type_contexts
@@ -656,6 +922,30 @@ fn modifiers(node: TsNode<'_>, src: &str) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+/// The class's specific stereotype, read from its OWN annotations only (not the body,
+/// so a `@Service` with a `@GetMapping` method is not mistaken for a controller).
+/// First matching annotation wins.
+fn class_stereotype(node: TsNode<'_>, src: &str) -> Option<&'static str> {
+    for annotation in annotations(node) {
+        let mapped = match annotation_name(annotation, src).as_deref() {
+            Some("RestController") | Some("Controller") => "controller",
+            Some("Service") => "service",
+            Some("Repository") => "repository",
+            Some("Configuration") => "configuration",
+            Some("Component") => "component",
+            Some("Entity") => "entity",
+            Some("Path") => "resource", // JAX-RS
+            _ => continue,
+        };
+        return Some(mapped);
+    }
+    None
+}
+
+fn stereotype_props(stereotype: Option<&str>) -> Option<serde_json::Value> {
+    stereotype.map(|stereotype| serde_json::json!({ "stereotype": stereotype }))
 }
 
 fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {

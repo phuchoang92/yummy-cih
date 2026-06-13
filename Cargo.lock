@@ -290,6 +290,7 @@ dependencies = [
  "cih-core",
  "cih-graph-store",
  "redis",
+ "serde_json",
  "tokio",
  "tracing",
 ]
