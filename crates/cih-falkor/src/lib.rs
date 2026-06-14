@@ -369,6 +369,65 @@ impl GraphStore for FalkorStore {
             })
             .collect())
     }
+
+    async fn candidates_by_name(&self, name: &str, limit: usize) -> Result<Vec<Node>> {
+        let lim = limit.clamp(1, 50);
+        // Use n.kind (stored property) not labels(n)[0] (always "Symbol") so
+        // node_from_row gets the real kind string.
+        let q = format!(
+            "CYPHER name={name_lit} \
+             MATCH (n:Symbol) WHERE n.name = $name \
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
+             ORDER BY n.id LIMIT {lim}",
+            name_lit = cstr(name),
+        );
+        Ok(self.rows(&q).await?.iter().map(|r| node_from_row(r)).collect())
+    }
+
+    async fn nodes_in_files(&self, files: &[String]) -> Result<Vec<Node>> {
+        if files.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = format!(
+            "[{}]",
+            files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
+        );
+        // Limit to callable/structural kinds most useful for change-impact analysis.
+        let q = format!(
+            "MATCH (n:Symbol) \
+             WHERE n.file IN {list} \
+               AND n.kind IN ['Method', 'Constructor', 'Function', 'Class', 'Interface', 'Enum'] \
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
+             ORDER BY n.file, n.id"
+        );
+        Ok(self.rows(&q).await?.iter().map(|r| node_from_row(r)).collect())
+    }
+
+    async fn processes_for_symbols(&self, symbol_ids: &[NodeId]) -> Result<Vec<String>> {
+        if symbol_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = format!(
+            "[{}]",
+            symbol_ids
+                .iter()
+                .map(|id| cstr(id.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let q = format!(
+            "MATCH (s:Symbol)-[:STEP_IN_PROCESS]->(p:Symbol) \
+             WHERE s.id IN {list} AND p.kind = 'Process' \
+             RETURN DISTINCT p.id \
+             ORDER BY p.id"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect())
+    }
 }
 
 /// Thin `BulkLoader` over a `FalkorStore` (ports & adapters: the engine depends

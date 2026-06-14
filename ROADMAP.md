@@ -316,47 +316,67 @@ These are output-format additions to existing tools — no new graph data needed
 
 ## Near-term additions (from GitNexus discovery)
 
-## Phase 18 — Repo registry + MCP resources  *(recommended next)*
+## Phase 18 — Repo registry + MCP resources ✅ (2026-06-14)
 
 Source: `docs/gitnexus-discovery.md` §1 + §2
 
-- **Repo registry** (`~/.cih/registry.json`) — register repos on `analyze`; store `name`,
-  `path`, `indexed_at`, `last_git_head`, `graph_key`, `artifacts_dir`, and graph `stats`
-  (node/edge/route/community/process counts).
-- **CLI:** `cih-engine list`, `cih-engine status <repo>`
-- **MCP tools:** `list_repos()`, `status({ repo })`
-- **MCP resources** (read-only, lower token cost than tool calls):
-  ```
-  cih://repo/{name}/context
-  cih://repo/{name}/communities
-  cih://repo/{name}/community/{id}
-  cih://repo/{name}/processes
-  cih://repo/{name}/process/{id}
-  cih://repo/{name}/schema
-  ```
-- **New files:** `crates/cih-core/src/registry.rs`, `crates/cih-engine/src/registry.rs`,
-  `crates/cih-engine/src/status.rs`, `crates/cih-server/src/resources.rs`
-- **Done when:** `cih-engine list` shows indexed repos with staleness; `list_repos()` MCP
-  tool and `cih://repo/{name}/context` resource both return data.
+- **Completed 2026-06-14:**
+  - **`~/.cih/registry.json`** — `Registry` / `RegistryEntry` / `RegistryStats` types in
+    `cih-core/src/registry.rs`; load/save/upsert/find/is_stale methods; RFC-3339 timestamps
+    and git HEAD capture via `std::process::Command` (no new deps).
+  - **Auto-register on analyze** — `cih-engine analyze` persists an entry after every
+    successful run (`cih-engine/src/registry.rs::persist_analyze`); nodes, edges, and file
+    counts come directly from `EmitOutcome`.
+  - **Auto-update on discover** — `cih-engine discover` updates `route_count`,
+    `community_count`, `process_count`, and `community_artifacts_dir` in the registry entry
+    (`persist_discover`). `route_count` is counted from the source nodes already in memory —
+    zero extra I/O. `DiscoverOutcome` gained a `route_count` field.
+  - **CLI:** `cih-engine list` (tabular or `--json`) + `cih-engine status <name>` (human or
+    `--json` with staleness flag).
+  - **MCP tools:** `list_repos()` returns all registry entries; `status({ name })` returns one
+    entry + staleness boolean.
+  - **MCP resources** (`cih-server/src/resources.rs`):
+    ```
+    cih://repo/{name}/context      → RegistryEntry JSON
+    cih://repo/{name}/communities  → Community nodes from community artifacts
+    cih://repo/{name}/processes    → Process nodes from community artifacts
+    cih://repo/{name}/schema       → { node_kinds, edge_kinds }
+    ```
+    Resource templates registered for all four URI patterns. Server capabilities updated to
+    `enable_tools().enable_resources()`.
+  - Workspace: **102 tests** green, clippy clean.
 
-## Phase 19 — Ambiguous symbol resolution + `detect_changes`
+## Phase 19 — Ambiguous symbol resolution + `detect_changes` ✅ (2026-06-14)
 
 Source: `docs/gitnexus-discovery.md` §3 + §4
 
-**Ambiguous symbol handling:** `context` and `impact` return an explicit
-`{"status":"ambiguous","candidates":[...]}` when multiple symbols match a short name —
-prevents silent wrong-symbol analysis; enables yummy frontend to show a symbol picker.
+**Ambiguous symbol handling:** `context` and `impact` now call `resolve_symbol()` before
+forwarding to the store. A short name (no `:` prefix) queries `candidates_by_name()`:
+- 0 results → `invalid_params` error
+- 1 result → proceeds with the found NodeId
+- >1 results → returns `{"status":"ambiguous","candidates":[{id,kind,name,file},...]}` (success)
+
+Full NodeIds (e.g. `Class:com.acme.OrderService`) skip disambiguation entirely.
 
 **`detect_changes` MCP tool:**
 ```
-detect_changes({ scope: "working" | "staged" | "base_ref", base_ref?: string })
+detect_changes({ scope: "working" | "staged" | "base_ref", base_ref?: string, repo?: string })
 ```
-Returns `{ changed_files, changed_symbols, affected_symbols, affected_processes, risk: "low|medium|high|critical" }`.
-Implementation: `git diff --name-only` → map files to graph nodes → BFS `impact` →
-join with `STEP_IN_PROCESS` → risk tier.
+Returns `{ changed_files, changed_symbols, affected_symbols, affected_processes, risk }`.
+Implementation: `git diff --name-only [--cached] HEAD` → `nodes_in_files()` → BFS `impact()`
+(up to 20 symbols, upstream, depth 4) → `processes_for_symbols()` → `risk_from_fanout()`.
 
-- **Done when:** `context("OrderService")` returns a candidates list when ambiguous;
-  `detect_changes({scope:"staged"})` returns a risk summary.
+**New `GraphStore` methods** (`cih-graph-store/src/lib.rs`):
+- `candidates_by_name(name, limit)` — exact `n.name` match, returns up to N nodes
+- `nodes_in_files(files)` — nodes for changed files (Method/Constructor/Function/Class/Interface/Enum)
+- `processes_for_symbols(ids)` — STEP_IN_PROCESS reachable Process nodes
+
+**New helpers** in `cih-server/src/main.rs`:
+- `CihServer::graph_key: String` — used to find the default repo in the registry
+- `find_repo_path(repo, graph_key)` — registry lookup with graph_key fallback
+- `git_changed_files(repo_path, scope, base_ref)` — runs git diff, returns relative paths
+
+- Workspace: **11 server + falkor tests** green, clippy clean.
 
 ## Phase 20 — Agent workflow docs  *(docs only)*
 

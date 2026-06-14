@@ -115,6 +115,22 @@ pub trait GraphStore: Send + Sync {
     async fn context(&self, id: &NodeId) -> Result<SymbolContext>;
     async fn communities(&self) -> Result<Vec<CommunityInfo>>;
     async fn route_map(&self, prefix: Option<&str>, limit: usize) -> Result<Vec<RouteInfo>>;
+
+    // ---- Phase 19: disambiguation + change detection ----
+
+    /// Find all nodes whose simple `name` property matches exactly (case-sensitive).
+    /// Returns up to `limit` candidates. Used for ambiguous-symbol detection when
+    /// the caller supplies a short name without a kind prefix.
+    async fn candidates_by_name(&self, name: &str, limit: usize) -> Result<Vec<Node>>;
+
+    /// Find all nodes whose `file` property is in `files` (repo-relative paths).
+    /// Scoped to callable/structural kinds (Method, Constructor, Function, Class,
+    /// Interface, Enum). Used by `detect_changes` to map changed files → symbols.
+    async fn nodes_in_files(&self, files: &[String]) -> Result<Vec<Node>>;
+
+    /// Return the Process node IDs directly reachable from `symbol_ids` via
+    /// STEP_IN_PROCESS edges.  Used by `detect_changes` to list affected processes.
+    async fn processes_for_symbols(&self, symbol_ids: &[NodeId]) -> Result<Vec<String>>;
 }
 
 /// Bulk loading is a SEPARATE port — mechanisms differ wildly across backends
