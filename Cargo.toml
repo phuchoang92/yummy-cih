@@ -7,6 +7,7 @@ members = [
   "crates/cih-engine",
   "crates/cih-lang",
   "crates/cih-parse",
+  "crates/cih-jar",
   "crates/cih-graph-store",
   "crates/cih-falkor",
   "crates/cih-server",
@@ -38,11 +39,14 @@ tree-sitter-java = "0.23.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "0.27", features = ["tokio-comp"] }
+cafebabe = "0.9"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # internal crates
 cih-core = { path = "crates/cih-core" }
 cih-engine = { path = "crates/cih-engine" }
 cih-lang = { path = "crates/cih-lang" }
 cih-parse = { path = "crates/cih-parse" }
+cih-jar = { path = "crates/cih-jar" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }
