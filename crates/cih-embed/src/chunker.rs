@@ -8,6 +8,10 @@ pub struct Chunk {
     pub end_line: u32,
 }
 
+/// Split `text` into overlapping byte-sized windows.
+///
+/// - `chunk_bytes`: maximum window size in bytes (typical: 1200)
+/// - `overlap_bytes`: trailing bytes repeated at the start of the next window (typical: 120)
 pub fn chunk_text(text: &str, chunk_bytes: usize, overlap_bytes: usize) -> Vec<Chunk> {
     if text.is_empty() {
         return Vec::new();

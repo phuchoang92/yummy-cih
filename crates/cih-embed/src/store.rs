@@ -139,7 +139,7 @@ impl EmbedStore {
 
         let texts: Vec<String> = pending.iter().map(|chunk| chunk.text.clone()).collect();
         let embeddings = self.model.embed(&texts)?;
-        for (chunk, embedding) in pending.iter().zip(embeddings.into_iter()) {
+        for (chunk, embedding) in pending.iter().zip(embeddings) {
             self.upsert_chunk(chunk, embedding).await?;
             summary.chunks_embedded += 1;
         }
@@ -165,6 +165,7 @@ impl EmbedStore {
             .query_one("SELECT COUNT(*) FROM cih_embeddings", &[])
             .await?
             .get(0);
+        // For small local indexes, exact scan avoids ANN index warm-up/recall tradeoffs.
         if count <= 2_000 {
             return self
                 .exact_search(&query_embedding, limit, max_distance)
@@ -227,7 +228,7 @@ impl EmbedStore {
                 &[
                     &chunk.node_id,
                     &chunk.chunk_idx,
-                    &kind_label(chunk.kind),
+                    &chunk.kind.label(),
                     &chunk.name,
                     &chunk.file,
                     &chunk.start_line,
@@ -289,7 +290,7 @@ impl EmbedStore {
             if distance <= max_distance {
                 hits.push(SemanticHit {
                     node_id: NodeId::new(row.get::<_, String>(0)),
-                    kind: parse_kind(&row.get::<_, String>(1)),
+                    kind: NodeKind::from_label(&row.get::<_, String>(1)),
                     name: row.get(2),
                     file: row.get(3),
                     range: Range {
@@ -308,7 +309,7 @@ impl EmbedStore {
                 .total_cmp(&b.distance)
                 .then_with(|| a.node_id.as_str().cmp(b.node_id.as_str()))
         });
-        Ok(dedupe_hits(hits.into_iter(), limit))
+        Ok(dedupe_hits(hits, limit))
     }
 }
 
@@ -316,7 +317,7 @@ fn row_to_hit(row: tokio_postgres::Row) -> SemanticHit {
     let distance = row.get::<_, f64>(6) as f32;
     SemanticHit {
         node_id: NodeId::new(row.get::<_, String>(0)),
-        kind: parse_kind(&row.get::<_, String>(1)),
+        kind: NodeKind::from_label(&row.get::<_, String>(1)),
         name: row.get(2),
         file: row.get(3),
         range: Range {
@@ -363,45 +364,5 @@ fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
         1.0
     } else {
         1.0 - dot / (a_norm.sqrt() * b_norm.sqrt())
-    }
-}
-
-fn parse_kind(kind: &str) -> NodeKind {
-    match kind {
-        "File" => NodeKind::File,
-        "Folder" => NodeKind::Folder,
-        "Class" => NodeKind::Class,
-        "Interface" => NodeKind::Interface,
-        "Enum" => NodeKind::Enum,
-        "Record" => NodeKind::Record,
-        "Annotation" => NodeKind::Annotation,
-        "Method" => NodeKind::Method,
-        "Function" => NodeKind::Function,
-        "Constructor" => NodeKind::Constructor,
-        "Field" => NodeKind::Field,
-        "Route" => NodeKind::Route,
-        "Community" => NodeKind::Community,
-        "Process" => NodeKind::Process,
-        _ => NodeKind::Other,
-    }
-}
-
-fn kind_label(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::File => "File",
-        NodeKind::Folder => "Folder",
-        NodeKind::Class => "Class",
-        NodeKind::Interface => "Interface",
-        NodeKind::Enum => "Enum",
-        NodeKind::Record => "Record",
-        NodeKind::Annotation => "Annotation",
-        NodeKind::Method => "Method",
-        NodeKind::Function => "Function",
-        NodeKind::Constructor => "Constructor",
-        NodeKind::Field => "Field",
-        NodeKind::Route => "Route",
-        NodeKind::Community => "Community",
-        NodeKind::Process => "Process",
-        NodeKind::Other => "Other",
     }
 }

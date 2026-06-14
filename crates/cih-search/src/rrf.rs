@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use cih_core::{NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};
 
+/// Standard Reciprocal Rank Fusion smoothing constant; rank-1 contributes 1 / (60 + 1).
 pub const RRF_K: f32 = 60.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,6 +25,7 @@ pub struct SearchHit {
 }
 
 impl SearchHit {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         node_id: NodeId,
         kind: NodeKind,

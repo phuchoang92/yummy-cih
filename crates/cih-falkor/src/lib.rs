@@ -377,7 +377,7 @@ async fn neighbor_nodes(store: &FalkorStore, id: &NodeId, dir: Direction) -> Res
 fn node_from_row(r: &[String]) -> Node {
     Node {
         id: NodeId::new(r.first().cloned().unwrap_or_default()),
-        kind: node_kind_from_label(r.get(1).map(String::as_str).unwrap_or("")),
+        kind: NodeKind::from_label(r.get(1).map(String::as_str).unwrap_or("")),
         name: r.get(2).cloned().unwrap_or_default(),
         qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
         file: r.get(4).cloned().unwrap_or_default(),
@@ -391,24 +391,24 @@ fn nodes_to_list(nodes: &[Node]) -> String {
         .iter()
         .map(|n| {
             let props_json = n.props.as_ref().map(serde_json::Value::to_string);
+            let id = cstr(n.id.as_str());
+            let name = cstr(&n.name);
+            let kind = cstr(n.kind.label());
+            let file = cstr(&n.file);
+            let qn = copt(n.qualified_name.as_deref());
+            let sl = n.range.start_line;
+            let el = n.range.end_line;
+            let props = copt(props_json.as_deref());
+            let stereotype = copt(prop_str(n, "stereotype"));
+            let http_method = copt(prop_str(n, "httpMethod"));
+            let path = copt(prop_str(n, "path"));
+            let decorator = copt(prop_str(n, "decorator"));
+            let handler = copt(prop_str(n, "handler"));
+            let symbol_count = cnum_u64(prop_u64(n, "symbolCount").or_else(|| prop_u64(n, "symbol_count")));
+            let cohesion = cnum_f64(prop_f64(n, "cohesion"));
+            let process_type = copt(prop_str(n, "process_type"));
             format!(
-                "{{id:{}, name:{}, kind:{}, file:{}, qn:{}, sl:{}, el:{}, props:{}, stereotype:{}, httpMethod:{}, path:{}, decorator:{}, handler:{}, symbolCount:{}, cohesion:{}, processType:{}}}",
-                cstr(n.id.as_str()),
-                cstr(&n.name),
-                cstr(node_kind_label(n.kind)),
-                cstr(&n.file),
-                copt(n.qualified_name.as_deref()),
-                n.range.start_line,
-                n.range.end_line,
-                copt(props_json.as_deref()),
-                copt(prop_str(n, "stereotype")),
-                copt(prop_str(n, "httpMethod")),
-                copt(prop_str(n, "path")),
-                copt(prop_str(n, "decorator")),
-                copt(prop_str(n, "handler")),
-                cnum_u64(prop_u64(n, "symbolCount").or_else(|| prop_u64(n, "symbol_count"))),
-                cnum_f64(prop_f64(n, "cohesion")),
-                copt(prop_str(n, "process_type")),
+                "{{id:{id}, name:{name}, kind:{kind}, file:{file}, qn:{qn}, sl:{sl}, el:{el}, props:{props}, stereotype:{stereotype}, httpMethod:{http_method}, path:{path}, decorator:{decorator}, handler:{handler}, symbolCount:{symbol_count}, cohesion:{cohesion}, processType:{process_type}}}"
             )
         })
         .collect();
@@ -457,46 +457,6 @@ fn rel_filter(kinds: &[EdgeKind]) -> String {
     } else {
         let labels: Vec<&str> = kinds.iter().map(|k| k.cypher_label()).collect();
         format!(":{}", labels.join("|"))
-    }
-}
-
-fn node_kind_label(k: NodeKind) -> &'static str {
-    match k {
-        NodeKind::File => "File",
-        NodeKind::Folder => "Folder",
-        NodeKind::Class => "Class",
-        NodeKind::Interface => "Interface",
-        NodeKind::Enum => "Enum",
-        NodeKind::Record => "Record",
-        NodeKind::Annotation => "Annotation",
-        NodeKind::Method => "Method",
-        NodeKind::Function => "Function",
-        NodeKind::Constructor => "Constructor",
-        NodeKind::Field => "Field",
-        NodeKind::Route => "Route",
-        NodeKind::Community => "Community",
-        NodeKind::Process => "Process",
-        NodeKind::Other => "Other",
-    }
-}
-
-fn node_kind_from_label(label: &str) -> NodeKind {
-    match label {
-        "File" => NodeKind::File,
-        "Folder" => NodeKind::Folder,
-        "Class" => NodeKind::Class,
-        "Interface" => NodeKind::Interface,
-        "Enum" => NodeKind::Enum,
-        "Record" => NodeKind::Record,
-        "Annotation" => NodeKind::Annotation,
-        "Method" => NodeKind::Method,
-        "Function" => NodeKind::Function,
-        "Constructor" => NodeKind::Constructor,
-        "Field" => NodeKind::Field,
-        "Route" => NodeKind::Route,
-        "Community" => NodeKind::Community,
-        "Process" => NodeKind::Process,
-        _ => NodeKind::Other,
     }
 }
 
@@ -566,5 +526,49 @@ fn cell_to_string(v: &&Value) -> String {
             format!("[{}]", inner.join(", "))
         }
         other => format!("{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_kind_label_roundtrip() {
+        for kind in [
+            NodeKind::File,
+            NodeKind::Folder,
+            NodeKind::Class,
+            NodeKind::Interface,
+            NodeKind::Enum,
+            NodeKind::Record,
+            NodeKind::Annotation,
+            NodeKind::Method,
+            NodeKind::Function,
+            NodeKind::Constructor,
+            NodeKind::Field,
+            NodeKind::Route,
+            NodeKind::Community,
+            NodeKind::Process,
+            NodeKind::Other,
+        ] {
+            assert_eq!(NodeKind::from_label(kind.label()), kind);
+        }
+        assert_eq!(NodeKind::from_label("Unknown"), NodeKind::Other);
+    }
+
+    #[test]
+    fn cstr_escapes_backslash_and_single_quote() {
+        assert_eq!(cstr("a\\b's"), "'a\\\\b\\'s'");
+        assert_eq!(cstr("line\nnext\tcell\rend"), "'line\\nnext\\tcell\\rend'");
+    }
+
+    #[test]
+    fn risk_from_fanout_buckets() {
+        assert_eq!(risk_from_fanout(0), "none");
+        assert_eq!(risk_from_fanout(5), "low");
+        assert_eq!(risk_from_fanout(20), "medium");
+        assert_eq!(risk_from_fanout(75), "high");
+        assert_eq!(risk_from_fanout(76), "critical");
     }
 }

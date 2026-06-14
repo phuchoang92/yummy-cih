@@ -1,6 +1,6 @@
 use cih_core::{Node, NodeKind};
 
-pub fn embeddable_nodes<'a>(nodes: &'a [Node]) -> Vec<&'a Node> {
+pub fn embeddable_nodes(nodes: &[Node]) -> Vec<&Node> {
     nodes
         .iter()
         .filter(|node| is_embeddable_kind(node.kind))
@@ -23,7 +23,7 @@ pub fn is_embeddable_kind(kind: NodeKind) -> bool {
 
 pub fn embedding_text(node: &Node) -> String {
     let mut parts = Vec::new();
-    parts.push(format!("kind: {}", kind_label(node.kind)));
+    parts.push(format!("kind: {}", node.kind.label()));
     parts.push(format!("name: {}", node.name));
     if let Some(qualified_name) = &node.qualified_name {
         parts.push(format!("qualified_name: {qualified_name}"));
@@ -39,29 +39,10 @@ pub fn embedding_text(node: &Node) -> String {
 }
 
 pub fn content_hash(node_id: &str, chunk_text: &str) -> String {
+    // 128 bits is plenty for change detection here and keeps row keys/logs compact.
     let mut hasher = blake3::Hasher::new();
     hasher.update(node_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(chunk_text.as_bytes());
     hasher.finalize().to_hex()[..32].to_string()
-}
-
-fn kind_label(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::File => "File",
-        NodeKind::Folder => "Folder",
-        NodeKind::Class => "Class",
-        NodeKind::Interface => "Interface",
-        NodeKind::Enum => "Enum",
-        NodeKind::Record => "Record",
-        NodeKind::Annotation => "Annotation",
-        NodeKind::Method => "Method",
-        NodeKind::Function => "Function",
-        NodeKind::Constructor => "Constructor",
-        NodeKind::Field => "Field",
-        NodeKind::Route => "Route",
-        NodeKind::Community => "Community",
-        NodeKind::Process => "Process",
-        NodeKind::Other => "Other",
-    }
 }

@@ -10,7 +10,7 @@ mod tokenize;
 
 use cih_core::NodeKind;
 
-pub use bm25::{build, IndexedDoc, SearchIndex};
+pub use bm25::{IndexedDoc, SearchIndex};
 pub use rrf::{rrf_merge, SearchHit, RRF_K};
 pub use tokenize::tokenize;
 
@@ -27,26 +27,6 @@ pub fn is_searchable_kind(kind: NodeKind) -> bool {
             | NodeKind::Field
             | NodeKind::Route
     )
-}
-
-pub fn kind_label(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::File => "File",
-        NodeKind::Folder => "Folder",
-        NodeKind::Class => "Class",
-        NodeKind::Interface => "Interface",
-        NodeKind::Enum => "Enum",
-        NodeKind::Record => "Record",
-        NodeKind::Annotation => "Annotation",
-        NodeKind::Method => "Method",
-        NodeKind::Function => "Function",
-        NodeKind::Constructor => "Constructor",
-        NodeKind::Field => "Field",
-        NodeKind::Route => "Route",
-        NodeKind::Community => "Community",
-        NodeKind::Process => "Process",
-        NodeKind::Other => "Other",
-    }
 }
 
 #[cfg(test)]
@@ -88,7 +68,7 @@ mod tests {
             ),
         ];
 
-        let index = build(&nodes);
+        let index = SearchIndex::build(&nodes);
         let hits = index.search("owner service find all", 10);
 
         assert_eq!(
@@ -107,7 +87,7 @@ mod tests {
 
     #[test]
     fn empty_corpus_search_returns_empty_hits() {
-        let index = build(&[]);
+        let index = SearchIndex::build(&[]);
 
         assert!(index.search("anything", 10).is_empty());
     }

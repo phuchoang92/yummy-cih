@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use cih_core::{Node, NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};
 
+use crate::is_searchable_kind;
 use crate::rrf::SearchHit;
 use crate::tokenize::tokenize;
-use crate::{is_searchable_kind, kind_label};
 
 const K1: f32 = 1.2;
 const B: f32 = 0.75;
@@ -29,10 +29,6 @@ pub struct SearchIndex {
     docs: Vec<IndexedDoc>,
     avg_doc_len: f32,
     doc_freq: HashMap<String, usize>,
-}
-
-pub fn build(nodes: &[Node]) -> SearchIndex {
-    SearchIndex::build(nodes)
 }
 
 impl SearchIndex {
@@ -151,7 +147,7 @@ fn idf(total_docs: f32, matching_docs: f32) -> f32 {
 
 fn node_text(node: &Node) -> String {
     let mut parts = Vec::new();
-    parts.push(kind_label(node.kind).to_string());
+    parts.push(node.kind.label().to_string());
     parts.push(node.name.clone());
     if let Some(qualified_name) = &node.qualified_name {
         parts.push(qualified_name.clone());

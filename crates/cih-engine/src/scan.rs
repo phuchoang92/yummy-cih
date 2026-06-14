@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cih_core::{BuildSystem, ModuleInfo, RepoMap, SpringSignal};
+use cih_core::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
 
 mod build_files;
 mod ignore_rules;
@@ -154,36 +154,68 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     }
     ensure_unassigned_java_module(&mut candidates, &java_files, &root);
 
-    // Collect JAR discovery inputs before candidates are consumed.
+    let (all_deps, own_group_prefix, artifact_to_name) = jar_discovery_inputs(&candidates);
+    let (aggregates, mut owned_java_files) = collect_java_aggregates(&candidates, &java_files);
+    let modules = build_modules_from_aggregates(candidates, aggregates, &artifact_to_name);
+    owned_java_files.sort_by(|a, b| a.rel.cmp(&b.rel));
+
+    let discovered_jars = discover_and_link_jars(&root, &all_deps, &own_group_prefix);
+
+    let repo_map = RepoMap {
+        root: normalize_path(root),
+        build_system: detect_build_system(&modules),
+        total_java_files: java_files.len() as u64,
+        total_loc: java_files.iter().map(|f| f.loc).sum(),
+        modules,
+        jars: discovered_jars,
+        decompiled_dirs,
+    };
+
+    Ok(ScanResult {
+        repo_map,
+        java_files: owned_java_files,
+    })
+}
+
+fn jar_discovery_inputs(
+    candidates: &[ModuleCandidate],
+) -> (Vec<String>, String, BTreeMap<String, String>) {
     let all_deps: Vec<String> = {
         let mut set: BTreeSet<String> = BTreeSet::new();
-        for c in &candidates {
-            set.extend(c.deps.iter().cloned());
+        for candidate in candidates {
+            set.extend(candidate.deps.iter().cloned());
         }
         set.into_iter().collect()
     };
-    let own_group_prefix: String = candidates
+    let own_group_prefix = candidates
         .iter()
-        .find(|c| c.rel_path == ".")
+        .find(|candidate| candidate.rel_path == ".")
         .or_else(|| candidates.first())
-        .and_then(|c| c.artifact_key.as_ref())
+        .and_then(|candidate| candidate.artifact_key.as_ref())
         .and_then(|key| key.split(':').next())
         .unwrap_or("")
         .to_string();
-
-    let artifact_to_name: BTreeMap<String, String> = candidates
+    let artifact_to_name = candidates
         .iter()
-        .filter_map(|m| {
-            m.artifact_key
+        .filter_map(|candidate| {
+            candidate
+                .artifact_key
                 .as_ref()
-                .map(|key| (key.clone(), m.name.clone()))
+                .map(|key| (key.clone(), candidate.name.clone()))
         })
         .collect();
+    (all_deps, own_group_prefix, artifact_to_name)
+}
+
+fn collect_java_aggregates(
+    candidates: &[ModuleCandidate],
+    java_files: &[JavaFileInfo],
+) -> (BTreeMap<String, ModuleAggregate>, Vec<OwnedJavaFile>) {
     let mut aggregates: BTreeMap<String, ModuleAggregate> = BTreeMap::new();
     let mut owned_java_files = Vec::new();
 
-    for java in &java_files {
-        let module_rel = find_owner_module(&candidates, &java.path).map(str::to_string);
+    for java in java_files {
+        let module_rel = find_owner_module(candidates, &java.path).map(str::to_string);
         owned_java_files.push(OwnedJavaFile {
             rel: java.path.clone(),
             module_rel: module_rel.clone(),
@@ -200,6 +232,14 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
         }
     }
 
+    (aggregates, owned_java_files)
+}
+
+fn build_modules_from_aggregates(
+    candidates: Vec<ModuleCandidate>,
+    mut aggregates: BTreeMap<String, ModuleAggregate>,
+    artifact_to_name: &BTreeMap<String, String>,
+) -> Vec<ModuleInfo> {
     let mut modules: Vec<ModuleInfo> = candidates
         .into_iter()
         .map(|candidate| {
@@ -226,24 +266,15 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
         })
         .collect();
     modules.sort_by(|a, b| a.rel_path.cmp(&b.rel_path).then(a.name.cmp(&b.name)));
-    owned_java_files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    modules
+}
 
-    let discovered_jars = jars::discover_jars(&root, &all_deps, &own_group_prefix);
-
-    let repo_map = RepoMap {
-        root: normalize_path(root),
-        build_system: detect_build_system(&modules),
-        total_java_files: java_files.len() as u64,
-        total_loc: java_files.iter().map(|f| f.loc).sum(),
-        modules,
-        jars: discovered_jars,
-        decompiled_dirs,
-    };
-
-    Ok(ScanResult {
-        repo_map,
-        java_files: owned_java_files,
-    })
+fn discover_and_link_jars(
+    root: &Path,
+    all_deps: &[String],
+    own_group_prefix: &str,
+) -> Vec<JarInfo> {
+    jars::discover_jars(root, all_deps, own_group_prefix)
 }
 
 #[cfg(test)]

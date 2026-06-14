@@ -11,15 +11,15 @@
 //! calls) are SDK-agnostic and stay as-is.
 
 mod config;
+mod search;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use cih_core::{GraphArtifacts, NodeId, VersionId};
-use cih_embed::{EmbedModelKind, EmbedStore, SemanticHit};
-use cih_graph_store::{Direction, GraphStore, GraphStoreError, Subgraph};
-use cih_search::{rrf_merge, SearchHit, SearchIndex};
+use cih_core::NodeId;
+use cih_embed::{EmbedModelKind, EmbedStore};
+use cih_graph_store::{Direction, GraphStore, GraphStoreError};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -32,17 +32,15 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use serde::Deserialize;
 
 use crate::config::{build_store, Config};
+use crate::search::{QueryArgs, QueryResult, SearchState};
 
 #[derive(Clone)]
 struct CihServer {
     store: Arc<dyn GraphStore>,
-    bm25: Arc<RwLock<Option<SearchIndex>>>,
-    embed_store: Option<Arc<EmbedStore>>,
-    artifacts_dir: Option<PathBuf>,
+    search: SearchState,
     tool_router: ToolRouter<CihServer>,
 }
 
@@ -73,25 +71,6 @@ struct CommunitiesArgs {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-struct QueryArgs {
-    /// Natural language or symbol keyword query.
-    q: String,
-    /// Maximum number of fused hits to return (default 10).
-    #[serde(default)]
-    limit: Option<usize>,
-    /// Include a one-hop subgraph around the top results.
-    #[serde(default)]
-    expand: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-struct QueryResult {
-    hits: Vec<SearchHit>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    subgraph: Option<Subgraph>,
-}
-
 #[tool_router]
 impl CihServer {
     fn new(
@@ -101,9 +80,7 @@ impl CihServer {
     ) -> Self {
         Self {
             store,
-            bm25: Arc::new(RwLock::new(None)),
-            embed_store,
-            artifacts_dir,
+            search: SearchState::new(artifacts_dir, embed_store),
             tool_router: Self::tool_router(),
         }
     }
@@ -126,11 +103,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ImpactArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let dir = match args.direction.as_deref() {
-            Some("downstream") => Direction::Downstream,
-            Some("both") => Direction::Both,
-            _ => Direction::Upstream,
-        };
+        let dir = parse_direction(args.direction.as_deref());
         let res = self
             .store
             .impact(&NodeId::new(args.name), dir, args.max_depth.unwrap_or(4))
@@ -158,32 +131,12 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<QueryArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = args.limit.unwrap_or(10).clamp(1, 50);
-        if self.artifacts_dir.is_none() && self.embed_store.is_none() {
-            return Err(McpError::internal_error(
-                "query unavailable: set CIH_ARTIFACTS_DIR for BM25 and/or CIH_PG_URL for semantic search",
-                None,
-            ));
-        }
-
-        let lexical = if let Some(index) = self.bm25_index().await? {
-            index.search(&args.q, limit * 2)
-        } else {
-            Vec::new()
-        };
-        let semantic = if let Some(embed_store) = &self.embed_store {
-            embed_store
-                .semantic_search(&args.q, limit * 2, 0.5)
-                .await
-                .map_err(|err| McpError::internal_error(err.to_string(), None))?
-                .into_iter()
-                .map(semantic_to_search_hit)
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let hits = rrf_merge(lexical, semantic, limit);
+        let limit = search::query_limit(args.limit);
+        let hits = self
+            .search
+            .query_hits(&args.q, limit)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
         let subgraph = if args.expand.unwrap_or(false) && !hits.is_empty() {
             let seeds: Vec<NodeId> = hits.iter().take(5).map(|hit| hit.node_id.clone()).collect();
             Some(self.store.subgraph(&seeds, 1).await.map_err(to_mcp)?)
@@ -192,30 +145,6 @@ impl CihServer {
         };
 
         json_result(&QueryResult { hits, subgraph })
-    }
-}
-
-impl CihServer {
-    async fn bm25_index(&self) -> Result<Option<SearchIndex>, McpError> {
-        let Some(artifacts_dir) = &self.artifacts_dir else {
-            return Ok(None);
-        };
-        {
-            let guard = self.bm25.read().await;
-            if let Some(index) = guard.as_ref() {
-                return Ok(Some(index.clone()));
-            }
-        }
-
-        let artifacts = latest_graph_artifacts_in_dir(artifacts_dir)
-            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
-        let nodes = artifacts
-            .read_nodes()
-            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
-        let index = cih_search::build(&nodes);
-        let mut guard = self.bm25.write().await;
-        *guard = Some(index.clone());
-        Ok(Some(index))
     }
 }
 
@@ -238,57 +167,12 @@ impl ServerHandler for CihServer {
     }
 }
 
-fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
-    SearchHit::from_parts(
-        hit.node_id,
-        hit.kind,
-        hit.name,
-        None,
-        hit.file,
-        hit.range,
-        hit.score,
-        "semantic",
-    )
-}
-
-fn latest_graph_artifacts_in_dir(parent: &Path) -> anyhow::Result<GraphArtifacts> {
-    let entries = std::fs::read_dir(parent)
-        .map_err(|err| anyhow::anyhow!("no graph artifacts at {}: {err}", parent.display()))?;
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let nodes_path = dir.join("nodes.jsonl");
-        let edges_path = dir.join("edges.jsonl");
-        if !nodes_path.is_file() || !edges_path.is_file() {
-            continue;
-        }
-        let version = entry.file_name().to_string_lossy().into_owned();
-        let modified = std::fs::metadata(&nodes_path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        candidates.push((
-            modified,
-            GraphArtifacts {
-                nodes_path,
-                edges_path,
-                version: VersionId(version),
-            },
-        ));
+fn parse_direction(direction: Option<&str>) -> Direction {
+    match direction {
+        Some("downstream") => Direction::Downstream,
+        Some("both") => Direction::Both,
+        _ => Direction::Upstream,
     }
-    candidates.sort_by(|(left_mtime, left), (right_mtime, right)| {
-        right_mtime
-            .cmp(left_mtime)
-            .then_with(|| right.version.0.cmp(&left.version.0))
-    });
-    candidates
-        .into_iter()
-        .next()
-        .map(|(_, artifacts)| artifacts)
-        .ok_or_else(|| anyhow::anyhow!("no complete graph artifacts under {}", parent.display()))
 }
 
 fn to_mcp(e: GraphStoreError) -> McpError {
@@ -299,6 +183,19 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
     let content =
         Content::json(value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
     Ok(CallToolResult::success(vec![content]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direction_parse_unknown_falls_back_to_upstream() {
+        assert_eq!(parse_direction(Some("downstream")), Direction::Downstream);
+        assert_eq!(parse_direction(Some("both")), Direction::Both);
+        assert_eq!(parse_direction(Some("sideways")), Direction::Upstream);
+        assert_eq!(parse_direction(None), Direction::Upstream);
+    }
 }
 
 #[tokio::main]

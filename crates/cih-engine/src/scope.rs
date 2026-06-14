@@ -378,7 +378,10 @@ include_decompiled = true
         };
         let files = vec![
             owned("payments/api/src/main/java/Api.java", Some("payments/api")),
-            owned("payments/core/src/main/java/Core.java", Some("payments/core")),
+            owned(
+                "payments/core/src/main/java/Core.java",
+                Some("payments/core"),
+            ),
         ];
 
         let scope = resolve(

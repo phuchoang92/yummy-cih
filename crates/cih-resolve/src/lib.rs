@@ -13,8 +13,7 @@ use cih_core::{
     ReferenceSite, SymbolDef, TypeBinding,
 };
 
-/// Result of turning unresolved [`ReferenceSite`](cih_core::ReferenceSite)s into
-/// graph edges.
+/// Result of turning unresolved [`ReferenceSite`]s into graph edges.
 #[derive(Clone, Debug, Default)]
 pub struct ResolveOutput {
     pub edges: Vec<Edge>,
@@ -33,7 +32,7 @@ pub fn resolve_edges(parsed: &[ParsedFile]) -> ResolveOutput {
 
 /// Cross-file resolution index over a parsed scope.
 #[derive(Debug, Default)]
-pub struct ResolveIndex {
+pub(crate) struct ResolveIndex {
     /// type FQCN → its def.
     types_by_fqcn: HashMap<String, SymbolDef>,
     /// simple type name → all FQCNs that share it (for unique-name fallback).
@@ -63,7 +62,7 @@ struct FileContext {
 
 impl ResolveIndex {
     /// Build the index from all `ParsedFile`s in the scope.
-    pub fn build(parsed: &[ParsedFile]) -> Self {
+    pub(crate) fn build(parsed: &[ParsedFile]) -> Self {
         let mut idx = ResolveIndex::default();
 
         // Pass 1: defs, members, files, bindings.
@@ -131,7 +130,7 @@ impl ResolveIndex {
     /// Resolve a raw (as-written) type name to a FQCN, using the imports +
     /// package of `file`: explicit import → same package → wildcard import →
     /// workspace-unique simple name. Already-qualified names pass through.
-    pub fn resolve_type(&self, raw: &str, file: &str) -> Option<String> {
+    pub(crate) fn resolve_type(&self, raw: &str, file: &str) -> Option<String> {
         let base = base_type_name(raw);
         if base.is_empty() {
             return None;
@@ -170,7 +169,12 @@ impl ResolveIndex {
 
     /// Find a member's node id on `owner_fqcn` directly (no hierarchy walk):
     /// exact-arity overload → any overload → field.
-    pub fn find_member(&self, owner_fqcn: &str, name: &str, arity: Option<u16>) -> Option<NodeId> {
+    pub(crate) fn find_member(
+        &self,
+        owner_fqcn: &str,
+        name: &str,
+        arity: Option<u16>,
+    ) -> Option<NodeId> {
         let key = (owner_fqcn.to_string(), name.to_string());
         if let Some(overloads) = self.methods.get(&key) {
             if let Some(a) = arity {
@@ -183,13 +187,13 @@ impl ResolveIndex {
         self.fields.get(&key).map(|d| d.id.clone())
     }
 
-    pub fn find_constructor(&self, owner_fqcn: &str, arity: Option<u16>) -> Option<NodeId> {
+    pub(crate) fn find_constructor(&self, owner_fqcn: &str, arity: Option<u16>) -> Option<NodeId> {
         self.find_member(owner_fqcn, "<init>", arity)
     }
 
     /// Like [`find_member`], but walks `owner_fqcn` + its supertypes (BFS) — the
     /// inheritance/MRO-ish member resolution the receiver-bound pass needs.
-    pub fn find_member_in_hierarchy(
+    pub(crate) fn find_member_in_hierarchy(
         &self,
         owner_fqcn: &str,
         name: &str,
@@ -211,7 +215,7 @@ impl ResolveIndex {
         None
     }
 
-    pub fn find_field_in_hierarchy(&self, owner_fqcn: &str, name: &str) -> Option<NodeId> {
+    pub(crate) fn find_field_in_hierarchy(&self, owner_fqcn: &str, name: &str) -> Option<NodeId> {
         let mut seen = HashSet::new();
         let mut queue = vec![owner_fqcn.to_string()];
         while let Some(cur) = queue.pop() {
@@ -228,7 +232,7 @@ impl ResolveIndex {
         None
     }
 
-    pub fn member_return_type_in_hierarchy(
+    pub(crate) fn member_return_type_in_hierarchy(
         &self,
         owner_fqcn: &str,
         name: &str,
@@ -264,7 +268,7 @@ impl ResolveIndex {
     /// Resolve a receiver name used inside callable `in_fqcn` to a type FQCN.
     /// Precedence: nearest param/local (then alias/call-result chains) → enclosing
     /// class field (incl. inherited) → `this`/`super`.
-    pub fn receiver_type(&self, in_fqcn: &str, receiver: &str) -> Option<String> {
+    pub(crate) fn receiver_type(&self, in_fqcn: &str, receiver: &str) -> Option<String> {
         self.receiver_type_inner(in_fqcn, receiver, 0)
     }
 
@@ -314,7 +318,7 @@ impl ResolveIndex {
         }
     }
 
-    pub fn field_type_in_hierarchy(&self, owner_class: &str, name: &str) -> Option<String> {
+    pub(crate) fn field_type_in_hierarchy(&self, owner_class: &str, name: &str) -> Option<String> {
         let mut seen = HashSet::new();
         let mut queue = vec![owner_class.to_string()];
         while let Some(cur) = queue.pop() {
@@ -362,31 +366,28 @@ impl ResolveIndex {
 
     // --- accessors (for 4.2 / 4.3) ---------------------------------------
 
-    pub fn supertypes(&self, fqcn: &str) -> &[String] {
+    pub(crate) fn supertypes(&self, fqcn: &str) -> &[String] {
         self.supertypes.get(fqcn).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub fn implementors(&self, fqcn: &str) -> &[String] {
+    #[cfg(test)]
+    pub(crate) fn implementors(&self, fqcn: &str) -> &[String] {
         self.implementors
             .get(fqcn)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub fn is_known_type(&self, fqcn: &str) -> bool {
+    pub(crate) fn is_known_type(&self, fqcn: &str) -> bool {
         self.types_by_fqcn.contains_key(fqcn)
     }
 
-    pub fn type_node_id(&self, fqcn: &str) -> Option<NodeId> {
+    pub(crate) fn type_node_id(&self, fqcn: &str) -> Option<NodeId> {
         self.types_by_fqcn.get(fqcn).map(|def| def.id.clone())
     }
 
-    pub fn file_of_type(&self, fqcn: &str) -> Option<&str> {
-        self.file_of_type.get(fqcn).map(String::as_str)
-    }
-
     /// Every type FQCN in the scope (for MRO / whole-graph passes).
-    pub fn type_fqcns(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn type_fqcns(&self) -> impl Iterator<Item = &str> {
         self.types_by_fqcn.keys().map(String::as_str)
     }
 
@@ -406,7 +407,7 @@ impl ResolveIndex {
         }
     }
 
-    pub fn is_interface_type(&self, fqcn: &str) -> bool {
+    pub(crate) fn is_interface_type(&self, fqcn: &str) -> bool {
         self.types_by_fqcn
             .get(fqcn)
             .map(|def| matches!(def.kind, NodeKind::Interface | NodeKind::Annotation))
@@ -944,7 +945,11 @@ fn c3_linearize(
             .find_map(|list| {
                 let h = &list[0];
                 let blocked = lists.iter().any(|l| l.len() > 1 && l[1..].contains(h));
-                if !blocked { Some(h.clone()) } else { None }
+                if !blocked {
+                    Some(h.clone())
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| lists[0][0].clone()); // cycle fallback: take first
         result.push(head.clone());

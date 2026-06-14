@@ -53,6 +53,48 @@ pub enum NodeKind {
     Other,
 }
 
+impl NodeKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            NodeKind::File => "File",
+            NodeKind::Folder => "Folder",
+            NodeKind::Class => "Class",
+            NodeKind::Interface => "Interface",
+            NodeKind::Enum => "Enum",
+            NodeKind::Record => "Record",
+            NodeKind::Annotation => "Annotation",
+            NodeKind::Method => "Method",
+            NodeKind::Function => "Function",
+            NodeKind::Constructor => "Constructor",
+            NodeKind::Field => "Field",
+            NodeKind::Route => "Route",
+            NodeKind::Community => "Community",
+            NodeKind::Process => "Process",
+            NodeKind::Other => "Other",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "File" => NodeKind::File,
+            "Folder" => NodeKind::Folder,
+            "Class" => NodeKind::Class,
+            "Interface" => NodeKind::Interface,
+            "Enum" => NodeKind::Enum,
+            "Record" => NodeKind::Record,
+            "Annotation" => NodeKind::Annotation,
+            "Method" => NodeKind::Method,
+            "Function" => NodeKind::Function,
+            "Constructor" => NodeKind::Constructor,
+            "Field" => NodeKind::Field,
+            "Route" => NodeKind::Route,
+            "Community" => NodeKind::Community,
+            "Process" => NodeKind::Process,
+            _ => NodeKind::Other,
+        }
+    }
+}
+
 pub fn file_id(rel: &str) -> NodeId {
     NodeId::new(format!("File:{rel}"))
 }
@@ -232,6 +274,30 @@ mod tests {
             process_id("handle-login", "a3f9c1").as_str(),
             "Process:handle-login-a3f9c1"
         );
+    }
+
+    #[test]
+    fn node_kind_labels_round_trip() {
+        for kind in [
+            NodeKind::File,
+            NodeKind::Folder,
+            NodeKind::Class,
+            NodeKind::Interface,
+            NodeKind::Enum,
+            NodeKind::Record,
+            NodeKind::Annotation,
+            NodeKind::Method,
+            NodeKind::Function,
+            NodeKind::Constructor,
+            NodeKind::Field,
+            NodeKind::Route,
+            NodeKind::Community,
+            NodeKind::Process,
+            NodeKind::Other,
+        ] {
+            assert_eq!(NodeKind::from_label(kind.label()), kind);
+        }
+        assert_eq!(NodeKind::from_label("Unknown"), NodeKind::Other);
     }
 
     #[test]

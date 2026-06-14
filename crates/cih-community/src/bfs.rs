@@ -25,14 +25,16 @@ pub fn trace_process_paths(
         };
         let mut traces_for_entry = Vec::new();
         let mut queue = VecDeque::new();
-        queue.push_back((entry_idx, vec![entry_idx]));
+        let mut entry_seen = HashSet::new();
+        entry_seen.insert(entry_idx);
+        queue.push_back((entry_idx, vec![entry_idx], entry_seen));
 
-        while let Some((cur, path)) = queue.pop_front() {
+        while let Some((cur, path, path_seen)) = queue.pop_front() {
             let mut callees: Vec<NodeIndex> = digraph
                 .edges_directed(cur, Direction::Outgoing)
                 .filter(|edge| *edge.weight() >= cfg.min_trace_confidence)
                 .map(|edge| edge.target())
-                .filter(|next| !path.contains(next))
+                .filter(|next| !path_seen.contains(next))
                 .collect();
             callees.sort_by(|a, b| digraph[*a].as_str().cmp(digraph[*b].as_str()));
             callees.dedup();
@@ -48,7 +50,9 @@ pub fn trace_process_paths(
             for next in callees {
                 let mut next_path = path.clone();
                 next_path.push(next);
-                queue.push_back((next, next_path));
+                let mut next_seen = path_seen.clone();
+                next_seen.insert(next);
+                queue.push_back((next, next_path, next_seen));
             }
         }
 

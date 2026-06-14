@@ -1,0 +1,219 @@
+use std::path::{Path, PathBuf};
+use std::process;
+
+use anyhow::{Context, Result};
+use cih_core::{EdgeKind, GraphArtifacts, NodeKind, VersionId};
+use serde::Serialize;
+
+use crate::db::{load_to_falkor, LoadOutcome};
+use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
+use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+
+pub(crate) fn run_discover(
+    repo: PathBuf,
+    falkor_url: Option<String>,
+    graph_key: Option<String>,
+    no_load: bool,
+    json: bool,
+) -> Result<()> {
+    let emit = run_discover_core(&repo)?;
+
+    let load = if no_load {
+        tracing::info!("Skipping FalkorDB load (--no-load)");
+        LoadOutcome::Skipped
+    } else {
+        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        match load_to_falkor(url, key, &emit.artifacts) {
+            Ok(stats) => {
+                tracing::info!(
+                    nodes = stats.nodes,
+                    edges = stats.edges,
+                    "FalkorDB discover load complete"
+                );
+                LoadOutcome::Loaded(stats)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "FalkorDB discover load failed");
+                LoadOutcome::Failed(format!("{err:#}"))
+            }
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
+    } else {
+        emit.print_human(&load);
+    }
+
+    if matches!(load, LoadOutcome::Failed(_)) {
+        process::exit(3);
+    }
+    Ok(())
+}
+
+pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
+    let source = latest_graph_artifacts(repo)?;
+    let nodes = source
+        .read_nodes()
+        .with_context(|| format!("failed to read {}", source.nodes_path.display()))?;
+    let edges = source
+        .read_edges()
+        .with_context(|| format!("failed to read {}", source.edges_path.display()))?;
+
+    let mut community_cfg = cih_community::CommunityConfig::default();
+    if cih_community::is_large_graph(&nodes) {
+        community_cfg.resolution = 2.0;
+        community_cfg.max_iterations = 3;
+    }
+    let community_output = cih_community::detect_communities(&nodes, &edges, &community_cfg);
+    let symbol_count = nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Method | NodeKind::Constructor | NodeKind::Class | NodeKind::Interface
+            )
+        })
+        .count();
+    let process_cfg = cih_community::ProcessConfig::for_symbol_count(symbol_count);
+    let process_output =
+        cih_community::trace_processes(&nodes, &edges, &community_output.memberships, &process_cfg);
+
+    let mut output_nodes = community_output.nodes;
+    output_nodes.extend(process_output.nodes);
+    let mut output_edges = community_output.edges;
+    output_edges.extend(process_output.edges);
+    output_nodes.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    output_edges.sort_by(|a, b| {
+        a.src
+            .as_str()
+            .cmp(b.src.as_str())
+            .then_with(|| a.dst.as_str().cmp(b.dst.as_str()))
+            .then_with(|| a.kind.cypher_label().cmp(b.kind.cypher_label()))
+    });
+
+    let version = discover_version(&output_nodes, &output_edges);
+    let artifacts_dir = repo.join(".cih").join("artifacts-community").join(&version);
+    let artifacts = GraphArtifacts::write(
+        &artifacts_dir,
+        VersionId(version.clone()),
+        &output_nodes,
+        &output_edges,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write community artifacts to {}",
+            artifacts_dir.display()
+        )
+    })?;
+    prune_other_versions(&repo.join(".cih").join("artifacts-community"), &version)?;
+
+    Ok(DiscoverOutcome {
+        source_version: source.version.0,
+        artifacts,
+        artifacts_dir,
+        version,
+        community_count: output_nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Community)
+            .count(),
+        process_count: output_nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Process)
+            .count(),
+        member_edge_count: output_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::MemberOf)
+            .count(),
+        step_edge_count: output_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::StepInProcess)
+            .count(),
+        node_count: output_nodes.len(),
+        edge_count: output_edges.len(),
+    })
+}
+
+/// Everything `run_discover_core` produced (DB-free), used to load + report.
+pub(crate) struct DiscoverOutcome {
+    pub(crate) source_version: String,
+    pub(crate) artifacts: GraphArtifacts,
+    pub(crate) artifacts_dir: PathBuf,
+    pub(crate) version: String,
+    pub(crate) community_count: usize,
+    pub(crate) process_count: usize,
+    pub(crate) member_edge_count: usize,
+    pub(crate) step_edge_count: usize,
+    pub(crate) node_count: usize,
+    pub(crate) edge_count: usize,
+}
+
+impl DiscoverOutcome {
+    fn summary<'a>(&'a self, load: &'a LoadOutcome) -> DiscoverSummary<'a> {
+        DiscoverSummary {
+            source_version: &self.source_version,
+            version: &self.version,
+            artifacts_path: self.artifacts_dir.display().to_string(),
+            community_count: self.community_count,
+            process_count: self.process_count,
+            member_edge_count: self.member_edge_count,
+            step_edge_count: self.step_edge_count,
+            node_count: self.node_count,
+            edge_count: self.edge_count,
+            falkor_status: load.status(),
+            falkor_nodes: load.stats().map(|s| s.nodes),
+            falkor_edges: load.stats().map(|s| s.edges),
+            falkor_error: load.error(),
+        }
+    }
+
+    fn print_human(&self, load: &LoadOutcome) {
+        println!(
+            "Discover: source graph {} -> {} communities, {} processes.",
+            self.source_version, self.community_count, self.process_count
+        );
+        println!(
+            "Edges: {} MEMBER_OF, {} STEP_IN_PROCESS.",
+            self.member_edge_count, self.step_edge_count
+        );
+        println!(
+            "Artifacts: {} (version {})",
+            self.artifacts_dir.display(),
+            self.version
+        );
+        match load {
+            LoadOutcome::Loaded(stats) => {
+                println!(
+                    "FalkorDB: loaded {} nodes, {} edges.",
+                    stats.nodes, stats.edges
+                )
+            }
+            LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
+            LoadOutcome::Failed(_) => {
+                println!("FalkorDB: load failed (artifacts on disk - re-run to retry).")
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DiscoverSummary<'a> {
+    source_version: &'a str,
+    version: &'a str,
+    artifacts_path: String,
+    community_count: usize,
+    process_count: usize,
+    member_edge_count: usize,
+    step_edge_count: usize,
+    node_count: usize,
+    edge_count: usize,
+    /// "loaded" | "skipped" | "failed"
+    falkor_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_nodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_edges: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_error: Option<&'a str>,
+}

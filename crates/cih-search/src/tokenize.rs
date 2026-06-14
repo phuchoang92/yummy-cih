@@ -27,6 +27,7 @@ pub fn tokenize(input: &str) -> Vec<String> {
 }
 
 fn is_camel_boundary(prev: char, current: char, next: Option<char>) -> bool {
+    // Split lower/digit→upper (`ownerService`) and acronym→word (`HTTPServer`).
     if current.is_ascii_uppercase() && (prev.is_ascii_lowercase() || prev.is_ascii_digit()) {
         return true;
     }

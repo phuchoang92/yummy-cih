@@ -163,10 +163,7 @@ fn group_artifact_from_path(path: &Path) -> (Option<String>, Option<String>) {
 
     // Gradle: anchor on "files-*" segment
     // after files-*: [group, artifact, version, hash, filename]
-    if let Some(files_pos) = components
-        .iter()
-        .rposition(|&c| c.starts_with("files-"))
-    {
+    if let Some(files_pos) = components.iter().rposition(|&c| c.starts_with("files-")) {
         let after = &components[files_pos + 1..];
         if after.len() >= 5 {
             let group = after[0];
@@ -178,7 +175,10 @@ fn group_artifact_from_path(path: &Path) -> (Option<String>, Option<String>) {
     }
 
     // Fallback: stem only (e.g. `guava-33.0-jre.jar` → artifact = `guava-33.0-jre`)
-    let stem = path.file_stem().and_then(|s| s.to_str()).map(str::to_string);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
     (None, stem)
 }
 
@@ -209,11 +209,19 @@ fn find_in_gradle(gradle_files: &Path, group_id: &str, artifact_id: &str) -> Opt
         return None;
     }
     for version_entry in fs::read_dir(&artifact_dir).ok()?.flatten() {
-        if !version_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if !version_entry
+            .file_type()
+            .map(|ft| ft.is_dir())
+            .unwrap_or(false)
+        {
             continue;
         }
         for hash_entry in fs::read_dir(version_entry.path()).ok()?.flatten() {
-            if hash_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            if hash_entry
+                .file_type()
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false)
+            {
                 if let Some(jar) = find_primary_jar_in(&hash_entry.path()) {
                     return Some(jar);
                 }
@@ -233,8 +241,7 @@ fn find_primary_jar_in(dir: &Path) -> Option<PathBuf> {
 
 fn is_own(group_id: &str, own_prefix: &str) -> bool {
     !own_prefix.is_empty()
-        && (group_id == own_prefix
-            || group_id.starts_with(&format!("{own_prefix}.")))
+        && (group_id == own_prefix || group_id.starts_with(&format!("{own_prefix}.")))
 }
 
 /// Count `.class` entries inside a JAR (reads the ZIP central directory, no decompression).
@@ -324,8 +331,8 @@ mod tests {
     fn write_fake_jar(path: &Path, class_count: usize) {
         let file = fs::File::create(path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
-        let opts =
-            zip::write::FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+        let opts = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for i in 0..class_count {
             writer
                 .start_file(format!("com/example/Class{i}.class"), opts)
@@ -366,10 +373,7 @@ mod tests {
 
         let jars = discover_jars(&root, &[], "");
         assert_eq!(jars.len(), 1);
-        assert_eq!(
-            jars[0].artifact.as_deref(),
-            Some("core-1.0")
-        );
+        assert_eq!(jars[0].artifact.as_deref(), Some("core-1.0"));
 
         let _ = fs::remove_dir_all(root);
     }
