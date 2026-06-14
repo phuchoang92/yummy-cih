@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{Edge, GraphArtifacts, Node, VersionId};
+use cih_core::{Edge, GraphArtifacts, Node, ParsedFile, VersionId};
 use cih_falkor::FalkorStore;
 use cih_graph_store::{GraphStore, LoadStats};
 use clap::{Parser, Subcommand};
@@ -225,11 +225,14 @@ fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOu
     let repo_root = PathBuf::from(&scope_file.repo_root);
 
     let parse_output = cih_parse::parse_files(&repo_root, &scope_file.files)?;
+    let resolve_output = cih_resolve::resolve_edges(&parse_output.parsed_files);
+    let edges = combined_edges(&parse_output.edges, &resolve_output.edges);
 
-    // Version the graph by the CONTENT of the emitted nodes+edges (deterministic,
-    // already sorted) — not by the scope identity — so a changed file body yields a
-    // new version + a fresh `_CihMeta` node. Same content re-run → same version.
-    let version = content_version(&parse_output.nodes, &parse_output.edges);
+    // Version the graph by the CONTENT of the emitted nodes+edges plus parsed IR
+    // (deterministic, already sorted) — not by the scope identity — so a changed
+    // file body or resolver input yields a new version. Same content re-run →
+    // same version.
+    let version = content_version(&parse_output.nodes, &edges, &parse_output.parsed_files);
 
     let cih_dir = repo_root.join(".cih");
     let parsed_dir = cih_dir.join("parsed").join(&version);
@@ -240,9 +243,14 @@ fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOu
         &artifacts_dir,
         VersionId(version.clone()),
         &parse_output.nodes,
-        &parse_output.edges,
+        &edges,
     )
-    .with_context(|| format!("failed to write graph artifacts to {}", artifacts_dir.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to write graph artifacts to {}",
+            artifacts_dir.display()
+        )
+    })?;
 
     // Old version dirs are re-derivable intermediates; keep only the current one.
     prune_other_versions(&cih_dir.join("parsed"), &version)?;
@@ -250,7 +258,9 @@ fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOu
 
     tracing::info!(
         nodes = parse_output.nodes.len(),
-        edges = parse_output.edges.len(),
+        edges = edges.len(),
+        resolved_edges = resolve_output.edges.len(),
+        unresolved_refs = resolve_output.skipped,
         version = %version,
         path = %artifacts_dir.display(),
         "Graph artifacts written"
@@ -264,7 +274,10 @@ fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOu
         artifacts_dir,
         version,
         node_count: parse_output.nodes.len(),
-        edge_count: parse_output.edges.len(),
+        edge_count: edges.len(),
+        resolved_edge_count: resolve_output.edges.len(),
+        unresolved_reference_count: resolve_output.skipped,
+        unresolved_external_fqcns: resolve_output.unresolved_external_fqcns,
         parsed_file_count: parse_output.parsed_files.len(),
         skipped_count: parse_output.skipped.len(),
     })
@@ -280,6 +293,9 @@ struct EmitOutcome {
     version: String,
     node_count: usize,
     edge_count: usize,
+    resolved_edge_count: usize,
+    unresolved_reference_count: u64,
+    unresolved_external_fqcns: Vec<String>,
     parsed_file_count: usize,
     skipped_count: usize,
 }
@@ -294,6 +310,9 @@ impl EmitOutcome {
             artifacts_path: self.artifacts_dir.display().to_string(),
             node_count: self.node_count,
             edge_count: self.edge_count,
+            resolved_edge_count: self.resolved_edge_count,
+            unresolved_reference_count: self.unresolved_reference_count,
+            unresolved_external_fqcns: &self.unresolved_external_fqcns,
             parsed_file_count: self.parsed_file_count,
             skipped_count: self.skipped_count,
             falkor_status: load.status(),
@@ -318,12 +337,32 @@ impl EmitOutcome {
             self.parsed_files_path.display()
         );
         if self.skipped_count > 0 {
-            println!("Skipped: {} files (see logs for details).", self.skipped_count);
+            println!(
+                "Skipped: {} files (see logs for details).",
+                self.skipped_count
+            );
         }
-        println!("Artifacts: {} (version {})", self.artifacts_dir.display(), self.version);
+        println!(
+            "Resolved: {} edges, {} unresolved refs.",
+            self.resolved_edge_count, self.unresolved_reference_count
+        );
+        if !self.unresolved_external_fqcns.is_empty() {
+            println!(
+                "External unresolved types: {}.",
+                self.unresolved_external_fqcns.len()
+            );
+        }
+        println!(
+            "Artifacts: {} (version {})",
+            self.artifacts_dir.display(),
+            self.version
+        );
         match load {
             LoadOutcome::Loaded(stats) => {
-                println!("FalkorDB: loaded {} nodes, {} edges.", stats.nodes, stats.edges)
+                println!(
+                    "FalkorDB: loaded {} nodes, {} edges.",
+                    stats.nodes, stats.edges
+                )
             }
             LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
             LoadOutcome::Failed(_) => {
@@ -333,8 +372,8 @@ impl EmitOutcome {
     }
 }
 
-/// blake3 (first 16 hex) over the deterministic, sorted nodes+edges → graph version.
-fn content_version(nodes: &[Node], edges: &[Edge]) -> String {
+/// blake3 (first 16 hex) over deterministic nodes+edges+IR → graph version.
+fn content_version(nodes: &[Node], edges: &[Edge], parsed_files: &[ParsedFile]) -> String {
     let mut hasher = blake3::Hasher::new();
     for node in nodes {
         hasher.update(&serde_json::to_vec(node).unwrap_or_default());
@@ -344,7 +383,36 @@ fn content_version(nodes: &[Node], edges: &[Edge]) -> String {
         hasher.update(&serde_json::to_vec(edge).unwrap_or_default());
         hasher.update(b"\n");
     }
+    for parsed in parsed_files {
+        hasher.update(&serde_json::to_vec(parsed).unwrap_or_default());
+        hasher.update(b"\n");
+    }
     hasher.finalize().to_hex()[..16].to_string()
+}
+
+fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
+    // Dedup on (src, dst, kind); when two sources emit the same relationship keep the
+    // higher-confidence edge. BTreeMap gives a deterministic iteration order.
+    let mut map: std::collections::BTreeMap<(String, String, &'static str), Edge> =
+        std::collections::BTreeMap::new();
+    for edge in structure.iter().chain(resolved.iter()).cloned() {
+        let key = (
+            edge.src.as_str().to_string(),
+            edge.dst.as_str().to_string(),
+            edge.kind.cypher_label(),
+        );
+        match map.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if edge.confidence > slot.get().confidence {
+                    *slot.get_mut() = edge;
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(edge);
+            }
+        }
+    }
+    map.into_values().collect()
 }
 
 /// Remove every direct child dir of `parent` except `keep`. Best-effort: failures to
@@ -353,8 +421,8 @@ fn prune_other_versions(parent: &Path, keep: &str) -> Result<()> {
     if !parent.exists() {
         return Ok(());
     }
-    for entry in std::fs::read_dir(parent)
-        .with_context(|| format!("failed to read {}", parent.display()))?
+    for entry in
+        std::fs::read_dir(parent).with_context(|| format!("failed to read {}", parent.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -406,6 +474,9 @@ struct AnalyzeSummary<'a> {
     artifacts_path: String,
     node_count: usize,
     edge_count: usize,
+    resolved_edge_count: usize,
+    unresolved_reference_count: u64,
+    unresolved_external_fqcns: &'a [String],
     parsed_file_count: usize,
     skipped_count: usize,
     /// "loaded" | "skipped" | "failed"
@@ -469,11 +540,20 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("cih-emit-test-{}-{nanos}", std::process::id()));
         fs::create_dir_all(root.join("src/main/java/com/example")).unwrap();
-        write(&root, "pom.xml", "<project><groupId>com.example</groupId><artifactId>demo</artifactId></project>");
+        write(
+            &root,
+            "pom.xml",
+            "<project><groupId>com.example</groupId><artifactId>demo</artifactId></project>",
+        );
         write(
             &root,
             "src/main/java/com/example/OwnerService.java",
             "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() {}\n}\n",
+        );
+        write(
+            &root,
+            "src/main/java/com/example/OwnerController.java",
+            "package com.example;\nclass OwnerController {\n  private OwnerService service;\n  public void handle() { service.findAll(); }\n}\n",
         );
         root
     }
@@ -508,6 +588,14 @@ mod tests {
             fs::read_to_string(&nodes_jsonl).unwrap().lines().count(),
             emit.node_count
         );
+        assert!(emit.resolved_edge_count > 0);
+        let edges = fs::read_to_string(&edges_jsonl).unwrap();
+        assert!(
+            edges.contains("\"kind\":\"Calls\"")
+                && edges.contains("Method:com.example.OwnerController#handle/0")
+                && edges.contains("Method:com.example.OwnerService#findAll/0"),
+            "resolved CALLS edge should be written"
+        );
 
         // Skipped (no DB) maps to the right summary status, no exit.
         let summary = emit.summary(&LoadOutcome::Skipped);
@@ -538,7 +626,10 @@ mod tests {
         );
         let scan = scan::scan_repo(&root).unwrap();
         let changed = analyze_emit(&scan, all_scope()).unwrap();
-        assert_ne!(changed.version, first, "changed content must yield a new version");
+        assert_ne!(
+            changed.version, first,
+            "changed content must yield a new version"
+        );
 
         // Prune keeps only the current version dir.
         let artifacts_parent = root.join(".cih").join("artifacts");
@@ -551,4 +642,3 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 }
-

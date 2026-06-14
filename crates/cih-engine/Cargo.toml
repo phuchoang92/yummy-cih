@@ -13,6 +13,7 @@ cih-core.workspace = true
 cih-falkor.workspace = true
 cih-graph-store.workspace = true
 cih-parse.workspace = true
+cih-resolve.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
