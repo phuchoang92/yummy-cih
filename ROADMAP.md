@@ -106,8 +106,18 @@ breadth; one demoable capability per milestone.
     resolution without rescanning; `load_parsed_files` in `cih-parse` for offline IR loading.
   - Workspace: 43 tests green, clippy clean; `combined_edges` deduplicates on (src, dst, kind)
     keeping highest confidence.
-- **4.4 (separable, post-milestone):** see notes under Phase 8 below — JAR discovery
-  (`4.4a`) + demand-driven extraction (`4.4b`) when unresolved-ref wiring is needed.
+- **4.4 ✅ VERIFIED 2026-06-14** (delivered post-milestone, closes the Phase-8 wiring gap):
+  - **4.4a JAR discovery** (`cih-engine/scan/jars.rs`): `discover_jars` catalogs JARs from
+    `lib/`/`libs/`/`.workspace-dependencies/` (local walk), Maven `~/.m2/repository/` (targeted
+    per dep), and Gradle `~/.gradle/caches/modules-*/files-*/` (targeted per dep) into
+    `RepoMap.jars`. Counts `.class` entries, extracts group/artifact from Maven/Gradle path
+    layouts, marks own-vs-third-party via `own_group_prefix`. 7 tests.
+  - **4.4b demand-driven JAR API extraction** (`cih-engine/main.rs`): `extract_jar_api` feeds
+    `resolve_output.unresolved_external_fqcns` into `JarApiExtractor::with_include(...)` over
+    all cataloged JARs; merges resulting nodes+edges into `GraphArtifacts`; JAR nodes/edges are
+    included in the content version. `run_resolve` reads `repo-map.json` for jars. 3 new tests
+    including end-to-end integration via `cih-jar` sample fixture.
+  - Workspace: **57 tests** green, clippy clean.
 
 ## Phase 5 — Communities + processes
 
@@ -135,14 +145,14 @@ breadth; one demoable capability per milestone.
   `CrudRepository` heritage — needs Phase 4 heritage edges); a `route_map` MCP view.
 - **Done when:** routes + beans are queryable; a `route_map` view works on a Spring app.
 
-## Phase 8 — Dependency libs: API-surface 🚧 (built in Phase 3 Task 8) + full decompile
+## Phase 8 — Dependency libs: API-surface ✅ (wiring done in Phase 4.4) + full decompile
 
 - **Done in Phase 3 (`cih-jar`):** signature-only **API-surface** extraction from source-less JARs
   via `cafebabe` (no JDK/decompiler) — Class/Method/Constructor/Field nodes with locked ids,
   demand-driven `include` filter. The high-value path for the 26k own libs.
-- **Remaining (wiring):** after Phase 4, feed the **unresolved-reference FQCN set** to
-  `JarApiExtractor::with_include(...)` and route output through `bulk_load`, so app→lib calls land on
-  the lib's API node instead of dropping; locate dependency JARs (`~/.m2`, `lib/`, build files).
+- **Done in Phase 4.4 (wiring):** JAR catalog (`RepoMap.jars`) + `extract_jar_api` feeds the
+  unresolved-reference FQCN set to `JarApiExtractor::with_include(...)` and routes output through
+  `GraphArtifacts`/`bulk_load`; app→lib calls now land on the lib's API node instead of dropping.
 - **Remaining (full decompile):** for the few libs whose *internals* must be traced through, spawn
   Fernflower → `.java` into `EFS:.workspace-dependencies/` → index as first-class source;
   size-skip guard. (Rare exception; API-surface is the default.)

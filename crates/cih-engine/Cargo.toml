@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 cih-core.workspace = true
 cih-falkor.workspace = true
+cih-jar.workspace = true
 cih-graph-store.workspace = true
 cih-parse.workspace = true
 cih-resolve.workspace = true

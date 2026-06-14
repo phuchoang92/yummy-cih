@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{Edge, GraphArtifacts, Node, ParsedFile, VersionId};
+use cih_core::{Edge, GraphArtifacts, JarInfo, Node, ParsedFile, RepoMap, VersionId};
+use cih_jar::JarApiExtractor;
 use scope::ScopeFile;
 use cih_falkor::FalkorStore;
 use cih_graph_store::{GraphStore, LoadStats};
@@ -248,23 +249,45 @@ impl LoadOutcome {
 fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOutcome> {
     let scope_file = scope::resolve(&scan.repo_map, &scan.java_files, request)?;
     let scope_path = scope::write_scope_file(&scope_file)?;
-    analyze_from_scope(scope_file, scope_path)
+    analyze_from_scope(scope_file, scope_path, &scan.repo_map.jars)
 }
 
 /// DB-free core shared by `analyze` and `resolve`: parse the files listed in
-/// `scope_file` → resolve → write IR + GraphArtifacts.
-fn analyze_from_scope(scope_file: ScopeFile, scope_path: PathBuf) -> Result<EmitOutcome> {
+/// `scope_file` → resolve → extract JAR API for unresolved types → write IR +
+/// GraphArtifacts.
+fn analyze_from_scope(
+    scope_file: ScopeFile,
+    scope_path: PathBuf,
+    jars: &[JarInfo],
+) -> Result<EmitOutcome> {
     let repo_root = PathBuf::from(&scope_file.repo_root);
 
     let parse_output = cih_parse::parse_files(&repo_root, &scope_file.files)?;
     let resolve_output = cih_resolve::resolve_edges(&parse_output.parsed_files);
-    let edges = combined_edges(&parse_output.edges, &resolve_output.edges);
+
+    // Phase 4.4b: extract API-surface nodes for external types the resolver
+    // couldn't find in source. Demand-driven: only FQCNs that appear in
+    // `unresolved_external_fqcns` are extracted (the rest of the JARs are
+    // skipped). If there are no unresolved types or no JARs, this is a no-op.
+    let (jar_nodes, jar_edges, jar_failed) =
+        extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
+    let jar_node_count = jar_nodes.len();
+
+    // Combine structure + resolved + jar edges. JAR node IDs are locked and
+    // namespace-distinct from source nodes, so no collisions expected, but
+    // routing through combined_edges is cheap and keeps dedup semantics uniform.
+    let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
+    edges.extend(jar_edges);
+
+    // Merge source + jar nodes.
+    let mut all_nodes = parse_output.nodes;
+    all_nodes.extend(jar_nodes);
 
     // Version the graph by the CONTENT of the emitted nodes+edges plus parsed IR
     // (deterministic, already sorted) — not by the scope identity — so a changed
     // file body or resolver input yields a new version. Same content re-run →
     // same version.
-    let version = content_version(&parse_output.nodes, &edges, &parse_output.parsed_files);
+    let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
 
     let cih_dir = repo_root.join(".cih");
     let parsed_dir = cih_dir.join("parsed").join(&version);
@@ -274,7 +297,7 @@ fn analyze_from_scope(scope_file: ScopeFile, scope_path: PathBuf) -> Result<Emit
     let artifacts = GraphArtifacts::write(
         &artifacts_dir,
         VersionId(version.clone()),
-        &parse_output.nodes,
+        &all_nodes,
         &edges,
     )
     .with_context(|| {
@@ -289,9 +312,10 @@ fn analyze_from_scope(scope_file: ScopeFile, scope_path: PathBuf) -> Result<Emit
     prune_other_versions(&cih_dir.join("artifacts"), &version)?;
 
     tracing::info!(
-        nodes = parse_output.nodes.len(),
+        nodes = all_nodes.len(),
         edges = edges.len(),
         resolved_edges = resolve_output.edges.len(),
+        jar_nodes = jar_node_count,
         unresolved_refs = resolve_output.skipped,
         version = %version,
         path = %artifacts_dir.display(),
@@ -305,13 +329,15 @@ fn analyze_from_scope(scope_file: ScopeFile, scope_path: PathBuf) -> Result<Emit
         parsed_files_path: parse_artifacts.parsed_files_path,
         artifacts_dir,
         version,
-        node_count: parse_output.nodes.len(),
+        node_count: all_nodes.len(),
         edge_count: edges.len(),
         resolved_edge_count: resolve_output.edges.len(),
         unresolved_reference_count: resolve_output.skipped,
         unresolved_external_fqcns: resolve_output.unresolved_external_fqcns,
         parsed_file_count: parse_output.parsed_files.len(),
         skipped_count: parse_output.skipped.len(),
+        jar_node_count,
+        jar_failed,
     })
 }
 
@@ -330,7 +356,11 @@ fn run_resolve(
             .with_context(|| format!("malformed scope file at {}", scope_path.display()))?
     };
 
-    let emit = analyze_from_scope(scope_file, scope_path)?;
+    // Load the saved repo-map to get the JAR catalog (populated by `scan`).
+    // Gracefully absent: if the repo-map is missing the JAR pass is skipped.
+    let jars = load_jars_from_repo_map(&repo);
+
+    let emit = analyze_from_scope(scope_file, scope_path, &jars)?;
 
     let load = if no_load {
         tracing::info!("Skipping FalkorDB load (--no-load)");
@@ -373,6 +403,8 @@ struct EmitOutcome {
     node_count: usize,
     edge_count: usize,
     resolved_edge_count: usize,
+    jar_node_count: usize,
+    jar_failed: usize,
     unresolved_reference_count: u64,
     unresolved_external_fqcns: Vec<String>,
     parsed_file_count: usize,
@@ -394,6 +426,8 @@ impl EmitOutcome {
             unresolved_external_fqcns: &self.unresolved_external_fqcns,
             parsed_file_count: self.parsed_file_count,
             skipped_count: self.skipped_count,
+            jar_node_count: self.jar_node_count,
+            jar_failed: self.jar_failed,
             falkor_status: load.status(),
             falkor_nodes: load.stats().map(|s| s.nodes),
             falkor_edges: load.stats().map(|s| s.edges),
@@ -431,6 +465,17 @@ impl EmitOutcome {
                 self.unresolved_external_fqcns.len()
             );
         }
+        if self.jar_node_count > 0 || self.jar_failed > 0 {
+            let failed_note = if self.jar_failed > 0 {
+                format!(", {} JARs failed", self.jar_failed)
+            } else {
+                String::new()
+            };
+            println!(
+                "JAR API: {} nodes from dependency JARs{}.",
+                self.jar_node_count, failed_note
+            );
+        }
         println!(
             "Artifacts: {} (version {})",
             self.artifacts_dir.display(),
@@ -449,6 +494,49 @@ impl EmitOutcome {
             }
         }
     }
+}
+
+/// Extract API-surface nodes+edges from `jars` for the given FQCN set.
+/// Demand-driven: passes `include` to [`JarApiExtractor::with_include`] so only
+/// classes matching an unresolved FQCN are parsed. Returns (nodes, edges, failed_jar_count).
+fn extract_jar_api(
+    jars: &[JarInfo],
+    fqcns: &[String],
+) -> (Vec<Node>, Vec<Edge>, usize) {
+    if fqcns.is_empty() || jars.is_empty() {
+        return (Vec::new(), Vec::new(), 0);
+    }
+    let include: std::collections::HashSet<String> = fqcns.iter().cloned().collect();
+    let extractor = JarApiExtractor::with_include(include);
+    let mut all_nodes = Vec::new();
+    let mut all_edges = Vec::new();
+    let mut failed = 0usize;
+    for jar in jars {
+        match extractor.extract(std::path::Path::new(&jar.path)) {
+            Ok(output) => {
+                all_nodes.extend(output.nodes);
+                all_edges.extend(output.edges);
+            }
+            Err(err) => {
+                tracing::warn!(jar = %jar.path, error = %err, "JAR API extraction failed — skipping");
+                failed += 1;
+            }
+        }
+    }
+    (all_nodes, all_edges, failed)
+}
+
+/// Read `.cih/repo-map.json` and return its JAR catalog. Returns an empty vec
+/// if the file is absent or malformed (graceful no-op when `scan` hasn't run).
+fn load_jars_from_repo_map(repo: &Path) -> Vec<JarInfo> {
+    let path = repo.join(".cih").join("repo-map.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    serde_json::from_str::<RepoMap>(&raw)
+        .map(|rm| rm.jars)
+        .unwrap_or_default()
 }
 
 /// blake3 (first 16 hex) over deterministic nodes+edges+IR → graph version.
@@ -558,6 +646,8 @@ struct AnalyzeSummary<'a> {
     unresolved_external_fqcns: &'a [String],
     parsed_file_count: usize,
     skipped_count: usize,
+    jar_node_count: usize,
+    jar_failed: usize,
     /// "loaded" | "skipped" | "failed"
     falkor_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -610,14 +700,14 @@ fn build_scope_request(repo: &std::path::Path, flags: &AnalyzeFlags) -> Result<S
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     fn temp_repo() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
         let root =
-            std::env::temp_dir().join(format!("cih-emit-test-{}-{nanos}", std::process::id()));
+            std::env::temp_dir().join(format!("cih-emit-test-{}-{id}", std::process::id()));
         fs::create_dir_all(root.join("src/main/java/com/example")).unwrap();
         write(
             &root,
@@ -753,8 +843,117 @@ mod tests {
         let scope_path = root.join(".cih").join("scope.json");
         let raw = fs::read_to_string(&scope_path).unwrap();
         let scope_file: ScopeFile = serde_json::from_str(&raw).unwrap();
-        let v2 = analyze_from_scope(scope_file, scope_path).unwrap().version;
+        let v2 = analyze_from_scope(scope_file, scope_path, &[]).unwrap().version;
         assert_eq!(v1, v2, "resolve with same scope must produce the same version");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn extract_jar_api_returns_empty_for_empty_inputs() {
+        let (nodes, edges, failed) = extract_jar_api(&[], &["com.example.Lib".to_string()]);
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+        assert_eq!(failed, 0);
+
+        let (nodes, edges, failed) = extract_jar_api(&[], &[]);
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn extract_jar_api_demand_driven_with_sample_jar() {
+        // Uses the cih-jar sample fixture. Skip gracefully if it's absent (rare).
+        let sample_jar = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("cih-jar")
+            .join("tests")
+            .join("fixtures")
+            .join("sample.jar");
+        if !sample_jar.exists() {
+            return;
+        }
+
+        let jar = JarInfo {
+            path: sample_jar.to_string_lossy().into_owned(),
+            group_id: Some("com.acme".into()),
+            artifact: Some("sample".into()),
+            is_own: false,
+            classes: 1,
+        };
+
+        // Request only com.acme.Sample — demand-driven.
+        let fqcns = vec!["com.acme.Sample".to_string()];
+        let (nodes, _edges, failed) = extract_jar_api(&[jar.clone()], &fqcns);
+        assert_eq!(failed, 0);
+        assert!(!nodes.is_empty(), "should have extracted the Sample class node");
+        assert!(
+            nodes.iter().any(|n| n.id.as_str() == "Class:com.acme.Sample"),
+            "expected Class:com.acme.Sample node"
+        );
+
+        // Requesting a different FQCN that isn't in the JAR → no nodes, no failure.
+        let (nodes2, _, failed2) = extract_jar_api(&[jar], &["com.other.Missing".to_string()]);
+        assert_eq!(failed2, 0);
+        assert!(nodes2.is_empty(), "unknown class should produce no nodes");
+
+        // Unresolvable path → failed counter increments.
+        let bad_jar = JarInfo {
+            path: "/nonexistent/path/foo.jar".into(),
+            group_id: None,
+            artifact: None,
+            is_own: false,
+            classes: 0,
+        };
+        let (_, _, failed3) = extract_jar_api(&[bad_jar], &fqcns);
+        assert_eq!(failed3, 1);
+    }
+
+    #[test]
+    fn jar_nodes_appear_in_graph_artifacts() {
+        let sample_jar = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("cih-jar")
+            .join("tests")
+            .join("fixtures")
+            .join("sample.jar");
+        if !sample_jar.exists() {
+            return;
+        }
+
+        let root = temp_repo();
+        // Inject a source file that calls com.acme.Sample (→ unresolved external FQCN).
+        write(
+            &root,
+            "src/main/java/com/example/UsesExternal.java",
+            "package com.example;\nimport com.acme.Sample;\nclass UsesExternal {\n  void run() { new Sample(42); }\n}\n",
+        );
+
+        let mut scan = scan::scan_repo(&root).unwrap();
+        // Inject the sample JAR into the repo-map so analyze_from_scope can see it.
+        scan.repo_map.jars.push(JarInfo {
+            path: sample_jar.to_string_lossy().into_owned(),
+            group_id: Some("com.acme".into()),
+            artifact: Some("sample".into()),
+            is_own: false,
+            classes: 1,
+        });
+
+        let emit = analyze_emit(&scan, all_scope()).unwrap();
+        assert!(
+            emit.jar_node_count > 0,
+            "expected JAR nodes in the output; got 0"
+        );
+
+        // The Class:com.acme.Sample node should appear in nodes.jsonl.
+        let nodes_jsonl = fs::read_to_string(emit.artifacts_dir.join("nodes.jsonl")).unwrap();
+        assert!(
+            nodes_jsonl.contains("Class:com.acme.Sample"),
+            "Class:com.acme.Sample should be in nodes.jsonl"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }

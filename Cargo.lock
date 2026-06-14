@@ -295,6 +295,7 @@ dependencies = [
  "cih-core",
  "cih-falkor",
  "cih-graph-store",
+ "cih-jar",
  "cih-parse",
  "cih-resolve",
  "clap",
