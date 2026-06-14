@@ -9,9 +9,11 @@ use std::path::PathBuf;
 
 mod artifacts; // JSONL read/write helpers on GraphArtifacts (Phase 2)
 pub mod ir;
+pub mod registry;
 pub mod repo_map;
 
 pub use ir::{BindingKind, ParsedFile, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding};
+pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
 pub use repo_map::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
 
 /// Stable, unique node identifier (e.g. `Method:com.acme.UserService#save`).

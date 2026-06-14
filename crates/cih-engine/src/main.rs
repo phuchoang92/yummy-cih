@@ -3,6 +3,7 @@ mod db;
 mod discover;
 mod embed;
 mod file_cache;
+mod registry;
 mod scan;
 mod scope;
 #[cfg(test)]
@@ -123,6 +124,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List all repos registered in ~/.cih/registry.json.
+    List {
+        /// Print registry entries as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the registry status for one repo (name or absolute path).
+    Status {
+        /// Repo name or absolute path as registered.
+        name: String,
+        /// Print as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -185,5 +200,56 @@ fn main() -> Result<()> {
             model,
             json,
         } => embed::run_embed(repo, pg_url, model, json),
+        Command::List { json } => {
+            use cih_core::Registry;
+            let reg = Registry::load();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reg)?);
+            } else {
+                if reg.entries.is_empty() {
+                    println!("No repositories indexed yet. Run `cih-engine analyze <repo>` first.");
+                } else {
+                    println!("{:<24} {:<12} {:>8} {:>8} {:>6}  path", "name", "indexed_at", "nodes", "edges", "files");
+                    println!("{}", "-".repeat(90));
+                    for e in &reg.entries {
+                        let date = e.indexed_at.get(..10).unwrap_or(&e.indexed_at);
+                        println!("{:<24} {:<12} {:>8} {:>8} {:>6}  {}", e.name, date, e.stats.nodes, e.stats.edges, e.stats.files, e.path);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Command::Status { name, json } => {
+            use cih_core::Registry;
+            let reg = Registry::load();
+            if let Some(entry) = reg.find(&name) {
+                let stale = reg.is_stale(&name);
+                if json {
+                    #[derive(serde::Serialize)]
+                    struct StatusOutput<'a> {
+                        entry: &'a cih_core::RegistryEntry,
+                        stale: bool,
+                    }
+                    println!("{}", serde_json::to_string_pretty(&StatusOutput { entry, stale })?);
+                } else {
+                    println!("name:          {}", entry.name);
+                    println!("path:          {}", entry.path);
+                    println!("graph_key:     {}", entry.graph_key);
+                    println!("indexed_at:    {}", entry.indexed_at);
+                    println!("git_head:      {}", entry.last_git_head.as_deref().unwrap_or("(unknown)"));
+                    println!("stale:         {}", stale);
+                    println!("nodes:         {}", entry.stats.nodes);
+                    println!("edges:         {}", entry.stats.edges);
+                    println!("files:         {}", entry.stats.files);
+                    println!("routes:        {}", entry.stats.routes);
+                    println!("communities:   {}", entry.stats.communities);
+                    println!("processes:     {}", entry.stats.processes);
+                }
+            } else {
+                eprintln!("Registry entry not found for '{name}'. Run `cih-engine analyze <repo>` first.");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
     }
 }

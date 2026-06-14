@@ -89,6 +89,9 @@ pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         emit.print_human(&load);
     }
 
+    let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+    crate::registry::persist_analyze(&emit, graph_key);
+
     if matches!(load, LoadOutcome::Failed(_)) {
         process::exit(3);
     }

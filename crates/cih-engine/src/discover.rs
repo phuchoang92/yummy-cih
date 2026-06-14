@@ -46,6 +46,8 @@ pub(crate) fn run_discover(
         emit.print_human(&load);
     }
 
+    crate::registry::persist_discover(&repo, &emit);
+
     if matches!(load, LoadOutcome::Failed(_)) {
         process::exit(3);
     }
@@ -109,11 +111,14 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
     })?;
     prune_other_versions(&repo.join(".cih").join("artifacts-community"), &version)?;
 
+    let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
+
     Ok(DiscoverOutcome {
         source_version: source.version.0,
         artifacts,
         artifacts_dir,
         version,
+        route_count,
         community_count: output_nodes
             .iter()
             .filter(|n| n.kind == NodeKind::Community)
@@ -141,6 +146,7 @@ pub(crate) struct DiscoverOutcome {
     pub(crate) artifacts: GraphArtifacts,
     pub(crate) artifacts_dir: PathBuf,
     pub(crate) version: String,
+    pub(crate) route_count: usize,
     pub(crate) community_count: usize,
     pub(crate) process_count: usize,
     pub(crate) member_edge_count: usize,

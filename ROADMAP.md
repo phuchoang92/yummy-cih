@@ -260,10 +260,11 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   - Requires detecting outbound HTTP calls (`RestTemplate`, `WebClient`, `@FeignClient`) and event
     publishing (`@KafkaListener`, `@EventListener`) as new `EdgeKind::ExternalCall` /
     `EdgeKind::PublishesEvent` in `cih-core` and `cih-parse`.
-- **`cr_impact(description: String)`** MCP tool: given a plain-language CR description, the agent
-  calls `query(description)` to find relevant symbols, then `impact(symbol)` for each, and returns
-  an aggregated change-surface summary (affected modules, estimated file count, risk tier).
-  Implemented as agent-orchestration in `cih-server`; no new graph schema needed.
+- **`cr_impact(description: String)`** — **belongs in yummy-agent, not cih-server.** Given a
+  plain-language CR description, the agent calls `query(description)` to find relevant symbols,
+  then `impact(symbol)` for each, and returns an aggregated change-surface summary (affected
+  modules, estimated file count, risk tier). `cih-server` exposes `query` and `impact` as
+  primitives only; the chaining and LLM synthesis happen in yummy-agent.
 - **`feature_map(keywords: Vec<String>)`** MCP tool: maps business terms (e.g. `["checkout",
   "payment"]`) to code clusters — communities + routes + classes that implement those features.
   Uses hybrid BM25+semantic search + community membership from Phase 5/6.
@@ -306,6 +307,159 @@ These are output-format additions to existing tools — no new graph data needed
 
 - **Done when:** yummy frontend can render a live architecture diagram for any selected module
   without the user reading code.
+
+> **Dev shortcut:** FalkorDB's Docker image ships a browser UI on port 3000. Expose it with
+> `"3000:3000"` in docker-compose for direct Cypher graph exploration during development.
+> The yummy frontend (this phase) is the product visualization path.
+
+---
+
+## Near-term additions (from GitNexus discovery)
+
+## Phase 18 — Repo registry + MCP resources  *(recommended next)*
+
+Source: `docs/gitnexus-discovery.md` §1 + §2
+
+- **Repo registry** (`~/.cih/registry.json`) — register repos on `analyze`; store `name`,
+  `path`, `indexed_at`, `last_git_head`, `graph_key`, `artifacts_dir`, and graph `stats`
+  (node/edge/route/community/process counts).
+- **CLI:** `cih-engine list`, `cih-engine status <repo>`
+- **MCP tools:** `list_repos()`, `status({ repo })`
+- **MCP resources** (read-only, lower token cost than tool calls):
+  ```
+  cih://repo/{name}/context
+  cih://repo/{name}/communities
+  cih://repo/{name}/community/{id}
+  cih://repo/{name}/processes
+  cih://repo/{name}/process/{id}
+  cih://repo/{name}/schema
+  ```
+- **New files:** `crates/cih-core/src/registry.rs`, `crates/cih-engine/src/registry.rs`,
+  `crates/cih-engine/src/status.rs`, `crates/cih-server/src/resources.rs`
+- **Done when:** `cih-engine list` shows indexed repos with staleness; `list_repos()` MCP
+  tool and `cih://repo/{name}/context` resource both return data.
+
+## Phase 19 — Ambiguous symbol resolution + `detect_changes`
+
+Source: `docs/gitnexus-discovery.md` §3 + §4
+
+**Ambiguous symbol handling:** `context` and `impact` return an explicit
+`{"status":"ambiguous","candidates":[...]}` when multiple symbols match a short name —
+prevents silent wrong-symbol analysis; enables yummy frontend to show a symbol picker.
+
+**`detect_changes` MCP tool:**
+```
+detect_changes({ scope: "working" | "staged" | "base_ref", base_ref?: string })
+```
+Returns `{ changed_files, changed_symbols, affected_symbols, affected_processes, risk: "low|medium|high|critical" }`.
+Implementation: `git diff --name-only` → map files to graph nodes → BFS `impact` →
+join with `STEP_IN_PROCESS` → risk tier.
+
+- **Done when:** `context("OrderService")` returns a candidates list when ambiguous;
+  `detect_changes({scope:"staged"})` returns a risk summary.
+
+## Phase 20 — Agent workflow docs  *(docs only)*
+
+Source: `docs/gitnexus-discovery.md` §5
+
+Create `docs/agent-workflows/` with five skill files describing which CIH tools to call
+for each persona and what output shape to expect:
+
+```
+docs/agent-workflows/
+  exploring.md          <- codebase exploration workflow
+  impact-analysis.md    <- blast-radius workflow (Developer)
+  debugging.md          <- call-chain tracing workflow (Developer)
+  product-owner.md      <- route_map + feature_map workflow (PO)
+  tester.md             <- regression_scope + test_coverage workflow (Tester)
+```
+
+Feeds Phase 10 — these docs become the grounding for yummy persona system prompts.
+
+- **Done when:** 5 workflow docs exist; each references at least 2 CIH tools with
+  example inputs and expected output shapes.
+
+---
+
+## Mid-term additions (from GitNexus discovery)
+
+## Phase 21 — Cross-service contract extraction
+
+Source: `docs/gitnexus-discovery.md` §6
+
+For Java/Spring microservice landscapes (e.g., banking codebase):
+
+- **HTTP clients:** detect `RestTemplate`, `WebClient`, `@FeignClient`, `Retrofit` call sites
+  → emit `ExternalCall` edge with URL template as property.
+- **Events:** detect `@KafkaListener`, `ApplicationEventPublisher.publishEvent()`, Spring events
+  → emit `PublishesEvent` / `ListensTo` edges with topic/type.
+- **CLI:** `cih-engine group create <name>`, `cih-engine group add <name> <repo>`,
+  `cih-engine group sync <name>`
+
+- **Done when:** Kafka producer in service A and `@KafkaListener` in service B are linked;
+  `impact` traverses the `PUBLISHES_EVENT` → `LISTENS_TO` edge pair.
+
+## Phase 22 — API impact + shape check
+
+Source: `docs/gitnexus-discovery.md` §7
+
+Builds on Phase 21 HTTP contracts:
+
+- **`api_impact({ method, path })`** — return all consumers of an HTTP route across the group.
+- **`shape_check({ provider, consumer })`** — compare response DTO fields of provider against
+  property accesses of consumer; flag mismatches.
+
+- **Done when:** `api_impact({method:"GET",path:"/orders/{id}"})` returns the consuming services.
+
+## Phase 23 — Generated wiki
+
+Source: `docs/gitnexus-discovery.md` §10
+
+```
+cih-engine wiki <repo> --out docs/generated/wiki
+```
+
+Generated Markdown pages: module overview (communities), API route catalog, process traces,
+community cohesion pages, dependency/JAR surface.
+Feeds Phase 10 Docusaurus wiki as the static content generator.
+
+- **Done when:** `cih-engine wiki` on a Spring app produces navigable Markdown Docusaurus can serve.
+
+## Phase 24 — Graph-assisted rename dry-run
+
+Source: `docs/gitnexus-discovery.md` §8
+
+```
+rename_symbol({ id, new_name, dry_run: true })
+```
+
+Returns: graph-confirmed edits, text-search candidates, ambiguous/unsafe edits, tests to re-run.
+Developer persona safe-refactoring workflow.
+
+---
+
+## Later additions (from GitNexus discovery)
+
+## Phase 25 — CFG/PDG + taint analysis
+
+Source: `docs/gitnexus-discovery.md` §9
+
+```
+cih-engine analyze <repo> --pdg
+explain({ target })
+```
+
+Emits `BasicBlock` nodes, `CFG` / `REACHING_DEF` / `TAINTED` / `SANITIZES` edges.
+Target: security review and injection-path analysis for banking/fintech codebases.
+Priority: low now, high if security analysis becomes a product goal.
+
+## Phase 26 — Multi-repo group + cross-repo impact
+
+Full cross-repo group sync (Phase 21 covers per-pair contracts; this is full group-level
+orchestration). Cross-repo `impact` traverses service boundaries across the entire group.
+Includes additional JVM language support (Kotlin) via new `LanguageProvider` impls.
+
+---
 
 ## Phase 11 — Storage spike + Postgres-CTE + Neptune adapters
 
@@ -368,6 +522,14 @@ These are output-format additions to existing tools — no new graph data needed
   yummy frontend team requests diagram rendering.
 - **Phase 10** (product) can begin as soon as Phase 15 and 16 tools are available, since those
   define the BA and Tester chat interactions in the yummy frontend.
+- **Phase 18** (registry + resources) should run before Phase 10 — `list_repos` and MCP
+  resources make yummy's agent orientation cheaper and more reliable.
+- **Phase 19** (ambiguous + detect_changes) can overlap with Phase 10; `detect_changes` feeds
+  Developer and Tester personas directly.
+- **Phase 20** (workflow docs) can be written any time; immediately improves Phase 10 prompts.
+- **Phases 21 → 22** require Phases 5 (processes) + 15 (trace_flow) for full value.
+- **Phase 23** (wiki) requires Phases 5 + 7; runs independently of 21.
+- **Phases 24 → 26** are deferred; no blocking dependency on near-term phases.
 
 ## Definition of done (overall v1)
 

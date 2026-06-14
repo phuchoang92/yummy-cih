@@ -11,6 +11,7 @@
 //! calls) are SDK-agnostic and stay as-is.
 
 mod config;
+mod resources;
 mod search;
 
 use std::path::PathBuf;
@@ -23,9 +24,12 @@ use cih_graph_store::{Direction, GraphStore, GraphStoreError, RouteInfo};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, Content, Implementation, ListResourcesResult,
+        ListResourceTemplatesResult, PaginatedRequestParam, ProtocolVersion,
+        ReadResourceRequestParam, ReadResourceResult, ServerCapabilities, ServerInfo,
     },
-    tool, tool_handler, tool_router,
+    service::RequestContext,
+    tool, tool_handler, tool_router, RoleServer,
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService,
     },
@@ -79,6 +83,12 @@ struct RouteMapArgs {
     /// Max routes to return (default 200).
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StatusArgs {
+    /// Repo name or absolute path as shown in `list_repos`.
+    name: String,
 }
 
 #[tool_router]
@@ -172,6 +182,34 @@ impl CihServer {
         let routes: Vec<RouteInfo> = self.store.route_map(prefix, limit).await.map_err(to_mcp)?;
         json_result(&routes)
     }
+
+    #[tool(description = "List all repos indexed in the CIH registry with their stats.")]
+    async fn list_repos(&self) -> Result<CallToolResult, McpError> {
+        let reg = cih_core::Registry::load();
+        json_result(&reg.entries)
+    }
+
+    #[tool(description = "Return registry entry and staleness for one repo (by name or path).")]
+    async fn status(
+        &self,
+        Parameters(args): Parameters<StatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let reg = cih_core::Registry::load();
+        if let Some(entry) = reg.find(&args.name) {
+            let stale = reg.is_stale(&args.name);
+            #[derive(serde::Serialize)]
+            struct Out<'a> {
+                entry: &'a cih_core::RegistryEntry,
+                stale: bool,
+            }
+            json_result(&Out { entry, stale })
+        } else {
+            Err(McpError::invalid_params(
+                format!("repo '{}' not in registry", args.name),
+                None,
+            ))
+        }
+    }
 }
 
 #[tool_handler]
@@ -179,17 +217,45 @@ impl ServerHandler for CihServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             server_info: Implementation {
                 name: "cih".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 ..Default::default()
             },
             instructions: Some(
-                "Code Intelligence Hub — query the call graph: `query`, `context`, `impact`, `communities`."
+                "Code Intelligence Hub — query the call graph: `query`, `context`, `impact`, \
+                 `communities`, `list_repos`. Read repo data via cih://repo/{name}/context|communities|processes|schema."
                     .into(),
             ),
         }
+    }
+
+    async fn list_resources(
+        &self,
+        request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        resources::list_resources(request)
+    }
+
+    async fn list_resource_templates(
+        &self,
+        request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        resources::list_resource_templates(request)
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        resources::read_resource(request)
     }
 }
 
