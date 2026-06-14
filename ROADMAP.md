@@ -378,26 +378,25 @@ Implementation: `git diff --name-only [--cached] HEAD` → `nodes_in_files()` �
 
 - Workspace: **11 server + falkor tests** green, clippy clean.
 
-## Phase 20 — Agent workflow docs  *(docs only)*
+## Phase 20 — Agent workflow docs ✅ (2026-06-14)
 
 Source: `docs/gitnexus-discovery.md` §5
 
-Create `docs/agent-workflows/` with five skill files describing which CIH tools to call
-for each persona and what output shape to expect:
+Created `docs/agent-workflows/` with five skill files:
 
 ```
 docs/agent-workflows/
-  exploring.md          <- codebase exploration workflow
-  impact-analysis.md    <- blast-radius workflow (Developer)
-  debugging.md          <- call-chain tracing workflow (Developer)
-  product-owner.md      <- route_map + feature_map workflow (PO)
-  tester.md             <- regression_scope + test_coverage workflow (Tester)
+  exploring.md          <- orient to an unfamiliar codebase (any persona)
+  impact-analysis.md    <- blast-radius workflow (Developer, Tech Lead)
+  debugging.md          <- call-chain tracing (Developer)
+  product-owner.md      <- route_map + process/community view (PO, BA)
+  tester.md             <- regression scope + E2E coverage mapping (Tester, QA)
 ```
 
-Feeds Phase 10 — these docs become the grounding for yummy persona system prompts.
+Each file: persona, when-to-use, step-by-step tool calls with example inputs/outputs,
+output shape for the agent to return, tips. Every doc references ≥ 3 CIH tools.
 
-- **Done when:** 5 workflow docs exist; each references at least 2 CIH tools with
-  example inputs and expected output shapes.
+Feeds Phase 10 — these docs become the grounding for yummy persona system prompts.
 
 ---
 
