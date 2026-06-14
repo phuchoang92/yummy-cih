@@ -115,7 +115,7 @@ fn collect_declarations(
             qualified_name: Some(fqcn.clone()),
             file: builder.file.clone(),
             range,
-            props: stereotype_props(class_stereotype(node, src)),
+            props: build_class_props(node, src),
         });
         builder.defs.push(SymbolDef {
             id: id.clone(),
@@ -207,7 +207,11 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         qualified_name: Some(format!("{}#{name}/{arity}", owner.fqcn)),
         file: builder.file.clone(),
         range,
-        props: None,
+        props: if is_bean_method(node, src) {
+            Some(serde_json::json!({ "isBean": true }))
+        } else {
+            None
+        },
     });
     builder.edges.push(Edge {
         src: owner.id.clone(),
@@ -1088,8 +1092,77 @@ fn class_stereotype(node: TsNode<'_>, src: &str) -> Option<&'static str> {
     None
 }
 
-fn stereotype_props(stereotype: Option<&str>) -> Option<serde_json::Value> {
-    stereotype.map(|stereotype| serde_json::json!({ "stereotype": stereotype }))
+fn is_bean_method(node: TsNode<'_>, src: &str) -> bool {
+    annotations(node)
+        .into_iter()
+        .any(|ann| annotation_name(ann, src).as_deref() == Some("Bean"))
+}
+
+const JPA_INTERFACES: &[&str] = &[
+    "JpaRepository",
+    "CrudRepository",
+    "PagingAndSortingRepository",
+    "ListCrudRepository",
+    "ListPagingAndSortingRepository",
+    "MongoRepository",
+    "ReactiveCrudRepository",
+    "ReactiveMongoRepository",
+    "R2dbcRepository",
+    "JpaSpecificationExecutor",
+];
+
+/// Returns `(is_jpa_repo, entity_type_short_name)`.
+/// Checks the `implements` clause for known Spring Data interfaces.
+fn jpa_repository_props(node: TsNode<'_>, src: &str) -> (bool, Option<String>) {
+    let Some(interfaces_node) = node.child_by_field_name("interfaces") else {
+        return (false, None);
+    };
+    // super_interfaces → type_list → (type_identifier | generic_type)*
+    let scan_node = first_named_child(interfaces_node, "interface_type_list")
+        .or_else(|| first_named_child(interfaces_node, "type_list"))
+        .unwrap_or(interfaces_node);
+    let mut cursor = scan_node.walk();
+    for child in scan_node.named_children(&mut cursor) {
+        match child.kind() {
+            "type_identifier" => {
+                let name = text(child, src);
+                if JPA_INTERFACES.contains(&name.as_str()) {
+                    return (true, None);
+                }
+            }
+            "generic_type" => {
+                // generic_type has no "name" field; the type identifier is the first named child.
+                let Some(name_node) = child.named_child(0) else {
+                    continue;
+                };
+                let name = text(name_node, src);
+                if JPA_INTERFACES.contains(&name.as_str()) {
+                    // generic_type: [type_identifier, type_arguments]; type_arguments has no field name.
+                    // Use named_child(1) to access type_arguments, then named_child(0) for entity type.
+                    let entity = child
+                        .named_child(1)
+                        .and_then(|args| args.named_child(0))
+                        .map(|c| text(c, src))
+                        .filter(|s| !s.is_empty());
+                    return (true, entity);
+                }
+            }
+            _ => {}
+        }
+    }
+    (false, None)
+}
+
+fn build_class_props(node: TsNode<'_>, src: &str) -> Option<serde_json::Value> {
+    let stereotype = class_stereotype(node, src);
+    let (is_jpa, entity_opt) = jpa_repository_props(node, src);
+    let effective_stereotype = stereotype.or(if is_jpa { Some("repository") } else { None });
+    match (effective_stereotype, entity_opt) {
+        (None, None) => None,
+        (Some(s), None) => Some(serde_json::json!({ "stereotype": s })),
+        (None, Some(e)) => Some(serde_json::json!({ "entityType": e })),
+        (Some(s), Some(e)) => Some(serde_json::json!({ "stereotype": s, "entityType": e })),
+    }
 }
 
 fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {

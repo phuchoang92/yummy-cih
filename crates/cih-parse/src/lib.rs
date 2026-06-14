@@ -580,4 +580,139 @@ class Multi {
             );
         }
     }
+
+    fn node_prop<'a>(output: &'a ParseOutput, node_id: &str, key: &str) -> Option<&'a serde_json::Value> {
+        output
+            .nodes
+            .iter()
+            .find(|n| n.id.as_str() == node_id)
+            .and_then(|n| n.props.as_ref())
+            .and_then(|p| p.get(key))
+    }
+
+    #[test]
+    fn bean_method_tagged_when_annotated() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/AppConfig.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+package com.example;
+@Configuration
+class AppConfig {
+    @Bean
+    public DataSource dataSource() { return null; }
+    public void helper() {}
+}
+"#,
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let bean_id = method_id("com.example.AppConfig", "dataSource", 0);
+        let helper_id = method_id("com.example.AppConfig", "helper", 0);
+        assert_eq!(
+            node_prop(&output, bean_id.as_str(), "isBean"),
+            Some(&serde_json::Value::Bool(true)),
+            "@Bean method must have isBean=true"
+        );
+        assert_eq!(
+            node_prop(&output, helper_id.as_str(), "isBean"),
+            None,
+            "plain method must have no isBean prop"
+        );
+    }
+
+    #[test]
+    fn bean_method_not_tagged_without_annotation() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/Plain.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "package com.example;\nclass Plain { public Object produce() { return null; } }\n",
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let id = method_id("com.example.Plain", "produce", 0);
+        assert_eq!(node_prop(&output, id.as_str(), "isBean"), None);
+    }
+
+    #[test]
+    fn jpa_repository_tagged_as_repository() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/UserRepo.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "package com.example;\nclass UserRepo implements JpaRepository<User, Long> {}\n",
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(
+            stereotype_of(&output, "com.example.UserRepo").as_deref(),
+            Some("repository"),
+            "JpaRepository implementor must be tagged as repository"
+        );
+        assert_eq!(
+            node_prop(&output, "Class:com.example.UserRepo", "entityType"),
+            Some(&serde_json::Value::String("User".to_string())),
+            "entityType must be the first generic type argument"
+        );
+    }
+
+    #[test]
+    fn jpa_crud_repository_also_tagged() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/ItemRepo.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "package com.example;\nclass ItemRepo implements CrudRepository<Item, Long> {}\n",
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(
+            stereotype_of(&output, "com.example.ItemRepo").as_deref(),
+            Some("repository")
+        );
+    }
+
+    #[test]
+    fn jpa_annotation_idempotent_with_interface() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/AnnotatedRepo.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "package com.example;\n@Repository\nclass AnnotatedRepo implements JpaRepository<Order, Long> {}\n",
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(
+            stereotype_of(&output, "com.example.AnnotatedRepo").as_deref(),
+            Some("repository"),
+            "stereotype must be repository when both annotation and interface are present"
+        );
+    }
 }

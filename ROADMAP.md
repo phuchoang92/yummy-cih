@@ -159,16 +159,34 @@ breadth; one demoable capability per milestone.
   - Workspace: **70 tests** green. `cargo fmt --check` still reports pre-existing formatting
     diffs in unrelated files (`cih-engine` scan/scope helpers, `cih-falkor`, `cih-jar`,
     `cih-parse`, `cih-resolve`); Phase 6 touched files were rustfmt-formatted.
+- **Architecture cleanup 2026-06-14** (`docs/architecture-improvements.md`):
+  - `NodeKind::label()` / `from_label()` consolidated in `cih-core`; 3 duplicate copies removed.
+  - `ResolveIndex` and all methods sealed to `pub(crate)`; only `resolve_edges()` remains public.
+  - `cih-engine/src/main.rs` split from 1 405 lines into 5 focused modules: `analyze`, `discover`,
+    `embed`, `db`, `versioning` + `tests`; `main.rs` reduced to **183 lines**.
+  - `cih-server/src/search.rs` extracted: `QueryArgs`, `query_hits()`, RRF orchestration.
+  - BFS cycle detection upgraded from O(n) `Vec::contains` to O(1) `HashSet`.
+  - Added 7 tests (cih-core round-trip, 3 × cih-falkor, 3 × cih-server).
+  - Workspace: **77 tests** green, clippy clean.
 
-## Phase 7 — Spring pre-phase  🚧 partially delivered in Phase 3 (Task 7)
+## Phase 7 — Spring pre-phase ✅ (2026-06-14)
 
 - **Crate:** `cih-spring` (currently inline in `cih-parse`; extract if it grows).
 - **Done in Phase 3:** per-class `stereotype` tags (`@Service`/`@Repository`/`@Controller`/
   `@RestController`/`@Configuration`/`@Component`/`@Entity`) from own annotations; routes
   (`@RequestMapping`/`@GetMapping`/… → `Route` + `HANDLES_ROUTE`, class-prefix joined).
-- **Remaining:** `@Bean` producer methods; JPA repository-interface tagging (`JpaRepository`/
-  `CrudRepository` heritage — needs Phase 4 heritage edges); a `route_map` MCP view.
-- **Done when:** routes + beans are queryable; a `route_map` view works on a Spring app.
+- **Completed 2026-06-14** (`docs/phase-7.md`):
+  - **`@Bean` detection** — `is_bean_method()` in `cih-parse/src/java.rs` sets `props.isBean=true`
+    on Method nodes annotated with `@Bean`; reuses existing `annotations()` helper.
+  - **JPA repository tagging** — `jpa_repository_props()` walks the `implements` clause for 10 known
+    Spring Data interfaces (`JpaRepository`, `CrudRepository`, `MongoRepository`, …); sets
+    `stereotype="repository"` and `entityType=<first generic arg>` on Class nodes; no import
+    resolution needed (short names are globally unique by Spring Data convention).
+  - **`route_map` MCP tool** — `RouteInfo` struct in `cih-graph-store`; FalkorDB Cypher impl in
+    `cih-falkor`; `route_map(prefix, limit)` MCP tool in `cih-server`; path-prefix filter + max
+    limit (default 200).
+  - 8 new tests (5 cih-parse, 2 cih-falkor, 1 cih-server). Workspace: **85 tests** green, clippy clean.
+- **Done when:** routes + beans are queryable; a `route_map` view works on a Spring app. ✅
 
 ## Phase 8 — Dependency libs: API-surface ✅ (wiring done in Phase 4.4) + full decompile
 

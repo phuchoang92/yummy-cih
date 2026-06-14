@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use cih_core::NodeId;
 use cih_embed::{EmbedModelKind, EmbedStore};
-use cih_graph_store::{Direction, GraphStore, GraphStoreError};
+use cih_graph_store::{Direction, GraphStore, GraphStoreError, RouteInfo};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -67,6 +67,16 @@ struct ImpactArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CommunitiesArgs {
     /// Optional maximum number of communities to return.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RouteMapArgs {
+    /// Path prefix filter (e.g. "/api/owners"). Omit or leave empty for all routes.
+    #[serde(default)]
+    prefix: String,
+    /// Max routes to return (default 200).
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -146,6 +156,22 @@ impl CihServer {
 
         json_result(&QueryResult { hits, subgraph })
     }
+
+    #[tool(description = "List Spring REST endpoints: HTTP method + path + handler method. \
+        Use prefix to filter by path prefix (e.g. prefix=\"/api/users\").")]
+    async fn route_map(
+        &self,
+        Parameters(args): Parameters<RouteMapArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let prefix = if args.prefix.is_empty() {
+            None
+        } else {
+            Some(args.prefix.as_str())
+        };
+        let limit = args.limit.unwrap_or(200).clamp(1, 1000);
+        let routes: Vec<RouteInfo> = self.store.route_map(prefix, limit).await.map_err(to_mcp)?;
+        json_result(&routes)
+    }
 }
 
 #[tool_handler]
@@ -195,6 +221,13 @@ mod tests {
         assert_eq!(parse_direction(Some("both")), Direction::Both);
         assert_eq!(parse_direction(Some("sideways")), Direction::Upstream);
         assert_eq!(parse_direction(None), Direction::Upstream);
+    }
+
+    #[test]
+    fn route_map_args_default_limit_is_none() {
+        let args: RouteMapArgs = serde_json::from_str("{}").unwrap();
+        assert!(args.prefix.is_empty());
+        assert_eq!(args.limit, None);
     }
 }
 

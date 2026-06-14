@@ -85,6 +85,16 @@ pub struct CommunityInfo {
     pub cohesion: f64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RouteInfo {
+    pub path: String,
+    pub http_method: String,
+    pub decorator: String,
+    pub handler_id: NodeId,
+    pub handler_name: String,
+    pub handler_qualified: String,
+}
+
 /// The pluggable storage port. MCP tools map 1:1 onto the read methods.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
@@ -103,6 +113,7 @@ pub trait GraphStore: Send + Sync {
     async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph>;
     async fn context(&self, id: &NodeId) -> Result<SymbolContext>;
     async fn communities(&self) -> Result<Vec<CommunityInfo>>;
+    async fn route_map(&self, prefix: Option<&str>, limit: usize) -> Result<Vec<RouteInfo>>;
 }
 
 /// Bulk loading is a SEPARATE port — mechanisms differ wildly across backends

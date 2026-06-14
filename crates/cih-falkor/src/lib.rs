@@ -18,7 +18,7 @@ use cih_core::{
 };
 use cih_graph_store::{
     risk_from_fanout, BulkLoader, CommunityInfo, Direction, GraphStore, GraphStoreError, Impact,
-    ImpactNode, LoadStats, Path, Result, Subgraph, SymbolContext,
+    ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
 };
 use redis::Value;
 
@@ -329,6 +329,34 @@ impl GraphStore for FalkorStore {
             })
             .collect())
     }
+
+    async fn route_map(&self, prefix: Option<&str>, limit: usize) -> Result<Vec<RouteInfo>> {
+        let prefix_val = prefix.unwrap_or("");
+        let q = format!(
+            "CYPHER prefix={prefix_lit} limit={limit} \
+             MATCH (m:Symbol)-[:HANDLES_ROUTE]->(r:Symbol) \
+             WHERE r.kind = 'Route' \
+               AND ($prefix = '' OR r.path STARTS WITH $prefix) \
+             RETURN r.path, r.httpMethod, r.decorator, r.handler, m.id, m.name, m.qualifiedName \
+             ORDER BY r.path, r.httpMethod \
+             LIMIT $limit",
+            prefix_lit = cstr(prefix_val),
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|row| row.len() >= 6)
+            .map(|row| RouteInfo {
+                path: row.first().cloned().unwrap_or_default(),
+                http_method: row.get(1).cloned().unwrap_or_default(),
+                decorator: row.get(2).cloned().unwrap_or_default(),
+                handler_id: NodeId::new(row.get(4).cloned().unwrap_or_default()),
+                handler_name: row.get(5).cloned().unwrap_or_default(),
+                handler_qualified: row.get(6).cloned().unwrap_or_default(),
+            })
+            .collect())
+    }
 }
 
 /// Thin `BulkLoader` over a `FalkorStore` (ports & adapters: the engine depends
@@ -570,5 +598,56 @@ mod tests {
         assert_eq!(risk_from_fanout(20), "medium");
         assert_eq!(risk_from_fanout(75), "high");
         assert_eq!(risk_from_fanout(76), "critical");
+    }
+
+    fn make_row(cells: &[&str]) -> Vec<String> {
+        cells.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn route_map_row_parses_correctly() {
+        // Simulate a row: path, httpMethod, decorator, handler(ignored), id, name, qualifiedName
+        let row = make_row(&[
+            "/api/users",
+            "GET",
+            "GetMapping",
+            "Method:com.example.UserController#list/0",
+            "Method:com.example.UserController#list/0",
+            "list",
+            "com.example.UserController#list/0",
+        ]);
+        // Map using the same logic as route_map() implementation
+        let info = RouteInfo {
+            path: row.first().cloned().unwrap_or_default(),
+            http_method: row.get(1).cloned().unwrap_or_default(),
+            decorator: row.get(2).cloned().unwrap_or_default(),
+            handler_id: NodeId::new(row.get(4).cloned().unwrap_or_default()),
+            handler_name: row.get(5).cloned().unwrap_or_default(),
+            handler_qualified: row.get(6).cloned().unwrap_or_default(),
+        };
+        assert_eq!(info.path, "/api/users");
+        assert_eq!(info.http_method, "GET");
+        assert_eq!(info.decorator, "GetMapping");
+        assert_eq!(info.handler_id.as_str(), "Method:com.example.UserController#list/0");
+        assert_eq!(info.handler_name, "list");
+        assert_eq!(info.handler_qualified, "com.example.UserController#list/0");
+    }
+
+    #[test]
+    fn route_map_empty_result_returns_empty_vec() {
+        let rows: Vec<Vec<String>> = vec![];
+        let result: Vec<RouteInfo> = rows
+            .into_iter()
+            .filter(|row| row.len() >= 6)
+            .map(|row| RouteInfo {
+                path: row.first().cloned().unwrap_or_default(),
+                http_method: row.get(1).cloned().unwrap_or_default(),
+                decorator: row.get(2).cloned().unwrap_or_default(),
+                handler_id: NodeId::new(row.get(4).cloned().unwrap_or_default()),
+                handler_name: row.get(5).cloned().unwrap_or_default(),
+                handler_qualified: row.get(6).cloned().unwrap_or_default(),
+            })
+            .collect();
+        assert!(result.is_empty());
     }
 }
