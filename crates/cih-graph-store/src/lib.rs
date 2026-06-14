@@ -8,7 +8,7 @@
 //! Postgres-CTE adapter is fully separate.
 
 use async_trait::async_trait;
-use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, VersionId};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
 use serde::{Deserialize, Serialize};
 
 #[derive(thiserror::Error, Debug)]
@@ -102,7 +102,8 @@ pub trait GraphStore: Send + Sync {
     async fn ensure_schema(&self) -> Result<()>;
     async fn bulk_load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats>;
     async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()>;
-    async fn swap_version(&self, version: &VersionId) -> Result<()>;
+    /// Copy this store's graph into `dest_key`, replacing the destination atomically.
+    async fn publish_to(&self, dest_key: &str) -> Result<()>;
 
     // ---- reads (domain queries) ----
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;

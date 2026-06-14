@@ -2,6 +2,7 @@ mod analyze;
 mod db;
 mod discover;
 mod embed;
+mod file_cache;
 mod scan;
 mod scope;
 #[cfg(test)]
@@ -69,6 +70,9 @@ enum Command {
         /// Skip the FalkorDB load step (emit JSONL artifacts only).
         #[arg(long)]
         no_load: bool,
+        /// Disable incremental parse cache and re-parse all files.
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Re-run the resolve pass using the saved scope (.cih/scope.json), without re-scanning.
     /// Useful when the resolver changes but the source files have not.
@@ -144,6 +148,7 @@ fn main() -> Result<()> {
             falkor_url,
             graph_key,
             no_load,
+            no_cache,
         } => analyze::run_analyze(
             repo,
             AnalyzeFlags {
@@ -157,6 +162,7 @@ fn main() -> Result<()> {
                 falkor_url,
                 graph_key,
                 no_load,
+                no_cache,
             },
         ),
         Command::Resolve {

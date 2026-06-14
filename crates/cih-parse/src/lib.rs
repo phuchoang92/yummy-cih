@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use cih_core::{file_id, folder_id, Edge, EdgeKind, Node, NodeId, ParsedFile, Range};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 mod java;
 
@@ -31,20 +32,31 @@ pub struct SkippedFile {
     pub reason: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ParseUnitsOutput {
+    pub units: Vec<ParsedUnit>,
+    pub skipped: Vec<SkippedFile>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ParseArtifacts {
     pub parsed_files_path: PathBuf,
 }
 
-#[derive(Clone, Debug)]
-struct ParseUnit {
-    rel: String,
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    parsed_file: ParsedFile,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParsedUnit {
+    pub rel: String,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub parsed_file: ParsedFile,
 }
 
 pub fn parse_files(repo_root: &Path, files: &[String]) -> Result<ParseOutput> {
+    let output = parse_file_units(repo_root, files)?;
+    Ok(parse_output_from_units(output.units, output.skipped))
+}
+
+pub fn parse_file_units(repo_root: &Path, files: &[String]) -> Result<ParseUnitsOutput> {
     // Per-file failures are collected, not propagated: one unreadable/garbage file
     // must not abort indexing of a 12k-file repo.
     let results = files
@@ -66,6 +78,16 @@ pub fn parse_files(repo_root: &Path, files: &[String]) -> Result<ParseOutput> {
     units.sort_by(|a, b| a.rel.cmp(&b.rel));
     skipped.sort_by(|a, b| a.rel.cmp(&b.rel));
 
+    Ok(ParseUnitsOutput { units, skipped })
+}
+
+pub fn parse_output_from_units(
+    mut units: Vec<ParsedUnit>,
+    mut skipped: Vec<SkippedFile>,
+) -> ParseOutput {
+    units.sort_by(|a, b| a.rel.cmp(&b.rel));
+    skipped.sort_by(|a, b| a.rel.cmp(&b.rel));
+
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeMap::new();
     let mut parsed_files = Vec::new();
@@ -81,12 +103,12 @@ pub fn parse_files(repo_root: &Path, files: &[String]) -> Result<ParseOutput> {
         parsed_files.push(unit.parsed_file);
     }
 
-    Ok(ParseOutput {
+    ParseOutput {
         nodes: nodes.into_values().collect(),
         edges: edges.into_values().collect(),
         parsed_files,
         skipped,
-    })
+    }
 }
 
 pub fn write_parsed_files(dir: &Path, parsed_files: &[ParsedFile]) -> Result<ParseArtifacts> {
@@ -113,7 +135,8 @@ pub fn load_parsed_files(dir: &Path) -> Result<Vec<ParsedFile>> {
     );
     let mut out = Vec::new();
     for (i, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("read error at line {} of {}", i + 1, path.display()))?;
+        let line =
+            line.with_context(|| format!("read error at line {} of {}", i + 1, path.display()))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -124,7 +147,7 @@ pub fn load_parsed_files(dir: &Path) -> Result<Vec<ParsedFile>> {
     Ok(out)
 }
 
-fn parse_one(repo_root: &Path, rel: &str) -> Result<ParseUnit> {
+fn parse_one(repo_root: &Path, rel: &str) -> Result<ParsedUnit> {
     let path = repo_root.join(rel);
     let src =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -581,7 +604,11 @@ class Multi {
         }
     }
 
-    fn node_prop<'a>(output: &'a ParseOutput, node_id: &str, key: &str) -> Option<&'a serde_json::Value> {
+    fn node_prop<'a>(
+        output: &'a ParseOutput,
+        node_id: &str,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
         output
             .nodes
             .iter()

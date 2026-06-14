@@ -13,9 +13,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use cih_core::{
-    Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range, VersionId,
-};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
     risk_from_fanout, BulkLoader, CommunityInfo, Direction, GraphStore, GraphStoreError, Impact,
     ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
@@ -52,6 +50,27 @@ impl FalkorStore {
             .query_async(&mut con)
             .await
             .map_err(|e| GraphStoreError::Backend(e.to_string()))
+    }
+
+    async fn graph_command(&self, command: &str, args: &[&str]) -> Result<Value> {
+        let mut con = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| GraphStoreError::Backend(e.to_string()))?;
+        let mut cmd = redis::cmd(command);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.query_async(&mut con)
+            .await
+            .map_err(|e| GraphStoreError::Backend(e.to_string()))
+    }
+
+    pub async fn drop_graph(&self) -> Result<()> {
+        self.graph_command("GRAPH.DELETE", &[&self.graph_key])
+            .await?;
+        Ok(())
     }
 
     /// Result rows (the second element of a GRAPH.QUERY reply) as stringified
@@ -130,9 +149,7 @@ impl GraphStore for FalkorStore {
         let edges = artifacts
             .read_edges()
             .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
-        let stats = self.load_nodes_edges(&nodes, &edges).await?;
-        self.swap_version(&artifacts.version).await?;
-        Ok(stats)
+        self.load_nodes_edges(&nodes, &edges).await
     }
 
     async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()> {
@@ -153,14 +170,9 @@ impl GraphStore for FalkorStore {
         Ok(())
     }
 
-    async fn swap_version(&self, version: &VersionId) -> Result<()> {
-        // Pragmatic: record the version on a meta node. Production blue-green
-        // (load into a staging graph key, then GRAPH.COPY/swap) is a later refinement.
-        self.run(&format!(
-            "MERGE (m:_CihMeta {{key:'version'}}) SET m.value = {}",
-            cstr(&version.0)
-        ))
-        .await?;
+    async fn publish_to(&self, dest_key: &str) -> Result<()> {
+        self.graph_command("GRAPH.COPY", &[&self.graph_key, dest_key, "REPLACE"])
+            .await?;
         Ok(())
     }
 
@@ -628,7 +640,10 @@ mod tests {
         assert_eq!(info.path, "/api/users");
         assert_eq!(info.http_method, "GET");
         assert_eq!(info.decorator, "GetMapping");
-        assert_eq!(info.handler_id.as_str(), "Method:com.example.UserController#list/0");
+        assert_eq!(
+            info.handler_id.as_str(),
+            "Method:com.example.UserController#list/0"
+        );
         assert_eq!(info.handler_name, "list");
         assert_eq!(info.handler_qualified, "com.example.UserController#list/0");
     }

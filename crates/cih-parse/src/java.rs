@@ -2,15 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use cih_core::{
-    constructor_id, field_id, file_id, method_id, type_id, BindingKind, Edge, EdgeKind, Node, NodeId,
-    NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    constructor_id, field_id, file_id, method_id, type_id, BindingKind, Edge, EdgeKind, Node,
+    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
 };
 use cih_lang::java::JavaProvider;
 use cih_lang::LanguageProvider;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, QueryCursor, Tree};
 
-use crate::ParseUnit;
+use crate::ParsedUnit;
 
 #[derive(Clone, Debug)]
 struct TypeContext {
@@ -52,7 +52,7 @@ struct FileBuilder {
     callable_contexts: Vec<CallableContext>,
 }
 
-pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParseUnit> {
+pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParsedUnit> {
     let provider = JavaProvider::new();
     // Uses cih-lang's thread-local parser: one parser per rayon worker, reused
     // across the files that worker processes (no per-file parser construction).
@@ -74,7 +74,7 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParseUnit> {
     collect_spring_routes(root, src, &mut builder);
     normalize_builder(&mut builder);
 
-    Ok(ParseUnit {
+    Ok(ParsedUnit {
         rel: rel.to_string(),
         nodes: builder.nodes,
         edges: builder.edges,
@@ -464,9 +464,7 @@ fn type_binding(
 ) -> Option<TypeBinding> {
     let (anchor_tag, anchor_node) = captures.iter().find(|(key, _)| {
         let key = key.as_str();
-        key.starts_with("type-binding.")
-            && key != "type-binding.type"
-            && key != "type-binding.name"
+        key.starts_with("type-binding.") && key != "type-binding.type" && key != "type-binding.name"
     })?;
     let type_node = captures.get("type-binding.type")?;
     let name_node = captures.get("type-binding.name")?;

@@ -41,17 +41,16 @@ breadth; one demoable capability per milestone.
 - **Goal:** load a real graph programmatically, not by hand.
 - **Build:** finalize the canonical `GraphArtifacts` schema (nodes/edges parquet+csv) in `cih-core`;
   `FalkorBulkLoader` (UNWIND batches + index creation); implement `bulk_load` /
-  `upsert_incremental` / `swap_version` on `FalkorStore`; **switch queries to FalkorDB query
+  `upsert_incremental` / `publish_to` on `FalkorStore`; **switch queries to FalkorDB query
   parameters** (drop the stub inline-escaping).
 - **Done when:** load a synthetic ~10k-node graph; queries return; re-load is idempotent.
 - **VERIFIED 2026-06-13:** canonical artifacts are **JSONL** (`nodes.jsonl`/`edges.jsonl`) in
   `cih-core` (`GraphArtifacts::write`/`read_nodes`/`read_edges`) — Parquet deferred to the Neptune
-  S3 path (Phase 11). `FalkorStore::{bulk_load,upsert_incremental,swap_version}` + `FalkorBulkLoader`
-  implemented (UNWIND-batch MERGE, idempotent; edges grouped per type; `_CihMeta` version node;
-  `upsert` = delete-by-file then re-load). Read queries now use FalkorDB `CYPHER` parameters.
+  S3 path (Phase 11). `FalkorStore::{bulk_load,upsert_incremental}` + `FalkorBulkLoader`
+  implemented (UNWIND-batch MERGE, idempotent; edges grouped per type; `upsert` =
+  delete-by-file then re-load). Read queries now use FalkorDB `CYPHER` parameters.
   Smoke test: `cargo run -p cih-falkor --example load_sample` → impact returns the full call chain.
-  Remaining polish: Parquet + S3 (Phase 11), blue-green staging-key swap, compact-protocol list
-  parsing for `call_chain`.
+  Remaining polish: Parquet + S3 (Phase 11), compact-protocol list parsing for `call_chain`.
 
 ## Phase 3 — Engine MVP: scan → scope → parse → structure ✅  🎯 first vertical slice
 
@@ -202,11 +201,26 @@ breadth; one demoable capability per milestone.
 - **Done when:** calls into a dependency resolve (to its API node, or to decompiled source) instead
   of being silently dropped.
 
-## Phase 9 — Incremental re-index + cache + versioning
+## Phase 9 — Incremental re-index + cache + versioning ✅ (2026-06-14)
 
-- **Build:** blake3 file-hash diff vs prior `meta.json`; parse cache (bincode, content-addressed);
-  importer-BFS expansion (depth 4); atomic version swap in the store (port `run-analyze.ts`).
-- **Done when:** re-index after editing one file is fast and correct (only the delta re-resolves).
+- **Plan:** `docs/phase-9.md`.
+- **Completed 2026-06-14:**
+  - **File hash index** — `.cih/file-hashes.json` stores blake3/16 content hashes for scoped files;
+    readable files are hashed in parallel with `rayon`.
+  - **Content-addressed parse cache** — `.cih/parse-cache/<hash>.json` stores per-file parse units
+    (`ParsedFile` IR plus graph nodes/edges), so unchanged files keep route nodes and Spring/JPA
+    props without re-running tree-sitter.
+  - **Importer BFS expansion** — changed files are expanded through transitive importers up to
+    depth 4; resolution still runs across the complete scoped file set.
+  - **No-op reuse** — unchanged scope + identical hash set reuses the latest artifacts and skips
+    parse, resolve, and DB reload. `analyze --no-cache` forces full parsing for parser upgrades.
+  - **Blue-green Falkor publish** — engine loads into `<graph_key>-staging`, then publishes via
+    `GRAPH.COPY staging live REPLACE`, and deletes the staging graph.
+  - **Parse API support** — `cih-parse::parse_file_units` and `parse_output_from_units` preserve
+    existing `parse_files` behavior while enabling cache composition.
+  - Workspace: **93 tests** green, clippy clean, docs build clean.
+- **Done when:** re-index after editing one file is fast and correct (only the delta re-parses;
+  resolution still runs full-scope). ✅
 
 ## Phase 10 — Product: orchestration + chat + wiki  🎯 GraphRAG product
 

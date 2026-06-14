@@ -581,6 +581,7 @@ dependencies = [
  "cih-core",
  "cih-lang",
  "rayon",
+ "serde",
  "serde_json",
  "streaming-iterator",
  "tree-sitter",

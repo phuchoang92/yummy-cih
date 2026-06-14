@@ -4,11 +4,16 @@ use std::process;
 use anyhow::{Context, Result};
 use cih_core::{Edge, GraphArtifacts, JarInfo, Node, RepoMap, VersionId};
 use cih_jar::JarApiExtractor;
+use cih_parse::{ParseOutput, ParsedUnit};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 
 use crate::db::{load_to_falkor, LoadOutcome};
+use crate::file_cache::{
+    hash_all, load_cached_parsed, save_cached_parsed, FileHashIndex, ImporterIndex,
+};
 use crate::scope::{self, ScopeFile, ScopeRequest};
-use crate::versioning::{content_version, prune_other_versions};
+use crate::versioning::{content_version, latest_graph_artifacts, prune_other_versions};
 use crate::{scan, DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
 #[derive(Debug)]
@@ -23,6 +28,7 @@ pub(crate) struct AnalyzeFlags {
     pub(crate) falkor_url: Option<String>,
     pub(crate) graph_key: Option<String>,
     pub(crate) no_load: bool,
+    pub(crate) no_cache: bool,
 }
 
 pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -37,9 +43,19 @@ pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         process::exit(2);
     }
 
-    let emit = analyze_emit(&scan, request)?;
+    let emit = analyze_emit_with_options(
+        &scan,
+        request,
+        AnalyzeCacheOptions {
+            use_cache: !flags.no_cache,
+            allow_noop: !flags.no_cache,
+        },
+    )?;
 
-    let load = if flags.no_load {
+    let load = if emit.reused_artifacts {
+        tracing::info!("No source changes detected; reusing existing artifacts and live graph");
+        LoadOutcome::Reused
+    } else if flags.no_load {
         tracing::info!("Skipping FalkorDB load (--no-load)");
         LoadOutcome::Skipped
     } else {
@@ -99,7 +115,15 @@ pub(crate) fn run_resolve(
     };
 
     let jars = load_jars_from_repo_map(&repo);
-    let emit = analyze_from_scope(scope_file, scope_path, &jars)?;
+    let emit = analyze_from_scope_with_options(
+        scope_file,
+        scope_path,
+        &jars,
+        AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: false,
+        },
+    )?;
 
     let load = if no_load {
         tracing::info!("Skipping FalkorDB load (--no-load)");
@@ -137,23 +161,98 @@ pub(crate) fn run_resolve(
 
 /// DB-free core of `analyze`: resolve scope → parse → write IR + GraphArtifacts.
 /// Returns everything the caller needs to load and report. No process exits, no DB.
+#[cfg(test)]
 pub(crate) fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOutcome> {
+    analyze_emit_with_options(
+        scan,
+        request,
+        AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: true,
+        },
+    )
+}
+
+pub(crate) fn analyze_emit_with_options(
+    scan: &scan::ScanResult,
+    request: ScopeRequest,
+    cache: AnalyzeCacheOptions,
+) -> Result<EmitOutcome> {
     let scope_file = scope::resolve(&scan.repo_map, &scan.java_files, request)?;
     let scope_path = scope::write_scope_file(&scope_file)?;
-    analyze_from_scope(scope_file, scope_path, &scan.repo_map.jars)
+    analyze_from_scope_with_options(scope_file, scope_path, &scan.repo_map.jars, cache)
 }
 
 /// DB-free core shared by `analyze` and `resolve`: parse the files listed in
 /// `scope_file` → resolve → extract JAR API for unresolved types → write IR +
 /// GraphArtifacts.
+#[cfg(test)]
 pub(crate) fn analyze_from_scope(
     scope_file: ScopeFile,
     scope_path: PathBuf,
     jars: &[JarInfo],
 ) -> Result<EmitOutcome> {
-    let repo_root = PathBuf::from(&scope_file.repo_root);
+    analyze_from_scope_with_options(
+        scope_file,
+        scope_path,
+        jars,
+        AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: true,
+        },
+    )
+}
 
-    let parse_output = cih_parse::parse_files(&repo_root, &scope_file.files)?;
+pub(crate) fn analyze_from_scope_with_options(
+    scope_file: ScopeFile,
+    scope_path: PathBuf,
+    jars: &[JarInfo],
+    cache: AnalyzeCacheOptions,
+) -> Result<EmitOutcome> {
+    let repo_root = PathBuf::from(&scope_file.repo_root);
+    let cih_dir = repo_root.join(".cih");
+
+    let incremental = parse_scope(&repo_root, &cih_dir, &scope_file.files, cache)?;
+    if let ParseScopeOutcome::Reused {
+        artifacts,
+        parsed_files_path,
+        node_count,
+        edge_count,
+        parsed_file_count,
+        cache_stats,
+    } = incremental
+    {
+        return Ok(EmitOutcome {
+            scope_file,
+            scope_path,
+            artifacts,
+            parsed_files_path,
+            artifacts_dir: cih_dir
+                .join("artifacts")
+                .join(cache_stats.version.as_deref().unwrap_or_default()),
+            version: cache_stats.version.clone().unwrap_or_default(),
+            node_count,
+            edge_count,
+            resolved_edge_count: 0,
+            unresolved_reference_count: 0,
+            unresolved_external_fqcns: Vec::new(),
+            parsed_file_count,
+            skipped_count: 0,
+            jar_node_count: 0,
+            jar_failed: 0,
+            reused_artifacts: true,
+            cache_stats,
+        });
+    }
+
+    let ParseScopeOutcome::Parsed {
+        parse_output,
+        current_hashes,
+        cache_stats,
+    } = incremental
+    else {
+        unreachable!("reused case returned above");
+    };
     let resolve_output = cih_resolve::resolve_edges(&parse_output.parsed_files);
     let (jar_nodes, jar_edges, jar_failed) =
         extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
@@ -167,7 +266,6 @@ pub(crate) fn analyze_from_scope(
 
     let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
 
-    let cih_dir = repo_root.join(".cih");
     let parsed_dir = cih_dir.join("parsed").join(&version);
     let parse_artifacts = cih_parse::write_parsed_files(&parsed_dir, &parse_output.parsed_files)?;
 
@@ -187,6 +285,7 @@ pub(crate) fn analyze_from_scope(
 
     prune_other_versions(&cih_dir.join("parsed"), &version)?;
     prune_other_versions(&cih_dir.join("artifacts"), &version)?;
+    FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
 
     tracing::info!(
         nodes = all_nodes.len(),
@@ -198,6 +297,8 @@ pub(crate) fn analyze_from_scope(
         path = %artifacts_dir.display(),
         "Graph artifacts written"
     );
+
+    let cache_stats = cache_stats.with_version(version.clone());
 
     Ok(EmitOutcome {
         scope_file,
@@ -215,6 +316,220 @@ pub(crate) fn analyze_from_scope(
         skipped_count: parse_output.skipped.len(),
         jar_node_count,
         jar_failed,
+        reused_artifacts: false,
+        cache_stats,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AnalyzeCacheOptions {
+    pub(crate) use_cache: bool,
+    pub(crate) allow_noop: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct CacheStats {
+    pub(crate) enabled: bool,
+    pub(crate) noop: bool,
+    pub(crate) cache_hits: usize,
+    pub(crate) changed_files: usize,
+    pub(crate) expanded_files: usize,
+    pub(crate) reparsed_files: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) version: Option<String>,
+}
+
+impl CacheStats {
+    fn with_version(mut self, version: String) -> Self {
+        self.version = Some(version);
+        self
+    }
+}
+
+enum ParseScopeOutcome {
+    Reused {
+        artifacts: GraphArtifacts,
+        parsed_files_path: PathBuf,
+        node_count: usize,
+        edge_count: usize,
+        parsed_file_count: usize,
+        cache_stats: CacheStats,
+    },
+    Parsed {
+        parse_output: ParseOutput,
+        current_hashes: HashMap<String, String>,
+        cache_stats: CacheStats,
+    },
+}
+
+fn parse_scope(
+    repo_root: &Path,
+    cih_dir: &Path,
+    files: &[String],
+    cache: AnalyzeCacheOptions,
+) -> Result<ParseScopeOutcome> {
+    let current_hashes = hash_all(repo_root, files);
+
+    if !cache.use_cache {
+        let unit_output = cih_parse::parse_file_units(repo_root, files)?;
+        for unit in &unit_output.units {
+            if let Some(hash) = current_hashes.get(&unit.rel) {
+                save_cached_parsed(cih_dir, hash, unit)?;
+            }
+        }
+        let reparsed_files = unit_output.units.len();
+        return Ok(ParseScopeOutcome::Parsed {
+            parse_output: cih_parse::parse_output_from_units(
+                unit_output.units,
+                unit_output.skipped,
+            ),
+            current_hashes,
+            cache_stats: CacheStats {
+                enabled: false,
+                reparsed_files,
+                ..CacheStats::default()
+            },
+        });
+    }
+
+    let previous = FileHashIndex::load(cih_dir);
+    let changed_files: Vec<String> = previous
+        .changed_files(&current_hashes)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let all_files_hashed = current_hashes.len() == files.len();
+
+    if cache.allow_noop
+        && all_files_hashed
+        && changed_files.is_empty()
+        && previous.same_file_set(&current_hashes)
+    {
+        match reused_artifacts(repo_root, cih_dir) {
+            Ok(reused) => {
+                tracing::info!("nothing changed, reusing last artifacts");
+                return Ok(ParseScopeOutcome::Reused {
+                    cache_stats: CacheStats {
+                        enabled: true,
+                        noop: true,
+                        version: Some(reused.artifacts.version.0.clone()),
+                        ..CacheStats::default()
+                    },
+                    artifacts: reused.artifacts,
+                    parsed_files_path: reused.parsed_files_path,
+                    node_count: reused.node_count,
+                    edge_count: reused.edge_count,
+                    parsed_file_count: reused.parsed_file_count,
+                });
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "incremental no-op unavailable; falling back to parse");
+            }
+        }
+    }
+
+    let mut cached_by_file: HashMap<String, ParsedUnit> = HashMap::new();
+    for rel in files {
+        let unit = current_hashes
+            .get(rel)
+            .and_then(|hash| load_cached_parsed(cih_dir, hash))
+            .or_else(|| {
+                previous
+                    .get(rel)
+                    .and_then(|hash| load_cached_parsed(cih_dir, hash))
+            });
+        if let Some(unit) = unit {
+            cached_by_file.insert(rel.clone(), unit);
+        }
+    }
+
+    let cached_parsed: Vec<_> = cached_by_file
+        .values()
+        .map(|unit| unit.parsed_file.clone())
+        .collect();
+    let importer_index = ImporterIndex::build(&cached_parsed);
+    let mut to_parse: HashSet<String> = importer_index.expand(&changed_files, 4);
+    for rel in files {
+        if !cached_by_file.contains_key(rel) {
+            to_parse.insert(rel.clone());
+        }
+        if !current_hashes.contains_key(rel) {
+            to_parse.insert(rel.clone());
+        }
+    }
+
+    let mut to_parse: Vec<String> = to_parse.into_iter().collect();
+    to_parse.sort();
+    let unit_output = cih_parse::parse_file_units(repo_root, &to_parse)?;
+
+    let reparsed_files = unit_output.units.len();
+    let skipped_reparse: HashSet<&str> = unit_output
+        .skipped
+        .iter()
+        .map(|skipped| skipped.rel.as_str())
+        .collect();
+    let mut parsed_by_file: HashMap<String, ParsedUnit> = HashMap::new();
+    for unit in unit_output.units {
+        if let Some(hash) = current_hashes.get(&unit.rel) {
+            save_cached_parsed(cih_dir, hash, &unit)?;
+        }
+        parsed_by_file.insert(unit.rel.clone(), unit);
+    }
+
+    let mut combined_units = Vec::new();
+    for rel in files {
+        if let Some(unit) = parsed_by_file.remove(rel) {
+            combined_units.push(unit);
+        } else if !skipped_reparse.contains(rel.as_str()) {
+            if let Some(unit) = cached_by_file.remove(rel) {
+                combined_units.push(unit);
+            }
+        }
+    }
+    let cache_hits = combined_units
+        .iter()
+        .filter(|unit| !to_parse.iter().any(|rel| rel == &unit.rel))
+        .count();
+    let expanded_files = to_parse.len();
+
+    Ok(ParseScopeOutcome::Parsed {
+        parse_output: cih_parse::parse_output_from_units(combined_units, unit_output.skipped),
+        current_hashes,
+        cache_stats: CacheStats {
+            enabled: true,
+            noop: false,
+            cache_hits,
+            changed_files: changed_files.len(),
+            expanded_files,
+            reparsed_files,
+            version: None,
+        },
+    })
+}
+
+struct ReusedArtifacts {
+    artifacts: GraphArtifacts,
+    parsed_files_path: PathBuf,
+    node_count: usize,
+    edge_count: usize,
+    parsed_file_count: usize,
+}
+
+fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts> {
+    let artifacts = latest_graph_artifacts(repo_root)?;
+    let nodes = artifacts.read_nodes()?;
+    let edges = artifacts.read_edges()?;
+    let parsed_dir = cih_dir.join("parsed").join(&artifacts.version.0);
+    let parsed_files_path = parsed_dir.join("parsed-files.jsonl");
+    let parsed_file_count = cih_parse::load_parsed_files(&parsed_dir)
+        .map(|files| files.len())
+        .unwrap_or(0);
+    Ok(ReusedArtifacts {
+        artifacts,
+        parsed_files_path,
+        node_count: nodes.len(),
+        edge_count: edges.len(),
+        parsed_file_count,
     })
 }
 
@@ -235,6 +550,8 @@ pub(crate) struct EmitOutcome {
     pub(crate) unresolved_external_fqcns: Vec<String>,
     pub(crate) parsed_file_count: usize,
     pub(crate) skipped_count: usize,
+    pub(crate) reused_artifacts: bool,
+    pub(crate) cache_stats: CacheStats,
 }
 
 impl EmitOutcome {
@@ -254,6 +571,8 @@ impl EmitOutcome {
             skipped_count: self.skipped_count,
             jar_node_count: self.jar_node_count,
             jar_failed: self.jar_failed,
+            reused_artifacts: self.reused_artifacts,
+            cache: &self.cache_stats,
             falkor_status: load.status(),
             falkor_nodes: load.stats().map(|s| s.nodes),
             falkor_edges: load.stats().map(|s| s.edges),
@@ -280,6 +599,19 @@ impl EmitOutcome {
                 "Skipped: {} files (see logs for details).",
                 self.skipped_count
             );
+        }
+        if self.cache_stats.enabled {
+            if self.cache_stats.noop {
+                println!("Cache: no source changes; reused existing artifacts.");
+            } else {
+                println!(
+                    "Cache: {} hits, {} changed, {} expanded, {} reparsed.",
+                    self.cache_stats.cache_hits,
+                    self.cache_stats.changed_files,
+                    self.cache_stats.expanded_files,
+                    self.cache_stats.reparsed_files
+                );
+            }
         }
         println!(
             "Resolved: {} edges, {} unresolved refs.",
@@ -315,6 +647,7 @@ impl EmitOutcome {
                 )
             }
             LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
+            LoadOutcome::Reused => println!("FalkorDB: unchanged; existing live graph reused."),
             LoadOutcome::Failed(_) => {
                 println!("FalkorDB: load failed (artifacts on disk — re-run to retry).")
             }
@@ -338,6 +671,8 @@ pub(crate) struct AnalyzeSummary<'a> {
     pub(crate) skipped_count: usize,
     pub(crate) jar_node_count: usize,
     pub(crate) jar_failed: usize,
+    pub(crate) reused_artifacts: bool,
+    pub(crate) cache: &'a CacheStats,
     /// "loaded" | "skipped" | "failed"
     pub(crate) falkor_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]

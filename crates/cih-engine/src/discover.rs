@@ -189,6 +189,7 @@ impl DiscoverOutcome {
                     stats.nodes, stats.edges
                 )
             }
+            LoadOutcome::Reused => println!("FalkorDB: unchanged; existing live graph reused."),
             LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
             LoadOutcome::Failed(_) => {
                 println!("FalkorDB: load failed (artifacts on disk - re-run to retry).")
