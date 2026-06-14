@@ -1,0 +1,15 @@
+[package]
+name = "cih-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cih-core.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+fastembed.workspace = true
+pgvector.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true

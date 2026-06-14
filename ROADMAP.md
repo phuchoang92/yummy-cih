@@ -121,25 +121,44 @@ breadth; one demoable capability per milestone.
 
 ## Phase 5 — Communities + processes ✅
 
-- **Build:** Leiden over CSR (port `community-processor.ts` params: resolution 2.0/1.0, capped
-  iters, >10k filtering) → `Community` nodes + `MEMBER_OF`; process BFS (port
-  `process-processor.ts`: depth 10 / branch 4 / max 75) → `Process` nodes + `STEP_IN_PROCESS`.
-- **Done when:** clusters + execution flows appear; MCP resources expose them.
-- **VERIFIED 2026-06-14:** `cih-community` crate added with deterministic seeded community
-  detection, heuristic labels, cohesion scoring, entry-point scoring, and BFS process tracing.
-  `cih-engine discover <repo>` reads the latest `.cih/artifacts/<version>` graph, writes
-  `.cih/artifacts-community/<version>`, and optionally loads the generated `Community`/`Process`
-  graph overlay into FalkorDB. `FalkorStore::context()` now returns process ids, and the MCP server
-  exposes a `communities` tool. Workspace: **65 tests** green, clippy clean.
+- **Plan:** `docs/phase-5.md`.
+- **VERIFIED 2026-06-14:** Leiden-style community detection + BFS process tracing delivered:
+  - **New crate `cih-community`:** `prng.rs` (Mulberry32, seed `0xc0de` for reproducibility),
+    `graph.rs` (undirected community graph + directed calls digraph via `petgraph = "0.6"`),
+    `leiden.rs` (Louvain Phase 1 local-moving, 60-second timeout + graceful degradation),
+    `label.rs` (three-tier heuristic: folder-mode → name-prefix → `Cluster_N`), `cohesion.rs`
+    (sampled internal-edge density), `entry_points.rs` (callee/caller ratio × name multipliers,
+    top-200 cap), `bfs.rs` (BFS cycle-safe + two-pass dedup: substring-subset removal then
+    endpoint-longest). **7 unit tests.**
+  - **`cih-engine discover` subcommand:** reads latest `.cih/artifacts/<v>/` (mtime-ranked),
+    runs `detect_communities` (resolution 1.0/2.0 auto-selected at 10 001 nodes) +
+    `trace_processes` (depth 10, branching 4, dynamic max), writes `Community`/`Process` nodes
+    + `MEMBER_OF`/`STEP_IN_PROCESS` edges to `.cih/artifacts-community/<v>/`; prunes stale
+    versions; loads to FalkorDB (exit-3 on failure). **1 integration test.**
+  - **`cih-falkor context()`:** STEP_IN_PROCESS query now populates `SymbolContext.processes`.
+  - **`cih-server communities` tool:** MCP tool lists all detected clusters with cohesion scores.
+  - **`cih-core`:** `community_id(idx)` + `process_id(slug, hash)` id helpers.
+  - Workspace: **62 tests** green, clippy clean.
 
-## Phase 6 — Search: BM25 + embeddings + hybrid
+## Phase 6 — Search: BM25 + embeddings + hybrid ✅
 
-- **Crates:** `cih-search`, `cih-embed` (or a TS/Python embedding sidecar).
-- **Build:** in-Rust BM25 over name+content (port `bm25-index.ts`); chunker + embeddings
-  (`fastembed`/`ort` or sidecar, MiniLM-384 / bge-m3-1024) → **pgvector HNSW**; hybrid RRF
-  (`k=60`, port `hybrid-search.ts`); wire the `query` MCP tool → hybrid search → seed nodes +
-  `subgraph`.
-- **Done when:** `query("user registration")` returns ranked, process-grouped results.
+- **Plan:** `docs/phase-6.md`.
+- **VERIFIED 2026-06-14:** hybrid search delivered:
+  - **New crate `cih-search`:** tokenizer with punctuation/camel splitting, BM25 over graph symbol
+    nodes (`Class`/`Interface`/`Enum`/`Record`/`Annotation`/`Method`/`Constructor`/`Field`/
+    `Route`), and Reciprocal Rank Fusion (`k=60`). **5 unit tests.**
+  - **New crate `cih-embed`:** character chunker (4 KB / 500 B overlap), deterministic
+    `blake3` content hashes, fastembed model wrapper (`all-minilm-l6-v2` default,
+    `bge-small-en-v1.5` supported), pgvector table/index DDL, content-hash skip logic, HNSW
+    query with exact-scan fallback for small datasets. **3 pure unit tests.**
+  - **`cih-engine embed` subcommand:** reads latest `.cih/artifacts/<v>/nodes.jsonl`, ensures
+    pgvector schema, embeds eligible graph nodes, and prints human or JSON summary.
+  - **`cih-server query` MCP tool:** lazily builds in-memory BM25 from `CIH_ARTIFACTS_DIR`, uses
+    optional semantic search from `CIH_PG_URL`, merges both with RRF, and supports `expand=true`
+    via `GraphStore::subgraph(top_5, 1)`.
+  - Workspace: **70 tests** green. `cargo fmt --check` still reports pre-existing formatting
+    diffs in unrelated files (`cih-engine` scan/scope helpers, `cih-falkor`, `cih-jar`,
+    `cih-parse`, `cih-resolve`); Phase 6 touched files were rustfmt-formatted.
 
 ## Phase 7 — Spring pre-phase  🚧 partially delivered in Phase 3 (Task 7)
 

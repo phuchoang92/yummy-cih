@@ -10,6 +10,8 @@ members = [
   "crates/cih-resolve",
   "crates/cih-jar",
   "crates/cih-community",
+  "crates/cih-search",
+  "crates/cih-embed",
   "crates/cih-graph-store",
   "crates/cih-falkor",
   "crates/cih-server",
@@ -44,6 +46,9 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 cafebabe = "0.9"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 petgraph = "0.6"
+fastembed = { version = "4", default-features = false, features = ["ort-download-binaries", "hf-hub-native-tls"] }
+tokio-postgres = "0.7"
+pgvector = { version = "0.4", features = ["postgres"] }
 
 # internal crates
 cih-core = { path = "crates/cih-core" }
@@ -53,5 +58,7 @@ cih-parse = { path = "crates/cih-parse" }
 cih-resolve = { path = "crates/cih-resolve" }
 cih-jar = { path = "crates/cih-jar" }
 cih-community = { path = "crates/cih-community" }
+cih-search = { path = "crates/cih-search" }
+cih-embed = { path = "crates/cih-embed" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }

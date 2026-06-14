@@ -4,6 +4,7 @@
 //! `neptune` at go-live, `postgres` as the ~$0 fallback. Swapping backends is a
 //! one-line env change; nothing else in the server cares which store it is.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -15,6 +16,8 @@ pub struct Config {
     pub bind: String,
     pub falkor_url: String,
     pub graph_key: String,
+    pub artifacts_dir: Option<PathBuf>,
+    pub pg_url: Option<String>,
 }
 
 impl Config {
@@ -24,6 +27,8 @@ impl Config {
             bind: env("CIH_BIND", "127.0.0.1:8080"),
             falkor_url: env("FALKOR_URL", "redis://127.0.0.1:6379"),
             graph_key: env("CIH_GRAPH_KEY", "cih"),
+            artifacts_dir: std::env::var("CIH_ARTIFACTS_DIR").ok().map(PathBuf::from),
+            pg_url: std::env::var("CIH_PG_URL").ok(),
         }
     }
 }
@@ -47,6 +52,8 @@ pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
         "postgres" => Err(anyhow!(
             "postgres-cte adapter not implemented yet — ~$0 fallback (cih-postgres)"
         )),
-        other => Err(anyhow!("unknown CIH_GRAPH_BACKEND='{other}' (use falkor|neptune|postgres)")),
+        other => Err(anyhow!(
+            "unknown CIH_GRAPH_BACKEND='{other}' (use falkor|neptune|postgres)"
+        )),
     }
 }
