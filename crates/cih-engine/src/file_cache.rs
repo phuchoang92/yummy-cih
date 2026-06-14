@@ -283,6 +283,7 @@ mod tests {
                 param_types: Vec::new(),
                 return_type: None,
                 declared_type: None,
+                stereotype: None,
             }],
             imports: imports
                 .into_iter()

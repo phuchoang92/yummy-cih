@@ -52,6 +52,8 @@ pub(crate) struct ResolveIndex {
     supertypes: HashMap<String, Vec<String>>,
     /// interface/super FQCN → types that extend/implement it.
     implementors: HashMap<String, Vec<String>>,
+    /// type FQCN → Spring stereotype ("service", "repository", "component", …).
+    type_stereotypes: HashMap<String, String>,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +78,9 @@ impl ResolveIndex {
             );
             for def in &pf.defs {
                 if is_type_kind(def.kind) {
+                    if let Some(s) = def.stereotype.as_deref() {
+                        idx.type_stereotypes.insert(def.fqcn.clone(), s.to_string());
+                    }
                     idx.types_by_fqcn.insert(def.fqcn.clone(), def.clone());
                     idx.simple_to_fqcns
                         .entry(simple_of(&def.fqcn))
@@ -413,6 +418,25 @@ impl ResolveIndex {
             .map(|def| matches!(def.kind, NodeKind::Interface | NodeKind::Annotation))
             .unwrap_or(false)
     }
+
+    fn is_spring_bean(&self, fqcn: &str) -> bool {
+        matches!(
+            self.type_stereotypes.get(fqcn).map(String::as_str),
+            Some("service" | "repository" | "component" | "controller" | "configuration")
+        )
+    }
+
+    /// Returns the single `@Service`/`@Component`/`@Repository` implementor for an
+    /// interface, or `None` when there are zero or multiple (ambiguous).
+    fn di_impl(&self, interface_fqcn: &str) -> Option<String> {
+        let impls = self.implementors.get(interface_fqcn)?;
+        let beans: Vec<&String> = impls.iter().filter(|f| self.is_spring_bean(f)).collect();
+        if beans.len() == 1 {
+            Some(beans[0].clone())
+        } else {
+            None
+        }
+    }
 }
 
 struct EdgeEmitter<'a> {
@@ -676,16 +700,25 @@ impl<'a> EdgeEmitter<'a> {
         }
 
         if let Some(owner) = self.resolve_receiver_expr_type(pf, site, receiver) {
+            // DI redirect: interface receiver with exactly one @Service impl → use the impl.
+            let effective_owner = if self.index.is_interface_type(&owner) {
+                self.index.di_impl(&owner).unwrap_or_else(|| owner.clone())
+            } else {
+                owner.clone()
+            };
+
             if let Some(dst) = self
                 .index
-                .find_member_in_hierarchy(&owner, &site.name, site.arity)
+                .find_member_in_hierarchy(&effective_owner, &site.name, site.arity)
             {
-                let confidence = if receiver.contains('.') || receiver.contains('(') {
-                    0.7
+                let (confidence, reason) = if effective_owner != owner {
+                    (0.9, "di-resolved")
+                } else if receiver.contains('.') || receiver.contains('(') {
+                    (0.7, "receiver-bound")
                 } else {
-                    1.0
+                    (1.0, "receiver-bound")
                 };
-                return Some((dst, confidence, "receiver-bound".to_string()));
+                return Some((dst, confidence, reason.to_string()));
             }
             if owner.contains('.') && !self.index.is_known_type(&owner) {
                 self.unresolved_external_fqcns.insert(owner);
@@ -1076,6 +1109,7 @@ mod tests {
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
+            stereotype: None,
         }
     }
 
@@ -1091,6 +1125,7 @@ mod tests {
             param_types: params.iter().map(|s| s.to_string()).collect(),
             return_type: ret.map(str::to_string),
             declared_type: None,
+            stereotype: None,
         }
     }
 
@@ -1106,6 +1141,7 @@ mod tests {
             param_types: Vec::new(),
             return_type: None,
             declared_type: Some(ty.into()),
+            stereotype: None,
         }
     }
 
@@ -1121,6 +1157,7 @@ mod tests {
             param_types: params.iter().map(|s| s.to_string()).collect(),
             return_type: None,
             declared_type: None,
+            stereotype: None,
         }
     }
 
@@ -1620,6 +1657,339 @@ mod tests {
                     && e.dst == method_id("com.acme.Marker", "act", 0)
             }),
             "should not emit METHOD_OVERRIDES to an interface"
+        );
+    }
+
+    // ── Spring DI resolution tests ────────────────────────────────────────────
+
+    fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
+        // Interface: UserService with save(User)
+        let iface = ParsedFile {
+            file: "com/acme/UserService.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                SymbolDef {
+                    id: type_id(NodeKind::Interface, "com.acme.UserService"),
+                    kind: NodeKind::Interface,
+                    fqcn: "com.acme.UserService".into(),
+                    name: "UserService".into(),
+                    owner: None,
+                    range: Range::default(),
+                    modifiers: Vec::new(),
+                    param_types: Vec::new(),
+                    return_type: None,
+                    declared_type: None,
+                    stereotype: None,
+                },
+                method_def("com.acme.UserService", "save", &["User"], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+        };
+
+        // Impl: UserServiceImpl implements UserService
+        let mut impl_def = SymbolDef {
+            id: type_id(NodeKind::Class, "com.acme.UserServiceImpl"),
+            kind: NodeKind::Class,
+            fqcn: "com.acme.UserServiceImpl".into(),
+            name: "UserServiceImpl".into(),
+            owner: None,
+            range: Range::default(),
+            modifiers: Vec::new(),
+            param_types: Vec::new(),
+            return_type: None,
+            declared_type: None,
+            stereotype: impl_stereotype.map(str::to_string),
+        };
+        let impl_file = ParsedFile {
+            file: "com/acme/UserServiceImpl.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                impl_def.clone(),
+                method_def("com.acme.UserServiceImpl", "save", &["User"], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![heritage(
+                "com.acme.UserServiceImpl",
+                "UserService",
+                RefKind::Implements,
+            )],
+            type_bindings: vec![],
+        };
+
+        // Caller: OrderController with field `userService: UserService` and call userService.save(u)
+        let caller = ParsedFile {
+            file: "com/acme/OrderController.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                SymbolDef {
+                    id: type_id(NodeKind::Class, "com.acme.OrderController"),
+                    kind: NodeKind::Class,
+                    fqcn: "com.acme.OrderController".into(),
+                    name: "OrderController".into(),
+                    owner: None,
+                    range: Range::default(),
+                    modifiers: Vec::new(),
+                    param_types: Vec::new(),
+                    return_type: None,
+                    declared_type: None,
+                    stereotype: Some("controller".into()),
+                },
+                method_def("com.acme.OrderController", "placeOrder", &["Order"], None),
+                field_def("com.acme.OrderController", "userService", "UserService"),
+            ],
+            imports: vec![],
+            reference_sites: vec![ReferenceSite {
+                name: "save".into(),
+                receiver: Some("userService".into()),
+                kind: RefKind::Call,
+                arity: Some(1),
+                range: Range::default(),
+                in_fqcn: "com.acme.OrderController#placeOrder/1".into(),
+                in_callable: method_id("com.acme.OrderController", "placeOrder", 1),
+            }],
+            type_bindings: vec![TypeBinding {
+                name: "userService".into(),
+                raw_type: "UserService".into(),
+                kind: BindingKind::Field,
+                in_fqcn: "com.acme.OrderController".into(),
+                range: Range::default(),
+            }],
+        };
+
+        vec![iface, impl_file, caller]
+    }
+
+    #[test]
+    fn di_resolves_interface_call_to_service_impl() {
+        let files = make_di_scenario(Some("service"));
+        let out = resolve_edges(&files);
+        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        // Should call the impl, not the interface
+        assert!(
+            calls.iter().any(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1)),
+            "should resolve to impl method"
+        );
+        assert!(
+            !calls.iter().any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
+            "should NOT call the interface method when impl is found"
+        );
+        // Confidence should be 0.9 for DI-resolved
+        let di_edge = calls
+            .iter()
+            .find(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1))
+            .unwrap();
+        assert_eq!(di_edge.reason, "di-resolved");
+    }
+
+    #[test]
+    fn di_falls_back_when_no_service_impl() {
+        // Impl exists but has no @Service stereotype
+        let files = make_di_scenario(None);
+        let out = resolve_edges(&files);
+        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        // Falls back to interface method
+        assert!(
+            calls.iter().any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
+            "should fall back to interface method when no @Service impl"
+        );
+    }
+
+    #[test]
+    fn di_falls_back_when_multiple_service_impls() {
+        // Two @Service impls — ambiguous, must not guess
+        let iface = ParsedFile {
+            file: "com/acme/UserService.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                SymbolDef {
+                    id: type_id(NodeKind::Interface, "com.acme.UserService"),
+                    kind: NodeKind::Interface,
+                    fqcn: "com.acme.UserService".into(),
+                    name: "UserService".into(),
+                    owner: None,
+                    range: Range::default(),
+                    modifiers: Vec::new(),
+                    param_types: Vec::new(),
+                    return_type: None,
+                    declared_type: None,
+                    stereotype: None,
+                },
+                method_def("com.acme.UserService", "save", &["User"], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+        };
+        let make_impl = |name: &str| -> ParsedFile {
+            let fqcn = format!("com.acme.{name}");
+            ParsedFile {
+                file: format!("com/acme/{name}.java"),
+                package: Some("com.acme".into()),
+                defs: vec![
+                    SymbolDef {
+                        id: type_id(NodeKind::Class, &fqcn),
+                        kind: NodeKind::Class,
+                        fqcn: fqcn.clone(),
+                        name: name.to_string(),
+                        owner: None,
+                        range: Range::default(),
+                        modifiers: Vec::new(),
+                        param_types: Vec::new(),
+                        return_type: None,
+                        declared_type: None,
+                        stereotype: Some("service".into()),
+                    },
+                    method_def(&fqcn, "save", &["User"], None),
+                ],
+                imports: vec![],
+                reference_sites: vec![heritage(&fqcn, "UserService", RefKind::Implements)],
+                type_bindings: vec![],
+            }
+        };
+        let caller = ParsedFile {
+            file: "com/acme/OrderController.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                SymbolDef {
+                    id: type_id(NodeKind::Class, "com.acme.OrderController"),
+                    kind: NodeKind::Class,
+                    fqcn: "com.acme.OrderController".into(),
+                    name: "OrderController".into(),
+                    owner: None,
+                    range: Range::default(),
+                    modifiers: Vec::new(),
+                    param_types: Vec::new(),
+                    return_type: None,
+                    declared_type: None,
+                    stereotype: Some("controller".into()),
+                },
+                method_def("com.acme.OrderController", "placeOrder", &["Order"], None),
+                field_def("com.acme.OrderController", "userService", "UserService"),
+            ],
+            imports: vec![],
+            reference_sites: vec![ReferenceSite {
+                name: "save".into(),
+                receiver: Some("userService".into()),
+                kind: RefKind::Call,
+                arity: Some(1),
+                range: Range::default(),
+                in_fqcn: "com.acme.OrderController#placeOrder/1".into(),
+                in_callable: method_id("com.acme.OrderController", "placeOrder", 1),
+            }],
+            type_bindings: vec![TypeBinding {
+                name: "userService".into(),
+                raw_type: "UserService".into(),
+                kind: BindingKind::Field,
+                in_fqcn: "com.acme.OrderController".into(),
+                range: Range::default(),
+            }],
+        };
+        let out = resolve_edges(&[iface, make_impl("UserServiceImplA"), make_impl("UserServiceImplB"), caller]);
+        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        // Must fall back to interface — ambiguous, don't pick one
+        assert!(
+            calls.iter().any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
+            "ambiguous DI should fall back to interface method"
+        );
+        assert!(
+            !calls.iter().any(|e| e.reason == "di-resolved"),
+            "should not emit di-resolved edge when ambiguous"
+        );
+    }
+
+    #[test]
+    fn di_not_applied_to_concrete_class_receiver() {
+        // Field typed as concrete class, not interface — DI should not change behavior
+        let files = {
+            let concrete = ParsedFile {
+                file: "com/acme/UserServiceImpl.java".into(),
+                package: Some("com.acme".into()),
+                defs: vec![
+                    SymbolDef {
+                        id: type_id(NodeKind::Class, "com.acme.UserServiceImpl"),
+                        kind: NodeKind::Class,
+                        fqcn: "com.acme.UserServiceImpl".into(),
+                        name: "UserServiceImpl".into(),
+                        owner: None,
+                        range: Range::default(),
+                        modifiers: Vec::new(),
+                        param_types: Vec::new(),
+                        return_type: None,
+                        declared_type: None,
+                        stereotype: Some("service".into()),
+                    },
+                    method_def("com.acme.UserServiceImpl", "save", &["User"], None),
+                ],
+                imports: vec![],
+                reference_sites: vec![],
+                type_bindings: vec![],
+            };
+            let caller = ParsedFile {
+                file: "com/acme/OrderController.java".into(),
+                package: Some("com.acme".into()),
+                defs: vec![
+                    SymbolDef {
+                        id: type_id(NodeKind::Class, "com.acme.OrderController"),
+                        kind: NodeKind::Class,
+                        fqcn: "com.acme.OrderController".into(),
+                        name: "OrderController".into(),
+                        owner: None,
+                        range: Range::default(),
+                        modifiers: Vec::new(),
+                        param_types: Vec::new(),
+                        return_type: None,
+                        declared_type: None,
+                        stereotype: Some("controller".into()),
+                    },
+                    method_def("com.acme.OrderController", "placeOrder", &["Order"], None),
+                    field_def("com.acme.OrderController", "userServiceImpl", "UserServiceImpl"),
+                ],
+                imports: vec![],
+                reference_sites: vec![ReferenceSite {
+                    name: "save".into(),
+                    receiver: Some("userServiceImpl".into()),
+                    kind: RefKind::Call,
+                    arity: Some(1),
+                    range: Range::default(),
+                    in_fqcn: "com.acme.OrderController#placeOrder/1".into(),
+                    in_callable: method_id("com.acme.OrderController", "placeOrder", 1),
+                }],
+                type_bindings: vec![TypeBinding {
+                    name: "userServiceImpl".into(),
+                    raw_type: "UserServiceImpl".into(),
+                    kind: BindingKind::Field,
+                    in_fqcn: "com.acme.OrderController".into(),
+                    range: Range::default(),
+                }],
+            };
+            vec![concrete, caller]
+        };
+        let out = resolve_edges(&files);
+        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        assert!(
+            calls.iter().any(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1)),
+            "concrete field should resolve directly to impl"
+        );
+        assert!(
+            !calls.iter().any(|e| e.reason == "di-resolved"),
+            "concrete field should use receiver-bound, not di-resolved"
+        );
+    }
+
+    #[test]
+    fn di_resolves_repository_interface() {
+        // @Repository stereotype also qualifies for DI resolution
+        let files = make_di_scenario(Some("repository"));
+        let out = resolve_edges(&files);
+        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        assert!(
+            calls.iter().any(|e| {
+                e.dst == method_id("com.acme.UserServiceImpl", "save", 1)
+                    && e.reason == "di-resolved"
+            }),
+            "@Repository impl should also be DI-resolved"
         );
     }
 }

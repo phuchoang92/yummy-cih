@@ -357,6 +357,7 @@ mod tests {
                 param_types: vec!["Long".into()],
                 return_type: Some("User".into()),
                 declared_type: None,
+                stereotype: None,
             }],
             imports: vec![RawImport {
                 raw: "java.util.List".into(),

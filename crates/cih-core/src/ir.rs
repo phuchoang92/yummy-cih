@@ -52,6 +52,10 @@ pub struct SymbolDef {
     /// Declared type for fields, raw name (`None` for non-fields).
     #[serde(default)]
     pub declared_type: Option<String>,
+    /// Spring stereotype for type-kind defs: `"service"`, `"repository"`, `"component"`,
+    /// `"controller"`, `"configuration"`, `"entity"`. `None` for non-types and plain classes.
+    #[serde(default)]
+    pub stereotype: Option<String>,
 }
 
 /// A raw import statement, pre-resolution.

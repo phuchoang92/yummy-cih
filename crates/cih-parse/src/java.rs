@@ -128,6 +128,7 @@ fn collect_declarations(
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
+            stereotype: class_stereotype(node, src).map(|s| s.to_string()),
         });
 
         if let Some(parent_id) = owner_id {
@@ -231,6 +232,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         param_types: param_type_names(node, src),
         return_type: return_type_name(node, src),
         declared_type: None,
+        stereotype: None,
     });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -276,6 +278,7 @@ fn collect_constructor(
         param_types: param_type_names(node, src),
         return_type: None,
         declared_type: None,
+        stereotype: None,
     });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -328,6 +331,7 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             param_types: Vec::new(),
             return_type: None,
             declared_type: declared_type.clone(),
+            stereotype: None,
         });
     }
 }

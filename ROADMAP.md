@@ -8,6 +8,23 @@ Phased build plan for **CIH (Code Intelligence Hub)**. Architecture rationale li
 then make the call graph *accurate*, then add *product*, then *scale to go-live*. Depth before
 breadth; one demoable capability per milestone.
 
+**What is a multi-persona AI agent system?**
+yummy-cih is the AI backend for the **yummy** frontend. A single shared code-intelligence graph
+(FalkorDB) is queried by an AI agent (Claude via the Agent SDK) that adapts its answers to the
+user's role. The same graph serves four personas — each gets a dedicated set of MCP tools and a
+persona-specific chat view in yummy:
+
+| Persona | Core need | CIH answers |
+|---------|-----------|-------------|
+| **Developer** | Understand unfamiliar code; assess blast radius of a change | `context`, `impact`, `query`, `call_chain` |
+| **PO** (Product Owner) | Know what the system does; estimate effort for incoming CRs | `route_map`, `feature_map`, `cr_impact` |
+| **BA** (Business Analyst) | Trace end-to-end business flows; map features to code | `trace_flow`, `cr_impact`, `feature_map` |
+| **Tester** | Find what tests cover which code; know what to re-run after a change | `test_coverage`, `regression_scope`, `untested_paths` |
+
+This differs from file-level coding assistants (Claude Code, Kiro): CIH answers *system-level*
+questions from a persistent, always-fresh indexed graph — no re-reading thousands of files per
+question. The yummy frontend exposes persona-filtered chat views over this single backend.
+
 **Status:** ✅ done · 🚧 in progress · ⬜ not started.
 **Critical path to value:** Phase 1 → 2 → 3 → 4. Everything after enriches, productizes, or scales.
 
@@ -222,12 +239,73 @@ breadth; one demoable capability per milestone.
 - **Done when:** re-index after editing one file is fast and correct (only the delta re-parses;
   resolution still runs full-scope). ✅
 
-## Phase 10 — Product: orchestration + chat + wiki  🎯 GraphRAG product
+## Phase 10 — Product: multi-persona chat + wiki  🎯 usable product
 
-- **Build:** Next.js BFF running the **Claude Agent SDK**, consuming CIH's MCP tools (Opus 4.8 deep
-  / Sonnet 4.x chat); chat UI; **Docusaurus** wiki auto-rebuilt from communities/processes.
-- **Done when:** a chat question → agent traverses the graph via MCP tools → grounded, cited answer;
-  wiki renders. 🎯 **Milestone: usable product.**
+- **Build:** Next.js BFF running the **Claude Agent SDK** (Opus 4.8 deep / Sonnet 4.x chat),
+  consuming CIH MCP tools; **persona-specific chat views** in yummy for Developer / PO / BA /
+  Tester; **Docusaurus** wiki auto-rebuilt from communities and processes.
+- **MCP tool contract:** tools return structured JSON (not free text) so yummy can render diagrams,
+  tables, and source citations alongside chat answers.
+- **Done when:** a PO asks "what APIs does the payment module expose?" → agent calls
+  `route_map(prefix="/payment")` + `communities()` → cited answer rendered in yummy; wiki renders
+  the community graph as navigable docs. 🎯 **Milestone: usable product for all four personas.**
+
+## Phase 15 — Flow Intelligence: trace_flow · cr_impact · feature_map
+
+**Primary personas: PO, BA**
+
+- **`trace_flow(entry_point)`** MCP tool: given an HTTP route or method ID, return the full
+  execution chain (controller → services → repos → external calls) as a structured path list with
+  node IDs, names, and file locations. Uses BFS over `CALLS` + `HANDLES_ROUTE` edges.
+  - Requires detecting outbound HTTP calls (`RestTemplate`, `WebClient`, `@FeignClient`) and event
+    publishing (`@KafkaListener`, `@EventListener`) as new `EdgeKind::ExternalCall` /
+    `EdgeKind::PublishesEvent` in `cih-core` and `cih-parse`.
+- **`cr_impact(description: String)`** MCP tool: given a plain-language CR description, the agent
+  calls `query(description)` to find relevant symbols, then `impact(symbol)` for each, and returns
+  an aggregated change-surface summary (affected modules, estimated file count, risk tier).
+  Implemented as agent-orchestration in `cih-server`; no new graph schema needed.
+- **`feature_map(keywords: Vec<String>)`** MCP tool: maps business terms (e.g. `["checkout",
+  "payment"]`) to code clusters — communities + routes + classes that implement those features.
+  Uses hybrid BM25+semantic search + community membership from Phase 5/6.
+- **Done when:** a BA can type "trace the checkout flow" and get the full chain from
+  `POST /api/checkout` to the DB call including an external Stripe call; a PO can ask "how big is
+  the loyalty points CR?" and get a module list + estimated file count.
+
+## Phase 16 — Test Intelligence: coverage · regression scope · untested paths
+
+**Primary persona: Tester**
+
+- **Test class detection in `cih-parse`:** identify test classes via `@Test`, `@SpringBootTest`,
+  `@ExtendWith`, `@RunWith`, and naming conventions (`*Test`, `*Spec`, `*IT`). Emit
+  `stereotype="test"` prop. Link test methods to production code via `@MockBean` references and
+  class-name heuristics → new `EdgeKind::Tests` in `cih-core`.
+- **`test_coverage(symbol_id)`** MCP tool: given a class or method node ID, return the test methods
+  that cover it (direct `TESTS` edge or naming-convention match).
+- **`regression_scope(changed_files: Vec<String>)`** MCP tool: given a list of changed repo paths,
+  return the set of test classes that must be re-run. Uses reverse `TESTS` edges + `impact()` blast
+  radius expansion.
+- **`untested_paths(module_prefix: String)`** MCP tool: returns classes/methods in the module that
+  have no inbound `TESTS` edge — i.e., no test coverage found in the graph.
+- **Done when:** a tester asks "what breaks if I change `OrderService`?" → list of test classes to
+  re-run; "what in the payment module has no tests?" → actionable coverage gap list.
+
+## Phase 17 — Visualization output for yummy frontend
+
+**Primary consumer: yummy frontend**
+
+MCP tools that return graph data support a `format` parameter so yummy can render diagrams without
+a separate graph-rendering backend:
+
+- `trace_flow(..., format="mermaid")` → Mermaid flowchart of the execution chain
+- `impact(..., format="diagram")` → D3-JSON force-directed blast radius graph
+- `communities(format="diagram")` → service map with module boundaries
+- `route_map(format="openapi")` → OpenAPI 3.0 JSON generated from the route graph (path, HTTP
+  method, handler class/method, inferred request/response types)
+
+These are output-format additions to existing tools — no new graph data needed.
+
+- **Done when:** yummy frontend can render a live architecture diagram for any selected module
+  without the user reading code.
 
 ## Phase 11 — Storage spike + Postgres-CTE + Neptune adapters
 
@@ -244,13 +322,28 @@ breadth; one demoable capability per milestone.
 - **Done when:** production indexes the real large repo; banking-grade controls in place.
   🎯 **Milestone: go-live.**
 
-## Phase 13 — Spring DI-aware resolution (deferred differentiator)
+## Phase 13 — Spring DI-aware resolution ✅ (2026-06-14)
 
 - **Build:** bean-wiring pass — resolve `@Autowired`/constructor injection so an interface-typed
   call (`UserService service; service.save()`) routes to the concrete `@Service` impl; augment
   receiver type bindings before the receiver-bound pass.
-- **Done when:** interface calls resolve to the impl in `impact`/`call_chain` (the key Spring edge
-  over GitNexus's generic resolver).
+- **Completed 2026-06-14:**
+  - **`stereotype` field on `SymbolDef`** (`cih-core/src/ir.rs`) — Spring stereotype propagated
+    through the parse IR so the resolver can see it; `#[serde(default)]` keeps cached artifacts
+    backward-compatible.
+  - **Parse-time population** (`cih-parse/src/java.rs`) — `class_stereotype()` result stored into
+    every type-kind `SymbolDef` at parse time; reuses existing annotation helper, zero new parsing.
+  - **`type_stereotypes` index in `ResolveIndex`** (`cih-resolve/src/lib.rs`) — built in Pass 1
+    alongside `types_by_fqcn`; `is_spring_bean()` helper matches `service|repository|component|
+    controller|configuration`.
+  - **`di_impl()` + DI redirect in `resolve_receiver_bound_call()`** — when receiver resolves to
+    an interface, look up the single `@Service`/`@Repository`/… implementor; if unambiguous,
+    redirect the `CALLS` edge to the concrete impl method (confidence 0.9, reason `"di-resolved"`).
+    Falls back to interface method when 0 or ≥2 bean impls (no silent wrong-impl guess).
+  - 5 new tests (`di_resolves_interface_call_to_service_impl`, `di_falls_back_when_no_service_impl`,
+    `di_falls_back_when_multiple_service_impls`, `di_not_applied_to_concrete_class_receiver`,
+    `di_resolves_repository_interface`). Workspace: **98 tests** green, clippy clean.
+- **Done when:** interface calls resolve to the impl in `impact`/`call_chain`. ✅
 
 ## Phase 14 — More languages (generic-pipeline payoff)
 
@@ -268,6 +361,13 @@ breadth; one demoable capability per milestone.
 - **Adapters (11)** can be written anytime after the `GraphStore` port is stable (post-Phase 2) —
   they don't block the engine.
 - **13 & 14** are intentionally last (differentiator + breadth), after the core is proven.
+- **Phases 15 & 16** can start once Phases 5 (communities) + 7 (routes) are stable — they add new
+  MCP tools over existing graph data, except Phase 15's external-call edges (small `cih-parse`
+  extension) and Phase 16's `EdgeKind::Tests` (small `cih-core` + `cih-parse` extension).
+- **Phase 17** is output-format work that layers onto any tool at any time; prioritize when the
+  yummy frontend team requests diagram rendering.
+- **Phase 10** (product) can begin as soon as Phase 15 and 16 tools are available, since those
+  define the BA and Tester chat interactions in the yummy frontend.
 
 ## Definition of done (overall v1)
 
