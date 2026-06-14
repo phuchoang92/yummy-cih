@@ -17,8 +17,8 @@ use cih_core::{
     Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range, VersionId,
 };
 use cih_graph_store::{
-    risk_from_fanout, BulkLoader, Direction, GraphStore, GraphStoreError, Impact, ImpactNode,
-    LoadStats, Path, Result, Subgraph, SymbolContext,
+    risk_from_fanout, BulkLoader, CommunityInfo, Direction, GraphStore, GraphStoreError, Impact,
+    ImpactNode, LoadStats, Path, Result, Subgraph, SymbolContext,
 };
 use redis::Value;
 
@@ -82,7 +82,9 @@ impl FalkorStore {
                      n.qualifiedName = row.qn, n.startLine = row.sl, n.endLine = row.el, \
                      n.props = row.props, n.stereotype = row.stereotype, \
                      n.httpMethod = row.httpMethod, n.path = row.path, \
-                     n.decorator = row.decorator, n.handler = row.handler",
+                     n.decorator = row.decorator, n.handler = row.handler, \
+                     n.symbolCount = row.symbolCount, n.cohesion = row.cohesion, \
+                     n.processType = row.processType",
                 arr = nodes_to_list(chunk)
             );
             self.run(&q).await?;
@@ -173,7 +175,12 @@ impl GraphStore for FalkorStore {
         Ok(rows.first().map(|r| node_from_row(r)))
     }
 
-    async fn neighbors(&self, id: &NodeId, dir: Direction, kinds: &[EdgeKind]) -> Result<Vec<Edge>> {
+    async fn neighbors(
+        &self,
+        id: &NodeId,
+        dir: Direction,
+        kinds: &[EdgeKind],
+    ) -> Result<Vec<Edge>> {
         let rel = rel_filter(kinds);
         let pat = match dir {
             Direction::Upstream => format!("(n:Symbol {{id:$id}})<-[r{rel}]-(m:Symbol)"),
@@ -284,12 +291,43 @@ impl GraphStore for FalkorStore {
             .ok_or_else(|| GraphStoreError::NotFound(id.to_string()))?;
         let callers = neighbor_nodes(self, id, Direction::Upstream).await?;
         let callees = neighbor_nodes(self, id, Direction::Downstream).await?;
+        let proc_query = format!(
+            "CYPHER id={id} \
+             MATCH (s:Symbol {{id:$id}})-[:STEP_IN_PROCESS]->(p:Symbol) \
+             WHERE p.kind = 'Process' \
+             RETURN p.id ORDER BY p.name",
+            id = cstr(id.as_str())
+        );
+        let processes = self
+            .rows(&proc_query)
+            .await?
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect();
         Ok(SymbolContext {
             node,
             callers,
             callees,
-            processes: vec![], // populated once the Process phase lands in the graph
+            processes,
         })
+    }
+
+    async fn communities(&self) -> Result<Vec<CommunityInfo>> {
+        let q = "MATCH (c:Symbol) WHERE c.kind = 'Community' \
+                 RETURN c.id, c.name, c.symbolCount, c.cohesion \
+                 ORDER BY c.symbolCount DESC, c.name";
+        Ok(self
+            .rows(q)
+            .await?
+            .into_iter()
+            .filter(|row| row.len() >= 2)
+            .map(|row| CommunityInfo {
+                id: row.first().cloned().unwrap_or_default(),
+                name: row.get(1).cloned().unwrap_or_default(),
+                symbol_count: row.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+                cohesion: row.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            })
+            .collect())
     }
 }
 
@@ -354,7 +392,7 @@ fn nodes_to_list(nodes: &[Node]) -> String {
         .map(|n| {
             let props_json = n.props.as_ref().map(serde_json::Value::to_string);
             format!(
-                "{{id:{}, name:{}, kind:{}, file:{}, qn:{}, sl:{}, el:{}, props:{}, stereotype:{}, httpMethod:{}, path:{}, decorator:{}, handler:{}}}",
+                "{{id:{}, name:{}, kind:{}, file:{}, qn:{}, sl:{}, el:{}, props:{}, stereotype:{}, httpMethod:{}, path:{}, decorator:{}, handler:{}, symbolCount:{}, cohesion:{}, processType:{}}}",
                 cstr(n.id.as_str()),
                 cstr(&n.name),
                 cstr(node_kind_label(n.kind)),
@@ -368,6 +406,9 @@ fn nodes_to_list(nodes: &[Node]) -> String {
                 copt(prop_str(n, "path")),
                 copt(prop_str(n, "decorator")),
                 copt(prop_str(n, "handler")),
+                cnum_u64(prop_u64(n, "symbolCount").or_else(|| prop_u64(n, "symbol_count"))),
+                cnum_f64(prop_f64(n, "cohesion")),
+                copt(prop_str(n, "process_type")),
             )
         })
         .collect();
@@ -376,6 +417,22 @@ fn nodes_to_list(nodes: &[Node]) -> String {
 
 fn prop_str<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
     node.props.as_ref()?.get(key)?.as_str()
+}
+
+fn prop_u64(node: &Node, key: &str) -> Option<u64> {
+    node.props.as_ref()?.get(key)?.as_u64()
+}
+
+fn prop_f64(node: &Node, key: &str) -> Option<f64> {
+    node.props.as_ref()?.get(key)?.as_f64()
+}
+
+fn cnum_u64(v: Option<u64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
+}
+
+fn cnum_f64(v: Option<f64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
 }
 
 fn edges_to_list(edges: &[&Edge]) -> String {

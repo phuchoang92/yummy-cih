@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{Edge, GraphArtifacts, JarInfo, Node, ParsedFile, RepoMap, VersionId};
-use cih_jar::JarApiExtractor;
-use scope::ScopeFile;
+use cih_core::{
+    Edge, EdgeKind, GraphArtifacts, JarInfo, Node, NodeKind, ParsedFile, RepoMap, VersionId,
+};
 use cih_falkor::FalkorStore;
 use cih_graph_store::{GraphStore, LoadStats};
+use cih_jar::JarApiExtractor;
 use clap::{Parser, Subcommand};
+use scope::ScopeFile;
 use scope::ScopeRequest;
 use serde::Serialize;
 
@@ -88,6 +90,23 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Detect communities and process traces from the latest analyzed artifacts.
+    Discover {
+        /// Repository root with .cih/artifacts/<version> from a prior analyze/resolve run.
+        repo: PathBuf,
+        /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
+        #[arg(long, env = "FALKOR_URL")]
+        falkor_url: Option<String>,
+        /// FalkorDB graph key. Defaults to $CIH_GRAPH_KEY or "cih".
+        #[arg(long, env = "CIH_GRAPH_KEY")]
+        graph_key: Option<String>,
+        /// Skip the FalkorDB load step (emit JSONL artifacts only).
+        #[arg(long)]
+        no_load: bool,
+        /// Print the summary as JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -135,6 +154,13 @@ fn main() -> Result<()> {
             no_load,
             json,
         } => run_resolve(repo, falkor_url, graph_key, no_load, json),
+        Command::Discover {
+            repo,
+            falkor_url,
+            graph_key,
+            no_load,
+            json,
+        } => run_discover(repo, falkor_url, graph_key, no_load, json),
     }
 }
 
@@ -350,8 +376,12 @@ fn run_resolve(
 ) -> Result<()> {
     let scope_path = repo.join(".cih").join("scope.json");
     let scope_file: ScopeFile = {
-        let raw = std::fs::read_to_string(&scope_path)
-            .with_context(|| format!("no saved scope at {} — run `analyze` first", scope_path.display()))?;
+        let raw = std::fs::read_to_string(&scope_path).with_context(|| {
+            format!(
+                "no saved scope at {} — run `analyze` first",
+                scope_path.display()
+            )
+        })?;
         serde_json::from_str(&raw)
             .with_context(|| format!("malformed scope file at {}", scope_path.display()))?
     };
@@ -370,7 +400,11 @@ fn run_resolve(
         let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
         match load_to_falkor(url, key, &emit.artifacts) {
             Ok(stats) => {
-                tracing::info!(nodes = stats.nodes, edges = stats.edges, "FalkorDB resolve load complete");
+                tracing::info!(
+                    nodes = stats.nodes,
+                    edges = stats.edges,
+                    "FalkorDB resolve load complete"
+                );
                 LoadOutcome::Loaded(stats)
             }
             Err(err) => {
@@ -392,6 +426,132 @@ fn run_resolve(
     Ok(())
 }
 
+fn run_discover(
+    repo: PathBuf,
+    falkor_url: Option<String>,
+    graph_key: Option<String>,
+    no_load: bool,
+    json: bool,
+) -> Result<()> {
+    let emit = run_discover_core(&repo)?;
+
+    let load = if no_load {
+        tracing::info!("Skipping FalkorDB load (--no-load)");
+        LoadOutcome::Skipped
+    } else {
+        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        match load_to_falkor(url, key, &emit.artifacts) {
+            Ok(stats) => {
+                tracing::info!(
+                    nodes = stats.nodes,
+                    edges = stats.edges,
+                    "FalkorDB discover load complete"
+                );
+                LoadOutcome::Loaded(stats)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "FalkorDB discover load failed");
+                LoadOutcome::Failed(format!("{err:#}"))
+            }
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
+    } else {
+        emit.print_human(&load);
+    }
+
+    if matches!(load, LoadOutcome::Failed(_)) {
+        process::exit(3);
+    }
+    Ok(())
+}
+
+fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
+    let source = latest_graph_artifacts(repo)?;
+    let nodes = source
+        .read_nodes()
+        .with_context(|| format!("failed to read {}", source.nodes_path.display()))?;
+    let edges = source
+        .read_edges()
+        .with_context(|| format!("failed to read {}", source.edges_path.display()))?;
+
+    let mut community_cfg = cih_community::CommunityConfig::default();
+    if cih_community::is_large_graph(&nodes) {
+        community_cfg.resolution = 2.0;
+        community_cfg.max_iterations = 3;
+    }
+    let community_output = cih_community::detect_communities(&nodes, &edges, &community_cfg);
+    let symbol_count = nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Method | NodeKind::Constructor | NodeKind::Class | NodeKind::Interface
+            )
+        })
+        .count();
+    let process_cfg = cih_community::ProcessConfig::for_symbol_count(symbol_count);
+    let process_output =
+        cih_community::trace_processes(&nodes, &edges, &community_output.memberships, &process_cfg);
+
+    let mut output_nodes = community_output.nodes;
+    output_nodes.extend(process_output.nodes);
+    let mut output_edges = community_output.edges;
+    output_edges.extend(process_output.edges);
+    output_nodes.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    output_edges.sort_by(|a, b| {
+        a.src
+            .as_str()
+            .cmp(b.src.as_str())
+            .then_with(|| a.dst.as_str().cmp(b.dst.as_str()))
+            .then_with(|| a.kind.cypher_label().cmp(b.kind.cypher_label()))
+    });
+
+    let version = discover_version(&output_nodes, &output_edges);
+    let artifacts_dir = repo.join(".cih").join("artifacts-community").join(&version);
+    let artifacts = GraphArtifacts::write(
+        &artifacts_dir,
+        VersionId(version.clone()),
+        &output_nodes,
+        &output_edges,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write community artifacts to {}",
+            artifacts_dir.display()
+        )
+    })?;
+    prune_other_versions(&repo.join(".cih").join("artifacts-community"), &version)?;
+
+    Ok(DiscoverOutcome {
+        source_version: source.version.0,
+        artifacts,
+        artifacts_dir,
+        version,
+        community_count: output_nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Community)
+            .count(),
+        process_count: output_nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Process)
+            .count(),
+        member_edge_count: output_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::MemberOf)
+            .count(),
+        step_edge_count: output_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::StepInProcess)
+            .count(),
+        node_count: output_nodes.len(),
+        edge_count: output_edges.len(),
+    })
+}
+
 /// Everything `analyze_emit` produced (DB-free), used to load + report.
 struct EmitOutcome {
     scope_file: scope::ScopeFile,
@@ -409,6 +569,20 @@ struct EmitOutcome {
     unresolved_external_fqcns: Vec<String>,
     parsed_file_count: usize,
     skipped_count: usize,
+}
+
+/// Everything `run_discover_core` produced (DB-free), used to load + report.
+struct DiscoverOutcome {
+    source_version: String,
+    artifacts: GraphArtifacts,
+    artifacts_dir: PathBuf,
+    version: String,
+    community_count: usize,
+    process_count: usize,
+    member_edge_count: usize,
+    step_edge_count: usize,
+    node_count: usize,
+    edge_count: usize,
 }
 
 impl EmitOutcome {
@@ -496,13 +670,58 @@ impl EmitOutcome {
     }
 }
 
+impl DiscoverOutcome {
+    fn summary<'a>(&'a self, load: &'a LoadOutcome) -> DiscoverSummary<'a> {
+        DiscoverSummary {
+            source_version: &self.source_version,
+            version: &self.version,
+            artifacts_path: self.artifacts_dir.display().to_string(),
+            community_count: self.community_count,
+            process_count: self.process_count,
+            member_edge_count: self.member_edge_count,
+            step_edge_count: self.step_edge_count,
+            node_count: self.node_count,
+            edge_count: self.edge_count,
+            falkor_status: load.status(),
+            falkor_nodes: load.stats().map(|s| s.nodes),
+            falkor_edges: load.stats().map(|s| s.edges),
+            falkor_error: load.error(),
+        }
+    }
+
+    fn print_human(&self, load: &LoadOutcome) {
+        println!(
+            "Discover: source graph {} -> {} communities, {} processes.",
+            self.source_version, self.community_count, self.process_count
+        );
+        println!(
+            "Edges: {} MEMBER_OF, {} STEP_IN_PROCESS.",
+            self.member_edge_count, self.step_edge_count
+        );
+        println!(
+            "Artifacts: {} (version {})",
+            self.artifacts_dir.display(),
+            self.version
+        );
+        match load {
+            LoadOutcome::Loaded(stats) => {
+                println!(
+                    "FalkorDB: loaded {} nodes, {} edges.",
+                    stats.nodes, stats.edges
+                )
+            }
+            LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
+            LoadOutcome::Failed(_) => {
+                println!("FalkorDB: load failed (artifacts on disk - re-run to retry).")
+            }
+        }
+    }
+}
+
 /// Extract API-surface nodes+edges from `jars` for the given FQCN set.
 /// Demand-driven: passes `include` to [`JarApiExtractor::with_include`] so only
 /// classes matching an unresolved FQCN are parsed. Returns (nodes, edges, failed_jar_count).
-fn extract_jar_api(
-    jars: &[JarInfo],
-    fqcns: &[String],
-) -> (Vec<Node>, Vec<Edge>, usize) {
+fn extract_jar_api(jars: &[JarInfo], fqcns: &[String]) -> (Vec<Node>, Vec<Edge>, usize) {
     if fqcns.is_empty() || jars.is_empty() {
         return (Vec::new(), Vec::new(), 0);
     }
@@ -552,6 +771,78 @@ fn content_version(nodes: &[Node], edges: &[Edge], parsed_files: &[ParsedFile]) 
     }
     for parsed in parsed_files {
         hasher.update(&serde_json::to_vec(parsed).unwrap_or_default());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex()[..16].to_string()
+}
+
+fn latest_graph_artifacts(repo: &Path) -> Result<GraphArtifacts> {
+    let parent = repo.join(".cih").join("artifacts");
+    let mut candidates = Vec::new();
+    let entries = std::fs::read_dir(&parent).with_context(|| {
+        format!(
+            "no graph artifacts at {} - run `analyze` first",
+            parent.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry?;
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let nodes_path = dir.join("nodes.jsonl");
+        let edges_path = dir.join("edges.jsonl");
+        if !nodes_path.is_file() || !edges_path.is_file() {
+            continue;
+        }
+        let version = entry.file_name().to_string_lossy().into_owned();
+        let modified = std::fs::metadata(&nodes_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        candidates.push((
+            modified,
+            GraphArtifacts {
+                nodes_path,
+                edges_path,
+                version: VersionId(version),
+            },
+        ));
+    }
+    candidates.sort_by(|(a_mtime, a_artifacts), (b_mtime, b_artifacts)| {
+        b_mtime
+            .cmp(a_mtime)
+            .then_with(|| b_artifacts.version.0.cmp(&a_artifacts.version.0))
+    });
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, artifacts)| artifacts)
+        .with_context(|| format!("no complete graph artifacts under {}", parent.display()))
+}
+
+fn discover_version(nodes: &[Node], edges: &[Edge]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    let mut node_ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    node_ids.sort_unstable();
+    for id in node_ids {
+        hasher.update(id.as_bytes());
+        hasher.update(b"\n");
+    }
+    let mut edge_keys: Vec<String> = edges
+        .iter()
+        .map(|e| {
+            format!(
+                "{}\t{}\t{}",
+                e.src.as_str(),
+                e.dst.as_str(),
+                e.kind.cypher_label()
+            )
+        })
+        .collect();
+    edge_keys.sort_unstable();
+    for key in edge_keys {
+        hasher.update(key.as_bytes());
         hasher.update(b"\n");
     }
     hasher.finalize().to_hex()[..16].to_string()
@@ -658,6 +949,27 @@ struct AnalyzeSummary<'a> {
     falkor_error: Option<&'a str>,
 }
 
+#[derive(Serialize)]
+struct DiscoverSummary<'a> {
+    source_version: &'a str,
+    version: &'a str,
+    artifacts_path: String,
+    community_count: usize,
+    process_count: usize,
+    member_edge_count: usize,
+    step_edge_count: usize,
+    node_count: usize,
+    edge_count: usize,
+    /// "loaded" | "skipped" | "failed"
+    falkor_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_nodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_edges: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    falkor_error: Option<&'a str>,
+}
+
 fn build_scope_request(repo: &std::path::Path, flags: &AnalyzeFlags) -> Result<ScopeRequest> {
     let scope_path = if let Some(path) = &flags.scope {
         Some(path.clone())
@@ -706,8 +1018,7 @@ mod tests {
 
     fn temp_repo() -> PathBuf {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("cih-emit-test-{}-{id}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cih-emit-test-{}-{id}", std::process::id()));
         fs::create_dir_all(root.join("src/main/java/com/example")).unwrap();
         write(
             &root,
@@ -827,7 +1138,10 @@ mod tests {
         );
         let scan2 = scan::scan_repo(&root).unwrap();
         let v2 = analyze_emit(&scan2, all_scope()).unwrap().version;
-        assert_ne!(v1, v2, "adding a call in a method body must bump the version");
+        assert_ne!(
+            v1, v2,
+            "adding a call in a method body must bump the version"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -843,8 +1157,13 @@ mod tests {
         let scope_path = root.join(".cih").join("scope.json");
         let raw = fs::read_to_string(&scope_path).unwrap();
         let scope_file: ScopeFile = serde_json::from_str(&raw).unwrap();
-        let v2 = analyze_from_scope(scope_file, scope_path, &[]).unwrap().version;
-        assert_eq!(v1, v2, "resolve with same scope must produce the same version");
+        let v2 = analyze_from_scope(scope_file, scope_path, &[])
+            .unwrap()
+            .version;
+        assert_eq!(
+            v1, v2,
+            "resolve with same scope must produce the same version"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -888,9 +1207,14 @@ mod tests {
         let fqcns = vec!["com.acme.Sample".to_string()];
         let (nodes, _edges, failed) = extract_jar_api(&[jar.clone()], &fqcns);
         assert_eq!(failed, 0);
-        assert!(!nodes.is_empty(), "should have extracted the Sample class node");
         assert!(
-            nodes.iter().any(|n| n.id.as_str() == "Class:com.acme.Sample"),
+            !nodes.is_empty(),
+            "should have extracted the Sample class node"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.id.as_str() == "Class:com.acme.Sample"),
             "expected Class:com.acme.Sample node"
         );
 
@@ -954,6 +1278,37 @@ mod tests {
             nodes_jsonl.contains("Class:com.acme.Sample"),
             "Class:com.acme.Sample should be in nodes.jsonl"
         );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn discover_emits_community_and_process_artifacts() {
+        let root = temp_repo();
+        write(
+            &root,
+            "src/main/java/com/example/OwnerService.java",
+            "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() { helper(); }\n  private void helper() {}\n}\n",
+        );
+        let scan = scan::scan_repo(&root).unwrap();
+        let analyze = analyze_emit(&scan, all_scope()).unwrap();
+        assert!(analyze.resolved_edge_count >= 2);
+
+        let discover = run_discover_core(&root).unwrap();
+        assert!(discover.artifacts_dir.join("nodes.jsonl").exists());
+        assert!(discover.artifacts_dir.join("edges.jsonl").exists());
+        assert!(
+            discover.community_count >= 1,
+            "expected at least one detected community"
+        );
+        assert!(
+            discover.process_count >= 1,
+            "expected at least one 3-step process trace"
+        );
+
+        let nodes_jsonl = fs::read_to_string(discover.artifacts_dir.join("nodes.jsonl")).unwrap();
+        assert!(nodes_jsonl.contains("\"kind\":\"Community\""));
+        assert!(nodes_jsonl.contains("\"kind\":\"Process\""));
 
         fs::remove_dir_all(&root).unwrap();
     }

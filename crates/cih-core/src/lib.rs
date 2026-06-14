@@ -85,6 +85,14 @@ pub fn field_id(fqcn: &str, name: &str) -> NodeId {
     NodeId::new(format!("Field:{fqcn}#{name}"))
 }
 
+pub fn community_id(idx: usize) -> NodeId {
+    NodeId::new(format!("Community:{idx}"))
+}
+
+pub fn process_id(entry_slug: &str, hash: &str) -> NodeId {
+    NodeId::new(format!("Process:{entry_slug}-{hash}"))
+}
+
 /// Edge types (mirrors `gitnexus-shared` `RelationshipType`, trimmed for v1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
@@ -218,6 +226,11 @@ mod tests {
         assert_eq!(
             field_id("com.acme.Outer.Inner", "name").as_str(),
             "Field:com.acme.Outer.Inner#name"
+        );
+        assert_eq!(community_id(3).as_str(), "Community:3");
+        assert_eq!(
+            process_id("handle-login", "a3f9c1").as_str(),
+            "Process:handle-login-a3f9c1"
         );
     }
 

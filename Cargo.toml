@@ -9,6 +9,7 @@ members = [
   "crates/cih-parse",
   "crates/cih-resolve",
   "crates/cih-jar",
+  "crates/cih-community",
   "crates/cih-graph-store",
   "crates/cih-falkor",
   "crates/cih-server",
@@ -42,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "0.27", features = ["tokio-comp"] }
 cafebabe = "0.9"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+petgraph = "0.6"
 
 # internal crates
 cih-core = { path = "crates/cih-core" }
@@ -50,5 +52,6 @@ cih-lang = { path = "crates/cih-lang" }
 cih-parse = { path = "crates/cih-parse" }
 cih-resolve = { path = "crates/cih-resolve" }
 cih-jar = { path = "crates/cih-jar" }
+cih-community = { path = "crates/cih-community" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }

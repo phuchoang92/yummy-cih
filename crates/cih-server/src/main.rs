@@ -19,9 +19,13 @@ use cih_core::NodeId;
 use cih_graph_store::{Direction, GraphStore, GraphStoreError};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    },
     tool, tool_handler, tool_router,
-    transport::streamable_http_server::{session::local::LocalSessionManager, StreamableHttpService},
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpService,
+    },
     ErrorData as McpError, ServerHandler,
 };
 use schemars::JsonSchema;
@@ -53,6 +57,13 @@ struct ImpactArgs {
     /// Max traversal depth (default 4).
     #[serde(default)]
     max_depth: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CommunitiesArgs {
+    /// Optional maximum number of communities to return.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[tool_router]
@@ -94,6 +105,18 @@ impl CihServer {
             .map_err(to_mcp)?;
         json_result(&res)
     }
+
+    #[tool(description = "List community clusters detected in the codebase.")]
+    async fn communities(
+        &self,
+        Parameters(args): Parameters<CommunitiesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut communities = self.store.communities().await.map_err(to_mcp)?;
+        if let Some(limit) = args.limit {
+            communities.truncate(limit);
+        }
+        json_result(&communities)
+    }
 }
 
 #[tool_handler]
@@ -108,7 +131,8 @@ impl ServerHandler for CihServer {
                 ..Default::default()
             },
             instructions: Some(
-                "Code Intelligence Hub — query the call graph: `context`, `impact`.".into(),
+                "Code Intelligence Hub — query the call graph: `context`, `impact`, `communities`."
+                    .into(),
             ),
         }
     }
@@ -119,7 +143,8 @@ fn to_mcp(e: GraphStoreError) -> McpError {
 }
 
 fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-    let content = Content::json(value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    let content =
+        Content::json(value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
     Ok(CallToolResult::success(vec![content]))
 }
 

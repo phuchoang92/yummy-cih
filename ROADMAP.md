@@ -119,12 +119,18 @@ breadth; one demoable capability per milestone.
     including end-to-end integration via `cih-jar` sample fixture.
   - Workspace: **57 tests** green, clippy clean.
 
-## Phase 5 — Communities + processes
+## Phase 5 — Communities + processes ✅
 
 - **Build:** Leiden over CSR (port `community-processor.ts` params: resolution 2.0/1.0, capped
   iters, >10k filtering) → `Community` nodes + `MEMBER_OF`; process BFS (port
   `process-processor.ts`: depth 10 / branch 4 / max 75) → `Process` nodes + `STEP_IN_PROCESS`.
 - **Done when:** clusters + execution flows appear; MCP resources expose them.
+- **VERIFIED 2026-06-14:** `cih-community` crate added with deterministic seeded community
+  detection, heuristic labels, cohesion scoring, entry-point scoring, and BFS process tracing.
+  `cih-engine discover <repo>` reads the latest `.cih/artifacts/<version>` graph, writes
+  `.cih/artifacts-community/<version>`, and optionally loads the generated `Community`/`Process`
+  graph overlay into FalkorDB. `FalkorStore::context()` now returns process ids, and the MCP server
+  exposes a `communities` tool. Workspace: **65 tests** green, clippy clean.
 
 ## Phase 6 — Search: BM25 + embeddings + hybrid
 

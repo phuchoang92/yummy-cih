@@ -77,6 +77,14 @@ pub struct SymbolContext {
     pub processes: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommunityInfo {
+    pub id: String,
+    pub name: String,
+    pub symbol_count: u64,
+    pub cohesion: f64,
+}
+
 /// The pluggable storage port. MCP tools map 1:1 onto the read methods.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
@@ -88,11 +96,13 @@ pub trait GraphStore: Send + Sync {
 
     // ---- reads (domain queries) ----
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
-    async fn neighbors(&self, id: &NodeId, dir: Direction, kinds: &[EdgeKind]) -> Result<Vec<Edge>>;
+    async fn neighbors(&self, id: &NodeId, dir: Direction, kinds: &[EdgeKind])
+        -> Result<Vec<Edge>>;
     async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact>;
     async fn call_chain(&self, from: &NodeId, to: &NodeId, max_depth: u32) -> Result<Vec<Path>>;
     async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph>;
     async fn context(&self, id: &NodeId) -> Result<SymbolContext>;
+    async fn communities(&self) -> Result<Vec<CommunityInfo>>;
 }
 
 /// Bulk loading is a SEPARATE port — mechanisms differ wildly across backends
