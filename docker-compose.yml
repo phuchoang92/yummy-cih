@@ -1,0 +1,36 @@
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6380:6379"
+    volumes:
+      - falkordb-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cih-server:
+    image: yummy-cih:latest
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      FALKOR_URL: redis://falkordb:6379
+      CIH_GRAPH_KEY: cih
+      CIH_BIND: 0.0.0.0:8080
+      CIH_ARTIFACTS_DIR: /data/artifacts
+      HF_HOME: /data/hf-cache
+      RUST_LOG: info,cih_server=debug
+    volumes:
+      - cih-data:/data
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  falkordb-data:
+  cih-data:
