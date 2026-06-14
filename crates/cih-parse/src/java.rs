@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use cih_core::{
-    constructor_id, field_id, file_id, method_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind,
-    ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef,
+    constructor_id, field_id, file_id, method_id, type_id, BindingKind, Edge, EdgeKind, Node, NodeId,
+    NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
 };
 use cih_lang::java::JavaProvider;
 use cih_lang::LanguageProvider;
@@ -47,6 +47,7 @@ struct FileBuilder {
     defs: Vec<SymbolDef>,
     imports: Vec<RawImport>,
     reference_sites: Vec<ReferenceSite>,
+    type_bindings: Vec<TypeBinding>,
     type_contexts: Vec<TypeContext>,
     callable_contexts: Vec<CallableContext>,
 }
@@ -83,6 +84,7 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParseUnit> {
             defs: builder.defs,
             imports: builder.imports,
             reference_sites: builder.reference_sites,
+            type_bindings: builder.type_bindings,
         },
     })
 }
@@ -123,6 +125,9 @@ fn collect_declarations(
             owner: owner_id.clone(),
             range,
             modifiers: modifiers(node, src),
+            param_types: Vec::new(),
+            return_type: None,
+            declared_type: None,
         });
 
         if let Some(parent_id) = owner_id {
@@ -219,6 +224,9 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         owner: Some(owner.id.clone()),
         range,
         modifiers: modifiers(node, src),
+        param_types: param_type_names(node, src),
+        return_type: return_type_name(node, src),
+        declared_type: None,
     });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -261,6 +269,9 @@ fn collect_constructor(
         owner: Some(owner.id.clone()),
         range,
         modifiers: modifiers(node, src),
+        param_types: param_type_names(node, src),
+        return_type: None,
+        declared_type: None,
     });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -271,6 +282,7 @@ fn collect_constructor(
 }
 
 fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner: &TypeContext) {
+    let declared_type = node.child_by_field_name("type").map(|ty| text(ty, src));
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() != "variable_declarator" {
@@ -309,6 +321,9 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             owner: Some(owner.id.clone()),
             range,
             modifiers: modifiers(node, src),
+            param_types: Vec::new(),
+            return_type: None,
+            declared_type: declared_type.clone(),
         });
     }
 }
@@ -332,6 +347,11 @@ fn collect_query_ir(provider: &JavaProvider, tree: &Tree, src: &str, builder: &m
                     builder.imports.push(import);
                 }
             }
+            continue;
+        }
+
+        if let Some(binding) = type_binding(&captures, src, builder) {
+            builder.type_bindings.push(binding);
             continue;
         }
 
@@ -375,6 +395,7 @@ fn reference_site(
         _ => None,
     };
     let in_fqcn = context_for(anchor.node.start_byte(), builder).unwrap_or_default();
+    let in_callable = callable_id_for(anchor.node.start_byte(), builder);
 
     Some(ReferenceSite {
         name,
@@ -383,6 +404,7 @@ fn reference_site(
         arity,
         range: range_of(name_node),
         in_fqcn,
+        in_callable,
     })
 }
 
@@ -428,27 +450,93 @@ fn reference_anchor<'a>(captures: &'a BTreeMap<String, TsNode<'a>>) -> Option<Re
     None
 }
 
+/// Build a `TypeBinding` from a `@type-binding.*` query match (params, locals,
+/// fields, `var` inference, patterns, aliases). The anchor capture's tag (and, for
+/// `.annotation`, the anchor node kind) determines the `BindingKind`.
+fn type_binding(
+    captures: &BTreeMap<String, TsNode<'_>>,
+    src: &str,
+    builder: &FileBuilder,
+) -> Option<TypeBinding> {
+    let (anchor_tag, anchor_node) = captures.iter().find(|(key, _)| {
+        let key = key.as_str();
+        key.starts_with("type-binding.")
+            && key != "type-binding.type"
+            && key != "type-binding.name"
+    })?;
+    let type_node = captures.get("type-binding.type")?;
+    let name_node = captures.get("type-binding.name")?;
+    let raw_type = text(*type_node, src);
+    let name = text(*name_node, src);
+    if raw_type.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(TypeBinding {
+        name,
+        raw_type,
+        kind: binding_kind(anchor_tag.as_str(), *anchor_node),
+        in_fqcn: context_for(anchor_node.start_byte(), builder).unwrap_or_default(),
+        range: range_of(*name_node),
+    })
+}
+
+fn binding_kind(tag: &str, anchor: TsNode<'_>) -> BindingKind {
+    match tag {
+        "type-binding.parameter" => BindingKind::Param,
+        "type-binding.call-result" => BindingKind::CallResult,
+        "type-binding.alias" => BindingKind::Alias,
+        // `var x = new User();` — concrete inferred local.
+        "type-binding.constructor" => BindingKind::Local,
+        "type-binding.return" => BindingKind::Return,
+        "type-binding.pattern" => BindingKind::Pattern,
+        // `.annotation` covers fields AND locals/enhanced-for — the anchor node
+        // kind disambiguates (field_declaration → Field, otherwise Local).
+        "type-binding.annotation" => match anchor.kind() {
+            "field_declaration" => BindingKind::Field,
+            _ => BindingKind::Local,
+        },
+        _ => BindingKind::Local,
+    }
+}
+
 fn collect_heritage_references(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
     match node.kind() {
         "class_declaration" => {
-            let in_fqcn = type_context_at(node.start_byte(), builder)
-                .map(|ctx| ctx.fqcn.clone())
-                .unwrap_or_default();
+            let (in_fqcn, owner_id) = heritage_owner(node, builder);
             if let Some(superclass) = node.child_by_field_name("superclass") {
-                emit_heritage_from_children(superclass, src, builder, RefKind::Extends, &in_fqcn);
+                emit_heritage_from_children(
+                    superclass,
+                    src,
+                    builder,
+                    RefKind::Extends,
+                    &in_fqcn,
+                    &owner_id,
+                );
             }
             if let Some(interfaces) = node.child_by_field_name("interfaces") {
-                emit_heritage_type_list(interfaces, src, builder, RefKind::Implements, &in_fqcn);
+                emit_heritage_type_list(
+                    interfaces,
+                    src,
+                    builder,
+                    RefKind::Implements,
+                    &in_fqcn,
+                    &owner_id,
+                );
             }
         }
         "interface_declaration" => {
-            let in_fqcn = type_context_at(node.start_byte(), builder)
-                .map(|ctx| ctx.fqcn.clone())
-                .unwrap_or_default();
+            let (in_fqcn, owner_id) = heritage_owner(node, builder);
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "extends_interfaces" {
-                    emit_heritage_type_list(child, src, builder, RefKind::Extends, &in_fqcn);
+                    emit_heritage_type_list(
+                        child,
+                        src,
+                        builder,
+                        RefKind::Extends,
+                        &in_fqcn,
+                        &owner_id,
+                    );
                 }
             }
         }
@@ -461,19 +549,30 @@ fn collect_heritage_references(node: TsNode<'_>, src: &str, builder: &mut FileBu
     }
 }
 
+/// The enclosing type's `(fqcn, node id)` for a heritage clause — the EXTENDS/
+/// IMPLEMENTS edge source. Cloned up front so the immutable index borrow ends
+/// before the emit functions borrow `builder` mutably.
+fn heritage_owner(node: TsNode<'_>, builder: &FileBuilder) -> (String, NodeId) {
+    match type_context_at(node.start_byte(), builder) {
+        Some(ctx) => (ctx.fqcn.clone(), ctx.id.clone()),
+        None => (String::new(), file_id(&builder.file)),
+    }
+}
+
 fn emit_heritage_type_list(
     node: TsNode<'_>,
     src: &str,
     builder: &mut FileBuilder,
     kind: RefKind,
     in_fqcn: &str,
+    owner_id: &NodeId,
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "type_list" {
-            emit_heritage_from_children(child, src, builder, kind, in_fqcn);
+            emit_heritage_from_children(child, src, builder, kind, in_fqcn, owner_id);
         } else if let Some(name_node) = base_name_node(child) {
-            emit_heritage_reference(name_node, src, builder, kind, in_fqcn);
+            emit_heritage_reference(name_node, src, builder, kind, in_fqcn, owner_id);
         }
     }
 }
@@ -484,11 +583,12 @@ fn emit_heritage_from_children(
     builder: &mut FileBuilder,
     kind: RefKind,
     in_fqcn: &str,
+    owner_id: &NodeId,
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if let Some(name_node) = base_name_node(child) {
-            emit_heritage_reference(name_node, src, builder, kind, in_fqcn);
+            emit_heritage_reference(name_node, src, builder, kind, in_fqcn, owner_id);
         }
     }
 }
@@ -499,6 +599,7 @@ fn emit_heritage_reference(
     builder: &mut FileBuilder,
     kind: RefKind,
     in_fqcn: &str,
+    owner_id: &NodeId,
 ) {
     let name = text(name_node, src);
     if name.is_empty() {
@@ -511,6 +612,7 @@ fn emit_heritage_reference(
         arity: None,
         range: range_of(name_node),
         in_fqcn: in_fqcn.to_string(),
+        in_callable: owner_id.clone(),
     });
 }
 
@@ -825,6 +927,39 @@ fn parameter_count(node: TsNode<'_>) -> u16 {
     count
 }
 
+/// Raw (unresolved) parameter type names for a method/constructor, ordered, with
+/// the same `formal_parameter | spread_parameter` filter as `parameter_count` (so
+/// `param_types.len()` matches arity; the explicit receiver is excluded).
+fn param_type_names(node: TsNode<'_>, src: &str) -> Vec<String> {
+    let Some(parameters) = node.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = parameters.walk();
+    for child in parameters.named_children(&mut cursor) {
+        if !matches!(child.kind(), "formal_parameter" | "spread_parameter") {
+            continue;
+        }
+        if let Some(ty) = child
+            .child_by_field_name("type")
+            .or_else(|| child.named_child(0))
+        {
+            out.push(text(ty, src));
+        }
+    }
+    out
+}
+
+/// Raw return type name for a method (`None` for `void` / no type field).
+fn return_type_name(node: TsNode<'_>, src: &str) -> Option<String> {
+    let ty = node.child_by_field_name("type")?;
+    if ty.kind() == "void_type" {
+        return None;
+    }
+    let raw = text(ty, src);
+    (!raw.is_empty() && raw != "void").then_some(raw)
+}
+
 fn call_arity(node: TsNode<'_>) -> Option<u16> {
     let arguments = node.child_by_field_name("arguments")?;
     let mut count = 0u16;
@@ -874,6 +1009,15 @@ fn callable_context_at(byte: usize, builder: &FileBuilder) -> Option<&CallableCo
         .iter()
         .filter(|ctx| ctx.start_byte <= byte && byte <= ctx.end_byte)
         .max_by_key(|ctx| ctx.start_byte)
+}
+
+/// The graph node id of the callable enclosing `byte` (the edge SOURCE for a
+/// reference). Falls back to the enclosing type, then the file — never dangles.
+fn callable_id_for(byte: usize, builder: &FileBuilder) -> NodeId {
+    callable_context_at(byte, builder)
+        .map(|ctx| ctx.id.clone())
+        .or_else(|| type_context_at(byte, builder).map(|ctx| ctx.id.clone()))
+        .unwrap_or_else(|| file_id(&builder.file))
 }
 
 fn type_context_at(byte: usize, builder: &FileBuilder) -> Option<&TypeContext> {
@@ -1004,6 +1148,21 @@ fn normalize_builder(builder: &mut FileBuilder) {
             && a.arity == b.arity
             && a.range == b.range
             && a.in_fqcn == b.in_fqcn
+    });
+    builder.type_bindings.sort_by(|a, b| {
+        a.in_fqcn
+            .cmp(&b.in_fqcn)
+            .then(a.name.cmp(&b.name))
+            .then(a.range.start_line.cmp(&b.range.start_line))
+            .then(a.range.start_col.cmp(&b.range.start_col))
+            .then(a.raw_type.cmp(&b.raw_type))
+    });
+    builder.type_bindings.dedup_by(|a, b| {
+        a.name == b.name
+            && a.raw_type == b.raw_type
+            && a.kind == b.kind
+            && a.in_fqcn == b.in_fqcn
+            && a.range == b.range
     });
 }
 

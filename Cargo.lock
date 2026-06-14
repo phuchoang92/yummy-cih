@@ -370,6 +370,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cih-resolve"
+version = "0.1.0"
+dependencies = [
+ "cih-core",
+]
+
+[[package]]
 name = "cih-server"
 version = "0.1.0"
 dependencies = [

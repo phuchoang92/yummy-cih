@@ -11,7 +11,7 @@ mod artifacts; // JSONL read/write helpers on GraphArtifacts (Phase 2)
 pub mod ir;
 pub mod repo_map;
 
-pub use ir::{ParsedFile, RawImport, RefKind, ReferenceSite, SymbolDef};
+pub use ir::{BindingKind, ParsedFile, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding};
 pub use repo_map::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
 
 /// Stable, unique node identifier (e.g. `Method:com.acme.UserService#save`).
@@ -275,6 +275,9 @@ mod tests {
                     end_col: 5,
                 },
                 modifiers: vec!["public".into()],
+                param_types: vec!["Long".into()],
+                return_type: Some("User".into()),
+                declared_type: None,
             }],
             imports: vec![RawImport {
                 raw: "java.util.List".into(),
@@ -299,6 +302,19 @@ mod tests {
                     end_col: 24,
                 },
                 in_fqcn: "com.acme.UserService#save/1".into(),
+                in_callable: method_id("com.acme.UserService", "save", 1),
+            }],
+            type_bindings: vec![TypeBinding {
+                name: "repository".into(),
+                raw_type: "UserRepository".into(),
+                kind: BindingKind::Field,
+                in_fqcn: "com.acme.UserService".into(),
+                range: Range {
+                    start_line: 6,
+                    start_col: 4,
+                    end_line: 6,
+                    end_col: 40,
+                },
             }],
         };
 

@@ -7,6 +7,7 @@ members = [
   "crates/cih-engine",
   "crates/cih-lang",
   "crates/cih-parse",
+  "crates/cih-resolve",
   "crates/cih-jar",
   "crates/cih-graph-store",
   "crates/cih-falkor",
@@ -47,6 +48,7 @@ cih-core = { path = "crates/cih-core" }
 cih-engine = { path = "crates/cih-engine" }
 cih-lang = { path = "crates/cih-lang" }
 cih-parse = { path = "crates/cih-parse" }
+cih-resolve = { path = "crates/cih-resolve" }
 cih-jar = { path = "crates/cih-jar" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }

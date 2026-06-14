@@ -191,7 +191,7 @@ fn insert_edge(edges: &mut BTreeMap<(String, String, &'static str), Edge>, edge:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_core::{constructor_id, field_id, method_id, type_id, RefKind};
+    use cih_core::{constructor_id, field_id, method_id, type_id, BindingKind, RefKind};
 
     fn temp_repo() -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -454,6 +454,82 @@ class Plain {}
             Some("entity")
         );
         assert_eq!(stereotype_of(&output, "com.example.Plain"), None);
+    }
+
+    #[test]
+    fn persists_type_bindings_param_return_field_and_in_callable() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/OwnerController.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+package com.example;
+class OwnerController {
+    private OwnerService service;
+    public Owner findOwner(Long id) {
+        var found = service.findOwner(id);
+        return found;
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let parsed = output.parsed_files.first().unwrap();
+
+        // SymbolDef carries param/return/declared types.
+        let method = parsed
+            .defs
+            .iter()
+            .find(|d| d.id == method_id("com.example.OwnerController", "findOwner", 1))
+            .unwrap();
+        assert_eq!(method.param_types, vec!["Long"]);
+        assert_eq!(method.return_type.as_deref(), Some("Owner"));
+        let field = parsed
+            .defs
+            .iter()
+            .find(|d| d.id == field_id("com.example.OwnerController", "service"))
+            .unwrap();
+        assert_eq!(field.declared_type.as_deref(), Some("OwnerService"));
+
+        // Type bindings: field, param, and the `var` call-result inference.
+        let binding = |name: &str| {
+            parsed
+                .type_bindings
+                .iter()
+                .find(|b| b.name == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("no binding for {name}"))
+        };
+        let svc = binding("service");
+        assert_eq!(svc.kind, BindingKind::Field);
+        assert_eq!(svc.raw_type, "OwnerService");
+        assert_eq!(svc.in_fqcn, "com.example.OwnerController");
+
+        let id = binding("id");
+        assert_eq!(id.kind, BindingKind::Param);
+        assert_eq!(id.raw_type, "Long");
+        assert_eq!(id.in_fqcn, "com.example.OwnerController#findOwner/1");
+
+        let found = binding("found");
+        assert_eq!(found.kind, BindingKind::CallResult);
+        assert_eq!(found.raw_type, "findOwner"); // method whose return type to follow
+
+        // ReferenceSite.in_callable is the caller's NodeId, not the in_fqcn string.
+        let call = parsed
+            .reference_sites
+            .iter()
+            .find(|s| s.kind == RefKind::Call && s.name == "findOwner")
+            .unwrap();
+        assert_eq!(
+            call.in_callable,
+            method_id("com.example.OwnerController", "findOwner", 1)
+        );
+        assert_eq!(call.in_fqcn, "com.example.OwnerController#findOwner/1");
     }
 
     #[test]

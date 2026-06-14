@@ -53,18 +53,38 @@ breadth; one demoable capability per milestone.
   Remaining polish: Parquet + S3 (Phase 11), blue-green staging-key swap, compact-protocol list
   parsing for `call_chain`.
 
-## Phase 3 — Engine MVP: scan + parse + structure  🎯 first vertical slice
+## Phase 3 — Engine MVP: scan → scope → parse → structure ✅  🎯 first vertical slice
 
-- **Crates:** `cih-parse`, `cih-lang` (JavaProvider), `cih-engine` (orchestrator); extend `cih-core` IR.
+- **Crates:** `cih-parse`, `cih-lang` (JavaProvider), `cih-engine` (orchestrator), `cih-jar`;
+  extend `cih-core` IR.
 - **Build:** file scan with ignore rules; tree-sitter-java parse via the scope query
   (port `languages/java/query.ts`); extract `Class`/`Interface`/`Method`/`Field` defs + `File`/
   `Folder` nodes + `CONTAINS`/`HAS_METHOD` edges → emit `GraphArtifacts`; `rayon` parallel parse;
   wire engine → `BulkLoader` → FalkorDB.
 - **Done when:** `cih-engine analyze <java-repo>` loads real symbols; MCP `context` shows them.
   (Calls still absent/crude — that's Phase 4.) 🎯 **Milestone: index → query a real repo.**
+- **VERIFIED 2026-06-14:** delivered as 8 tasks (detail in `docs/phase-3.md` + `phase-3-impl-spec.md`),
+  refined with a **scan→scope-first** flow so a 12k-file repo isn't all-or-nothing:
+  - **scan** (`cih-engine scan`) — parse-free walk → `RepoMap` (modules, LOC, Spring counts) +
+    `.cih/repo-map.json` + recommendation; **scope** (`analyze --all|--module|--include|--exclude` or
+    `cih.scope.toml`) → resolved file list → `.cih/scope.json` (module-subtree + name-collision aware).
+  - **parse** (`cih-parse`, rayon, thread-local parser) → structure nodes/edges +
+    `ParsedFile` IR (defs, imports, **unresolved `ReferenceSite`s** for Phase 4) → `parsed-files.jsonl`;
+    robust skip-and-count on bad files.
+  - **emit + load** — content-hash `VersionId` → `GraphArtifacts` JSONL → `FalkorStore::bulk_load`;
+    stale-version pruning; exit-3 on DB-load failure; idempotent.
+  - **Spring tags (Task 7, pulls Phase 7 forward):** per-class `stereotype` prop from the class's own
+    annotations (controller/service/repository/component/configuration/entity/resource) + `Route`
+    nodes + `HANDLES_ROUTE` edges (class `@RequestMapping` prefix joined with method `@*Mapping`).
+  - **JAR API-surface (Task 8, the source-less-lib unlock, Phase-8 API part):** `cih-jar` reads
+    `.class` via `cafebabe` (no JDK/decompiler) → signature-only Class/Method/Constructor/Field nodes
+    with **locked ids**, demand-driven `include` filter. Engine wiring waits on Phase 4's
+    unresolved-ref set.
+  - Verified live on FalkorDB :6380; workspace clippy clean, all crate tests green.
 
-## Phase 4 — Scope resolution + MRO  🎯 accurate call graph
+## Phase 4 — Scope resolution + MRO  🚧 next  🎯 accurate call graph
 
+- **Plan:** `docs/phase-4.md`.
 - **Crate:** `cih-resolve`.
 - **Build:** `finalize_scope_model` (def + qualified-name index); the 5 emit passes —
   `emit_receiver_bound_calls` (7-case dispatcher), `emit_free_call_fallback`,
@@ -91,20 +111,29 @@ breadth; one demoable capability per milestone.
   `subgraph`.
 - **Done when:** `query("user registration")` returns ranked, process-grouped results.
 
-## Phase 7 — Spring pre-phase
+## Phase 7 — Spring pre-phase  🚧 partially delivered in Phase 3 (Task 7)
 
-- **Crate:** `cih-spring`.
-- **Build:** stereotype tags (`@Service`/`@Repository`/`@Controller`/`@RestController`/
-  `@Configuration`/`@Component`, `@Bean`); routes (`@RequestMapping`/`@GetMapping`/… → `Route` +
-  `HANDLES_ROUTE`); JPA (`@Entity`, `JpaRepository`/`CrudRepository`) tags.
+- **Crate:** `cih-spring` (currently inline in `cih-parse`; extract if it grows).
+- **Done in Phase 3:** per-class `stereotype` tags (`@Service`/`@Repository`/`@Controller`/
+  `@RestController`/`@Configuration`/`@Component`/`@Entity`) from own annotations; routes
+  (`@RequestMapping`/`@GetMapping`/… → `Route` + `HANDLES_ROUTE`, class-prefix joined).
+- **Remaining:** `@Bean` producer methods; JPA repository-interface tagging (`JpaRepository`/
+  `CrudRepository` heritage — needs Phase 4 heritage edges); a `route_map` MCP view.
 - **Done when:** routes + beans are queryable; a `route_map` view works on a Spring app.
 
-## Phase 8 — Decompilation (Fernflower)
+## Phase 8 — Dependency libs: API-surface 🚧 (built in Phase 3 Task 8) + full decompile
 
-- **Build:** engine spawns Fernflower on dependency JARs **lacking source** → `.java` into
-  `EFS:.workspace-dependencies/`; index as first-class source; tag decompiled nodes;
-  size-skip guard for generated/oversized files.
-- **Done when:** calls into a decompiled dependency resolve instead of being silently dropped.
+- **Done in Phase 3 (`cih-jar`):** signature-only **API-surface** extraction from source-less JARs
+  via `cafebabe` (no JDK/decompiler) — Class/Method/Constructor/Field nodes with locked ids,
+  demand-driven `include` filter. The high-value path for the 26k own libs.
+- **Remaining (wiring):** after Phase 4, feed the **unresolved-reference FQCN set** to
+  `JarApiExtractor::with_include(...)` and route output through `bulk_load`, so app→lib calls land on
+  the lib's API node instead of dropping; locate dependency JARs (`~/.m2`, `lib/`, build files).
+- **Remaining (full decompile):** for the few libs whose *internals* must be traced through, spawn
+  Fernflower → `.java` into `EFS:.workspace-dependencies/` → index as first-class source;
+  size-skip guard. (Rare exception; API-surface is the default.)
+- **Done when:** calls into a dependency resolve (to its API node, or to decompiled source) instead
+  of being silently dropped.
 
 ## Phase 9 — Incremental re-index + cache + versioning
 
