@@ -15,10 +15,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cih_core::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
+use cih_core::{BuildSystem, ModuleInfo, RepoMap, SpringSignal};
 
 mod build_files;
 mod ignore_rules;
+mod jars;
 mod java_scan;
 mod modules;
 mod paths;
@@ -153,6 +154,23 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     }
     ensure_unassigned_java_module(&mut candidates, &java_files, &root);
 
+    // Collect JAR discovery inputs before candidates are consumed.
+    let all_deps: Vec<String> = {
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        for c in &candidates {
+            set.extend(c.deps.iter().cloned());
+        }
+        set.into_iter().collect()
+    };
+    let own_group_prefix: String = candidates
+        .iter()
+        .find(|c| c.rel_path == ".")
+        .or_else(|| candidates.first())
+        .and_then(|c| c.artifact_key.as_ref())
+        .and_then(|key| key.split(':').next())
+        .unwrap_or("")
+        .to_string();
+
     let artifact_to_name: BTreeMap<String, String> = candidates
         .iter()
         .filter_map(|m| {
@@ -210,13 +228,15 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     modules.sort_by(|a, b| a.rel_path.cmp(&b.rel_path).then(a.name.cmp(&b.name)));
     owned_java_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 
+    let discovered_jars = jars::discover_jars(&root, &all_deps, &own_group_prefix);
+
     let repo_map = RepoMap {
         root: normalize_path(root),
         build_system: detect_build_system(&modules),
         total_java_files: java_files.len() as u64,
         total_loc: java_files.iter().map(|f| f.loc).sum(),
         modules,
-        jars: Vec::<JarInfo>::new(),
+        jars: discovered_jars,
         decompiled_dirs,
     };
 

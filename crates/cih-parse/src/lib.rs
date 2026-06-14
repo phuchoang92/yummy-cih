@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -103,6 +103,25 @@ pub fn write_parsed_files(dir: &Path, parsed_files: &[ParsedFile]) -> Result<Par
     writer.flush()?;
 
     Ok(ParseArtifacts { parsed_files_path })
+}
+
+/// Read a `parsed-files.jsonl` produced by [`write_parsed_files`] back into memory.
+pub fn load_parsed_files(dir: &Path) -> Result<Vec<ParsedFile>> {
+    let path = dir.join("parsed-files.jsonl");
+    let reader = BufReader::new(
+        File::open(&path).with_context(|| format!("failed to open {}", path.display()))?,
+    );
+    let mut out = Vec::new();
+    for (i, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("read error at line {} of {}", i + 1, path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let pf: ParsedFile = serde_json::from_str(&line)
+            .with_context(|| format!("parse error at line {} of {}", i + 1, path.display()))?;
+        out.push(pf);
+    }
+    Ok(out)
 }
 
 fn parse_one(repo_root: &Path, rel: &str) -> Result<ParseUnit> {

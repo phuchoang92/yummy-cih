@@ -6,6 +6,7 @@ use std::process;
 
 use anyhow::{Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, ParsedFile, VersionId};
+use scope::ScopeFile;
 use cih_falkor::FalkorStore;
 use cih_graph_store::{GraphStore, LoadStats};
 use clap::{Parser, Subcommand};
@@ -68,6 +69,24 @@ enum Command {
         #[arg(long)]
         no_load: bool,
     },
+    /// Re-run the resolve pass using the saved scope (.cih/scope.json), without re-scanning.
+    /// Useful when the resolver changes but the source files have not.
+    Resolve {
+        /// Repository root (must contain .cih/scope.json from a prior `analyze` run).
+        repo: PathBuf,
+        /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
+        #[arg(long, env = "FALKOR_URL")]
+        falkor_url: Option<String>,
+        /// FalkorDB graph key. Defaults to $CIH_GRAPH_KEY or "cih".
+        #[arg(long, env = "CIH_GRAPH_KEY")]
+        graph_key: Option<String>,
+        /// Skip the FalkorDB load step (emit JSONL artifacts only).
+        #[arg(long)]
+        no_load: bool,
+        /// Print the summary as JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -108,6 +127,13 @@ fn main() -> Result<()> {
                 no_load,
             },
         ),
+        Command::Resolve {
+            repo,
+            falkor_url,
+            graph_key,
+            no_load,
+            json,
+        } => run_resolve(repo, falkor_url, graph_key, no_load, json),
     }
 }
 
@@ -222,6 +248,12 @@ impl LoadOutcome {
 fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOutcome> {
     let scope_file = scope::resolve(&scan.repo_map, &scan.java_files, request)?;
     let scope_path = scope::write_scope_file(&scope_file)?;
+    analyze_from_scope(scope_file, scope_path)
+}
+
+/// DB-free core shared by `analyze` and `resolve`: parse the files listed in
+/// `scope_file` → resolve → write IR + GraphArtifacts.
+fn analyze_from_scope(scope_file: ScopeFile, scope_path: PathBuf) -> Result<EmitOutcome> {
     let repo_root = PathBuf::from(&scope_file.repo_root);
 
     let parse_output = cih_parse::parse_files(&repo_root, &scope_file.files)?;
@@ -281,6 +313,53 @@ fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOu
         parsed_file_count: parse_output.parsed_files.len(),
         skipped_count: parse_output.skipped.len(),
     })
+}
+
+fn run_resolve(
+    repo: PathBuf,
+    falkor_url: Option<String>,
+    graph_key: Option<String>,
+    no_load: bool,
+    json: bool,
+) -> Result<()> {
+    let scope_path = repo.join(".cih").join("scope.json");
+    let scope_file: ScopeFile = {
+        let raw = std::fs::read_to_string(&scope_path)
+            .with_context(|| format!("no saved scope at {} — run `analyze` first", scope_path.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("malformed scope file at {}", scope_path.display()))?
+    };
+
+    let emit = analyze_from_scope(scope_file, scope_path)?;
+
+    let load = if no_load {
+        tracing::info!("Skipping FalkorDB load (--no-load)");
+        LoadOutcome::Skipped
+    } else {
+        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        match load_to_falkor(url, key, &emit.artifacts) {
+            Ok(stats) => {
+                tracing::info!(nodes = stats.nodes, edges = stats.edges, "FalkorDB resolve load complete");
+                LoadOutcome::Loaded(stats)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "FalkorDB load failed after resolve");
+                LoadOutcome::Failed(format!("{err:#}"))
+            }
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
+    } else {
+        emit.print_human(&load);
+    }
+
+    if matches!(load, LoadOutcome::Failed(_)) {
+        process::exit(3);
+    }
+    Ok(())
 }
 
 /// Everything `analyze_emit` produced (DB-free), used to load + report.
@@ -638,6 +717,44 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(dirs, vec![changed.version.clone()]);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ir_only_body_change_bumps_version() {
+        // Verifies that a method-body edit (new call site, no new declarations) changes
+        // the content_version, proving post-resolve versioning covers the IR.
+        let root = temp_repo();
+        let scan = scan::scan_repo(&root).unwrap();
+        let v1 = analyze_emit(&scan, all_scope()).unwrap().version;
+
+        // Replace handle() body with a different call — same method signature, new reference.
+        write(
+            &root,
+            "src/main/java/com/example/OwnerController.java",
+            "package com.example;\nclass OwnerController {\n  private OwnerService service;\n  public void handle() { service.findAll(); service.findAll(); }\n}\n",
+        );
+        let scan2 = scan::scan_repo(&root).unwrap();
+        let v2 = analyze_emit(&scan2, all_scope()).unwrap().version;
+        assert_ne!(v1, v2, "adding a call in a method body must bump the version");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_subcommand_reads_saved_scope() {
+        let root = temp_repo();
+        // First run analyze to produce .cih/scope.json.
+        let scan = scan::scan_repo(&root).unwrap();
+        let v1 = analyze_emit(&scan, all_scope()).unwrap().version;
+
+        // resolve subcommand reads scope.json and re-runs — same content → same version.
+        let scope_path = root.join(".cih").join("scope.json");
+        let raw = fs::read_to_string(&scope_path).unwrap();
+        let scope_file: ScopeFile = serde_json::from_str(&raw).unwrap();
+        let v2 = analyze_from_scope(scope_file, scope_path).unwrap().version;
+        assert_eq!(v1, v2, "resolve with same scope must produce the same version");
 
         fs::remove_dir_all(&root).unwrap();
     }

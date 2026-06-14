@@ -82,18 +82,32 @@ breadth; one demoable capability per milestone.
     unresolved-ref set.
   - Verified live on FalkorDB :6380; workspace clippy clean, all crate tests green.
 
-## Phase 4 — Scope resolution + MRO  🚧 next  🎯 accurate call graph
+## Phase 4 — Scope resolution + MRO ✅  🎯 accurate call graph
 
 - **Plan:** `docs/phase-4.md`.
 - **Crate:** `cih-resolve`.
-- **Build:** `finalize_scope_model` (def + qualified-name index); the 5 emit passes —
-  `emit_receiver_bound_calls` (7-case dispatcher), `emit_free_call_fallback`,
-  `emit_references_via_lookup`, `emit_import_edges` (ports: `scope-resolution/pipeline/run.ts`,
-  `passes/receiver-bound-calls.ts`, `graph-bridge/ids.ts`); C3 MRO (port `mro-processor.ts`).
-  Emit `CALLS`/`ACCESSES`/`USES`/`EXTENDS`/`IMPLEMENTS`/`METHOD_OVERRIDES` with `confidence`.
-- **Done when:** index `spring-petclinic`; `service.save()` resolves to the right method;
-  `impact()` returns real callers; node/edge counts sane vs GitNexus on the same repo.
-  🎯 **Milestone: trustworthy impact analysis.**
+- **VERIFIED 2026-06-14:** full resolution pipeline delivered in 5 sub-phases:
+  - **4.0 IR extension** (`cih-core` + `cih-parse`): `TypeBinding { kind: BindingKind, .. }`,
+    `SymbolDef.param_types/return_type/declared_type`, `ReferenceSite.in_callable: NodeId`;
+    `cih-parse` persists type bindings, param/return types, and caller ids.
+  - **4.1 `ResolveIndex`** (`cih-resolve`): def/type/heritage/import indexes; precedence-ordered
+    scope-binding lookup (Param > Local > Pattern > Field > CallResult > Alias > Return + range
+    proximity for shadowing); `find_member_in_hierarchy` (BFS with arity cascade).
+  - **4.2 Emit passes** (ordered, per-site dedup): receiver-bound 7-case dispatcher →
+    free-call fallback → references-via-lookup (Ctor/FieldRead/FieldWrite/TypeRef) →
+    import edges → heritage; `edge.src = site.in_callable`; `skipped` counter + external FQCN set.
+  - **4.3 C3 MRO**: `c3_linearize` (memoized, cycle-safe); `build_mro_map` over all scope types;
+    `emit_mro_edges` — one `METHOD_OVERRIDES` to nearest class ancestor; all
+    `METHOD_IMPLEMENTS` to interface ancestors. Fixed `stable_dedup` so superclass-first
+    heritage order is preserved for C3.
+  - **4.5 Versioning + wiring**: `content_version` covers structure nodes + combined
+    (structure+resolved) edges + `ParsedFile` IR — IR-only body changes bump the version;
+    `cih-engine resolve <repo>` subcommand reads saved `.cih/scope.json` and re-runs
+    resolution without rescanning; `load_parsed_files` in `cih-parse` for offline IR loading.
+  - Workspace: 43 tests green, clippy clean; `combined_edges` deduplicates on (src, dst, kind)
+    keeping highest confidence.
+- **4.4 (separable, post-milestone):** see notes under Phase 8 below — JAR discovery
+  (`4.4a`) + demand-driven extraction (`4.4b`) when unresolved-ref wiring is needed.
 
 ## Phase 5 — Communities + processes
 

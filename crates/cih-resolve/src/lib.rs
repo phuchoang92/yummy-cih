@@ -395,14 +395,22 @@ impl ResolveIndex {
             v.sort();
             v.dedup();
         }
+        // Preserve insertion order for supertypes: C3 linearization requires the
+        // superclass to appear before interfaces (extends clause precedes implements).
         for v in self.supertypes.values_mut() {
-            v.sort();
-            v.dedup();
+            stable_dedup(v);
         }
         for v in self.implementors.values_mut() {
             v.sort();
             v.dedup();
         }
+    }
+
+    pub fn is_interface_type(&self, fqcn: &str) -> bool {
+        self.types_by_fqcn
+            .get(fqcn)
+            .map(|def| matches!(def.kind, NodeKind::Interface | NodeKind::Annotation))
+            .unwrap_or(false)
     }
 }
 
@@ -433,6 +441,7 @@ impl<'a> EdgeEmitter<'a> {
         self.emit_references_via_lookup();
         self.emit_import_edges();
         self.emit_heritage_edges();
+        self.emit_mro_edges();
         self.finish()
     }
 
@@ -586,6 +595,58 @@ impl<'a> EdgeEmitter<'a> {
                     1.0,
                     "heritage".to_string(),
                 );
+            }
+        }
+    }
+
+    fn emit_mro_edges(&mut self) {
+        let mro_map = build_mro_map(&self.index);
+
+        // Pre-collect (owner_fqcn, src_id, method_name, arity) to avoid borrow conflicts
+        // with the push_edge mutable borrow that follows.
+        let method_entries: Vec<(String, NodeId, String, u16)> = self
+            .index
+            .methods
+            .iter()
+            .flat_map(|((owner, name), overloads)| {
+                overloads.iter().map(move |def| {
+                    (
+                        owner.clone(),
+                        def.id.clone(),
+                        name.clone(),
+                        def.param_types.len() as u16,
+                    )
+                })
+            })
+            .collect();
+
+        for (owner_fqcn, src_id, name, arity) in method_entries {
+            let Some(mro) = mro_map.get(&owner_fqcn) else {
+                continue;
+            };
+            let mut class_override_emitted = false;
+            for ancestor in &mro[1..] {
+                let dst_id = self.index.find_member(ancestor, &name, Some(arity));
+                let is_iface = self.index.is_interface_type(ancestor);
+                let Some(dst_id) = dst_id else { continue };
+                if is_iface {
+                    self.push_edge(
+                        src_id.clone(),
+                        dst_id,
+                        EdgeKind::MethodImplements,
+                        1.0,
+                        "mro".to_string(),
+                    );
+                } else if !class_override_emitted {
+                    self.push_edge(
+                        src_id.clone(),
+                        dst_id,
+                        EdgeKind::MethodOverrides,
+                        1.0,
+                        "mro".to_string(),
+                    );
+                    class_override_emitted = true;
+                }
             }
         }
     }
@@ -826,6 +887,74 @@ impl<'a> EdgeEmitter<'a> {
             unresolved_external_fqcns: self.unresolved_external_fqcns.into_iter().collect(),
         }
     }
+}
+
+/// Remove duplicates from `v` without changing the order of the first occurrences.
+fn stable_dedup(v: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    v.retain(|x| seen.insert(x.clone()));
+}
+
+/// Compute a C3 linearization for every type in the index.
+/// Result: type FQCN → ordered MRO list (self first, then ancestors breadth-first in C3 order).
+fn build_mro_map(index: &ResolveIndex) -> HashMap<String, Vec<String>> {
+    let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+    let all: Vec<String> = index.type_fqcns().map(str::to_string).collect();
+    for fqcn in &all {
+        c3_linearize(fqcn, index, &mut cache);
+    }
+    cache
+}
+
+/// C3 linearization of `fqcn`. Results are memoized in `cache`.
+/// Supertypes must be ordered: superclass first (if any), then interfaces — this is guaranteed
+/// by [`ResolveIndex::dedup`] which uses [`stable_dedup`] and the parse order from java.rs.
+fn c3_linearize(
+    fqcn: &str,
+    index: &ResolveIndex,
+    cache: &mut HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    if let Some(cached) = cache.get(fqcn) {
+        return cached.clone();
+    }
+    // Pre-insert sentinel so cycles in the supertype graph don't loop forever.
+    cache.insert(fqcn.to_string(), vec![fqcn.to_string()]);
+
+    let bases: Vec<String> = index.supertypes(fqcn).to_vec();
+    if bases.is_empty() {
+        return vec![fqcn.to_string()];
+    }
+
+    // Build the merge input: one linearization per base, plus the bases list itself.
+    let mut lists: Vec<Vec<String>> = bases
+        .iter()
+        .map(|b| c3_linearize(b, index, cache))
+        .collect();
+    lists.push(bases);
+
+    let mut result = vec![fqcn.to_string()];
+    loop {
+        lists.retain(|l| !l.is_empty());
+        if lists.is_empty() {
+            break;
+        }
+        // Pick the first head that is not in the tail of any list.
+        let head = lists
+            .iter()
+            .find_map(|list| {
+                let h = &list[0];
+                let blocked = lists.iter().any(|l| l.len() > 1 && l[1..].contains(h));
+                if !blocked { Some(h.clone()) } else { None }
+            })
+            .unwrap_or_else(|| lists[0][0].clone()); // cycle fallback: take first
+        result.push(head.clone());
+        for list in &mut lists {
+            list.retain(|x| x != &head);
+        }
+    }
+
+    cache.insert(fqcn.to_string(), result.clone());
+    result
 }
 
 fn is_type_kind(kind: NodeKind) -> bool {
@@ -1313,5 +1442,179 @@ mod tests {
         let out = resolve_edges(&files);
         assert_eq!(out.skipped, 1);
         assert_eq!(out.unresolved_external_fqcns, vec!["com.external.Client"]);
+    }
+
+    // ── Phase 4.3 MRO tests ────────────────────────────────────────────────
+
+    /// Minimal hierarchy shared by the MRO tests:
+    ///   interface Animal { void speak(); }
+    ///   abstract class Mammal implements Animal { void breathe(); }
+    ///   class Dog extends Mammal implements Animal { void speak(); void breathe(); }
+    fn mro_workspace() -> Vec<ParsedFile> {
+        let animal = ParsedFile {
+            file: "com/acme/Animal.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Interface, "com.acme.Animal"),
+                method_def("com.acme.Animal", "speak", &[], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+        };
+        let mammal = ParsedFile {
+            file: "com/acme/Mammal.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.Mammal"),
+                method_def("com.acme.Mammal", "breathe", &[], None),
+            ],
+            imports: vec![],
+            // Mammal implements Animal but has no speak() — abstract.
+            reference_sites: vec![heritage("com.acme.Mammal", "Animal", RefKind::Implements)],
+            type_bindings: vec![],
+        };
+        let dog = ParsedFile {
+            file: "com/acme/Dog.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.Dog"),
+                method_def("com.acme.Dog", "speak", &[], None),
+                method_def("com.acme.Dog", "breathe", &[], None),
+            ],
+            imports: vec![],
+            // extends first, then implements — preserves C3 order.
+            reference_sites: vec![
+                heritage("com.acme.Dog", "Mammal", RefKind::Extends),
+                heritage("com.acme.Dog", "Animal", RefKind::Implements),
+            ],
+            type_bindings: vec![],
+        };
+        vec![animal, mammal, dog]
+    }
+
+    #[test]
+    fn phase_4_3_mro_method_implements_interface() {
+        let files = mro_workspace();
+        let out = resolve_edges(&files);
+        assert!(
+            out.edges.iter().any(|e| {
+                e.kind == EdgeKind::MethodImplements
+                    && e.src == method_id("com.acme.Dog", "speak", 0)
+                    && e.dst == method_id("com.acme.Animal", "speak", 0)
+            }),
+            "Dog.speak should METHOD_IMPLEMENTS Animal.speak"
+        );
+    }
+
+    #[test]
+    fn phase_4_3_mro_method_overrides_superclass() {
+        let files = mro_workspace();
+        let out = resolve_edges(&files);
+        assert!(
+            out.edges.iter().any(|e| {
+                e.kind == EdgeKind::MethodOverrides
+                    && e.src == method_id("com.acme.Dog", "breathe", 0)
+                    && e.dst == method_id("com.acme.Mammal", "breathe", 0)
+            }),
+            "Dog.breathe should METHOD_OVERRIDES Mammal.breathe"
+        );
+    }
+
+    #[test]
+    fn phase_4_3_mro_both_overrides_and_implements() {
+        // Add speak() to Mammal so Dog.speak overrides it AND implements Animal.speak.
+        let mut files = mro_workspace();
+        files[1]
+            .defs
+            .push(method_def("com.acme.Mammal", "speak", &[], None));
+        let out = resolve_edges(&files);
+        // Dog.speak METHOD_OVERRIDES Mammal.speak (nearest class ancestor).
+        assert!(
+            out.edges.iter().any(|e| {
+                e.kind == EdgeKind::MethodOverrides
+                    && e.src == method_id("com.acme.Dog", "speak", 0)
+                    && e.dst == method_id("com.acme.Mammal", "speak", 0)
+            }),
+            "Dog.speak should METHOD_OVERRIDES Mammal.speak"
+        );
+        // Dog.speak METHOD_IMPLEMENTS Animal.speak (interface in MRO).
+        assert!(
+            out.edges.iter().any(|e| {
+                e.kind == EdgeKind::MethodImplements
+                    && e.src == method_id("com.acme.Dog", "speak", 0)
+                    && e.dst == method_id("com.acme.Animal", "speak", 0)
+            }),
+            "Dog.speak should also METHOD_IMPLEMENTS Animal.speak"
+        );
+    }
+
+    #[test]
+    fn phase_4_3_c3_order_superclass_before_interface() {
+        // Verifies that the MRO puts the direct superclass before the interface when
+        // both have the same method, so METHOD_OVERRIDES fires before METHOD_IMPLEMENTS.
+        let base = ParsedFile {
+            file: "com/acme/Base.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.Base"),
+                method_def("com.acme.Base", "act", &[], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+        };
+        let marker = ParsedFile {
+            file: "com/acme/Marker.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Interface, "com.acme.Marker"),
+                method_def("com.acme.Marker", "act", &[], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+        };
+        let child = ParsedFile {
+            file: "com/acme/Child.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.Child"),
+                method_def("com.acme.Child", "act", &[], None),
+            ],
+            imports: vec![],
+            // extends Base, implements Marker — C3: [Child, Base, Marker]
+            reference_sites: vec![
+                heritage("com.acme.Child", "Base", RefKind::Extends),
+                heritage("com.acme.Child", "Marker", RefKind::Implements),
+            ],
+            type_bindings: vec![],
+        };
+        let out = resolve_edges(&[base, marker, child]);
+        // Exactly one METHOD_OVERRIDES to Base.act (not to Marker).
+        assert!(
+            out.edges.iter().any(|e| {
+                e.kind == EdgeKind::MethodOverrides
+                    && e.src == method_id("com.acme.Child", "act", 0)
+                    && e.dst == method_id("com.acme.Base", "act", 0)
+            }),
+            "Child.act should METHOD_OVERRIDES Base.act"
+        );
+        assert!(
+            out.edges.iter().any(|e| {
+                e.kind == EdgeKind::MethodImplements
+                    && e.src == method_id("com.acme.Child", "act", 0)
+                    && e.dst == method_id("com.acme.Marker", "act", 0)
+            }),
+            "Child.act should METHOD_IMPLEMENTS Marker.act"
+        );
+        // No METHOD_OVERRIDES to Marker (it's an interface).
+        assert!(
+            !out.edges.iter().any(|e| {
+                e.kind == EdgeKind::MethodOverrides
+                    && e.dst == method_id("com.acme.Marker", "act", 0)
+            }),
+            "should not emit METHOD_OVERRIDES to an interface"
+        );
     }
 }
