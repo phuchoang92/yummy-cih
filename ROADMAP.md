@@ -402,21 +402,29 @@ Feeds Phase 10 — these docs become the grounding for yummy persona system prom
 
 ## Mid-term additions (from GitNexus discovery)
 
-## Phase 21 — Cross-service contract extraction
+## Phase 21 — Cross-service contract extraction ✅ (2026-06-15)
 
 Source: `docs/gitnexus-discovery.md` §6
 
-For Java/Spring microservice landscapes (e.g., banking codebase):
-
-- **HTTP clients:** detect `RestTemplate`, `WebClient`, `@FeignClient`, `Retrofit` call sites
-  → emit `ExternalCall` edge with URL template as property.
-- **Events:** detect `@KafkaListener`, `ApplicationEventPublisher.publishEvent()`, Spring events
-  → emit `PublishesEvent` / `ListensTo` edges with topic/type.
-- **CLI:** `cih-engine group create <name>`, `cih-engine group add <name> <repo>`,
-  `cih-engine group sync <name>`
-
-- **Done when:** Kafka producer in service A and `@KafkaListener` in service B are linked;
-  `impact` traverses the `PUBLISHES_EVENT` → `LISTENS_TO` edge pair.
+- **HTTP clients:** `@FeignClient`, `RestTemplate`, `WebClient` call sites detected in
+  `cih-parse/src/java.rs:682-845` → `ExternalEndpoint` nodes + `EXTERNAL_CALL` edges.
+- **Events:** `@KafkaListener`, `KafkaTemplate.send()`, `ApplicationEventPublisher.publishEvent()`,
+  `@EventListener` → `KafkaTopic` nodes + `PUBLISHES_EVENT` / `LISTENS_TO` edges.
+- **New core types:** `NodeKind::{KafkaTopic,ExternalEndpoint}`, `EdgeKind::{PublishesEvent,ListensTo,ExternalCall}`,
+  `ContractSite` / `ContractKind` IR types in `cih-core`; `GroupRegistry` / `GroupEntry` /
+  `ContractMatch` in `cih-core/src/group.rs`.
+- **`resolve_contract_edges()`** integrated into `cih-resolve::resolve_edges()` — deduplicates
+  topic/endpoint nodes and emits typed edges.
+- **CLI:** `cih-engine group create/add/remove/list/sync` in `cih-engine/src/group_cmd.rs`;
+  `sync_group()` reads JSONL artifacts, matches HTTP routes to ExternalEndpoint consumers and
+  Kafka publishers to listeners across repos, writes `~/.cih/groups/<name>/contracts.jsonl`.
+- **MCP tool:** `group_contracts({ group, kind? })` in `cih-server` reads the contracts artifact
+  and returns matched provider/consumer pairs.
+- **Schema resource** updated with new node/edge kinds.
+- **Verified 2026-06-15:** `212ecom-be` analyze emits 6 KafkaTopic nodes
+  (`OrderCreatedEvent`, `OrderStatusChangedEvent`, `OrderCancelledEvent`, `LowStockEvent`,
+  `CriticalStockEvent`, `ActivityLoggedEvent`); `group sync` and MCP `group_contracts` tool
+  return correct JSON. All 111 workspace tests green.
 
 ## Phase 22 — API impact + shape check
 
