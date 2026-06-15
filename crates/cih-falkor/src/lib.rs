@@ -172,7 +172,9 @@ impl GraphStore for FalkorStore {
     }
 
     async fn publish_to(&self, dest_key: &str) -> Result<()> {
-        self.graph_command("GRAPH.COPY", &[&self.graph_key, dest_key, "REPLACE"])
+        // Delete the destination first; ignore the error if it doesn't exist yet.
+        let _ = self.graph_command("GRAPH.DELETE", &[dest_key]).await;
+        self.graph_command("GRAPH.COPY", &[&self.graph_key, dest_key])
             .await?;
         Ok(())
     }
