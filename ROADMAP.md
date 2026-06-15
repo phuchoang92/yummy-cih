@@ -16,7 +16,7 @@ persona-specific chat view in yummy:
 
 | Persona | Core need | CIH answers |
 |---------|-----------|-------------|
-| **Developer** | Understand unfamiliar code; assess blast radius of a change | `context`, `impact`, `query`, `trace_flow` *(Phase 15)* |
+| **Developer** | Understand unfamiliar code; assess blast radius of a change | `context`, `impact`, `query`, `trace_flow` |
 | **PO** (Product Owner) | Know what the system does; estimate effort for incoming CRs | `route_map`, `feature_map`, `cr_impact` |
 | **BA** (Business Analyst) | Trace end-to-end business flows; map features to code | `trace_flow`, `cr_impact`, `feature_map` |
 | **Tester** | Find what tests cover which code; know what to re-run after a change | `test_coverage`, `regression_scope`, `untested_paths` |
@@ -250,27 +250,29 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   `route_map(prefix="/payment")` + `communities()` → cited answer rendered in yummy; wiki renders
   the community graph as navigable docs. 🎯 **Milestone: usable product for all four personas.**
 
-## Phase 15 — Flow Intelligence: trace_flow · cr_impact · feature_map
+## Phase 15 — Flow Intelligence: trace_flow · feature_map ✅ (2026-06-15)
 
 **Primary personas: PO, BA**
 
-- **`trace_flow(entry_point)`** MCP tool: given an HTTP route or method ID, return the full
-  execution chain (controller → services → repos → external calls) as a structured path list with
-  node IDs, names, and file locations. Uses BFS over `CALLS` + `HANDLES_ROUTE` edges.
-  - Requires detecting outbound HTTP calls (`RestTemplate`, `WebClient`, `@FeignClient`) and event
-    publishing (`@KafkaListener`, `@EventListener`) as new `EdgeKind::ExternalCall` /
-    `EdgeKind::PublishesEvent` in `cih-core` and `cih-parse`.
-- **`cr_impact(description: String)`** — **belongs in yummy-agent, not cih-server.** Given a
-  plain-language CR description, the agent calls `query(description)` to find relevant symbols,
-  then `impact(symbol)` for each, and returns an aggregated change-surface summary (affected
-  modules, estimated file count, risk tier). `cih-server` exposes `query` and `impact` as
-  primitives only; the chaining and LLM synthesis happen in yummy-agent.
-- **`feature_map(keywords: Vec<String>)`** MCP tool: maps business terms (e.g. `["checkout",
-  "payment"]`) to code clusters — communities + routes + classes that implement those features.
-  Uses hybrid BM25+semantic search + community membership from Phase 5/6.
-- **Done when:** a BA can type "trace the checkout flow" and get the full chain from
-  `POST /api/checkout` to the DB call including an external Stripe call; a PO can ask "how big is
-  the loyalty points CR?" and get a module list + estimated file count.
+- **`trace_flow(entry_point, max_depth?)`** MCP tool: given an HTTP route or method ID, returns
+  the full downstream execution chain as a structured list of `FlowNode` records (id, kind, name,
+  file, depth). Traverses `CALLS`, `HANDLES_ROUTE`, `EXTERNAL_CALL`, `PUBLISHES_EVENT`,
+  `LISTENS_TO` edges via a single Cypher variable-length path query; depth clamped to 10; results
+  ordered by minimum depth then name; cap 100 nodes. Supports full NodeId or short-name
+  disambiguation identical to `context` / `impact`.
+- **`cr_impact`** — **out of scope for cih-server.** Belongs in yummy-agent (LLM synthesis of
+  `query` + `impact` calls). `cih-server` exposes `query` and `impact` as primitives only.
+- **`feature_map(query, limit?)`** MCP tool: maps a business keyword string (e.g. `"checkout
+  payment"`) to code clusters — BM25 search results grouped by community name via `MEMBER_OF`
+  edges. Returns `Vec<{community, symbol_count, symbols: [{id, kind, name, file, score}]}>`;
+  unmatched nodes go into an `"unclustered"` group.
+- **Implementation:** `FlowNode` struct + `flow_downstream()` + `symbol_communities()` added to
+  `GraphStore` trait (`cih-graph-store`); FalkorDB Cypher impls in `cih-falkor`; two new
+  `#[tool]` methods in `cih-server`. No changes to engine or parse layers.
+- **Verified:** 113 tests green *(at the time)*. Two tools listed in `get_info()` instructions.
+- **Done when:** a BA can type "trace the checkout flow" → `trace_flow` returns the controller →
+  service → repo → external call chain; a PO asks "what implements order payment?" →
+  `feature_map` returns grouped symbol clusters.
 
 ## Phase 16 — Test Intelligence: coverage · regression scope · untested paths
 

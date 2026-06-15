@@ -23,7 +23,7 @@ use cih_core::{
     Registry, VersionId,
 };
 use cih_embed::{EmbedModelKind, EmbedStore};
-use cih_graph_store::{Direction, GraphStore, GraphStoreError, RouteInfo};
+use cih_graph_store::{CommunityInfo, Direction, GraphStore, GraphStoreError, RouteInfo};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -138,6 +138,26 @@ struct ShapeCheckArgs {
     provider: String,
     /// Consumer repo name (as registered).
     consumer: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TraceFlowArgs {
+    /// Symbol id or short name to trace from. Accepts a Route node
+    /// (e.g. `Route:GET /api/checkout`) or a Method node id.
+    /// Short names trigger disambiguation like `context` and `impact`.
+    entry_point: String,
+    /// Maximum traversal depth (default 6, clamped to 10).
+    #[serde(default)]
+    max_depth: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FeatureMapArgs {
+    /// Business keywords to map to code clusters (e.g. "checkout payment").
+    query: String,
+    /// Max symbols to search for before clustering (default 50, max 200).
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 // ---- ambiguous-symbol helpers ----
@@ -737,6 +757,103 @@ impl CihServer {
             "contracts": results,
         }))
     }
+
+    #[tool(
+        description = "Trace the downstream execution chain from an HTTP route or method: \
+            controller → services → repos → external HTTP calls and events. \
+            Traverses CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT, LISTENS_TO edges. \
+            Pass a Route node id (e.g. `Route:GET /api/checkout`) or a method id."
+    )]
+    async fn trace_flow(
+        &self,
+        Parameters(args): Parameters<TraceFlowArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = match self.resolve_symbol(&args.entry_point).await? {
+            SymbolResolution::Id(id) => id,
+            SymbolResolution::Ambiguous(candidates) => {
+                return json_result(&AmbiguousResult::from_nodes(candidates));
+            }
+            SymbolResolution::NotFound => {
+                return Err(McpError::invalid_params(
+                    format!("symbol '{}' not found", args.entry_point),
+                    None,
+                ));
+            }
+        };
+        let depth = args.max_depth.unwrap_or(6).clamp(1, 10);
+        let steps = self.store.flow_downstream(&id, depth).await.map_err(to_mcp)?;
+        json_result(&serde_json::json!({
+            "entry_point": id.as_str(),
+            "depth_limit": depth,
+            "step_count": steps.len(),
+            "steps": steps,
+        }))
+    }
+
+    #[tool(
+        description = "Map business keywords to code clusters: BM25 search results grouped \
+            by community. Helps answer 'what code implements the checkout feature?' or \
+            'which modules handle payments?'"
+    )]
+    async fn feature_map(
+        &self,
+        Parameters(args): Parameters<FeatureMapArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = args.limit.unwrap_or(50).clamp(1, 200);
+        let hits = self
+            .search
+            .query_hits(&args.query, limit)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let hit_ids: Vec<NodeId> = hits.iter().map(|h| h.node_id.clone()).collect();
+        let memberships = self
+            .store
+            .symbol_communities(&hit_ids)
+            .await
+            .map_err(to_mcp)?;
+
+        let community_of: std::collections::BTreeMap<String, CommunityInfo> = memberships
+            .into_iter()
+            .map(|(nid, ci)| (nid.to_string(), ci))
+            .collect();
+
+        let mut clusters: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+            std::collections::BTreeMap::new();
+        for hit in &hits {
+            let cluster_key = community_of
+                .get(hit.node_id.as_str())
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "unclustered".to_string());
+            clusters
+                .entry(cluster_key)
+                .or_default()
+                .push(serde_json::json!({
+                    "id": hit.node_id.as_str(),
+                    "kind": hit.kind.label(),
+                    "name": hit.name,
+                    "file": hit.file,
+                    "score": hit.score,
+                }));
+        }
+
+        let result: Vec<serde_json::Value> = clusters
+            .into_iter()
+            .map(|(name, symbols)| {
+                serde_json::json!({
+                    "community": name,
+                    "symbol_count": symbols.len(),
+                    "symbols": symbols,
+                })
+            })
+            .collect();
+
+        json_result(&serde_json::json!({
+            "query": args.query,
+            "total_hits": hits.len(),
+            "clusters": result,
+        }))
+    }
 }
 
 #[tool_handler]
@@ -755,7 +872,8 @@ impl ServerHandler for CihServer {
             },
             instructions: Some(
                 "Code Intelligence Hub — query the call graph: `query`, `context`, `impact`, \
-                 `communities`, `route_map`, `group_contracts`, `api_impact`, `shape_check`, \
+                 `communities`, `route_map`, `trace_flow`, `feature_map`, \
+                 `group_contracts`, `api_impact`, `shape_check`, \
                  `list_repos`, `detect_changes`. \
                  Short symbol names trigger disambiguation; full NodeIds (Kind:fqn) skip it. \
                  Read repo data via cih://repo/{name}/context|communities|processes|schema."
@@ -962,6 +1080,21 @@ mod tests {
             Some(ContractMatchKind::SpringEvent)
         );
         assert!(parse_contract_kind_filter(Some("queue")).is_err());
+    }
+
+    #[test]
+    fn trace_flow_args_defaults() {
+        let args: TraceFlowArgs =
+            serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
+        assert_eq!(args.entry_point, "Route:GET /");
+        assert!(args.max_depth.is_none());
+    }
+
+    #[test]
+    fn feature_map_args_defaults() {
+        let args: FeatureMapArgs = serde_json::from_str(r#"{"query":"checkout"}"#).unwrap();
+        assert_eq!(args.query, "checkout");
+        assert!(args.limit.is_none());
     }
 
     #[test]

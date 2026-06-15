@@ -8,7 +8,7 @@
 //! Postgres-CTE adapter is fully separate.
 
 use async_trait::async_trait;
-use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(thiserror::Error, Debug)]
@@ -86,6 +86,16 @@ pub struct CommunityInfo {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FlowNode {
+    pub id: NodeId,
+    pub kind: NodeKind,
+    pub name: String,
+    pub qualified_name: Option<String>,
+    pub file: String,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RouteInfo {
     pub path: String,
     pub http_method: String,
@@ -131,6 +141,15 @@ pub trait GraphStore: Send + Sync {
     /// Return the Process node IDs directly reachable from `symbol_ids` via
     /// STEP_IN_PROCESS edges.  Used by `detect_changes` to list affected processes.
     async fn processes_for_symbols(&self, symbol_ids: &[NodeId]) -> Result<Vec<String>>;
+
+    /// Trace the downstream execution chain from an entry point.
+    /// Traverses CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT, LISTENS_TO edges.
+    /// Returns all reachable nodes ordered by minimum depth, capped at 100.
+    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowNode>>;
+
+    /// Return the community each node belongs to (via MEMBER_OF edges).
+    /// Nodes with no community are omitted from the result.
+    async fn symbol_communities(&self, ids: &[NodeId]) -> Result<Vec<(NodeId, CommunityInfo)>>;
 }
 
 /// Bulk loading is a SEPARATE port — mechanisms differ wildly across backends

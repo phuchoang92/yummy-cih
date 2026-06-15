@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
-    risk_from_fanout, BulkLoader, CommunityInfo, Direction, GraphStore, GraphStoreError, Impact,
-    ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
+    risk_from_fanout, BulkLoader, CommunityInfo, Direction, FlowNode, GraphStore, GraphStoreError,
+    Impact, ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
 };
 use redis::Value;
 
@@ -439,6 +439,67 @@ impl GraphStore for FalkorStore {
             .await?
             .into_iter()
             .filter_map(|row| row.into_iter().next())
+            .collect())
+    }
+
+    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowNode>> {
+        let d = max_depth.clamp(1, 10);
+        let q = format!(
+            "CYPHER id={id} \
+             MATCH p=(start:Symbol {{id:$id}})\
+             -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO*1..{d}]->(m:Symbol) \
+             RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file, min(length(p)) \
+             ORDER BY min(length(p)), m.name LIMIT 100",
+            id = cstr(entry.as_str())
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 5)
+            .map(|r| FlowNode {
+                id: NodeId::new(r[0].clone()),
+                kind: NodeKind::from_label(r[1].as_str()),
+                name: r[2].clone(),
+                qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
+                file: r.get(4).cloned().unwrap_or_default(),
+                depth: r.get(5).and_then(|s| s.parse().ok()).unwrap_or(1),
+            })
+            .collect())
+    }
+
+    async fn symbol_communities(&self, ids: &[NodeId]) -> Result<Vec<(NodeId, CommunityInfo)>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| cstr(id.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let q = format!(
+            "MATCH (n:Symbol)-[:MEMBER_OF]->(c:Symbol) \
+             WHERE n.id IN {list} AND c.kind = 'Community' \
+             RETURN n.id, c.id, c.name, c.symbolCount, c.cohesion"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 5)
+            .map(|r| {
+                (
+                    NodeId::new(r[0].clone()),
+                    CommunityInfo {
+                        id: r[1].clone(),
+                        name: r[2].clone(),
+                        symbol_count: r[3].parse().unwrap_or(0),
+                        cohesion: r[4].parse().unwrap_or(0.0),
+                    },
+                )
+            })
             .collect())
     }
 }
