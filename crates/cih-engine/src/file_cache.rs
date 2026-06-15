@@ -296,6 +296,7 @@ mod tests {
                 .collect(),
             reference_sites: Vec::new(),
             type_bindings: Vec::new(),
+            contract_sites: Vec::new(),
         }
     }
 

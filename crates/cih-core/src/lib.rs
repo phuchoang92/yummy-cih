@@ -8,11 +8,18 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod artifacts; // JSONL read/write helpers on GraphArtifacts (Phase 2)
+pub mod group;
 pub mod ir;
 pub mod registry;
 pub mod repo_map;
 
-pub use ir::{BindingKind, ParsedFile, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding};
+pub use group::{
+    contracts_path, group_dir, ContractMatch, ContractMatchKind, GroupEntry, GroupRegistry,
+};
+pub use ir::{
+    BindingKind, ContractKind, ContractSite, ParsedFile, RawImport, RefKind, ReferenceSite,
+    SymbolDef, TypeBinding,
+};
 pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
 pub use repo_map::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
 
@@ -52,6 +59,8 @@ pub enum NodeKind {
     Route,
     Community,
     Process,
+    KafkaTopic,
+    ExternalEndpoint,
     Other,
 }
 
@@ -72,6 +81,8 @@ impl NodeKind {
             NodeKind::Route => "Route",
             NodeKind::Community => "Community",
             NodeKind::Process => "Process",
+            NodeKind::KafkaTopic => "KafkaTopic",
+            NodeKind::ExternalEndpoint => "ExternalEndpoint",
             NodeKind::Other => "Other",
         }
     }
@@ -92,6 +103,8 @@ impl NodeKind {
             "Route" => NodeKind::Route,
             "Community" => NodeKind::Community,
             "Process" => NodeKind::Process,
+            "KafkaTopic" => NodeKind::KafkaTopic,
+            "ExternalEndpoint" => NodeKind::ExternalEndpoint,
             _ => NodeKind::Other,
         }
     }
@@ -137,6 +150,18 @@ pub fn process_id(entry_slug: &str, hash: &str) -> NodeId {
     NodeId::new(format!("Process:{entry_slug}-{hash}"))
 }
 
+pub fn kafka_topic_id(topic: &str) -> NodeId {
+    NodeId::new(format!("KafkaTopic:{topic}"))
+}
+
+pub fn external_endpoint_id(method: &str, url_template: &str) -> NodeId {
+    NodeId::new(format!(
+        "ExternalEndpoint:{}:{}",
+        method.to_ascii_uppercase(),
+        url_template
+    ))
+}
+
 /// Edge types (mirrors `gitnexus-shared` `RelationshipType`, trimmed for v1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
@@ -154,6 +179,9 @@ pub enum EdgeKind {
     MemberOf,
     StepInProcess,
     HandlesRoute,
+    PublishesEvent,
+    ListensTo,
+    ExternalCall,
     Other,
 }
 
@@ -175,6 +203,9 @@ impl EdgeKind {
             EdgeKind::MemberOf => "MEMBER_OF",
             EdgeKind::StepInProcess => "STEP_IN_PROCESS",
             EdgeKind::HandlesRoute => "HANDLES_ROUTE",
+            EdgeKind::PublishesEvent => "PUBLISHES_EVENT",
+            EdgeKind::ListensTo => "LISTENS_TO",
+            EdgeKind::ExternalCall => "EXTERNAL_CALL",
             EdgeKind::Other => "REL",
         }
     }
@@ -276,6 +307,11 @@ mod tests {
             process_id("handle-login", "a3f9c1").as_str(),
             "Process:handle-login-a3f9c1"
         );
+        assert_eq!(kafka_topic_id("orders").as_str(), "KafkaTopic:orders");
+        assert_eq!(
+            external_endpoint_id("get", "/api/orders/{id}").as_str(),
+            "ExternalEndpoint:GET:/api/orders/{id}"
+        );
     }
 
     #[test]
@@ -295,6 +331,8 @@ mod tests {
             NodeKind::Route,
             NodeKind::Community,
             NodeKind::Process,
+            NodeKind::KafkaTopic,
+            NodeKind::ExternalEndpoint,
             NodeKind::Other,
         ] {
             assert_eq!(NodeKind::from_label(kind.label()), kind);
@@ -395,6 +433,19 @@ mod tests {
                     start_line: 6,
                     start_col: 4,
                     end_line: 6,
+                    end_col: 40,
+                },
+            }],
+            contract_sites: vec![ContractSite {
+                kind: ContractKind::EventPublish,
+                url_template: None,
+                topic: Some("user-saved".into()),
+                http_method: None,
+                in_callable: method_id("com.acme.UserService", "save", 1),
+                range: Range {
+                    start_line: 12,
+                    start_col: 8,
+                    end_line: 12,
                     end_col: 40,
                 },
             }],

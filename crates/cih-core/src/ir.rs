@@ -23,6 +23,41 @@ pub struct ParsedFile {
     /// patterns, aliases) scoped to their enclosing callable. Phase 4 uses these,
     /// precedence-ordered, to resolve a receiver's type. Raw (unresolved) names.
     pub type_bindings: Vec<TypeBinding>,
+    /// Inter-service communication sites discovered in this file. Phase 21 turns
+    /// these into ExternalEndpoint/KafkaTopic nodes plus cross-service edges.
+    #[serde(default)]
+    pub contract_sites: Vec<ContractSite>,
+}
+
+/// A source location that participates in an inter-service contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractSite {
+    pub kind: ContractKind,
+    /// URL template for HTTP calls, e.g. `/api/orders/{id}`.
+    #[serde(default)]
+    pub url_template: Option<String>,
+    /// Kafka/Spring topic name or Spring event class simple name.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// HTTP method for HTTP calls.
+    #[serde(default)]
+    pub http_method: Option<String>,
+    /// Graph id of the enclosing callable that makes/listens to this contract.
+    pub in_callable: NodeId,
+    pub range: Range,
+}
+
+/// Type of contract site discovered by the parser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContractKind {
+    /// HTTP call via RestTemplate / WebClient.
+    HttpCall,
+    /// Feign client method declaration.
+    FeignClient,
+    /// KafkaTemplate.send() / ApplicationEventPublisher.publishEvent().
+    EventPublish,
+    /// @KafkaListener / @EventListener method.
+    EventListen,
 }
 
 /// A declared symbol — a type, method, constructor, or field.

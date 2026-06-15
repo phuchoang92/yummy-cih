@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use cih_core::{
-    constructor_id, field_id, file_id, method_id, type_id, BindingKind, Edge, EdgeKind, Node,
-    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    constructor_id, field_id, file_id, method_id, type_id, BindingKind, ContractKind, ContractSite,
+    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite,
+    SymbolDef, TypeBinding,
 };
 use cih_lang::java::JavaProvider;
 use cih_lang::LanguageProvider;
@@ -48,6 +49,7 @@ struct FileBuilder {
     imports: Vec<RawImport>,
     reference_sites: Vec<ReferenceSite>,
     type_bindings: Vec<TypeBinding>,
+    contract_sites: Vec<ContractSite>,
     type_contexts: Vec<TypeContext>,
     callable_contexts: Vec<CallableContext>,
 }
@@ -72,6 +74,7 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParsedUnit> {
     collect_query_ir(&provider, &tree, src, &mut builder);
     collect_heritage_references(root, src, &mut builder);
     collect_spring_routes(root, src, &mut builder);
+    collect_contract_sites(root, src, &mut builder);
     normalize_builder(&mut builder);
 
     Ok(ParsedUnit {
@@ -85,6 +88,7 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParsedUnit> {
             imports: builder.imports,
             reference_sites: builder.reference_sites,
             type_bindings: builder.type_bindings,
+            contract_sites: builder.contract_sites,
         },
     })
 }
@@ -675,6 +679,360 @@ fn emit_spring_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut File
     }
 }
 
+fn collect_contract_sites(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    match node.kind() {
+        "interface_declaration" => emit_feign_contracts(node, src, builder),
+        "method_declaration" => emit_listener_contracts(node, src, builder),
+        "method_invocation" => emit_invocation_contract(node, src, builder),
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_contract_sites(child, src, builder);
+    }
+}
+
+fn emit_feign_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    let Some(feign) = annotations(node)
+        .into_iter()
+        .find(|ann| annotation_name(*ann, src).as_deref() == Some("FeignClient"))
+    else {
+        return;
+    };
+    let base = annotation_string_values(feign, src, &["url", "path", "value"])
+        .into_iter()
+        .next();
+
+    for method in method_declarations(node) {
+        let Some(callable) = callable_context_at(method.start_byte(), builder).cloned() else {
+            continue;
+        };
+        for route in spring_method_routes(method, src) {
+            let url = if let Some(base) = base.as_deref().filter(|base| base.starts_with('/')) {
+                normalize_route_path(&route.path, base)
+            } else {
+                normalize_external_url(&route.path)
+            };
+            builder.contract_sites.push(ContractSite {
+                kind: ContractKind::FeignClient,
+                url_template: Some(url),
+                topic: None,
+                http_method: Some(route.http_method.to_string()),
+                in_callable: callable.id.clone(),
+                range: route.range,
+            });
+        }
+    }
+}
+
+fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    let Some(callable) = callable_context_at(node.start_byte(), builder).cloned() else {
+        return;
+    };
+    for annotation in annotations(node) {
+        match annotation_name(annotation, src).as_deref() {
+            Some("KafkaListener") => {
+                for topic in
+                    annotation_string_values(annotation, src, &["topics", "topic", "value"])
+                {
+                    builder.contract_sites.push(ContractSite {
+                        kind: ContractKind::EventListen,
+                        url_template: None,
+                        topic: Some(topic),
+                        http_method: None,
+                        in_callable: callable.id.clone(),
+                        range: range_of(annotation),
+                    });
+                }
+            }
+            Some("EventListener") => {
+                if let Some(topic) = param_type_names(node, src).into_iter().next() {
+                    builder.contract_sites.push(ContractSite {
+                        kind: ContractKind::EventListen,
+                        url_template: None,
+                        topic: Some(base_type_simple(&topic)),
+                        http_method: None,
+                        in_callable: callable.id.clone(),
+                        range: range_of(annotation),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let method = text(name_node, src);
+    let Some(callable) = callable_context_at(node.start_byte(), builder).cloned() else {
+        return;
+    };
+    let receiver = node
+        .child_by_field_name("object")
+        .map(|object| text(object, src))
+        .unwrap_or_default();
+
+    if let Some(http_method) = rest_template_http_method(&method) {
+        if receiver_has_type(builder, &callable.in_fqcn, &receiver, "RestTemplate") {
+            builder.contract_sites.push(ContractSite {
+                kind: ContractKind::HttpCall,
+                url_template: first_string_argument(node, src)
+                    .map(|url| normalize_external_url(&url)),
+                topic: None,
+                http_method: Some(http_method.to_string()),
+                in_callable: callable.id,
+                range: range_of(node),
+            });
+        }
+        return;
+    }
+
+    if method == "uri" {
+        if let Some(http_method) = infer_webclient_http_method(&receiver) {
+            if root_receiver_has_type(builder, &callable.in_fqcn, &receiver, "WebClient") {
+                builder.contract_sites.push(ContractSite {
+                    kind: ContractKind::HttpCall,
+                    url_template: first_string_argument(node, src)
+                        .map(|url| normalize_external_url(&url)),
+                    topic: None,
+                    http_method: Some(http_method.to_string()),
+                    in_callable: callable.id,
+                    range: range_of(node),
+                });
+            }
+        }
+        return;
+    }
+
+    if method == "send" && receiver_has_type(builder, &callable.in_fqcn, &receiver, "KafkaTemplate")
+    {
+        if let Some(topic) = first_string_argument(node, src) {
+            builder.contract_sites.push(ContractSite {
+                kind: ContractKind::EventPublish,
+                url_template: None,
+                topic: Some(topic),
+                http_method: None,
+                in_callable: callable.id,
+                range: range_of(node),
+            });
+        }
+        return;
+    }
+
+    if method == "publishEvent"
+        && receiver_has_type(
+            builder,
+            &callable.in_fqcn,
+            &receiver,
+            "ApplicationEventPublisher",
+        )
+    {
+        if let Some(topic) = first_constructor_argument_type(node, src) {
+            builder.contract_sites.push(ContractSite {
+                kind: ContractKind::EventPublish,
+                url_template: None,
+                topic: Some(topic),
+                http_method: None,
+                in_callable: callable.id,
+                range: range_of(node),
+            });
+        }
+    }
+}
+
+fn method_declarations(node: TsNode<'_>) -> Vec<TsNode<'_>> {
+    let mut out = Vec::new();
+    collect_method_declarations(node, &mut out);
+    out
+}
+
+fn collect_method_declarations<'a>(node: TsNode<'a>, out: &mut Vec<TsNode<'a>>) {
+    if node.kind() == "method_declaration" {
+        out.push(node);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_method_declarations(child, out);
+    }
+}
+
+fn annotation_string_values(node: TsNode<'_>, src: &str, keys: &[&str]) -> Vec<String> {
+    let Some(arguments) = first_named_child(node, "annotation_argument_list") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        match child.kind() {
+            "string_literal" => {
+                if keys.contains(&"value") {
+                    if let Some(value) = unquote_spring_literal(&text(child, src)) {
+                        out.push(value);
+                    }
+                }
+            }
+            "element_value_array_initializer" | "array_initializer" => {
+                if keys.contains(&"value") {
+                    for string_node in string_literals(child) {
+                        if let Some(value) = unquote_spring_literal(&text(string_node, src)) {
+                            out.push(value);
+                        }
+                    }
+                }
+            }
+            "element_value_pair" => {
+                let key = child
+                    .child_by_field_name("key")
+                    .or_else(|| first_named_child(child, "identifier"))
+                    .map(|node| text(node, src));
+                if !key
+                    .as_deref()
+                    .is_some_and(|key| keys.iter().any(|candidate| candidate == &key))
+                {
+                    continue;
+                }
+                for string_node in string_literals(child) {
+                    if let Some(value) = unquote_spring_literal(&text(string_node, src)) {
+                        out.push(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn rest_template_http_method(method: &str) -> Option<&'static str> {
+    match method {
+        "getForObject" | "getForEntity" => Some("GET"),
+        "postForObject" | "postForEntity" | "postForLocation" => Some("POST"),
+        "put" => Some("PUT"),
+        "delete" => Some("DELETE"),
+        "patchForObject" => Some("PATCH"),
+        "exchange" => None,
+        _ => None,
+    }
+}
+
+fn infer_webclient_http_method(receiver: &str) -> Option<&'static str> {
+    for (needle, method) in [
+        (".get()", "GET"),
+        (".post()", "POST"),
+        (".put()", "PUT"),
+        (".delete()", "DELETE"),
+        (".patch()", "PATCH"),
+    ] {
+        if receiver.contains(needle) {
+            return Some(method);
+        }
+    }
+    None
+}
+
+fn first_string_argument(node: TsNode<'_>, src: &str) -> Option<String> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() == "string_literal" {
+            return unquote_spring_literal(&text(child, src));
+        }
+    }
+    None
+}
+
+fn first_constructor_argument_type(node: TsNode<'_>, src: &str) -> Option<String> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() == "object_creation_expression" {
+            let raw = child
+                .child_by_field_name("type")
+                .or_else(|| child.named_child(0))
+                .map(|ty| text(ty, src))?;
+            return Some(base_type_simple(&raw));
+        }
+    }
+    None
+}
+
+fn receiver_has_type(builder: &FileBuilder, in_fqcn: &str, receiver: &str, expected: &str) -> bool {
+    let receiver = receiver.trim();
+    if receiver.is_empty() {
+        return false;
+    }
+    let candidate = receiver.rsplit('.').next().unwrap_or(receiver);
+    binding_has_type(builder, in_fqcn, candidate.trim_end_matches("()"), expected)
+}
+
+fn root_receiver_has_type(
+    builder: &FileBuilder,
+    in_fqcn: &str,
+    receiver: &str,
+    expected: &str,
+) -> bool {
+    let root = receiver
+        .split('.')
+        .next()
+        .unwrap_or(receiver)
+        .trim()
+        .trim_end_matches("()");
+    binding_has_type(builder, in_fqcn, root, expected)
+}
+
+fn binding_has_type(builder: &FileBuilder, in_fqcn: &str, name: &str, expected: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let owner = class_of_signature(in_fqcn);
+    builder.type_bindings.iter().any(|binding| {
+        binding.name == name
+            && (binding.in_fqcn == in_fqcn || binding.in_fqcn == owner)
+            && base_type_simple(&binding.raw_type) == expected
+    })
+}
+
+fn class_of_signature(in_fqcn: &str) -> &str {
+    in_fqcn.split('#').next().unwrap_or(in_fqcn)
+}
+
+fn base_type_simple(raw: &str) -> String {
+    raw.split('<')
+        .next()
+        .unwrap_or(raw)
+        .replace("[]", "")
+        .rsplit('.')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .to_string()
+}
+
+fn normalize_external_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+    {
+        return rest
+            .find('/')
+            .map(|idx| collapse_slashes(&rest[idx..]))
+            .unwrap_or_else(|| "/".to_string());
+    }
+    if trimmed.starts_with('/') {
+        collapse_slashes(trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn spring_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> {
     annotations(node)
         .into_iter()
@@ -1239,6 +1597,34 @@ fn normalize_builder(builder: &mut FileBuilder) {
             && a.in_fqcn == b.in_fqcn
             && a.range == b.range
     });
+    builder.contract_sites.sort_by(|a, b| {
+        a.in_callable
+            .as_str()
+            .cmp(b.in_callable.as_str())
+            .then(contract_kind_key(a.kind).cmp(contract_kind_key(b.kind)))
+            .then(a.http_method.cmp(&b.http_method))
+            .then(a.url_template.cmp(&b.url_template))
+            .then(a.topic.cmp(&b.topic))
+            .then(a.range.start_line.cmp(&b.range.start_line))
+            .then(a.range.start_col.cmp(&b.range.start_col))
+    });
+    builder.contract_sites.dedup_by(|a, b| {
+        a.kind == b.kind
+            && a.url_template == b.url_template
+            && a.topic == b.topic
+            && a.http_method == b.http_method
+            && a.in_callable == b.in_callable
+            && a.range == b.range
+    });
+}
+
+fn contract_kind_key(kind: ContractKind) -> &'static str {
+    match kind {
+        ContractKind::HttpCall => "http-call",
+        ContractKind::FeignClient => "feign-client",
+        ContractKind::EventPublish => "event-publish",
+        ContractKind::EventListen => "event-listen",
+    }
 }
 
 trait RefKindKey {

@@ -265,6 +265,7 @@ pub(crate) fn analyze_from_scope_with_options(
     edges.extend(jar_edges);
 
     let mut all_nodes = parse_output.nodes;
+    all_nodes.extend(resolve_output.nodes);
     all_nodes.extend(jar_nodes);
 
     let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);

@@ -233,7 +233,9 @@ fn insert_edge(edges: &mut BTreeMap<(String, String, &'static str), Edge>, edge:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_core::{constructor_id, field_id, method_id, type_id, BindingKind, RefKind};
+    use cih_core::{
+        constructor_id, field_id, method_id, type_id, BindingKind, ContractKind, RefKind,
+    };
 
     fn temp_repo() -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -602,6 +604,85 @@ class Multi {
                 "expected route {path}"
             );
         }
+    }
+
+    #[test]
+    fn parses_cross_service_contract_sites() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/Contracts.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+package com.example;
+
+@FeignClient(name = "orders", path = "/orders")
+interface OrdersClient {
+    @GetMapping("/{id}")
+    Order getOrder(String id);
+}
+
+class ContractClient {
+    private RestTemplate restTemplate;
+    private WebClient webClient;
+    private KafkaTemplate<String, String> kafkaTemplate;
+    private ApplicationEventPublisher publisher;
+
+    @KafkaListener(topics = {"orders.created"})
+    void listen(String payload) {}
+
+    @EventListener
+    void onUserCreated(UserCreated event) {}
+
+    void call() {
+        restTemplate.getForObject("http://orders.local/api/orders/{id}", String.class);
+        webClient.post().uri("/api/payments").retrieve();
+        kafkaTemplate.send("orders.created", "1");
+        publisher.publishEvent(new UserCreated());
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let parsed = output.parsed_files.first().unwrap();
+
+        assert!(parsed.contract_sites.iter().any(|site| {
+            site.kind == ContractKind::FeignClient
+                && site.http_method.as_deref() == Some("GET")
+                && site.url_template.as_deref() == Some("/orders/{id}")
+                && site.in_callable == method_id("com.example.OrdersClient", "getOrder", 1)
+        }));
+        assert!(parsed.contract_sites.iter().any(|site| {
+            site.kind == ContractKind::HttpCall
+                && site.http_method.as_deref() == Some("GET")
+                && site.url_template.as_deref() == Some("/api/orders/{id}")
+                && site.in_callable == method_id("com.example.ContractClient", "call", 0)
+        }));
+        assert!(parsed.contract_sites.iter().any(|site| {
+            site.kind == ContractKind::HttpCall
+                && site.http_method.as_deref() == Some("POST")
+                && site.url_template.as_deref() == Some("/api/payments")
+        }));
+        assert!(parsed.contract_sites.iter().any(|site| {
+            site.kind == ContractKind::EventListen
+                && site.topic.as_deref() == Some("orders.created")
+                && site.in_callable == method_id("com.example.ContractClient", "listen", 1)
+        }));
+        assert!(parsed.contract_sites.iter().any(|site| {
+            site.kind == ContractKind::EventListen && site.topic.as_deref() == Some("UserCreated")
+        }));
+        assert!(parsed.contract_sites.iter().any(|site| {
+            site.kind == ContractKind::EventPublish
+                && site.topic.as_deref() == Some("orders.created")
+                && site.in_callable == method_id("com.example.ContractClient", "call", 0)
+        }));
+        assert!(parsed.contract_sites.iter().any(|site| {
+            site.kind == ContractKind::EventPublish && site.topic.as_deref() == Some("UserCreated")
+        }));
     }
 
     fn node_prop<'a>(

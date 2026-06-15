@@ -3,6 +3,8 @@ mod db;
 mod discover;
 mod embed;
 mod file_cache;
+mod group;
+mod group_cmd;
 mod registry;
 mod scan;
 mod scope;
@@ -138,6 +140,51 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage cross-service repo groups and sync contract matches.
+    Group {
+        #[command(subcommand)]
+        command: GroupCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GroupCommand {
+    /// Create an empty repo group.
+    Create {
+        /// Group name.
+        name: String,
+    },
+    /// Add a registered repo to a group.
+    Add {
+        /// Group name.
+        name: String,
+        /// Registered repo name or absolute path.
+        repo: String,
+    },
+    /// Remove a repo from a group.
+    Remove {
+        /// Group name.
+        name: String,
+        /// Registered repo name or absolute path.
+        repo: String,
+    },
+    /// List repo groups.
+    List {
+        /// Print groups as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sync cross-service contract matches for a group.
+    Sync {
+        /// Group name.
+        name: String,
+        /// FalkorDB URL accepted for forward compatibility; sync reads local artifacts today.
+        #[arg(long, env = "FALKOR_URL")]
+        falkor_url: Option<String>,
+        /// Print sync summary as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -209,11 +256,17 @@ fn main() -> Result<()> {
                 if reg.entries.is_empty() {
                     println!("No repositories indexed yet. Run `cih-engine analyze <repo>` first.");
                 } else {
-                    println!("{:<24} {:<12} {:>8} {:>8} {:>6}  path", "name", "indexed_at", "nodes", "edges", "files");
+                    println!(
+                        "{:<24} {:<12} {:>8} {:>8} {:>6}  path",
+                        "name", "indexed_at", "nodes", "edges", "files"
+                    );
                     println!("{}", "-".repeat(90));
                     for e in &reg.entries {
                         let date = e.indexed_at.get(..10).unwrap_or(&e.indexed_at);
-                        println!("{:<24} {:<12} {:>8} {:>8} {:>6}  {}", e.name, date, e.stats.nodes, e.stats.edges, e.stats.files, e.path);
+                        println!(
+                            "{:<24} {:<12} {:>8} {:>8} {:>6}  {}",
+                            e.name, date, e.stats.nodes, e.stats.edges, e.stats.files, e.path
+                        );
                     }
                 }
             }
@@ -230,13 +283,19 @@ fn main() -> Result<()> {
                         entry: &'a cih_core::RegistryEntry,
                         stale: bool,
                     }
-                    println!("{}", serde_json::to_string_pretty(&StatusOutput { entry, stale })?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&StatusOutput { entry, stale })?
+                    );
                 } else {
                     println!("name:          {}", entry.name);
                     println!("path:          {}", entry.path);
                     println!("graph_key:     {}", entry.graph_key);
                     println!("indexed_at:    {}", entry.indexed_at);
-                    println!("git_head:      {}", entry.last_git_head.as_deref().unwrap_or("(unknown)"));
+                    println!(
+                        "git_head:      {}",
+                        entry.last_git_head.as_deref().unwrap_or("(unknown)")
+                    );
                     println!("stale:         {}", stale);
                     println!("nodes:         {}", entry.stats.nodes);
                     println!("edges:         {}", entry.stats.edges);
@@ -246,10 +305,23 @@ fn main() -> Result<()> {
                     println!("processes:     {}", entry.stats.processes);
                 }
             } else {
-                eprintln!("Registry entry not found for '{name}'. Run `cih-engine analyze <repo>` first.");
+                eprintln!(
+                    "Registry entry not found for '{name}'. Run `cih-engine analyze <repo>` first."
+                );
                 std::process::exit(1);
             }
             Ok(())
         }
+        Command::Group { command } => match command {
+            GroupCommand::Create { name } => group_cmd::run_group_create(&name),
+            GroupCommand::Add { name, repo } => group_cmd::run_group_add(&name, &repo),
+            GroupCommand::Remove { name, repo } => group_cmd::run_group_remove(&name, &repo),
+            GroupCommand::List { json } => group_cmd::run_group_list(json),
+            GroupCommand::Sync {
+                name,
+                falkor_url: _,
+                json,
+            } => group_cmd::run_group_sync(&name, json),
+        },
     }
 }

@@ -18,22 +18,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use cih_core::{Node, NodeId};
+use cih_core::{ContractMatch, ContractMatchKind, Node, NodeId};
 use cih_embed::{EmbedModelKind, EmbedStore};
 use cih_graph_store::{Direction, GraphStore, GraphStoreError, RouteInfo};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, Implementation, ListResourcesResult,
-        ListResourceTemplatesResult, PaginatedRequestParam, ProtocolVersion,
-        ReadResourceRequestParam, ReadResourceResult, ServerCapabilities, ServerInfo,
+        CallToolResult, Content, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+        PaginatedRequestParam, ProtocolVersion, ReadResourceRequestParam, ReadResourceResult,
+        ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
-    tool, tool_handler, tool_router, RoleServer,
+    tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService,
     },
-    ErrorData as McpError, ServerHandler,
+    ErrorData as McpError, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -105,6 +105,16 @@ struct DetectChangesArgs {
     /// registered under the server's active graph key.
     #[serde(default)]
     repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GroupContractsArgs {
+    /// Group name created with `cih-engine group create`.
+    group: String,
+    /// Optional kind filter: `all`, `http`, `http_route`, `kafka`, `kafka_topic`,
+    /// `spring`, or `spring_event`.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 // ---- ambiguous-symbol helpers ----
@@ -180,9 +190,11 @@ impl CihServer {
         })
     }
 
-    #[tool(description = "360° context for a symbol: its node, callers, callees, and processes. \
+    #[tool(
+        description = "360° context for a symbol: its node, callers, callees, and processes. \
         Pass a full NodeId (e.g. `Class:com.acme.OrderService`) or a short name; \
-        short names return {\"status\":\"ambiguous\",\"candidates\":[...]} when multiple match.")]
+        short names return {\"status\":\"ambiguous\",\"candidates\":[...]} when multiple match."
+    )]
     async fn context(
         &self,
         Parameters(args): Parameters<ContextArgs>,
@@ -203,9 +215,11 @@ impl CihServer {
         json_result(&ctx)
     }
 
-    #[tool(description = "Blast radius of changing a symbol: affected symbols, depth, and risk. \
+    #[tool(
+        description = "Blast radius of changing a symbol: affected symbols, depth, and risk. \
         Pass a full NodeId or short name; short names that match multiple symbols return \
-        {\"status\":\"ambiguous\",\"candidates\":[...]}.")]
+        {\"status\":\"ambiguous\",\"candidates\":[...]}."
+    )]
     async fn impact(
         &self,
         Parameters(args): Parameters<ImpactArgs>,
@@ -266,8 +280,10 @@ impl CihServer {
         json_result(&QueryResult { hits, subgraph })
     }
 
-    #[tool(description = "List Spring REST endpoints: HTTP method + path + handler method. \
-        Use prefix to filter by path prefix (e.g. prefix=\"/api/users\").")]
+    #[tool(
+        description = "List Spring REST endpoints: HTTP method + path + handler method. \
+        Use prefix to filter by path prefix (e.g. prefix=\"/api/users\")."
+    )]
     async fn route_map(
         &self,
         Parameters(args): Parameters<RouteMapArgs>,
@@ -310,18 +326,19 @@ impl CihServer {
         }
     }
 
-    #[tool(description = "Diff-driven change-impact analysis. Runs `git diff` in the repo, \
+    #[tool(
+        description = "Diff-driven change-impact analysis. Runs `git diff` in the repo, \
         maps changed files to graph nodes, traces upstream blast radius via BFS, and \
         scores overall risk (low/medium/high/critical). \
-        scope: `working` (all uncommitted), `staged` (index only), `base_ref` (vs a branch/SHA).")]
+        scope: `working` (all uncommitted), `staged` (index only), `base_ref` (vs a branch/SHA)."
+    )]
     async fn detect_changes(
         &self,
         Parameters(args): Parameters<DetectChangesArgs>,
     ) -> Result<CallToolResult, McpError> {
         // 1. Find repo path via registry.
-        let repo_path = find_repo_path(args.repo.as_deref(), &self.graph_key).map_err(|e| {
-            McpError::invalid_params(e, None)
-        })?;
+        let repo_path = find_repo_path(args.repo.as_deref(), &self.graph_key)
+            .map_err(|e| McpError::invalid_params(e, None))?;
 
         // 2. Run git diff to get list of changed files (repo-relative paths).
         let changed_files = git_changed_files(&repo_path, &args.scope, args.base_ref.as_deref())
@@ -356,11 +373,7 @@ impl CihServer {
         let mut affected_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         let symbol_limit = changed_nodes.len().min(20);
         for node in &changed_nodes[..symbol_limit] {
-            if let Ok(impact) = self
-                .store
-                .impact(&node.id, Direction::Upstream, 4)
-                .await
-            {
+            if let Ok(impact) = self.store.impact(&node.id, Direction::Upstream, 4).await {
                 for n in &impact.affected {
                     affected_set.insert(n.id.to_string());
                 }
@@ -417,6 +430,43 @@ impl CihServer {
             risk,
         })
     }
+
+    #[tool(
+        description = "Return cross-service contract matches for a repo group. \
+        Run `cih-engine group sync <group>` first. Optional kind filter: \
+        all, http/http_route, kafka/kafka_topic, spring/spring_event."
+    )]
+    async fn group_contracts(
+        &self,
+        Parameters(args): Parameters<GroupContractsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = cih_core::contracts_path(&args.group).ok_or_else(|| {
+            McpError::internal_error("cannot determine HOME for group contracts path", None)
+        })?;
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            McpError::invalid_params(
+                format!(
+                    "cannot read contracts for group '{}' at {}: {e}. Run `cih-engine group sync {}` first",
+                    args.group,
+                    path.display(),
+                    args.group
+                ),
+                None,
+            )
+        })?;
+        let filter = parse_contract_kind_filter(args.kind.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let mut matches = Vec::new();
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            let item: ContractMatch = serde_json::from_str(line).map_err(|e| {
+                McpError::internal_error(format!("malformed contracts artifact: {e}"), None)
+            })?;
+            if filter.is_none() || filter == Some(item.kind) {
+                matches.push(item);
+            }
+        }
+        json_result(&matches)
+    }
 }
 
 #[tool_handler]
@@ -435,7 +485,7 @@ impl ServerHandler for CihServer {
             },
             instructions: Some(
                 "Code Intelligence Hub — query the call graph: `query`, `context`, `impact`, \
-                 `communities`, `route_map`, `list_repos`, `detect_changes`. \
+                 `communities`, `route_map`, `group_contracts`, `list_repos`, `detect_changes`. \
                  Short symbol names trigger disambiguation; full NodeIds (Kind:fqn) skip it. \
                  Read repo data via cih://repo/{name}/context|communities|processes|schema."
                     .into(),
@@ -488,9 +538,7 @@ fn find_repo_path(repo: Option<&str>, graph_key: &str) -> std::result::Result<St
             .find(|e| e.graph_key == graph_key)
             .map(|e| e.path.clone())
             .ok_or_else(|| {
-                format!(
-                    "no repo registered for graph_key '{graph_key}'; pass `repo` explicitly"
-                )
+                format!("no repo registered for graph_key '{graph_key}'; pass `repo` explicitly")
             })
     }
 }
@@ -518,9 +566,7 @@ fn git_changed_files(
         }
     }
     cmd.current_dir(repo_path);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("git diff failed: {e}"))?;
+    let output = cmd.output().map_err(|e| format!("git diff failed: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git diff error: {stderr}"));
@@ -541,6 +587,20 @@ fn parse_direction(direction: Option<&str>) -> Direction {
         Some("downstream") => Direction::Downstream,
         Some("both") => Direction::Both,
         _ => Direction::Upstream,
+    }
+}
+
+fn parse_contract_kind_filter(
+    kind: Option<&str>,
+) -> std::result::Result<Option<ContractMatchKind>, String> {
+    match kind.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
+        "" | "all" => Ok(None),
+        "http" | "http_route" | "http-route" => Ok(Some(ContractMatchKind::HttpRoute)),
+        "kafka" | "kafka_topic" | "kafka-topic" => Ok(Some(ContractMatchKind::KafkaTopic)),
+        "spring" | "spring_event" | "spring-event" => Ok(Some(ContractMatchKind::SpringEvent)),
+        other => Err(format!(
+            "unknown contract kind '{other}'; expected all, http, kafka, or spring"
+        )),
     }
 }
 
@@ -582,6 +642,24 @@ mod tests {
     }
 
     #[test]
+    fn contract_kind_filter_accepts_aliases() {
+        assert_eq!(parse_contract_kind_filter(None).unwrap(), None);
+        assert_eq!(
+            parse_contract_kind_filter(Some("http")).unwrap(),
+            Some(ContractMatchKind::HttpRoute)
+        );
+        assert_eq!(
+            parse_contract_kind_filter(Some("kafka_topic")).unwrap(),
+            Some(ContractMatchKind::KafkaTopic)
+        );
+        assert_eq!(
+            parse_contract_kind_filter(Some("spring-event")).unwrap(),
+            Some(ContractMatchKind::SpringEvent)
+        );
+        assert!(parse_contract_kind_filter(Some("queue")).is_err());
+    }
+
+    #[test]
     fn git_diff_staged_args_are_correct() {
         // Verify that staged scope would produce --cached HEAD args (structural test).
         let scope = "staged";
@@ -589,9 +667,15 @@ mod tests {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("diff").arg("--name-only");
         match scope {
-            "staged" => { cmd.arg("--cached").arg("HEAD"); }
-            "base_ref" => { cmd.arg(base_ref.unwrap_or("main")); }
-            _ => { cmd.arg("HEAD"); }
+            "staged" => {
+                cmd.arg("--cached").arg("HEAD");
+            }
+            "base_ref" => {
+                cmd.arg(base_ref.unwrap_or("main"));
+            }
+            _ => {
+                cmd.arg("HEAD");
+            }
         }
         // Just checking no panic here — actual execution would require a git repo.
     }

@@ -139,6 +139,7 @@ impl FalkorStore {
 impl GraphStore for FalkorStore {
     async fn ensure_schema(&self) -> Result<()> {
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
+        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
         Ok(())
     }
 
@@ -381,7 +382,12 @@ impl GraphStore for FalkorStore {
              ORDER BY n.id LIMIT {lim}",
             name_lit = cstr(name),
         );
-        Ok(self.rows(&q).await?.iter().map(|r| node_from_row(r)).collect())
+        Ok(self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect())
     }
 
     async fn nodes_in_files(&self, files: &[String]) -> Result<Vec<Node>> {
@@ -400,7 +406,12 @@ impl GraphStore for FalkorStore {
              RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
              ORDER BY n.file, n.id"
         );
-        Ok(self.rows(&q).await?.iter().map(|r| node_from_row(r)).collect())
+        Ok(self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect())
     }
 
     async fn processes_for_symbols(&self, symbol_ids: &[NodeId]) -> Result<Vec<String>> {
@@ -575,6 +586,9 @@ fn edge_from_label(label: &str) -> EdgeKind {
         "MEMBER_OF" => EdgeKind::MemberOf,
         "STEP_IN_PROCESS" => EdgeKind::StepInProcess,
         "HANDLES_ROUTE" => EdgeKind::HandlesRoute,
+        "PUBLISHES_EVENT" => EdgeKind::PublishesEvent,
+        "LISTENS_TO" => EdgeKind::ListensTo,
+        "EXTERNAL_CALL" => EdgeKind::ExternalCall,
         _ => EdgeKind::Other,
     }
 }

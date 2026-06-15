@@ -1,7 +1,7 @@
 use cih_core::{EdgeKind, NodeKind, Registry};
 use rmcp::{
     model::{
-        AnnotateAble, ListResourcesResult, ListResourceTemplatesResult, PaginatedRequestParam,
+        AnnotateAble, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParam,
         RawResource, RawResourceTemplate, ReadResourceRequestParam, ReadResourceResult,
         ResourceContents,
     },
@@ -95,9 +95,7 @@ pub fn list_resource_templates(
 }
 
 /// Serve one resource by URI.
-pub fn read_resource(
-    request: ReadResourceRequestParam,
-) -> Result<ReadResourceResult, McpError> {
+pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceResult, McpError> {
     let uri = &request.uri;
 
     // Parse cih://repo/{name}/{section}
@@ -141,16 +139,16 @@ fn read_community_nodes(
         .as_deref()
         .ok_or_else(|| McpError::invalid_params("discover not run for this repo yet", None))?;
     let path = std::path::Path::new(dir).join("nodes.jsonl");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| McpError::internal_error(format!("cannot read {}: {e}", path.display()), None))?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| {
+        McpError::internal_error(format!("cannot read {}: {e}", path.display()), None)
+    })?;
     let label = kind.label();
     let nodes: Vec<serde_json::Value> = raw
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .filter(|v: &serde_json::Value| v.get("kind").and_then(|k| k.as_str()) == Some(label))
         .collect();
-    serde_json::to_string_pretty(&nodes)
-        .map_err(|e| McpError::internal_error(e.to_string(), None))
+    serde_json::to_string_pretty(&nodes).map_err(|e| McpError::internal_error(e.to_string(), None))
 }
 
 fn schema_json() -> String {
@@ -175,6 +173,8 @@ fn schema_json() -> String {
             NodeKind::Route.label(),
             NodeKind::Community.label(),
             NodeKind::Process.label(),
+            NodeKind::KafkaTopic.label(),
+            NodeKind::ExternalEndpoint.label(),
             NodeKind::Other.label(),
         ],
         edge_kinds: vec![
@@ -192,6 +192,9 @@ fn schema_json() -> String {
             EdgeKind::MemberOf.cypher_label(),
             EdgeKind::StepInProcess.cypher_label(),
             EdgeKind::HandlesRoute.cypher_label(),
+            EdgeKind::PublishesEvent.cypher_label(),
+            EdgeKind::ListensTo.cypher_label(),
+            EdgeKind::ExternalCall.cypher_label(),
             EdgeKind::Other.cypher_label(),
         ],
     };

@@ -9,13 +9,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cih_core::{
-    file_id, BindingKind, Edge, EdgeKind, NodeId, NodeKind, ParsedFile, RawImport, RefKind,
-    ReferenceSite, SymbolDef, TypeBinding,
+    external_endpoint_id, file_id, kafka_topic_id, BindingKind, ContractKind, Edge, EdgeKind, Node,
+    NodeId, NodeKind, ParsedFile, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
 };
 
 /// Result of turning unresolved [`ReferenceSite`]s into graph edges.
 #[derive(Clone, Debug, Default)]
 pub struct ResolveOutput {
+    pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     /// Reference/import sites that could not be resolved to an in-scope node.
     pub skipped: u64,
@@ -443,6 +444,7 @@ struct EdgeEmitter<'a> {
     parsed: &'a [ParsedFile],
     index: ResolveIndex,
     handled: HashSet<(usize, usize)>,
+    nodes: Vec<Node>,
     edges: Vec<Edge>,
     skipped: u64,
     unresolved_external_fqcns: BTreeSet<String>,
@@ -454,6 +456,7 @@ impl<'a> EdgeEmitter<'a> {
             parsed,
             index,
             handled: HashSet::new(),
+            nodes: Vec::new(),
             edges: Vec::new(),
             skipped: 0,
             unresolved_external_fqcns: BTreeSet::new(),
@@ -467,6 +470,9 @@ impl<'a> EdgeEmitter<'a> {
         self.emit_import_edges();
         self.emit_heritage_edges();
         self.emit_mro_edges();
+        let (contract_nodes, contract_edges) = resolve_contract_edges(self.parsed);
+        self.nodes.extend(contract_nodes);
+        self.edges.extend(contract_edges);
         self.finish()
     }
 
@@ -707,9 +713,9 @@ impl<'a> EdgeEmitter<'a> {
                 owner.clone()
             };
 
-            if let Some(dst) = self
-                .index
-                .find_member_in_hierarchy(&effective_owner, &site.name, site.arity)
+            if let Some(dst) =
+                self.index
+                    .find_member_in_hierarchy(&effective_owner, &site.name, site.arity)
             {
                 let (confidence, reason) = if effective_owner != owner {
                     (0.9, "di-resolved")
@@ -905,6 +911,12 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn finish(mut self) -> ResolveOutput {
+        let mut deduped_nodes = BTreeMap::new();
+        for node in self.nodes.drain(..) {
+            deduped_nodes
+                .entry(node.id.as_str().to_string())
+                .or_insert(node);
+        }
         let mut deduped = BTreeMap::new();
         for edge in self.edges.drain(..) {
             let key = (
@@ -916,11 +928,115 @@ impl<'a> EdgeEmitter<'a> {
         }
         let edges = deduped.into_values().collect();
         ResolveOutput {
+            nodes: deduped_nodes.into_values().collect(),
             edges,
             skipped: self.skipped,
             unresolved_external_fqcns: self.unresolved_external_fqcns.into_iter().collect(),
         }
     }
+}
+
+/// Convert parser-discovered inter-service contract sites into graph nodes and edges.
+pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    for pf in parsed {
+        for site in &pf.contract_sites {
+            match site.kind {
+                ContractKind::HttpCall | ContractKind::FeignClient => {
+                    let Some(url_template) = site.url_template.as_deref() else {
+                        continue;
+                    };
+                    let Some(http_method) = site.http_method.as_deref() else {
+                        continue;
+                    };
+                    let method = http_method.to_ascii_uppercase();
+                    let id = external_endpoint_id(&method, url_template);
+                    let name = format!("{method} {url_template}");
+                    let source = match site.kind {
+                        ContractKind::FeignClient => "feign-client",
+                        _ => "http-client",
+                    };
+                    nodes.push(Node {
+                        id: id.clone(),
+                        kind: NodeKind::ExternalEndpoint,
+                        name: name.clone(),
+                        qualified_name: Some(name),
+                        file: pf.file.clone(),
+                        range: site.range,
+                        props: Some(serde_json::json!({
+                            "httpMethod": method,
+                            "path": url_template,
+                            "urlTemplate": url_template,
+                            "source": source,
+                        })),
+                    });
+                    edges.push(Edge {
+                        src: site.in_callable.clone(),
+                        dst: id,
+                        kind: EdgeKind::ExternalCall,
+                        confidence: 0.75,
+                        reason: match site.kind {
+                            ContractKind::FeignClient => "feign-client",
+                            _ => "http-client",
+                        }
+                        .to_string(),
+                    });
+                }
+                ContractKind::EventPublish | ContractKind::EventListen => {
+                    let Some(topic) = site.topic.as_deref() else {
+                        continue;
+                    };
+                    let id = kafka_topic_id(topic);
+                    nodes.push(Node {
+                        id: id.clone(),
+                        kind: NodeKind::KafkaTopic,
+                        name: topic.to_string(),
+                        qualified_name: Some(topic.to_string()),
+                        file: pf.file.clone(),
+                        range: site.range,
+                        props: Some(serde_json::json!({
+                            "topic": topic,
+                        })),
+                    });
+                    let (kind, reason) = match site.kind {
+                        ContractKind::EventPublish => (EdgeKind::PublishesEvent, "event-publish"),
+                        ContractKind::EventListen => (EdgeKind::ListensTo, "event-listen"),
+                        _ => unreachable!("HTTP contract kind handled above"),
+                    };
+                    edges.push(Edge {
+                        src: site.in_callable.clone(),
+                        dst: id,
+                        kind,
+                        confidence: 0.8,
+                        reason: reason.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut deduped_nodes = BTreeMap::new();
+    for node in nodes {
+        deduped_nodes
+            .entry(node.id.as_str().to_string())
+            .or_insert(node);
+    }
+    let mut deduped_edges = BTreeMap::new();
+    for edge in edges {
+        let key = (
+            edge.src.as_str().to_string(),
+            edge.dst.as_str().to_string(),
+            edge.kind.cypher_label(),
+        );
+        deduped_edges.entry(key).or_insert(edge);
+    }
+
+    (
+        deduped_nodes.into_values().collect(),
+        deduped_edges.into_values().collect(),
+    )
 }
 
 /// Remove duplicates from `v` without changing the order of the first occurrences.
@@ -1095,7 +1211,10 @@ fn split_last_dot_outside_parens(value: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_core::{constructor_id, field_id, method_id, type_id, EdgeKind, Range, ReferenceSite};
+    use cih_core::{
+        constructor_id, external_endpoint_id, field_id, kafka_topic_id, method_id, type_id,
+        ContractKind, ContractSite, EdgeKind, Range, ReferenceSite,
+    };
 
     fn type_def(kind: NodeKind, fqcn: &str) -> SymbolDef {
         SymbolDef {
@@ -1183,6 +1302,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn contract_sites_emit_nodes_and_edges() {
+        let caller = method_id("com.acme.Client", "call", 0);
+        let listener = method_id("com.acme.Client", "listen", 1);
+        let file = ParsedFile {
+            file: "com/acme/Client.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+            contract_sites: vec![
+                ContractSite {
+                    kind: ContractKind::HttpCall,
+                    url_template: Some("/api/orders/{id}".into()),
+                    topic: None,
+                    http_method: Some("get".into()),
+                    in_callable: caller.clone(),
+                    range: Range::default(),
+                },
+                ContractSite {
+                    kind: ContractKind::EventPublish,
+                    url_template: None,
+                    topic: Some("orders.created".into()),
+                    http_method: None,
+                    in_callable: caller.clone(),
+                    range: Range::default(),
+                },
+                ContractSite {
+                    kind: ContractKind::EventListen,
+                    url_template: None,
+                    topic: Some("orders.created".into()),
+                    http_method: None,
+                    in_callable: listener.clone(),
+                    range: Range::default(),
+                },
+            ],
+        };
+
+        let out = resolve_edges(&[file]);
+        let endpoint = external_endpoint_id("GET", "/api/orders/{id}");
+        let topic = kafka_topic_id("orders.created");
+        assert!(out
+            .nodes
+            .iter()
+            .any(|node| node.id == endpoint && node.kind == NodeKind::ExternalEndpoint));
+        assert!(out
+            .nodes
+            .iter()
+            .any(|node| node.id == topic && node.kind == NodeKind::KafkaTopic));
+        assert!(out.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::ExternalCall && edge.src == caller && edge.dst == endpoint
+        }));
+        assert!(out.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::PublishesEvent && edge.src == caller && edge.dst == topic
+        }));
+        assert!(out.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::ListensTo && edge.src == listener && edge.dst == topic
+        }));
+    }
+
     fn heritage(class_fqcn: &str, super_name: &str, kind: RefKind) -> ReferenceSite {
         ReferenceSite {
             name: super_name.into(),
@@ -1228,6 +1408,7 @@ mod tests {
             imports: vec![import("java.util.List")],
             reference_sites: vec![],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let service = ParsedFile {
             file: "com/acme/OwnerService.java".into(),
@@ -1244,6 +1425,7 @@ mod tests {
                 RefKind::Implements,
             )],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let controller = ParsedFile {
             file: "com/acme/OwnerController.java".into(),
@@ -1269,6 +1451,7 @@ mod tests {
                 "com.acme.OwnerController#handle/1",
                 5,
             )],
+            contract_sites: vec![],
         };
         let thing = ParsedFile {
             file: "com/other/Thing.java".into(),
@@ -1277,6 +1460,7 @@ mod tests {
             imports: vec![],
             reference_sites: vec![],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         vec![repo, service, controller, thing]
     }
@@ -1503,6 +1687,7 @@ mod tests {
             imports: vec![],
             reference_sites: vec![],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let mammal = ParsedFile {
             file: "com/acme/Mammal.java".into(),
@@ -1515,6 +1700,7 @@ mod tests {
             // Mammal implements Animal but has no speak() — abstract.
             reference_sites: vec![heritage("com.acme.Mammal", "Animal", RefKind::Implements)],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let dog = ParsedFile {
             file: "com/acme/Dog.java".into(),
@@ -1531,6 +1717,7 @@ mod tests {
                 heritage("com.acme.Dog", "Animal", RefKind::Implements),
             ],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         vec![animal, mammal, dog]
     }
@@ -1605,6 +1792,7 @@ mod tests {
             imports: vec![],
             reference_sites: vec![],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let marker = ParsedFile {
             file: "com/acme/Marker.java".into(),
@@ -1616,6 +1804,7 @@ mod tests {
             imports: vec![],
             reference_sites: vec![],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let child = ParsedFile {
             file: "com/acme/Child.java".into(),
@@ -1631,6 +1820,7 @@ mod tests {
                 heritage("com.acme.Child", "Marker", RefKind::Implements),
             ],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let out = resolve_edges(&[base, marker, child]);
         // Exactly one METHOD_OVERRIDES to Base.act (not to Marker).
@@ -1686,10 +1876,11 @@ mod tests {
             imports: vec![],
             reference_sites: vec![],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
 
         // Impl: UserServiceImpl implements UserService
-        let mut impl_def = SymbolDef {
+        let impl_def = SymbolDef {
             id: type_id(NodeKind::Class, "com.acme.UserServiceImpl"),
             kind: NodeKind::Class,
             fqcn: "com.acme.UserServiceImpl".into(),
@@ -1716,6 +1907,7 @@ mod tests {
                 RefKind::Implements,
             )],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
 
         // Caller: OrderController with field `userService: UserService` and call userService.save(u)
@@ -1756,6 +1948,7 @@ mod tests {
                 in_fqcn: "com.acme.OrderController".into(),
                 range: Range::default(),
             }],
+            contract_sites: vec![],
         };
 
         vec![iface, impl_file, caller]
@@ -1765,14 +1958,22 @@ mod tests {
     fn di_resolves_interface_call_to_service_impl() {
         let files = make_di_scenario(Some("service"));
         let out = resolve_edges(&files);
-        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         // Should call the impl, not the interface
         assert!(
-            calls.iter().any(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1)),
+            calls
+                .iter()
+                .any(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1)),
             "should resolve to impl method"
         );
         assert!(
-            !calls.iter().any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
+            !calls
+                .iter()
+                .any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
             "should NOT call the interface method when impl is found"
         );
         // Confidence should be 0.9 for DI-resolved
@@ -1788,10 +1989,16 @@ mod tests {
         // Impl exists but has no @Service stereotype
         let files = make_di_scenario(None);
         let out = resolve_edges(&files);
-        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         // Falls back to interface method
         assert!(
-            calls.iter().any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
+            calls
+                .iter()
+                .any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
             "should fall back to interface method when no @Service impl"
         );
     }
@@ -1821,6 +2028,7 @@ mod tests {
             imports: vec![],
             reference_sites: vec![],
             type_bindings: vec![],
+            contract_sites: vec![],
         };
         let make_impl = |name: &str| -> ParsedFile {
             let fqcn = format!("com.acme.{name}");
@@ -1846,6 +2054,7 @@ mod tests {
                 imports: vec![],
                 reference_sites: vec![heritage(&fqcn, "UserService", RefKind::Implements)],
                 type_bindings: vec![],
+                contract_sites: vec![],
             }
         };
         let caller = ParsedFile {
@@ -1885,12 +2094,24 @@ mod tests {
                 in_fqcn: "com.acme.OrderController".into(),
                 range: Range::default(),
             }],
+            contract_sites: vec![],
         };
-        let out = resolve_edges(&[iface, make_impl("UserServiceImplA"), make_impl("UserServiceImplB"), caller]);
-        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let out = resolve_edges(&[
+            iface,
+            make_impl("UserServiceImplA"),
+            make_impl("UserServiceImplB"),
+            caller,
+        ]);
+        let calls: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         // Must fall back to interface — ambiguous, don't pick one
         assert!(
-            calls.iter().any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
+            calls
+                .iter()
+                .any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
             "ambiguous DI should fall back to interface method"
         );
         assert!(
@@ -1925,6 +2146,7 @@ mod tests {
                 imports: vec![],
                 reference_sites: vec![],
                 type_bindings: vec![],
+                contract_sites: vec![],
             };
             let caller = ParsedFile {
                 file: "com/acme/OrderController.java".into(),
@@ -1944,7 +2166,11 @@ mod tests {
                         stereotype: Some("controller".into()),
                     },
                     method_def("com.acme.OrderController", "placeOrder", &["Order"], None),
-                    field_def("com.acme.OrderController", "userServiceImpl", "UserServiceImpl"),
+                    field_def(
+                        "com.acme.OrderController",
+                        "userServiceImpl",
+                        "UserServiceImpl",
+                    ),
                 ],
                 imports: vec![],
                 reference_sites: vec![ReferenceSite {
@@ -1963,13 +2189,20 @@ mod tests {
                     in_fqcn: "com.acme.OrderController".into(),
                     range: Range::default(),
                 }],
+                contract_sites: vec![],
             };
             vec![concrete, caller]
         };
         let out = resolve_edges(&files);
-        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert!(
-            calls.iter().any(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1)),
+            calls
+                .iter()
+                .any(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1)),
             "concrete field should resolve directly to impl"
         );
         assert!(
@@ -1983,7 +2216,11 @@ mod tests {
         // @Repository stereotype also qualifies for DI resolution
         let files = make_di_scenario(Some("repository"));
         let out = resolve_edges(&files);
-        let calls: Vec<_> = out.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert!(
             calls.iter().any(|e| {
                 e.dst == method_id("com.acme.UserServiceImpl", "save", 1)
