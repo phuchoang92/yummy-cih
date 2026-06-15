@@ -71,6 +71,18 @@ fn analyze_emit_writes_artifacts_without_a_database() {
         "resolved CALLS edge should be written"
     );
 
+    // Unresolved-ref report files exist on disk.
+    let unresolved_jsonl = emit.artifacts_dir.join("unresolved-refs.jsonl");
+    let unresolved_md = emit.artifacts_dir.join("unresolved-refs.md");
+    assert!(unresolved_jsonl.exists(), "unresolved-refs.jsonl should exist");
+    assert!(unresolved_md.exists(), "unresolved-refs.md should exist");
+    assert!(
+        fs::read_to_string(&unresolved_md)
+            .unwrap()
+            .contains("# Unresolved References"),
+        "unresolved-refs.md should have expected header"
+    );
+
     // Skipped (no DB) maps to the right summary status, no exit.
     let summary = emit.summary(&LoadOutcome::Skipped);
     assert_eq!(summary.falkor_status, "skipped");

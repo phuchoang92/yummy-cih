@@ -10,8 +10,31 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cih_core::{
     external_endpoint_id, file_id, kafka_topic_id, BindingKind, ContractKind, Edge, EdgeKind, Node,
-    NodeId, NodeKind, ParsedFile, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
 };
+use serde::{Deserialize, Serialize};
+
+pub mod reports;
+pub use reports::write_unresolved_reports;
+
+/// Per-site diagnostic record for a reference that could not be resolved.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnresolvedRef {
+    pub file: String,
+    pub kind: String,
+    pub name: String,
+    pub receiver: Option<String>,
+    pub arity: Option<u16>,
+    pub in_fqcn: String,
+    pub in_callable: NodeId,
+    pub range: Range,
+    /// Reason taxonomy: receiver_type_unknown | receiver_external | member_not_found |
+    /// ctor_type_unknown | type_ref_unknown | heritage_type_unknown |
+    /// free_call_unresolved | field_not_found | callresult_return_type_unknown
+    pub reason: String,
+    pub resolved_receiver_type: Option<String>,
+    pub external_fqcn: Option<String>,
+}
 
 /// Result of turning unresolved [`ReferenceSite`]s into graph edges.
 #[derive(Clone, Debug, Default)]
@@ -22,6 +45,8 @@ pub struct ResolveOutput {
     pub skipped: u64,
     /// Qualified external types discovered while trying to resolve calls/ctors.
     pub unresolved_external_fqcns: Vec<String>,
+    /// Per-site diagnostic records for all unresolved references.
+    pub unresolved_refs: Vec<UnresolvedRef>,
 }
 
 /// Run Phase 4.2 over all parsed files: receiver-bound calls, free calls,
@@ -316,11 +341,13 @@ impl ResolveIndex {
             | BindingKind::Return => self.resolve_in_type(&tb.raw_type, owner_class),
             // `var y = x;` — raw_type is another bound name; chase it.
             BindingKind::Alias => self.receiver_type_inner(in_fqcn, &tb.raw_type, depth + 1),
-            // `var x = m(...);` — raw_type is a method name; best-effort treat it as a
-            // call on the enclosing class and follow its return type.
-            BindingKind::CallResult => {
-                self.method_return_type_in_hierarchy(owner_class, &tb.raw_type)
-            }
+            // `var x = m(...);` — raw_type is the method name.
+            // 1. Check the enclosing class hierarchy (self/free calls).
+            // 2. Scan fields of the enclosing class for the method when step 1 fails
+            //    (factory pattern: `var x = this.factory.create()`).
+            BindingKind::CallResult => self
+                .method_return_type_in_hierarchy(owner_class, &tb.raw_type)
+                .or_else(|| self.callresult_via_field_types(owner_class, &tb.raw_type)),
         }
     }
 
@@ -360,6 +387,27 @@ impl ResolveIndex {
             }
         }
         None
+    }
+
+    /// Fallback for `CallResult` bindings: if `method_name` is absent from `owner_class`'s
+    /// hierarchy, scan all declared fields of `owner_class`. If exactly one field's type has
+    /// the method, return its return type (handles `var x = factory.create()` patterns).
+    fn callresult_via_field_types(&self, owner_class: &str, method_name: &str) -> Option<String> {
+        let candidates: Vec<String> = self
+            .fields
+            .iter()
+            .filter(|((fqcn, _), _)| fqcn == owner_class)
+            .filter_map(|(_, def)| {
+                let raw = def.declared_type.as_ref()?;
+                let field_type = self.resolve_in_type(raw, owner_class)?;
+                self.method_return_type_in_hierarchy(&field_type, method_name)
+            })
+            .collect();
+        if candidates.len() == 1 {
+            candidates.into_iter().next()
+        } else {
+            None
+        }
     }
 
     /// Resolve a raw type name against the file that declares `type_fqcn`.
@@ -448,6 +496,7 @@ struct EdgeEmitter<'a> {
     edges: Vec<Edge>,
     skipped: u64,
     unresolved_external_fqcns: BTreeSet<String>,
+    unresolved_refs: Vec<UnresolvedRef>,
 }
 
 impl<'a> EdgeEmitter<'a> {
@@ -460,6 +509,78 @@ impl<'a> EdgeEmitter<'a> {
             edges: Vec::new(),
             skipped: 0,
             unresolved_external_fqcns: BTreeSet::new(),
+            unresolved_refs: Vec::new(),
+        }
+    }
+
+    fn push_unresolved(
+        &mut self,
+        pf: &ParsedFile,
+        site: &ReferenceSite,
+        reason: &str,
+        resolved_receiver_type: Option<String>,
+        external_fqcn: Option<String>,
+    ) {
+        self.skipped += 1;
+        if let Some(ref ext) = external_fqcn {
+            self.unresolved_external_fqcns.insert(ext.clone());
+        }
+        self.unresolved_refs.push(UnresolvedRef {
+            file: pf.file.clone(),
+            kind: format!("{:?}", site.kind),
+            name: site.name.clone(),
+            receiver: site.receiver.clone(),
+            arity: site.arity,
+            in_fqcn: site.in_fqcn.clone(),
+            in_callable: site.in_callable.clone(),
+            range: site.range,
+            reason: reason.to_string(),
+            resolved_receiver_type,
+            external_fqcn,
+        });
+    }
+
+    fn classify_unresolved_ref(
+        &mut self,
+        pf: &ParsedFile,
+        site: &ReferenceSite,
+    ) -> (&'static str, Option<String>, Option<String>) {
+        match site.kind {
+            RefKind::Call => {
+                if let Some(recv) = site.receiver.as_deref() {
+                    match self.resolve_receiver_expr_type(pf, site, recv) {
+                        Some(rt) if rt.contains('.') && !self.index.is_known_type(&rt) => {
+                            ("receiver_external", None, Some(rt))
+                        }
+                        Some(rt) => ("member_not_found", Some(rt), None),
+                        None => ("receiver_type_unknown", None, None),
+                    }
+                } else {
+                    ("free_call_unresolved", None, None)
+                }
+            }
+            RefKind::Ctor => {
+                let ext = self
+                    .index
+                    .resolve_type(&site.name, &pf.file)
+                    .filter(|f| f.contains('.') && !self.index.is_known_type(f));
+                ("ctor_type_unknown", None, ext)
+            }
+            RefKind::TypeRef => {
+                let ext = self
+                    .index
+                    .resolve_type(&site.name, &pf.file)
+                    .filter(|f| f.contains('.') && !self.index.is_known_type(f));
+                ("type_ref_unknown", None, ext)
+            }
+            RefKind::FieldRead | RefKind::FieldWrite => {
+                let recv_type = site
+                    .receiver
+                    .as_deref()
+                    .and_then(|r| self.resolve_receiver_expr_type(pf, site, r));
+                ("field_not_found", recv_type, None)
+            }
+            _ => ("unresolved", None, None),
         }
     }
 
@@ -580,8 +701,9 @@ impl<'a> EdgeEmitter<'a> {
                     self.push_edge(src, dst, kind, confidence, reason);
                     self.handled.insert((file_idx, site_idx));
                 } else if !matches!(site.kind, RefKind::Extends | RefKind::Implements) {
-                    self.note_unresolved_site(pf, site);
-                    self.skipped += 1;
+                    let (reason, recv_type, ext_fqcn) =
+                        self.classify_unresolved_ref(pf, site);
+                    self.push_unresolved(pf, site, reason, recv_type, ext_fqcn);
                 }
             }
         }
@@ -615,8 +737,11 @@ impl<'a> EdgeEmitter<'a> {
                     _ => continue,
                 };
                 let Some(dst) = self.resolve_type_node(pf, &site.name) else {
-                    self.note_unresolved_site(pf, site);
-                    self.skipped += 1;
+                    let ext = self
+                        .index
+                        .resolve_type(&site.name, &pf.file)
+                        .filter(|f| f.contains('.') && !self.index.is_known_type(f));
+                    self.push_unresolved(pf, site, "heritage_type_unknown", None, ext);
                     continue;
                 };
                 self.push_edge(
@@ -870,25 +995,6 @@ impl<'a> EdgeEmitter<'a> {
         None
     }
 
-    fn note_unresolved_site(&mut self, pf: &ParsedFile, site: &ReferenceSite) {
-        if let Some(receiver) = site.receiver.as_deref() {
-            if let Some(fqcn) = self.resolve_receiver_expr_type(pf, site, receiver) {
-                if fqcn.contains('.') && !self.index.is_known_type(&fqcn) {
-                    self.unresolved_external_fqcns.insert(fqcn);
-                }
-            }
-        } else if matches!(
-            site.kind,
-            RefKind::Ctor | RefKind::TypeRef | RefKind::Extends | RefKind::Implements
-        ) {
-            if let Some(fqcn) = self.index.resolve_type(&site.name, &pf.file) {
-                if fqcn.contains('.') && !self.index.is_known_type(&fqcn) {
-                    self.unresolved_external_fqcns.insert(fqcn);
-                }
-            }
-        }
-    }
-
     fn push_edge(
         &mut self,
         src: NodeId,
@@ -932,6 +1038,7 @@ impl<'a> EdgeEmitter<'a> {
             edges,
             skipped: self.skipped,
             unresolved_external_fqcns: self.unresolved_external_fqcns.into_iter().collect(),
+            unresolved_refs: self.unresolved_refs,
         }
     }
 }
@@ -2228,5 +2335,224 @@ mod tests {
             }),
             "@Repository impl should also be DI-resolved"
         );
+    }
+
+    // ── UnresolvedRef diagnostics tests ──────────────────────────────────────
+
+    #[test]
+    fn unresolved_ref_receiver_type_unknown() {
+        // Ref site with a receiver name that has no binding → receiver_type_unknown
+        let file = ParsedFile {
+            file: "com/acme/Foo.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.Foo"),
+                method_def("com.acme.Foo", "go", &[], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![ref_site(
+                "com.acme.Foo#go/0",
+                method_id("com.acme.Foo", "go", 0),
+                RefKind::Call,
+                Some("unknownReceiver"),
+                "doSomething",
+                Some(0),
+            )],
+            type_bindings: vec![],
+            contract_sites: vec![],
+        };
+        let out = resolve_edges(&[file]);
+        assert_eq!(out.skipped, 1);
+        assert_eq!(out.unresolved_refs.len(), 1);
+        let r = &out.unresolved_refs[0];
+        assert_eq!(r.reason, "receiver_type_unknown");
+        assert_eq!(r.name, "doSomething");
+        assert_eq!(r.receiver.as_deref(), Some("unknownReceiver"));
+        assert_eq!(r.file, "com/acme/Foo.java");
+    }
+
+    #[test]
+    fn unresolved_ref_member_not_found() {
+        // Receiver type resolves (field binding) but method absent → member_not_found
+        let service = ParsedFile {
+            file: "com/acme/MyService.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.MyService"),
+                method_def("com.acme.MyService", "knownMethod", &[], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+            contract_sites: vec![],
+        };
+        let caller = ParsedFile {
+            file: "com/acme/Caller.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.Caller"),
+                method_def("com.acme.Caller", "run", &[], None),
+                field_def("com.acme.Caller", "svc", "MyService"),
+            ],
+            imports: vec![],
+            reference_sites: vec![ref_site(
+                "com.acme.Caller#run/0",
+                method_id("com.acme.Caller", "run", 0),
+                RefKind::Call,
+                Some("svc"),
+                "missingMethod",
+                Some(0),
+            )],
+            type_bindings: vec![TypeBinding {
+                name: "svc".into(),
+                raw_type: "MyService".into(),
+                kind: BindingKind::Field,
+                in_fqcn: "com.acme.Caller".into(),
+                range: Range::default(),
+            }],
+            contract_sites: vec![],
+        };
+        let out = resolve_edges(&[service, caller]);
+        assert_eq!(out.skipped, 1);
+        let r = &out.unresolved_refs[0];
+        assert_eq!(r.reason, "member_not_found");
+        assert_eq!(
+            r.resolved_receiver_type.as_deref(),
+            Some("com.acme.MyService")
+        );
+    }
+
+    #[test]
+    fn unresolved_ref_heritage_type_unknown() {
+        // Class extends a type not in the parsed scope → heritage_type_unknown
+        let child = ParsedFile {
+            file: "com/acme/Child.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![type_def(NodeKind::Class, "com.acme.Child")],
+            imports: vec![],
+            reference_sites: vec![heritage("com.acme.Child", "MissingParent", RefKind::Extends)],
+            type_bindings: vec![],
+            contract_sites: vec![],
+        };
+        let out = resolve_edges(&[child]);
+        assert_eq!(out.skipped, 1);
+        let r = &out.unresolved_refs[0];
+        assert_eq!(r.reason, "heritage_type_unknown");
+        assert_eq!(r.name, "MissingParent");
+    }
+
+    #[test]
+    fn callresult_factory_pattern_resolved() {
+        // var order = factory.create(); order.process()
+        // factory field typed OrderFactory → create() returns Order → process() resolves
+        let order_factory = ParsedFile {
+            file: "com/acme/OrderFactory.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.OrderFactory"),
+                method_def("com.acme.OrderFactory", "create", &[], Some("Order")),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+            contract_sites: vec![],
+        };
+        let order = ParsedFile {
+            file: "com/acme/Order.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.Order"),
+                method_def("com.acme.Order", "process", &[], None),
+            ],
+            imports: vec![],
+            reference_sites: vec![],
+            type_bindings: vec![],
+            contract_sites: vec![],
+        };
+        let service = ParsedFile {
+            file: "com/acme/OrderService.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.OrderService"),
+                method_def("com.acme.OrderService", "run", &[], None),
+                field_def("com.acme.OrderService", "factory", "OrderFactory"),
+            ],
+            imports: vec![],
+            // order.process() — receiver "order" has CallResult("create") binding
+            reference_sites: vec![ref_site(
+                "com.acme.OrderService#run/0",
+                method_id("com.acme.OrderService", "run", 0),
+                RefKind::Call,
+                Some("order"),
+                "process",
+                Some(0),
+            )],
+            // var order = create();  raw_type = "create", kind = CallResult
+            type_bindings: vec![
+                TypeBinding {
+                    name: "factory".into(),
+                    raw_type: "OrderFactory".into(),
+                    kind: BindingKind::Field,
+                    in_fqcn: "com.acme.OrderService".into(),
+                    range: Range::default(),
+                },
+                TypeBinding {
+                    name: "order".into(),
+                    raw_type: "create".into(),
+                    kind: BindingKind::CallResult,
+                    in_fqcn: "com.acme.OrderService#run/0".into(),
+                    range: Range::default(),
+                },
+            ],
+            contract_sites: vec![],
+        };
+        let out = resolve_edges(&[order_factory, order, service]);
+        let calls: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
+        assert!(
+            calls.iter().any(|e| e.dst == method_id("com.acme.Order", "process", 0)),
+            "factory CallResult should resolve order.process() to Order#process/0"
+        );
+        assert_eq!(out.skipped, 0, "no unresolved refs when factory pattern works");
+    }
+
+    #[test]
+    fn callresult_factory_pattern_unresolved_when_return_type_absent() {
+        // var order = create(); — but create() has no return_type → unresolvable
+        let service = ParsedFile {
+            file: "com/acme/OrderService.java".into(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.OrderService"),
+                method_def("com.acme.OrderService", "run", &[], None),
+                // no create() method, no fields that have it
+            ],
+            imports: vec![],
+            reference_sites: vec![ref_site(
+                "com.acme.OrderService#run/0",
+                method_id("com.acme.OrderService", "run", 0),
+                RefKind::Call,
+                Some("order"),
+                "process",
+                Some(0),
+            )],
+            type_bindings: vec![TypeBinding {
+                name: "order".into(),
+                raw_type: "create".into(),
+                kind: BindingKind::CallResult,
+                in_fqcn: "com.acme.OrderService#run/0".into(),
+                range: Range::default(),
+            }],
+            contract_sites: vec![],
+        };
+        let out = resolve_edges(&[service]);
+        assert_eq!(out.skipped, 1);
+        let r = &out.unresolved_refs[0];
+        // Receiver "order" has a CallResult binding but return type can't be resolved;
+        // the receiver ends up unresolvable → receiver_type_unknown
+        assert_eq!(r.reason, "receiver_type_unknown");
     }
 }

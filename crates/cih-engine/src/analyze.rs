@@ -258,6 +258,7 @@ pub(crate) fn analyze_from_scope_with_options(
             resolved_edge_count: 0,
             unresolved_reference_count: 0,
             unresolved_external_fqcns: Vec::new(),
+            unresolved_report_path: None,
             parsed_file_count,
             skipped_count: 0,
             jar_node_count: 0,
@@ -334,6 +335,9 @@ pub(crate) fn analyze_from_scope_with_options(
         )
     })?;
 
+    cih_resolve::write_unresolved_reports(&resolve_output.unresolved_refs, &artifacts_dir)
+        .with_context(|| "failed to write unresolved-refs reports")?;
+
     prune_other_versions(&cih_dir.join("parsed"), &version)?;
     prune_other_versions(&cih_dir.join("artifacts"), &version)?;
     FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
@@ -356,13 +360,14 @@ pub(crate) fn analyze_from_scope_with_options(
         scope_path,
         artifacts,
         parsed_files_path: parse_artifacts.parsed_files_path,
-        artifacts_dir,
+        artifacts_dir: artifacts_dir.clone(),
         version,
         node_count: all_nodes.len(),
         edge_count: edges.len(),
         resolved_edge_count: resolve_output.edges.len(),
         unresolved_reference_count: resolve_output.skipped,
         unresolved_external_fqcns: resolve_output.unresolved_external_fqcns,
+        unresolved_report_path: Some(artifacts_dir.join("unresolved-refs.md")),
         parsed_file_count: parse_output.parsed_files.len(),
         skipped_count: parse_output.skipped.len(),
         jar_node_count,
@@ -633,6 +638,7 @@ pub(crate) struct EmitOutcome {
     pub(crate) jar_failed: usize,
     pub(crate) unresolved_reference_count: u64,
     pub(crate) unresolved_external_fqcns: Vec<String>,
+    pub(crate) unresolved_report_path: Option<PathBuf>,
     pub(crate) parsed_file_count: usize,
     pub(crate) skipped_count: usize,
     pub(crate) reused_artifacts: bool,
@@ -707,6 +713,9 @@ impl EmitOutcome {
                 "External unresolved types: {}.",
                 self.unresolved_external_fqcns.len()
             );
+        }
+        if let Some(ref p) = self.unresolved_report_path {
+            println!("Unresolved report: {}", p.display());
         }
         if self.jar_node_count > 0 || self.jar_failed > 0 {
             let failed_note = if self.jar_failed > 0 {

@@ -274,6 +274,30 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   service → repo → external call chain; a PO asks "what implements order payment?" →
   `feature_map` returns grouped symbol clusters.
 
+## Phase 15.5 — Unresolved Reference Reports + Factory-Aware Resolution ✅ (2026-06-15)
+
+**Pure diagnostics + resolver accuracy.** No new MCP tools; improves graph fidelity and
+provides a machine-readable report alongside every analysis run.
+
+- **`UnresolvedRef` struct** added to `cih-resolve`: per-site record with `file`, `kind`,
+  `name`, `receiver`, `arity`, `in_fqcn`, `range`, `reason`, `resolved_receiver_type`,
+  `external_fqcn`. Reason taxonomy: `receiver_type_unknown`, `receiver_external`,
+  `member_not_found`, `ctor_type_unknown`, `type_ref_unknown`, `heritage_type_unknown`,
+  `free_call_unresolved`, `field_not_found`.
+- **`ResolveOutput.unresolved_refs`** field replaces bare `skipped += 1` with structured
+  per-site data. `EdgeEmitter::push_unresolved()` atomically increments `skipped`, updates
+  `unresolved_external_fqcns` (backward-compat), and appends an `UnresolvedRef`.
+- **`write_unresolved_reports()`** (new `cih-resolve::reports` module) writes
+  `unresolved-refs.jsonl` + `unresolved-refs.md` (by-reason table, top-file table, missing
+  external FQCNs list) alongside `nodes.jsonl`/`edges.jsonl` every analyze run.
+- **Factory-aware `CallResult` resolution** (`ResolveIndex::callresult_via_field_types`):
+  when `var x = create()` can't be resolved on the enclosing class, scans declared fields of
+  that class; if exactly one field's type has the method, follows its return type. Handles the
+  `var order = this.factory.create(); order.process()` pattern without parser changes.
+- **Engine wiring:** `cih-engine/analyze.rs` calls `write_unresolved_reports` after artifact
+  write; `EmitOutcome.unresolved_report_path` surfaces the path in `print_human` output.
+- **Verified:** 118 tests green (5 new in cih-resolve + 1 extended engine integration test).
+
 ## Phase 16 — Test Intelligence: coverage · regression scope · untested paths
 
 **Primary persona: Tester**
