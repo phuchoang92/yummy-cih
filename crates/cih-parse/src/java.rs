@@ -205,6 +205,13 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let arity = parameter_count(node);
     let id = method_id(&owner.fqcn, &name, arity);
     let range = range_of(node);
+    let return_type = return_type_name(node, src);
+    let props = match (is_bean_method(node, src), return_type.as_ref()) {
+        (false, None) => None,
+        (true, None) => Some(serde_json::json!({ "isBean": true })),
+        (false, Some(rt)) => Some(serde_json::json!({ "returnType": rt })),
+        (true, Some(rt)) => Some(serde_json::json!({ "isBean": true, "returnType": rt })),
+    };
     builder.nodes.push(Node {
         id: id.clone(),
         kind: NodeKind::Method,
@@ -212,11 +219,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         qualified_name: Some(format!("{}#{name}/{arity}", owner.fqcn)),
         file: builder.file.clone(),
         range,
-        props: if is_bean_method(node, src) {
-            Some(serde_json::json!({ "isBean": true }))
-        } else {
-            None
-        },
+        props,
     });
     builder.edges.push(Edge {
         src: owner.id.clone(),
@@ -234,7 +237,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         range,
         modifiers: modifiers(node, src),
         param_types: param_type_names(node, src),
-        return_type: return_type_name(node, src),
+        return_type,
         declared_type: None,
         stereotype: None,
     });

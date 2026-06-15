@@ -49,6 +49,43 @@ pub fn contracts_path(name: &str) -> Option<PathBuf> {
     group_dir(name).map(|dir| dir.join("contracts.jsonl"))
 }
 
+/// Normalize a URL path for cross-repo contract matching.
+/// Strips query params, strips scheme + host, lowercases literal segments,
+/// and replaces `{var}` / `:var` path variables with `{*}`.
+pub fn normalize_contract_path(path: &str) -> String {
+    let mut base = path.split('?').next().unwrap_or(path).trim().to_string();
+    if let Some(idx) = base.find("://") {
+        let after_scheme = &base[idx + 3..];
+        base = after_scheme
+            .find('/')
+            .map(|slash| after_scheme[slash..].to_string())
+            .unwrap_or_else(|| "/".to_string());
+    }
+    if base.is_empty() {
+        base = "/".to_string();
+    }
+    if !base.starts_with('/') {
+        base = format!("/{base}");
+    }
+    let segments: Vec<String> = base
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            if (segment.starts_with('{') && segment.ends_with('}')) || segment.starts_with(':') {
+                "{*}".to_string()
+            } else {
+                segment.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    }
+}
+
 impl GroupRegistry {
     pub fn load() -> Self {
         groups_path()

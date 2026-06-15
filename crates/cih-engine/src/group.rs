@@ -263,39 +263,7 @@ fn dedup_matches(matches: Vec<ContractMatch>) -> Vec<ContractMatch> {
 }
 
 fn normalize_contract_path(path: &str) -> String {
-    let mut base = path.split('?').next().unwrap_or(path).trim().to_string();
-    if let Some(idx) = base.find("://") {
-        let after_scheme = &base[idx + 3..];
-        base = after_scheme
-            .find('/')
-            .map(|slash| after_scheme[slash..].to_string())
-            .unwrap_or_else(|| "/".to_string());
-    }
-    if base.is_empty() {
-        base = "/".to_string();
-    }
-    if !base.starts_with('/') {
-        base = format!("/{base}");
-    }
-
-    let segments: Vec<String> = base
-        .trim_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| {
-            if (segment.starts_with('{') && segment.ends_with('}')) || segment.starts_with(':') {
-                "{*}".to_string()
-            } else {
-                segment.to_ascii_lowercase()
-            }
-        })
-        .collect();
-
-    if segments.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}", segments.join("/"))
-    }
+    cih_core::normalize_contract_path(path)
 }
 
 fn node_prop_str(node: &Node, key: &str) -> Option<String> {

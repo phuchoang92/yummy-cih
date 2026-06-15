@@ -14,7 +14,8 @@ pub mod registry;
 pub mod repo_map;
 
 pub use group::{
-    contracts_path, group_dir, ContractMatch, ContractMatchKind, GroupEntry, GroupRegistry,
+    contracts_path, group_dir, normalize_contract_path, ContractMatch, ContractMatchKind,
+    GroupEntry, GroupRegistry,
 };
 pub use ir::{
     BindingKind, ContractKind, ContractSite, ParsedFile, RawImport, RefKind, ReferenceSite,
