@@ -13,12 +13,14 @@ use super::paths::{join_rel, parent_rel, path_from_rel};
 use super::{JavaFileInfo, ModuleCandidate, ScannedFile};
 
 pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<ModuleCandidate>> {
+    tracing::debug!(total_files = files.len(), "modules: scanning for build files");
     let mut modules = Vec::new();
 
     for file in files {
         let file_name = file.path.rsplit('/').next().unwrap_or_default();
         match file_name {
             "pom.xml" => {
+                tracing::debug!(path = %file.path, "modules: found pom.xml");
                 let content = fs::read_to_string(root.join(&file.path))
                     .with_context(|| format!("failed to read {}", file.path))?;
                 let meta = parse_pom(&content);
@@ -34,6 +36,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                 let deps = meta.as_ref().map(|m| m.deps.clone()).unwrap_or_default();
                 let child_modules = meta.as_ref().map(|m| m.modules.clone()).unwrap_or_default();
 
+                tracing::debug!(module = %name, path = %rel_path, deps = deps.len(), children = child_modules.len(), "modules: Maven module detected");
                 upsert_candidate(
                     &mut modules,
                     ModuleCandidate {
@@ -48,10 +51,12 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
 
                 for child in child_modules {
                     let child_rel = join_rel(&rel_path, &child);
+                    let child_name = fallback_module_name(root, &child_rel);
+                    tracing::debug!(module = %child_name, path = %child_rel, "modules: Maven child module");
                     upsert_candidate(
                         &mut modules,
                         ModuleCandidate {
-                            name: fallback_module_name(root, &child_rel),
+                            name: child_name,
                             rel_path: child_rel,
                             build_file: None,
                             build_system: BuildSystem::Maven,
@@ -62,6 +67,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                 }
             }
             "build.gradle" | "build.gradle.kts" => {
+                tracing::debug!(path = %file.path, "modules: found build.gradle");
                 let content = fs::read_to_string(root.join(&file.path))
                     .with_context(|| format!("failed to read {}", file.path))?;
                 let rel_path = parent_rel(&file.path);
@@ -77,6 +83,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                     .map(|m| format!("{}:{}", m.group_id, m.artifact_id));
                 let deps = meta.as_ref().map(|m| m.deps.clone()).unwrap_or_default();
 
+                tracing::debug!(module = %name, path = %rel_path, deps = deps.len(), "modules: Gradle module detected");
                 upsert_candidate(
                     &mut modules,
                     ModuleCandidate {
@@ -90,15 +97,20 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                 );
             }
             "settings.gradle" | "settings.gradle.kts" => {
+                tracing::debug!(path = %file.path, "modules: found settings.gradle");
                 let content = fs::read_to_string(root.join(&file.path))
                     .with_context(|| format!("failed to read {}", file.path))?;
                 let base_rel = parent_rel(&file.path);
-                for include in parse_gradle_includes(&content) {
+                let includes = parse_gradle_includes(&content);
+                tracing::debug!(includes = includes.len(), "modules: Gradle settings includes");
+                for include in includes {
                     let child_rel = join_rel(&base_rel, &include.replace(':', "/"));
+                    let child_name = fallback_module_name(root, &child_rel);
+                    tracing::debug!(module = %child_name, path = %child_rel, "modules: Gradle included subproject");
                     upsert_candidate(
                         &mut modules,
                         ModuleCandidate {
-                            name: fallback_module_name(root, &child_rel),
+                            name: child_name,
                             rel_path: child_rel,
                             build_file: None,
                             build_system: BuildSystem::Gradle,
@@ -113,6 +125,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
     }
 
     modules.sort_by(|a, b| a.rel_path.cmp(&b.rel_path).then(a.name.cmp(&b.name)));
+    tracing::debug!(modules = modules.len(), "modules: detection complete");
     Ok(modules)
 }
 

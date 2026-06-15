@@ -11,7 +11,10 @@ use super::paths::rel_path;
 use super::ScannedFile;
 
 pub(super) fn walk_repository_paths(root: &Path) -> Result<Vec<ScannedFile>> {
+    tracing::debug!(root = %root.display(), "walk: starting gitignore-aware filesystem walk");
+
     let root_for_filter = root.to_path_buf();
+    let root_for_log = root.to_path_buf();
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -19,7 +22,17 @@ pub(super) fn walk_repository_paths(root: &Path) -> Result<Vec<ScannedFile>> {
         .git_exclude(true)
         .git_global(true)
         .add_custom_ignore_filename(".cihignore")
-        .filter_entry(move |entry| should_descend_or_keep(&root_for_filter, entry));
+        .filter_entry(move |entry| {
+            let rel = rel_path(&root_for_filter, entry.path());
+            if !rel.is_empty()
+                && entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                && should_ignore_dir(&rel)
+            {
+                tracing::debug!(dir = %rel, "walk: skipping ignored directory");
+                return false;
+            }
+            should_descend_or_keep(&root_for_filter, entry)
+        });
 
     let mut files = Vec::new();
     for result in builder.build() {
@@ -35,6 +48,14 @@ pub(super) fn walk_repository_paths(root: &Path) -> Result<Vec<ScannedFile>> {
         files.push(ScannedFile { path: rel, size });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let total_bytes: u64 = files.iter().map(|f| f.size).sum();
+    tracing::debug!(
+        root = %root_for_log.display(),
+        files = files.len(),
+        total_bytes,
+        "walk: filesystem walk complete"
+    );
     Ok(files)
 }
 

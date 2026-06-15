@@ -32,8 +32,20 @@ pub(crate) struct AnalyzeFlags {
 }
 
 pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
+    let span = tracing::info_span!("analyze", repo = %repo.display());
+    let _enter = span.enter();
+
+    tracing::info!(repo = %repo.display(), "starting analyze");
+
     let scan = scan::scan_repo(&repo)?;
     let repo_map_path = scan::write_repo_map(&scan.repo_map)?;
+    tracing::info!(
+        path = %repo_map_path.display(),
+        java_files = scan.repo_map.total_java_files,
+        modules = scan.repo_map.modules.len(),
+        "repo-map written"
+    );
+
     let request = build_scope_request(&repo, &flags)?;
 
     if !request.has_selector() {
@@ -215,6 +227,13 @@ pub(crate) fn analyze_from_scope_with_options(
     let repo_root = PathBuf::from(&scope_file.repo_root);
     let cih_dir = repo_root.join(".cih");
 
+    tracing::info!(
+        files = scope_file.files.len(),
+        modules = scope_file.modules.len(),
+        cache_enabled = cache.use_cache,
+        "starting parse phase"
+    );
+
     let incremental = parse_scope(&repo_root, &cih_dir, &scope_file.files, cache)?;
     if let ParseScopeOutcome::Reused {
         artifacts,
@@ -256,10 +275,38 @@ pub(crate) fn analyze_from_scope_with_options(
     else {
         unreachable!("reused case returned above");
     };
+
+    tracing::info!(
+        parsed = parse_output.parsed_files.len(),
+        skipped = parse_output.skipped.len(),
+        struct_nodes = parse_output.nodes.len(),
+        struct_edges = parse_output.edges.len(),
+        "parse phase complete"
+    );
+
+    tracing::info!("starting resolve phase");
     let resolve_output = cih_resolve::resolve_edges(&parse_output.parsed_files);
+    tracing::info!(
+        resolved_edges = resolve_output.edges.len(),
+        skipped_refs = resolve_output.skipped,
+        unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
+        "resolve phase complete"
+    );
+
+    tracing::info!(
+        jars = jars.len(),
+        unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
+        "starting JAR API extraction"
+    );
     let (jar_nodes, jar_edges, jar_failed) =
         extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
     let jar_node_count = jar_nodes.len();
+    tracing::info!(
+        jar_nodes = jar_node_count,
+        jar_edges = jar_edges.len(),
+        jar_failed,
+        "JAR API extraction complete"
+    );
 
     let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
     edges.extend(jar_edges);
@@ -372,9 +419,12 @@ fn parse_scope(
     files: &[String],
     cache: AnalyzeCacheOptions,
 ) -> Result<ParseScopeOutcome> {
+    tracing::info!(total_files = files.len(), cache_enabled = cache.use_cache, "hashing files");
     let current_hashes = hash_all(repo_root, files);
+    tracing::debug!(hashed = current_hashes.len(), "file hashing complete");
 
     if !cache.use_cache {
+        tracing::info!(files = files.len(), "cache disabled — parsing all files");
         let unit_output = cih_parse::parse_file_units(repo_root, files)?;
         for unit in &unit_output.units {
             if let Some(hash) = current_hashes.get(&unit.rel) {
@@ -382,6 +432,7 @@ fn parse_scope(
             }
         }
         let reparsed_files = unit_output.units.len();
+        tracing::info!(reparsed = reparsed_files, skipped = unit_output.skipped.len(), "parse complete (no-cache)");
         return Ok(ParseScopeOutcome::Parsed {
             parse_output: cih_parse::parse_output_from_units(
                 unit_output.units,
@@ -403,6 +454,20 @@ fn parse_scope(
         .map(str::to_string)
         .collect();
     let all_files_hashed = current_hashes.len() == files.len();
+
+    tracing::info!(
+        changed = changed_files.len(),
+        total = files.len(),
+        "incremental cache check complete"
+    );
+    if !changed_files.is_empty() {
+        for f in changed_files.iter().take(20) {
+            tracing::debug!(file = %f, "changed");
+        }
+        if changed_files.len() > 20 {
+            tracing::debug!("... and {} more changed files", changed_files.len() - 20);
+        }
+    }
 
     if cache.allow_noop
         && all_files_hashed
@@ -464,7 +529,23 @@ fn parse_scope(
 
     let mut to_parse: Vec<String> = to_parse.into_iter().collect();
     to_parse.sort();
+
+    let cache_hits_pre = files.len().saturating_sub(to_parse.len());
+    tracing::info!(
+        to_parse = to_parse.len(),
+        cache_hits = cache_hits_pre,
+        changed = changed_files.len(),
+        "incremental parse: {} files to parse, {} from cache",
+        to_parse.len(),
+        cache_hits_pre,
+    );
+
     let unit_output = cih_parse::parse_file_units(repo_root, &to_parse)?;
+    tracing::info!(
+        parsed = unit_output.units.len(),
+        skipped = unit_output.skipped.len(),
+        "parse units complete"
+    );
 
     let reparsed_files = unit_output.units.len();
     let skipped_reparse: HashSet<&str> = unit_output

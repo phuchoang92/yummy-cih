@@ -12,20 +12,45 @@ use rayon::prelude::*;
 use super::{JavaFileInfo, ScannedFile};
 
 pub(super) fn collect_java_files(root: &Path, files: &[ScannedFile]) -> Vec<JavaFileInfo> {
-    files
+    let java_count = files.iter().filter(|f| f.path.ends_with(".java")).count();
+    tracing::debug!(java_files = java_count, "java_scan: starting per-file LOC/package/Spring extraction");
+
+    let result: Vec<JavaFileInfo> = files
         .par_iter()
         .filter(|file| file.path.ends_with(".java"))
         .filter_map(|file| {
             let full_path = root.join(&file.path);
-            let content = fs::read_to_string(full_path).ok()?;
+            let content = fs::read_to_string(&full_path).ok()?;
+            let spring = detect_spring_signal(&content);
+            tracing::debug!(
+                file = %file.path,
+                loc = content.bytes().filter(|b| *b == b'\n').count(),
+                spring_controller = spring.controllers,
+                spring_service = spring.services,
+                "java_scan: parsed file"
+            );
             Some(JavaFileInfo {
                 path: file.path.clone(),
                 loc: content.bytes().filter(|b| *b == b'\n').count() as u64,
                 package: extract_package(&content),
-                spring: detect_spring_signal(&content),
+                spring,
             })
         })
-        .collect()
+        .collect();
+
+    let spring_files = result
+        .iter()
+        .filter(|f| {
+            f.spring.controllers + f.spring.services + f.spring.repositories
+                + f.spring.components + f.spring.configs + f.spring.entities > 0
+        })
+        .count();
+    tracing::debug!(
+        parsed = result.len(),
+        spring_annotated = spring_files,
+        "java_scan: extraction complete"
+    );
+    result
 }
 
 pub(super) fn collect_decompiled_dirs(files: &[ScannedFile]) -> Vec<String> {

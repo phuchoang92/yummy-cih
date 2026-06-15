@@ -117,10 +117,28 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     let root = repo
         .canonicalize()
         .with_context(|| format!("failed to resolve repo path {}", repo.display()))?;
+
+    let span = tracing::info_span!("scan", repo = %root.display());
+    let _enter = span.enter();
+
+    tracing::info!(repo = %root.display(), "starting repository walk");
+
     let files = walk_repository_paths(&root)?;
-    let _total_scanned_bytes: u64 = files.iter().map(|file| file.size).sum();
+    let total_bytes: u64 = files.iter().map(|file| file.size).sum();
+    tracing::info!(
+        total_files = files.len(),
+        total_bytes,
+        "filesystem walk complete"
+    );
+
     let java_files = collect_java_files(&root, &files);
     let decompiled_dirs = collect_decompiled_dirs(&files);
+    tracing::info!(
+        java_files = java_files.len(),
+        decompiled_dirs = decompiled_dirs.len(),
+        "Java files collected"
+    );
+
     let mut candidates = detect_modules(&root, &files)?;
 
     for decompiled in &decompiled_dirs {
@@ -154,22 +172,37 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     }
     ensure_unassigned_java_module(&mut candidates, &java_files, &root);
 
+    tracing::info!(modules = candidates.len(), "modules detected");
+    for c in &candidates {
+        tracing::debug!(module = %c.name, path = %c.rel_path, build = ?c.build_system, "module");
+    }
+
     let (all_deps, own_group_prefix, artifact_to_name) = jar_discovery_inputs(&candidates);
     let (aggregates, mut owned_java_files) = collect_java_aggregates(&candidates, &java_files);
     let modules = build_modules_from_aggregates(candidates, aggregates, &artifact_to_name);
     owned_java_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let discovered_jars = discover_and_link_jars(&root, &all_deps, &own_group_prefix);
+    tracing::info!(jars = discovered_jars.len(), "JAR discovery complete");
 
+    let total_loc: u64 = java_files.iter().map(|f| f.loc).sum();
     let repo_map = RepoMap {
         root: normalize_path(root),
         build_system: detect_build_system(&modules),
         total_java_files: java_files.len() as u64,
-        total_loc: java_files.iter().map(|f| f.loc).sum(),
+        total_loc,
         modules,
         jars: discovered_jars,
         decompiled_dirs,
     };
+
+    tracing::info!(
+        java_files = java_files.len(),
+        total_loc,
+        modules = repo_map.modules.len(),
+        jars = repo_map.jars.len(),
+        "scan complete"
+    );
 
     Ok(ScanResult {
         repo_map,
