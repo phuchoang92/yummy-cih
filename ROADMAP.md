@@ -16,7 +16,7 @@ persona-specific chat view in yummy:
 
 | Persona | Core need | CIH answers |
 |---------|-----------|-------------|
-| **Developer** | Understand unfamiliar code; assess blast radius of a change | `context`, `impact`, `query`, `call_chain` |
+| **Developer** | Understand unfamiliar code; assess blast radius of a change | `context`, `impact`, `query`, `trace_flow` *(Phase 15)* |
 | **PO** (Product Owner) | Know what the system does; estimate effort for incoming CRs | `route_map`, `feature_map`, `cr_impact` |
 | **BA** (Business Analyst) | Trace end-to-end business flows; map features to code | `trace_flow`, `cr_impact`, `feature_map` |
 | **Tester** | Find what tests cover which code; know what to re-run after a change | `test_coverage`, `regression_scope`, `untested_paths` |
@@ -79,7 +79,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   wire engine → `BulkLoader` → FalkorDB.
 - **Done when:** `cih-engine analyze <java-repo>` loads real symbols; MCP `context` shows them.
   (Calls still absent/crude — that's Phase 4.) 🎯 **Milestone: index → query a real repo.**
-- **VERIFIED 2026-06-14:** delivered as 8 tasks (detail in `docs/phase-3.md` + `phase-3-impl-spec.md`),
+- **VERIFIED 2026-06-14:** delivered as 8 tasks (detail in `docs/plans/phase-3.md` + `phase-3-impl-spec.md`),
   refined with a **scan→scope-first** flow so a 12k-file repo isn't all-or-nothing:
   - **scan** (`cih-engine scan`) — parse-free walk → `RepoMap` (modules, LOC, Spring counts) +
     `.cih/repo-map.json` + recommendation; **scope** (`analyze --all|--module|--include|--exclude` or
@@ -100,7 +100,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
 
 ## Phase 4 — Scope resolution + MRO ✅  🎯 accurate call graph
 
-- **Plan:** `docs/phase-4.md`.
+- **Plan:** `docs/plans/phase-4.md`.
 - **Crate:** `cih-resolve`.
 - **VERIFIED 2026-06-14:** full resolution pipeline delivered in 5 sub-phases:
   - **4.0 IR extension** (`cih-core` + `cih-parse`): `TypeBinding { kind: BindingKind, .. }`,
@@ -120,7 +120,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
     (structure+resolved) edges + `ParsedFile` IR — IR-only body changes bump the version;
     `cih-engine resolve <repo>` subcommand reads saved `.cih/scope.json` and re-runs
     resolution without rescanning; `load_parsed_files` in `cih-parse` for offline IR loading.
-  - Workspace: 43 tests green, clippy clean; `combined_edges` deduplicates on (src, dst, kind)
+  - Workspace: 43 tests green *(at the time)*, clippy clean; `combined_edges` deduplicates on (src, dst, kind)
     keeping highest confidence.
 - **4.4 ✅ VERIFIED 2026-06-14** (delivered post-milestone, closes the Phase-8 wiring gap):
   - **4.4a JAR discovery** (`cih-engine/scan/jars.rs`): `discover_jars` catalogs JARs from
@@ -133,11 +133,11 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
     all cataloged JARs; merges resulting nodes+edges into `GraphArtifacts`; JAR nodes/edges are
     included in the content version. `run_resolve` reads `repo-map.json` for jars. 3 new tests
     including end-to-end integration via `cih-jar` sample fixture.
-  - Workspace: **57 tests** green, clippy clean.
+  - Workspace: **57 tests** green *(at the time)*, clippy clean.
 
 ## Phase 5 — Communities + processes ✅
 
-- **Plan:** `docs/phase-5.md`.
+- **Plan:** `docs/plans/phase-5.md`.
 - **VERIFIED 2026-06-14:** Leiden-style community detection + BFS process tracing delivered:
   - **New crate `cih-community`:** `prng.rs` (Mulberry32, seed `0xc0de` for reproducibility),
     `graph.rs` (undirected community graph + directed calls digraph via `petgraph = "0.6"`),
@@ -154,11 +154,11 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   - **`cih-falkor context()`:** STEP_IN_PROCESS query now populates `SymbolContext.processes`.
   - **`cih-server communities` tool:** MCP tool lists all detected clusters with cohesion scores.
   - **`cih-core`:** `community_id(idx)` + `process_id(slug, hash)` id helpers.
-  - Workspace: **62 tests** green, clippy clean.
+  - Workspace: **62 tests** green *(at the time)*, clippy clean.
 
 ## Phase 6 — Search: BM25 + embeddings + hybrid ✅
 
-- **Plan:** `docs/phase-6.md`.
+- **Plan:** `docs/plans/phase-6.md`.
 - **VERIFIED 2026-06-14:** hybrid search delivered:
   - **New crate `cih-search`:** tokenizer with punctuation/camel splitting, BM25 over graph symbol
     nodes (`Class`/`Interface`/`Enum`/`Record`/`Annotation`/`Method`/`Constructor`/`Field`/
@@ -172,7 +172,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   - **`cih-server query` MCP tool:** lazily builds in-memory BM25 from `CIH_ARTIFACTS_DIR`, uses
     optional semantic search from `CIH_PG_URL`, merges both with RRF, and supports `expand=true`
     via `GraphStore::subgraph(top_5, 1)`.
-  - Workspace: **70 tests** green. `cargo fmt --check` still reports pre-existing formatting
+  - Workspace: **70 tests** green *(at the time)*. `cargo fmt --check` still reports pre-existing formatting
     diffs in unrelated files (`cih-engine` scan/scope helpers, `cih-falkor`, `cih-jar`,
     `cih-parse`, `cih-resolve`); Phase 6 touched files were rustfmt-formatted.
 - **Architecture cleanup 2026-06-14** (`docs/architecture-improvements.md`):
@@ -183,7 +183,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   - `cih-server/src/search.rs` extracted: `QueryArgs`, `query_hits()`, RRF orchestration.
   - BFS cycle detection upgraded from O(n) `Vec::contains` to O(1) `HashSet`.
   - Added 7 tests (cih-core round-trip, 3 × cih-falkor, 3 × cih-server).
-  - Workspace: **77 tests** green, clippy clean.
+  - Workspace: **77 tests** green *(at the time)*, clippy clean.
 
 ## Phase 7 — Spring pre-phase ✅ (2026-06-14)
 
@@ -191,7 +191,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
 - **Done in Phase 3:** per-class `stereotype` tags (`@Service`/`@Repository`/`@Controller`/
   `@RestController`/`@Configuration`/`@Component`/`@Entity`) from own annotations; routes
   (`@RequestMapping`/`@GetMapping`/… → `Route` + `HANDLES_ROUTE`, class-prefix joined).
-- **Completed 2026-06-14** (`docs/phase-7.md`):
+- **Completed 2026-06-14** (`docs/plans/phase-7.md`):
   - **`@Bean` detection** — `is_bean_method()` in `cih-parse/src/java.rs` sets `props.isBean=true`
     on Method nodes annotated with `@Bean`; reuses existing `annotations()` helper.
   - **JPA repository tagging** — `jpa_repository_props()` walks the `implements` clause for 10 known
@@ -201,7 +201,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   - **`route_map` MCP tool** — `RouteInfo` struct in `cih-graph-store`; FalkorDB Cypher impl in
     `cih-falkor`; `route_map(prefix, limit)` MCP tool in `cih-server`; path-prefix filter + max
     limit (default 200).
-  - 8 new tests (5 cih-parse, 2 cih-falkor, 1 cih-server). Workspace: **85 tests** green, clippy clean.
+  - 8 new tests (5 cih-parse, 2 cih-falkor, 1 cih-server). Workspace: **85 tests** green *(at the time)*, clippy clean.
 - **Done when:** routes + beans are queryable; a `route_map` view works on a Spring app. ✅
 
 ## Phase 8 — Dependency libs: API-surface ✅ (wiring done in Phase 4.4) + full decompile
@@ -220,7 +220,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
 
 ## Phase 9 — Incremental re-index + cache + versioning ✅ (2026-06-14)
 
-- **Plan:** `docs/phase-9.md`.
+- **Plan:** `docs/plans/phase-9.md`.
 - **Completed 2026-06-14:**
   - **File hash index** — `.cih/file-hashes.json` stores blake3/16 content hashes for scoped files;
     readable files are hashed in parallel with `rayon`.
@@ -235,7 +235,7 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
     `GRAPH.COPY staging live REPLACE`, and deletes the staging graph.
   - **Parse API support** — `cih-parse::parse_file_units` and `parse_output_from_units` preserve
     existing `parse_files` behavior while enabling cache composition.
-  - Workspace: **93 tests** green, clippy clean, docs build clean.
+  - Workspace: **93 tests** green *(at the time)*, clippy clean, docs build clean.
 - **Done when:** re-index after editing one file is fast and correct (only the delta re-parses;
   resolution still runs full-scope). ✅
 
@@ -344,7 +344,7 @@ Source: `docs/gitnexus-discovery.md` §1 + §2
     ```
     Resource templates registered for all four URI patterns. Server capabilities updated to
     `enable_tools().enable_resources()`.
-  - Workspace: **102 tests** green, clippy clean.
+  - Workspace: **102 tests** green *(at the time)*, clippy clean.
 
 ## Phase 19 — Ambiguous symbol resolution + `detect_changes` ✅ (2026-06-14)
 
@@ -426,17 +426,27 @@ Source: `docs/gitnexus-discovery.md` §6
   `CriticalStockEvent`, `ActivityLoggedEvent`); `group sync` and MCP `group_contracts` tool
   return correct JSON. All 111 workspace tests green.
 
-## Phase 22 — API impact + shape check
+## Phase 22 — API impact + shape check ✅ (2026-06-15)
 
 Source: `docs/gitnexus-discovery.md` §7
 
 Builds on Phase 21 HTTP contracts:
 
-- **`api_impact({ method, path })`** — return all consumers of an HTTP route across the group.
-- **`shape_check({ provider, consumer })`** — compare response DTO fields of provider against
+- **`api_impact({ group, method, path })`** — return all consumers of an HTTP route across the group.
+- **`shape_check({ group, provider, consumer })`** — compare response DTO fields of provider against
   property accesses of consumer; flag mismatches.
 
-- **Done when:** `api_impact({method:"GET",path:"/orders/{id}"})` returns the consuming services.
+- **Done when:** `api_impact({method:"GET",path:"/orders/{id}"})` returns the consuming services. ✅
+- **Completed 2026-06-15:**
+  - `normalize_contract_path()` moved to `cih-core/src/group.rs` (pub); engine now delegates to it.
+  - Method `Node.props["returnType"]` persisted in `nodes.jsonl` via `cih-parse/src/java.rs` so
+    `shape_check` can identify response DTO classes without live type resolution.
+  - `api_impact({ group, method, path })` MCP tool: reads `contracts.jsonl`, normalizes path to
+    `METHOD /normalized/path` key, returns all consumer repos + their ExternalEndpoint node ids.
+  - `shape_check({ group, provider, consumer })` MCP tool: loads both repos' artifacts; for each
+    HttpRoute contract, diffs provider response-DTO fields (via returnType → class → HasField edges)
+    against consumer Accesses edges; reports `matched` / `provider_only` / `consumer_only` fields.
+  - Workspace: **111 tests** green (no new tests added; tools verified via build).
 
 ## Phase 23 — Generated wiki
 
@@ -523,7 +533,7 @@ Includes additional JVM language support (Kotlin) via new `LanguageProvider` imp
     Falls back to interface method when 0 or ≥2 bean impls (no silent wrong-impl guess).
   - 5 new tests (`di_resolves_interface_call_to_service_impl`, `di_falls_back_when_no_service_impl`,
     `di_falls_back_when_multiple_service_impls`, `di_not_applied_to_concrete_class_receiver`,
-    `di_resolves_repository_interface`). Workspace: **98 tests** green, clippy clean.
+    `di_resolves_repository_interface`). Workspace: **98 tests** green *(at the time)*, clippy clean.
 - **Done when:** interface calls resolve to the impl in `impact`/`call_chain`. ✅
 
 ## Phase 14 — More languages (generic-pipeline payoff)
@@ -541,10 +551,12 @@ Includes additional JVM language support (Kotlin) via new `LanguageProvider` imp
 - **Product (10)** can start as soon as 4 + 6 give queryable + searchable data.
 - **Adapters (11)** can be written anytime after the `GraphStore` port is stable (post-Phase 2) —
   they don't block the engine.
-- **13 & 14** are intentionally last (differentiator + breadth), after the core is proven.
+- **14** is intentionally late (differentiator + breadth), after the core is proven.
+  *(Phase 13 is ✅ done as of 2026-06-14.)*
 - **Phases 15 & 16** can start once Phases 5 (communities) + 7 (routes) are stable — they add new
-  MCP tools over existing graph data, except Phase 15's external-call edges (small `cih-parse`
-  extension) and Phase 16's `EdgeKind::Tests` (small `cih-core` + `cih-parse` extension).
+  MCP tools over existing graph data. Phase 15's `ExternalCall`/`PublishesEvent`/`ListensTo` edge
+  kinds were delivered in Phase 21; Phase 16 still needs `EdgeKind::Tests` (small `cih-core` +
+  `cih-parse` extension).
 - **Phase 17** is output-format work that layers onto any tool at any time; prioritize when the
   yummy frontend team requests diagram rendering.
 - **Phase 10** (product) can begin as soon as Phase 15 and 16 tools are available, since those
