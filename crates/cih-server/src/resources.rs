@@ -195,6 +195,7 @@ fn schema_json() -> String {
             EdgeKind::PublishesEvent.cypher_label(),
             EdgeKind::ListensTo.cypher_label(),
             EdgeKind::ExternalCall.cypher_label(),
+            EdgeKind::Tests.cypher_label(),
             EdgeKind::Other.cypher_label(),
         ],
     };

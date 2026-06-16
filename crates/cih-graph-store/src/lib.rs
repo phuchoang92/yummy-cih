@@ -150,6 +150,18 @@ pub trait GraphStore: Send + Sync {
     /// Return the community each node belongs to (via MEMBER_OF edges).
     /// Nodes with no community are omitted from the result.
     async fn symbol_communities(&self, ids: &[NodeId]) -> Result<Vec<(NodeId, CommunityInfo)>>;
+
+    /// Return all test method/class nodes that have a direct TESTS edge to `id` or
+    /// to the class that owns `id`. Returns up to 50 results.
+    async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>>;
+
+    /// Given repo-relative file paths, return the distinct test class/method nodes
+    /// that have a TESTS edge to any symbol in those files.
+    async fn tests_for_files(&self, files: &[String]) -> Result<Vec<Node>>;
+
+    /// Return production symbols (Method, Class, Interface) under `file_prefix`
+    /// that have no inbound TESTS edge — i.e. no known test coverage.
+    async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>>;
 }
 
 /// Bulk loading is a SEPARATE port — mechanisms differ wildly across backends

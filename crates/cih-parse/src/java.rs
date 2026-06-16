@@ -19,6 +19,7 @@ struct TypeContext {
     kind: NodeKind,
     fqcn: String,
     spring_prefix: Option<String>,
+    is_test: bool,
     start_byte: usize,
     end_byte: usize,
 }
@@ -119,8 +120,9 @@ fn collect_declarations(
             qualified_name: Some(fqcn.clone()),
             file: builder.file.clone(),
             range,
-            props: build_class_props(node, src),
+            props: build_class_props(node, src, &simple_name),
         });
+        let stereotype = class_stereotype(node, src, &simple_name).map(|s| s.to_string());
         builder.defs.push(SymbolDef {
             id: id.clone(),
             kind,
@@ -132,7 +134,7 @@ fn collect_declarations(
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
-            stereotype: class_stereotype(node, src).map(|s| s.to_string()),
+            stereotype: stereotype.clone(),
         });
 
         if let Some(parent_id) = owner_id {
@@ -158,6 +160,7 @@ fn collect_declarations(
             kind,
             fqcn,
             spring_prefix: spring_class_prefix(node, src),
+            is_test: stereotype.as_deref() == Some("test"),
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
         };
@@ -206,11 +209,14 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let id = method_id(&owner.fqcn, &name, arity);
     let range = range_of(node);
     let return_type = return_type_name(node, src);
-    let props = match (is_bean_method(node, src), return_type.as_ref()) {
-        (false, None) => None,
-        (true, None) => Some(serde_json::json!({ "isBean": true })),
-        (false, Some(rt)) => Some(serde_json::json!({ "returnType": rt })),
-        (true, Some(rt)) => Some(serde_json::json!({ "isBean": true, "returnType": rt })),
+    let is_test_method = owner.is_test && is_test_method(node, src);
+    let props = match (is_bean_method(node, src), is_test_method, return_type.as_ref()) {
+        (false, false, None) => None,
+        (true, _, None) => Some(serde_json::json!({ "isBean": true })),
+        (false, true, None) => Some(serde_json::json!({ "isTest": true })),
+        (false, false, Some(rt)) => Some(serde_json::json!({ "returnType": rt })),
+        (true, _, Some(rt)) => Some(serde_json::json!({ "isBean": true, "returnType": rt })),
+        (false, true, Some(rt)) => Some(serde_json::json!({ "isTest": true, "returnType": rt })),
     };
     builder.nodes.push(Node {
         id: id.clone(),
@@ -228,6 +234,17 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         confidence: 1.0,
         reason: "member".into(),
     });
+    // @Test method → TESTS edge to the owner class (test method covers the production class
+    // it's named after; deeper method-level coverage follows CALLS edges at query time).
+    if is_test_method {
+        builder.edges.push(Edge {
+            src: id.clone(),
+            dst: owner.id.clone(),
+            kind: EdgeKind::Tests,
+            confidence: 0.8,
+            reason: "test-method".into(),
+        });
+    }
     builder.defs.push(SymbolDef {
         id: id.clone(),
         kind: NodeKind::Method,
@@ -297,6 +314,9 @@ fn collect_constructor(
 
 fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner: &TypeContext) {
     let declared_type = node.child_by_field_name("type").map(|ty| text(ty, src));
+    // In a test class, @MockBean / @Autowired fields create a structural TESTS link from the
+    // test class to the production type (test class exercises that type's public API).
+    let is_mock_field = owner.is_test && is_mock_or_injected_field(node, src);
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() != "variable_declarator" {
@@ -327,6 +347,27 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             confidence: 1.0,
             reason: "member".into(),
         });
+        // TESTS edge: test class → raw type name resolved as a Class node id.
+        // The type is unresolved here; we emit the edge using the raw simple name.
+        // Phase 4 resolution does not process TESTS edges — the FalkorDB Cypher query
+        // matches by name when the type is actually in the graph.
+        if is_mock_field {
+            if let Some(raw_ty) = declared_type.as_deref() {
+                // Strip generics: "List<Order>" → "Order" is done via simple_type_name.
+                let simple = simple_type_name(raw_ty);
+                if !simple.is_empty() {
+                    builder.edges.push(Edge {
+                        src: owner.id.clone(),
+                        // Use a Class: prefix; if it's an interface it will be found by
+                        // candidates_by_name at query time anyway.
+                        dst: NodeId::new(format!("Class:{simple}")),
+                        kind: EdgeKind::Tests,
+                        confidence: 0.7,
+                        reason: "mock-bean".into(),
+                    });
+                }
+            }
+        }
         builder.defs.push(SymbolDef {
             id,
             kind: NodeKind::Field,
@@ -1438,7 +1479,7 @@ fn modifiers(node: TsNode<'_>, src: &str) -> Vec<String> {
 /// The class's specific stereotype, read from its OWN annotations only (not the body,
 /// so a `@Service` with a `@GetMapping` method is not mistaken for a controller).
 /// First matching annotation wins.
-fn class_stereotype(node: TsNode<'_>, src: &str) -> Option<&'static str> {
+fn class_stereotype(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<&'static str> {
     for annotation in annotations(node) {
         let mapped = match annotation_name(annotation, src).as_deref() {
             Some("RestController") | Some("Controller") => "controller",
@@ -1448,9 +1489,24 @@ fn class_stereotype(node: TsNode<'_>, src: &str) -> Option<&'static str> {
             Some("Component") => "component",
             Some("Entity") => "entity",
             Some("Path") => "resource", // JAX-RS
+            Some("SpringBootTest")
+            | Some("ExtendWith")
+            | Some("RunWith")
+            | Some("WebMvcTest")
+            | Some("DataJpaTest")
+            | Some("DataMongoTest")
+            | Some("JsonTest") => "test",
             _ => continue,
         };
         return Some(mapped);
+    }
+    // Naming-convention fallback: *Test / *Tests / *IT / *Spec
+    if simple_name.ends_with("Test")
+        || simple_name.ends_with("Tests")
+        || simple_name.ends_with("IT")
+        || simple_name.ends_with("Spec")
+    {
+        return Some("test");
     }
     None
 }
@@ -1459,6 +1515,33 @@ fn is_bean_method(node: TsNode<'_>, src: &str) -> bool {
     annotations(node)
         .into_iter()
         .any(|ann| annotation_name(ann, src).as_deref() == Some("Bean"))
+}
+
+fn is_test_method(node: TsNode<'_>, src: &str) -> bool {
+    annotations(node).into_iter().any(|ann| {
+        matches!(
+            annotation_name(ann, src).as_deref(),
+            Some("Test") | Some("ParameterizedTest") | Some("RepeatedTest")
+        )
+    })
+}
+
+fn is_mock_or_injected_field(node: TsNode<'_>, src: &str) -> bool {
+    annotations(node).into_iter().any(|ann| {
+        matches!(
+            annotation_name(ann, src).as_deref(),
+            Some("MockBean") | Some("SpyBean") | Some("Autowired") | Some("InjectMocks") | Some("Mock")
+        )
+    })
+}
+
+/// Strip generic parameters and array brackets from a raw type name.
+/// "List<Order>" → "List", "Order[]" → "Order", "Order" → "Order".
+fn simple_type_name(raw: &str) -> &str {
+    let s = raw.trim();
+    let s = s.split('<').next().unwrap_or(s);
+    let s = s.split('[').next().unwrap_or(s);
+    s.trim()
 }
 
 const JPA_INTERFACES: &[&str] = &[
@@ -1516,8 +1599,8 @@ fn jpa_repository_props(node: TsNode<'_>, src: &str) -> (bool, Option<String>) {
     (false, None)
 }
 
-fn build_class_props(node: TsNode<'_>, src: &str) -> Option<serde_json::Value> {
-    let stereotype = class_stereotype(node, src);
+fn build_class_props(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<serde_json::Value> {
+    let stereotype = class_stereotype(node, src, simple_name);
     let (is_jpa, entity_opt) = jpa_repository_props(node, src);
     let effective_stereotype = stereotype.or(if is_jpa { Some("repository") } else { None });
     match (effective_stereotype, entity_opt) {

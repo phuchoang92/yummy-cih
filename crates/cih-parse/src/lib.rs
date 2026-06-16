@@ -823,4 +823,155 @@ class AppConfig {
             "stereotype must be repository when both annotation and interface are present"
         );
     }
+
+    // ── Phase 16: test detection ──────────────────────────────────────────────
+
+    fn write_file(root: &PathBuf, rel: &str, content: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn test_class_by_annotation_gets_test_stereotype() {
+        let root = temp_repo();
+        let rel = "src/test/java/com/example/OrderServiceTest.java";
+        write_file(
+            &root,
+            rel,
+            r#"
+package com.example;
+import org.springframework.boot.test.context.SpringBootTest;
+@SpringBootTest
+public class OrderServiceTest {
+    @Test public void testSave() {}
+}
+"#,
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        // Node props should carry stereotype="test"
+        let test_node = output
+            .nodes
+            .iter()
+            .find(|n| n.name == "OrderServiceTest")
+            .expect("OrderServiceTest node must exist");
+        let stereotype = test_node
+            .props
+            .as_ref()
+            .and_then(|p| p.get("stereotype"))
+            .and_then(|v| v.as_str());
+        assert_eq!(stereotype, Some("test"), "SpringBootTest class must have stereotype=test");
+    }
+
+    #[test]
+    fn test_class_by_naming_convention_gets_test_stereotype() {
+        let root = temp_repo();
+        let rel = "src/test/java/com/example/PaymentServiceIT.java";
+        write_file(
+            &root,
+            rel,
+            "package com.example;\npublic class PaymentServiceIT {}\n",
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let test_node = output
+            .nodes
+            .iter()
+            .find(|n| n.name == "PaymentServiceIT")
+            .expect("PaymentServiceIT node must exist");
+        let stereotype = test_node
+            .props
+            .as_ref()
+            .and_then(|p| p.get("stereotype"))
+            .and_then(|v| v.as_str());
+        assert_eq!(stereotype, Some("test"), "*IT class must have stereotype=test");
+    }
+
+    #[test]
+    fn test_method_emits_tests_edge_and_prop() {
+        let root = temp_repo();
+        let rel = "src/test/java/com/example/FooTest.java";
+        write_file(
+            &root,
+            rel,
+            r#"
+package com.example;
+public class FooTest {
+    @Test
+    public void shouldWork() {}
+    public void helperMethod() {}
+}
+"#,
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        // The @Test method node should have isTest=true in props.
+        let test_method = output
+            .nodes
+            .iter()
+            .find(|n| n.name == "shouldWork")
+            .expect("shouldWork method node must exist");
+        let is_test = test_method
+            .props
+            .as_ref()
+            .and_then(|p| p.get("isTest"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(is_test, "@Test method must have isTest=true prop");
+
+        // A TESTS edge must exist from shouldWork to FooTest class.
+        let test_class_id = type_id(cih_core::NodeKind::Class, "com.example.FooTest");
+        let test_method_id = method_id("com.example.FooTest", "shouldWork", 0);
+        assert!(
+            output.edges.iter().any(|e| {
+                e.kind == EdgeKind::Tests && e.src == test_method_id && e.dst == test_class_id
+            }),
+            "TESTS edge from @Test method to owner class must be emitted"
+        );
+
+        // helperMethod (no @Test) must NOT have a TESTS edge.
+        let helper_id = method_id("com.example.FooTest", "helperMethod", 0);
+        assert!(
+            !output
+                .edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::Tests && e.src == helper_id),
+            "non-@Test method must not emit a TESTS edge"
+        );
+    }
+
+    #[test]
+    fn mock_bean_field_emits_tests_edge() {
+        let root = temp_repo();
+        let rel = "src/test/java/com/example/BarTest.java";
+        write_file(
+            &root,
+            rel,
+            r#"
+package com.example;
+@SpringBootTest
+public class BarTest {
+    @MockBean
+    private OrderService orderService;
+}
+"#,
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let test_class_id = type_id(cih_core::NodeKind::Class, "com.example.BarTest");
+        // TESTS edge from test class to the raw "Class:OrderService" target.
+        assert!(
+            output.edges.iter().any(|e| {
+                e.kind == EdgeKind::Tests
+                    && e.src == test_class_id
+                    && e.dst.as_str() == "Class:OrderService"
+            }),
+            "TESTS edge from test class to @MockBean field type must be emitted"
+        );
+    }
 }

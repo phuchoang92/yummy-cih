@@ -502,6 +502,99 @@ impl GraphStore for FalkorStore {
             })
             .collect())
     }
+
+    async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>> {
+        let id_lit = cstr(id.as_str());
+        // Direct TESTS edges to this symbol, plus TESTS edges to its owner class.
+        let q = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
+             WHERE target.id = {id_lit} \
+                OR EXISTS {{ \
+                      MATCH (owner:Symbol)-[:HAS_METHOD]->(target2:Symbol) \
+                      WHERE target2.id = {id_lit} AND owner.id = target.id \
+                   }} \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
+             ORDER BY t.file, t.name \
+             LIMIT 50"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect())
+    }
+
+    async fn tests_for_files(&self, files: &[String]) -> Result<Vec<Node>> {
+        if files.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = format!(
+            "[{}]",
+            files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
+        );
+        // Direct TESTS edges where the production target is in the changed files.
+        let q = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(prod:Symbol) \
+             WHERE prod.file IN {list} \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
+             ORDER BY t.file, t.name \
+             LIMIT 200"
+        );
+        let mut results: Vec<Node> = self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect();
+
+        // Also catch test methods that CALL into the changed files (one-hop indirect).
+        let q2 = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(:Symbol)-[:CALLS]->(prod:Symbol) \
+             WHERE prod.file IN {list} \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
+             ORDER BY t.file, t.name \
+             LIMIT 200"
+        );
+        let indirect: Vec<Node> = self
+            .rows(&q2)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect();
+
+        // Merge, dedup by id.
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|n| seen.insert(n.id.clone()));
+        for n in indirect {
+            if seen.insert(n.id.clone()) {
+                results.push(n);
+            }
+        }
+        results.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
+        Ok(results)
+    }
+
+    async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>> {
+        let lim = limit.clamp(1, 500);
+        let prefix_lit = cstr(file_prefix);
+        let q = format!(
+            "MATCH (n:Symbol) \
+             WHERE n.file STARTS WITH {prefix_lit} \
+               AND n.kind IN ['Method', 'Class', 'Interface'] \
+               AND NOT n.stereotype = 'test' \
+               AND NOT EXISTS {{ MATCH (:Symbol)-[:TESTS]->(n) }} \
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
+             ORDER BY n.file, n.name \
+             LIMIT {lim}"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect())
+    }
 }
 
 /// Thin `BulkLoader` over a `FalkorStore` (ports & adapters: the engine depends
@@ -652,6 +745,7 @@ fn edge_from_label(label: &str) -> EdgeKind {
         "PUBLISHES_EVENT" => EdgeKind::PublishesEvent,
         "LISTENS_TO" => EdgeKind::ListensTo,
         "EXTERNAL_CALL" => EdgeKind::ExternalCall,
+        "TESTS" => EdgeKind::Tests,
         _ => EdgeKind::Other,
     }
 }

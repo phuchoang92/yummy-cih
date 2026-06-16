@@ -183,6 +183,7 @@ pub enum EdgeKind {
     PublishesEvent,
     ListensTo,
     ExternalCall,
+    Tests,
     Other,
 }
 
@@ -207,6 +208,7 @@ impl EdgeKind {
             EdgeKind::PublishesEvent => "PUBLISHES_EVENT",
             EdgeKind::ListensTo => "LISTENS_TO",
             EdgeKind::ExternalCall => "EXTERNAL_CALL",
+            EdgeKind::Tests => "TESTS",
             EdgeKind::Other => "REL",
         }
     }

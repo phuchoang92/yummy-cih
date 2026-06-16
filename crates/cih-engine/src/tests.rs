@@ -331,6 +331,45 @@ fn jar_nodes_appear_in_graph_artifacts() {
 }
 
 #[test]
+fn test_class_emits_tests_edges_in_artifacts() {
+    let root = temp_repo();
+    // Add a test class with @SpringBootTest, @MockBean, and @Test method.
+    write(
+        &root,
+        "src/test/java/com/example/OwnerServiceTest.java",
+        r#"package com.example;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+@SpringBootTest
+public class OwnerServiceTest {
+    @MockBean
+    private OwnerService ownerService;
+    @Test
+    public void testFindAll() {}
+}
+"#,
+    );
+    let scan = scan::scan_repo(&root).unwrap();
+    let emit = analyze_emit(&scan, all_scope()).unwrap();
+
+    let nodes_jsonl = fs::read_to_string(emit.artifacts_dir.join("nodes.jsonl")).unwrap();
+    let edges_jsonl = fs::read_to_string(emit.artifacts_dir.join("edges.jsonl")).unwrap();
+
+    // Test class node must exist with stereotype=test.
+    assert!(
+        nodes_jsonl.contains("OwnerServiceTest"),
+        "test class node should appear in nodes.jsonl"
+    );
+    // TESTS edges must be emitted.
+    assert!(
+        edges_jsonl.contains("\"kind\":\"Tests\""),
+        "TESTS edges should appear in edges.jsonl"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn discover_emits_community_and_process_artifacts() {
     let root = temp_repo();
     write(

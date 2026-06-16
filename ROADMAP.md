@@ -298,23 +298,29 @@ provides a machine-readable report alongside every analysis run.
   write; `EmitOutcome.unresolved_report_path` surfaces the path in `print_human` output.
 - **Verified:** 118 tests green (5 new in cih-resolve + 1 extended engine integration test).
 
-## Phase 16 — Test Intelligence: coverage · regression scope · untested paths
+## Phase 16 — Test Intelligence: coverage · regression scope · untested paths ✅ (2026-06-16)
 
 **Primary persona: Tester**
 
-- **Test class detection in `cih-parse`:** identify test classes via `@Test`, `@SpringBootTest`,
-  `@ExtendWith`, `@RunWith`, and naming conventions (`*Test`, `*Spec`, `*IT`). Emit
-  `stereotype="test"` prop. Link test methods to production code via `@MockBean` references and
-  class-name heuristics → new `EdgeKind::Tests` in `cih-core`.
-- **`test_coverage(symbol_id)`** MCP tool: given a class or method node ID, return the test methods
-  that cover it (direct `TESTS` edge or naming-convention match).
-- **`regression_scope(changed_files: Vec<String>)`** MCP tool: given a list of changed repo paths,
-  return the set of test classes that must be re-run. Uses reverse `TESTS` edges + `impact()` blast
-  radius expansion.
-- **`untested_paths(module_prefix: String)`** MCP tool: returns classes/methods in the module that
-  have no inbound `TESTS` edge — i.e., no test coverage found in the graph.
-- **Done when:** a tester asks "what breaks if I change `OrderService`?" → list of test classes to
-  re-run; "what in the payment module has no tests?" → actionable coverage gap list.
+- **`EdgeKind::Tests`** added to `cih-core`; FalkorDB adapter maps `"TESTS"` ↔ `EdgeKind::Tests`.
+- **Test class detection in `cih-parse`:** identifies test classes via `@SpringBootTest`,
+  `@ExtendWith`, `@RunWith`, `@WebMvcTest`, `@DataJpaTest`, `@DataMongoTest`, `@JsonTest`, and
+  naming conventions (`*Test`, `*Tests`, `*IT`, `*Spec`). Sets `stereotype="test"` on matching class
+  nodes. Emits `TESTS` edges from `@Test`/`@ParameterizedTest`/`@RepeatedTest` methods to their
+  owner class (confidence 0.8, reason `"test-method"`) and from test classes to types injected via
+  `@MockBean`/`@SpyBean`/`@Autowired`/`@InjectMocks`/`@Mock` fields (confidence 0.7, reason
+  `"mock-bean"`). `TypeContext.is_test` gating ensures TESTS edges are only emitted from test
+  classes.
+- **`test_coverage(symbol_id)`** MCP tool (`cih-server`): queries TESTS edges to `id` or its owner
+  class; returns up to 50 test nodes.
+- **`regression_scope(changed_files)`** MCP tool: given changed repo paths, returns distinct test
+  class/method nodes covering any symbol in those files (direct TESTS + one-hop via CALLS, up to
+  200 each, merged in Rust).
+- **`untested_paths(module_prefix, limit?)`** MCP tool: returns production Method/Class/Interface
+  nodes under `module_prefix` that have no inbound TESTS edge (excludes `stereotype="test"` nodes).
+- **GraphStore trait:** 3 new methods — `test_coverage`, `tests_for_files`, `untested_symbols`;
+  Falkor Cypher impls in `cih-falkor`.
+- **Verified:** 125 tests green (4 new parse tests, 2 server arg tests, 1 engine integration test).
 
 ## Phase 17 — Visualization output for yummy frontend
 

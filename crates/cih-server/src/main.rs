@@ -160,6 +160,27 @@ struct FeatureMapArgs {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TestCoverageArgs {
+    /// Symbol to look up test coverage for — full NodeId or short name.
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RegressionScopeArgs {
+    /// Repo-relative file paths that changed (e.g. ["src/main/java/com/acme/OrderService.java"]).
+    changed_files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UntestedPathsArgs {
+    /// Repo-relative path prefix to restrict the search (e.g. "src/main/java/com/acme/payment").
+    module_prefix: String,
+    /// Max symbols to return (default 50, max 500).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 // ---- ambiguous-symbol helpers ----
 
 enum SymbolResolution {
@@ -854,6 +875,109 @@ impl CihServer {
             "clusters": result,
         }))
     }
+
+    #[tool(
+        description = "Return all test methods/classes that cover a symbol (via TESTS edges). \
+            Helps a tester understand which tests exercise a given class or method."
+    )]
+    async fn test_coverage(
+        &self,
+        Parameters(args): Parameters<TestCoverageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = match self.resolve_symbol(&args.name).await? {
+            SymbolResolution::Id(id) => id,
+            SymbolResolution::Ambiguous(candidates) => {
+                return json_result(&AmbiguousResult {
+                    status: "ambiguous",
+                    candidates: candidates
+                        .iter()
+                        .map(|n| AmbiguousCandidate {
+                            id: n.id.to_string(),
+                            kind: n.kind.label().to_string(),
+                            name: n.name.clone(),
+                            file: n.file.clone(),
+                        })
+                        .collect(),
+                });
+            }
+            SymbolResolution::NotFound => {
+                return Err(McpError::invalid_params(
+                    format!("symbol '{}' not found", args.name),
+                    None,
+                ));
+            }
+        };
+        let tests = self.store.test_coverage(&id).await.map_err(to_mcp)?;
+        json_result(&serde_json::json!({
+            "symbol_id": id.as_str(),
+            "test_count": tests.len(),
+            "tests": tests.iter().map(|n| serde_json::json!({
+                "id": n.id.as_str(),
+                "kind": n.kind.label(),
+                "name": n.name,
+                "file": n.file,
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    #[tool(
+        description = "Given a list of changed files, return all test classes that must be \
+            re-run. Follows TESTS edges (direct + one-hop via CALLS). Use after `git diff \
+            --name-only` to find the regression scope."
+    )]
+    async fn regression_scope(
+        &self,
+        Parameters(args): Parameters<RegressionScopeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let tests = self
+            .store
+            .tests_for_files(&args.changed_files)
+            .await
+            .map_err(to_mcp)?;
+        // Dedup by file, collect unique test class files.
+        let mut seen_files = std::collections::BTreeSet::new();
+        let test_classes: Vec<serde_json::Value> = tests
+            .iter()
+            .filter(|n| seen_files.insert(n.file.clone()))
+            .map(|n| serde_json::json!({
+                "id": n.id.as_str(),
+                "kind": n.kind.label(),
+                "name": n.name,
+                "file": n.file,
+            }))
+            .collect();
+        json_result(&serde_json::json!({
+            "changed_file_count": args.changed_files.len(),
+            "test_class_count": test_classes.len(),
+            "test_classes": test_classes,
+        }))
+    }
+
+    #[tool(
+        description = "Return production symbols (classes, methods) under a path prefix that \
+            have no test coverage (no inbound TESTS edge). Helps identify coverage gaps."
+    )]
+    async fn untested_paths(
+        &self,
+        Parameters(args): Parameters<UntestedPathsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = args.limit.unwrap_or(50).clamp(1, 500);
+        let symbols = self
+            .store
+            .untested_symbols(&args.module_prefix, limit)
+            .await
+            .map_err(to_mcp)?;
+        json_result(&serde_json::json!({
+            "prefix": args.module_prefix,
+            "untested_count": symbols.len(),
+            "symbols": symbols.iter().map(|n| serde_json::json!({
+                "id": n.id.as_str(),
+                "kind": n.kind.label(),
+                "name": n.name,
+                "file": n.file,
+            })).collect::<Vec<_>>(),
+        }))
+    }
 }
 
 #[tool_handler]
@@ -874,7 +998,8 @@ impl ServerHandler for CihServer {
                 "Code Intelligence Hub — query the call graph: `query`, `context`, `impact`, \
                  `communities`, `route_map`, `trace_flow`, `feature_map`, \
                  `group_contracts`, `api_impact`, `shape_check`, \
-                 `list_repos`, `detect_changes`. \
+                 `list_repos`, `detect_changes`, \
+                 `test_coverage`, `regression_scope`, `untested_paths`. \
                  Short symbol names trigger disambiguation; full NodeIds (Kind:fqn) skip it. \
                  Read repo data via cih://repo/{name}/context|communities|processes|schema."
                     .into(),
@@ -1094,6 +1219,24 @@ mod tests {
     fn feature_map_args_defaults() {
         let args: FeatureMapArgs = serde_json::from_str(r#"{"query":"checkout"}"#).unwrap();
         assert_eq!(args.query, "checkout");
+        assert!(args.limit.is_none());
+    }
+
+    #[test]
+    fn regression_scope_args_parses_file_list() {
+        let args: RegressionScopeArgs = serde_json::from_str(
+            r#"{"changed_files":["src/main/java/com/acme/Foo.java"]}"#,
+        )
+        .unwrap();
+        assert_eq!(args.changed_files.len(), 1);
+        assert_eq!(args.changed_files[0], "src/main/java/com/acme/Foo.java");
+    }
+
+    #[test]
+    fn untested_paths_args_defaults() {
+        let args: UntestedPathsArgs =
+            serde_json::from_str(r#"{"module_prefix":"src/main/java/com/acme"}"#).unwrap();
+        assert_eq!(args.module_prefix, "src/main/java/com/acme");
         assert!(args.limit.is_none());
     }
 
