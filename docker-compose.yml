@@ -30,6 +30,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # One-shot indexer — not a long-running service.
+  # Set REPO_PATH in .env or your shell, then run:
+  #   docker compose run --rm engine analyze /repo --all
+  #   docker compose run --rm engine discover /repo
+  #   docker compose run --rm engine wiki /repo --out /repo/.cih/wiki
+  engine:
+    image: phuchoang29/yummy-cih:latest
+    entrypoint: ["cih-engine"]
+    environment:
+      FALKOR_URL: redis://falkordb:6379
+      CIH_GRAPH_KEY: cih
+    volumes:
+      - ${REPO_PATH}:/repo
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    profiles: ["tools"]
+
 volumes:
   falkordb-data:
   cih-data:

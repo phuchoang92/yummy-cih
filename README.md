@@ -26,39 +26,31 @@ This starts two services:
 | `falkordb` | 6380 (host) | Graph database (persisted in `falkordb-data` volume) |
 | `cih-server` | 8080 (host) | MCP server (tools: context, impact, search) |
 
-### 3. Index your Java project
+### 3. Tell compose where your Java project is
 
-Run `cih-engine` inside the container, mounting your repo:
+Create a `.env` file next to `docker-compose.yml`:
 
 ```bash
-# Step 1 — Parse + resolve (writes artifacts to <repo>/.cih/)
-docker run --rm \
-  --network yummy-cih_default \
-  -v /path/to/your/java-project:/repo \
-  phuchoang29/yummy-cih:latest \
-  cih-engine analyze /repo --all
-
-# Step 2 — Community detection (groups related classes)
-docker run --rm \
-  --network yummy-cih_default \
-  -v /path/to/your/java-project:/repo \
-  phuchoang29/yummy-cih:latest \
-  cih-engine discover /repo
-
-# Step 3 — Generate wiki docs (PO / BA / Dev role pages)
-docker run --rm \
-  --network yummy-cih_default \
-  -v /path/to/your/java-project:/repo \
-  phuchoang29/yummy-cih:latest \
-  cih-engine wiki /repo --out /repo/.cih/wiki
+# .env
+REPO_PATH=/absolute/path/to/your/java-project
 ```
 
-Replace `/path/to/your/java-project` with the absolute path to your repo.
+### 4. Index your Java project
 
-> **Network name**: if your project folder is not `yummy-cih`, Docker names the default network
-> after your folder. Run `docker network ls | grep falkordb` to find the correct name.
+```bash
+# Parse + resolve — writes artifacts into <repo>/.cih/
+docker compose run --rm engine analyze /repo --all
 
-### 4. View the wiki
+# Community detection — groups related classes into modules
+docker compose run --rm engine discover /repo
+
+# Generate wiki docs (PO / BA / Dev role pages)
+docker compose run --rm engine wiki /repo --out /repo/.cih/wiki
+```
+
+Each command exits when done. The stack (`cih-server` + `falkordb`) keeps running in the background.
+
+### 5. View the wiki
 
 The wiki is written as Markdown to `<your-repo>/.cih/wiki/pages/`. Open the files in any
 Markdown viewer or serve them locally:
@@ -79,7 +71,7 @@ Role pages generated:
 | Dev | `pages/dev/` | Classes, stereotypes, routes, DB access, test coverage |
 | Shared | `pages/shared/` | Full API route list (Markdown + OpenAPI JSON) |
 
-### 5. Connect Claude / MCP Inspector
+### 6. Connect Claude / MCP Inspector
 
 The MCP server listens on `http://localhost:8080/mcp` (Streamable HTTP / JSON-RPC).
 
