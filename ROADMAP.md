@@ -322,23 +322,34 @@ provides a machine-readable report alongside every analysis run.
   Falkor Cypher impls in `cih-falkor`.
 - **Verified:** 125 tests green (4 new parse tests, 2 server arg tests, 1 engine integration test).
 
-## Phase 17 — Visualization output for yummy frontend
+## Phase 17 — Visualization output for yummy frontend ✅ (2026-06-16)
 
 **Primary consumer: yummy frontend**
 
 MCP tools that return graph data support a `format` parameter so yummy can render diagrams without
 a separate graph-rendering backend:
 
-- `trace_flow(..., format="mermaid")` → Mermaid flowchart of the execution chain
-- `impact(..., format="diagram")` → D3-JSON force-directed blast radius graph
-- `communities(format="diagram")` → service map with module boundaries
-- `route_map(format="openapi")` → OpenAPI 3.0 JSON generated from the route graph (path, HTTP
-  method, handler class/method, inferred request/response types)
+- `trace_flow(..., format="mermaid")` → Mermaid `flowchart TD` of the execution chain
+- `impact(..., format="diagram")` → D3-JSON force-directed blast-radius graph
+- `communities(format="diagram")` → D3-JSON service map with inter-community edge weights
+- `route_map(format="openapi")` → OpenAPI 3.0.3 JSON of the indexed route surface
 
-These are output-format additions to existing tools — no new graph data needed.
+**Data additions (additive, no existing callers break):**
+- `FlowNode.parent_id: Option<NodeId>` — predecessor in shortest path (enables Mermaid edges)
+- `ImpactNode.name/kind/parent_id` — enriches impact JSON and enables D3 graph links
+- `CommunityEdge { src, dst, weight }` struct + `GraphStore::community_graph()` trait method +
+  Falkor Cypher impl (counts CALLS edges crossing community boundaries)
 
-- **Done when:** yummy frontend can render a live architecture diagram for any selected module
-  without the user reading code.
+**New `cih-server/src/viz.rs`:** 4 pure render functions:
+- `render_mermaid_flow()` — sanitized node IDs, parent-tracking edges, truncated labels
+- `render_d3_impact()` — root node + affected nodes with parent→child links
+- `render_community_diagram()` — communities as nodes, inter-community calls as weighted links
+- `render_openapi()` — groups routes by path, derives operationIds, adds `x-handler-*` extensions
+
+**Falkor Cypher update:** `impact()` and `flow_downstream()` use a two-step WITH/ORDER BY/collect
+pattern to extract the shortest-path parent for each node.
+
+**Verified:** 133 tests green (1 new Falkor test, 5 viz unit tests, 2 new server arg tests).
 
 > **Dev shortcut:** FalkorDB's Docker image ships a browser UI on port 3000. Expose it with
 > `"3000:3000"` in docker-compose for direct Cypher graph exploration during development.

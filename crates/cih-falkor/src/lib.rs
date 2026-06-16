@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
-    risk_from_fanout, BulkLoader, CommunityInfo, Direction, FlowNode, GraphStore, GraphStoreError,
-    Impact, ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
+    risk_from_fanout, BulkLoader, CommunityEdge, CommunityInfo, Direction, FlowNode, GraphStore,
+    GraphStoreError, Impact, ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
 };
 use redis::Value;
 
@@ -228,10 +228,17 @@ impl GraphStore for FalkorStore {
             Direction::Downstream => format!("-[:CALLS*1..{d}]->"),
             Direction::Both => format!("-[:CALLS*1..{d}]-"),
         };
+        // Two-step aggregation: order paths by length per node, then take the first
+        // (shortest) parent and the minimum depth. This gives accurate parent tracking
+        // for D3 diagram rendering without requiring a separate query.
         let q = format!(
             "CYPHER id={id} \
              MATCH p=(n:Symbol {{id:$id}}){arrow}(m:Symbol) \
-             RETURN DISTINCT m.id, min(length(p))",
+             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode \
+             ORDER BY m.id, len \
+             WITH m, collect(pnode)[0] AS parent, min(len) AS depth \
+             RETURN m.id, depth, parent.id, m.name, labels(m)[0] \
+             LIMIT 200",
             id = cstr(id.as_str())
         );
         let rows = self.rows(&q).await?;
@@ -241,6 +248,9 @@ impl GraphStore for FalkorStore {
             .map(|r| ImpactNode {
                 id: NodeId::new(r[0].clone()),
                 depth: r.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+                parent_id: r.get(2).filter(|s| !s.is_empty()).map(|s| NodeId::new(s.clone())),
+                name: r.get(3).cloned().unwrap_or_default(),
+                kind: r.get(4).cloned().unwrap_or_default(),
                 via: "CALLS".to_string(),
             })
             .collect();
@@ -444,12 +454,17 @@ impl GraphStore for FalkorStore {
 
     async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowNode>> {
         let d = max_depth.clamp(1, 10);
+        // Two-step aggregation picks the shortest-path parent for each node so the
+        // Mermaid renderer can draw accurate edges between caller and callee.
         let q = format!(
             "CYPHER id={id} \
              MATCH p=(start:Symbol {{id:$id}})\
              -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO*1..{d}]->(m:Symbol) \
-             RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file, min(length(p)) \
-             ORDER BY min(length(p)), m.name LIMIT 100",
+             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode \
+             ORDER BY m.id, len \
+             WITH m, collect(pnode)[0] AS parent, min(len) AS depth \
+             RETURN m.id, m.kind, m.name, m.qualifiedName, m.file, depth, parent.id \
+             ORDER BY depth, m.name LIMIT 100",
             id = cstr(entry.as_str())
         );
         Ok(self
@@ -464,6 +479,7 @@ impl GraphStore for FalkorStore {
                 qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
                 file: r.get(4).cloned().unwrap_or_default(),
                 depth: r.get(5).and_then(|s| s.parse().ok()).unwrap_or(1),
+                parent_id: r.get(6).filter(|s| !s.is_empty()).map(|s| NodeId::new(s.clone())),
             })
             .collect())
     }
@@ -593,6 +609,29 @@ impl GraphStore for FalkorStore {
             .await?
             .iter()
             .map(|r| node_from_row(r))
+            .collect())
+    }
+
+    async fn community_graph(&self) -> Result<Vec<CommunityEdge>> {
+        // Count CALLS edges that cross community boundaries. Each unit of weight
+        // represents one caller→callee pair where caller and callee belong to
+        // different communities. Capped at 500 pairs to avoid a mega-result.
+        let q = "MATCH (a:Symbol)-[:MEMBER_OF]->(ca:Symbol), \
+                       (b:Symbol)-[:MEMBER_OF]->(cb:Symbol) \
+                 WHERE ca.kind = 'Community' AND cb.kind = 'Community' \
+                   AND (a)-[:CALLS]->(b) AND ca.id <> cb.id \
+                 RETURN ca.id, cb.id, count(*) AS weight \
+                 LIMIT 500";
+        Ok(self
+            .rows(q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| CommunityEdge {
+                src: r[0].clone(),
+                dst: r[1].clone(),
+                weight: r[2].parse().unwrap_or(0),
+            })
             .collect())
     }
 }
@@ -876,6 +915,19 @@ mod tests {
         );
         assert_eq!(info.handler_name, "list");
         assert_eq!(info.handler_qualified, "com.example.UserController#list/0");
+    }
+
+    #[test]
+    fn community_graph_row_parses_correctly() {
+        let row = make_row(&["Community:order-service", "Community:payment-service", "12"]);
+        let edge = CommunityEdge {
+            src: row[0].clone(),
+            dst: row[1].clone(),
+            weight: row[2].parse().unwrap_or(0),
+        };
+        assert_eq!(edge.src, "Community:order-service");
+        assert_eq!(edge.dst, "Community:payment-service");
+        assert_eq!(edge.weight, 12);
     }
 
     #[test]

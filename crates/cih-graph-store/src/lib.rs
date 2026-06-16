@@ -47,6 +47,10 @@ pub struct ImpactNode {
     pub id: NodeId,
     pub depth: u32,
     pub via: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<NodeId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,6 +97,15 @@ pub struct FlowNode {
     pub qualified_name: Option<String>,
     pub file: String,
     pub depth: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<NodeId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommunityEdge {
+    pub src: String,
+    pub dst: String,
+    pub weight: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -162,6 +175,12 @@ pub trait GraphStore: Send + Sync {
     /// Return production symbols (Method, Class, Interface) under `file_prefix`
     /// that have no inbound TESTS edge — i.e. no known test coverage.
     async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>>;
+
+    /// Return inter-community CALLS edges: for each pair of communities (A, B),
+    /// the number of CALLS edges from a member of A to a member of B. Used to
+    /// render the community service-map diagram. Returns empty if no discover run
+    /// has been done (no Community nodes in graph).
+    async fn community_graph(&self) -> Result<Vec<CommunityEdge>>;
 }
 
 /// Bulk loading is a SEPARATE port — mechanisms differ wildly across backends

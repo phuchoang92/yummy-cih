@@ -13,6 +13,7 @@
 mod config;
 mod resources;
 mod search;
+mod viz;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use cih_core::{
 };
 use cih_embed::{EmbedModelKind, EmbedStore};
 use cih_graph_store::{CommunityInfo, Direction, GraphStore, GraphStoreError, RouteInfo};
+use viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -71,6 +73,9 @@ struct ImpactArgs {
     /// Max traversal depth (default 4).
     #[serde(default)]
     max_depth: Option<u32>,
+    /// Output format. Omit for default JSON. Pass `"diagram"` for D3 force-directed JSON.
+    #[serde(default)]
+    format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -78,6 +83,9 @@ struct CommunitiesArgs {
     /// Optional maximum number of communities to return.
     #[serde(default)]
     limit: Option<usize>,
+    /// Output format. Omit for default JSON. Pass `"diagram"` for D3 service-map JSON.
+    #[serde(default)]
+    format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -88,6 +96,9 @@ struct RouteMapArgs {
     /// Max routes to return (default 200).
     #[serde(default)]
     limit: Option<usize>,
+    /// Output format. Omit for default JSON. Pass `"openapi"` for OpenAPI 3.0.3 JSON.
+    #[serde(default)]
+    format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -149,6 +160,9 @@ struct TraceFlowArgs {
     /// Maximum traversal depth (default 6, clamped to 10).
     #[serde(default)]
     max_depth: Option<u32>,
+    /// Output format. Omit for default JSON. Pass `"mermaid"` for a Mermaid flowchart string.
+    #[serde(default)]
+    format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -306,6 +320,9 @@ impl CihServer {
             .impact(&id, dir, args.max_depth.unwrap_or(4))
             .await
             .map_err(to_mcp)?;
+        if args.format.as_deref() == Some("diagram") {
+            return json_result(&render_d3_impact(&res));
+        }
         json_result(&res)
     }
 
@@ -317,6 +334,10 @@ impl CihServer {
         let mut communities = self.store.communities().await.map_err(to_mcp)?;
         if let Some(limit) = args.limit {
             communities.truncate(limit);
+        }
+        if args.format.as_deref() == Some("diagram") {
+            let edges = self.store.community_graph().await.map_err(to_mcp)?;
+            return json_result(&render_community_diagram(&communities, &edges));
         }
         json_result(&communities)
     }
@@ -359,6 +380,9 @@ impl CihServer {
         };
         let limit = args.limit.unwrap_or(200).clamp(1, 1000);
         let routes: Vec<RouteInfo> = self.store.route_map(prefix, limit).await.map_err(to_mcp)?;
+        if args.format.as_deref() == Some("openapi") {
+            return json_result(&render_openapi(&routes));
+        }
         json_result(&routes)
     }
 
@@ -803,6 +827,9 @@ impl CihServer {
         };
         let depth = args.max_depth.unwrap_or(6).clamp(1, 10);
         let steps = self.store.flow_downstream(&id, depth).await.map_err(to_mcp)?;
+        if args.format.as_deref() == Some("mermaid") {
+            return text_result(render_mermaid_flow(&id, &steps));
+        }
         json_result(&serde_json::json!({
             "entry_point": id.as_str(),
             "depth_limit": depth,
@@ -1001,7 +1028,11 @@ impl ServerHandler for CihServer {
                  `list_repos`, `detect_changes`, \
                  `test_coverage`, `regression_scope`, `untested_paths`. \
                  Short symbol names trigger disambiguation; full NodeIds (Kind:fqn) skip it. \
-                 Read repo data via cih://repo/{name}/context|communities|processes|schema."
+                 Read repo data via cih://repo/{name}/context|communities|processes|schema. \
+                 Visualization formats: `impact(format=\"diagram\")` → D3-JSON blast-radius graph; \
+                 `trace_flow(format=\"mermaid\")` → Mermaid flowchart; \
+                 `communities(format=\"diagram\")` → D3-JSON service map; \
+                 `route_map(format=\"openapi\")` → OpenAPI 3.0.3 JSON."
                     .into(),
             ),
         }
@@ -1162,6 +1193,10 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
     Ok(CallToolResult::success(vec![content]))
 }
 
+fn text_result(s: String) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::success(vec![Content::text(s)]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1213,6 +1248,25 @@ mod tests {
             serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
         assert_eq!(args.entry_point, "Route:GET /");
         assert!(args.max_depth.is_none());
+        assert!(args.format.is_none());
+    }
+
+    #[test]
+    fn impact_args_accepts_format_diagram() {
+        let args: ImpactArgs =
+            serde_json::from_str(r#"{"name":"OrderService","format":"diagram"}"#).unwrap();
+        assert_eq!(args.name, "OrderService");
+        assert_eq!(args.format.as_deref(), Some("diagram"));
+    }
+
+    #[test]
+    fn trace_flow_args_accepts_format_mermaid() {
+        let args: TraceFlowArgs = serde_json::from_str(
+            r#"{"entry_point":"Route:GET /api/checkout","format":"mermaid"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.entry_point, "Route:GET /api/checkout");
+        assert_eq!(args.format.as_deref(), Some("mermaid"));
     }
 
     #[test]
