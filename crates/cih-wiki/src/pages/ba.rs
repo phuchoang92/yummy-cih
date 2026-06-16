@@ -200,6 +200,23 @@ pub fn render_ba_community(
         }
     }
 
+    if let Some(tables) = graph.community_db_tables.get(comm_id) {
+        if !tables.is_empty() {
+            md.push_str("## Data Access\n\n");
+            md.push_str("| Table | Read | Write |\n");
+            md.push_str("|---|---|---|\n");
+            for t in tables {
+                md.push_str(&format!(
+                    "| `{}` | {} | {} |\n",
+                    t.table_name,
+                    if t.reads { "✓" } else { "" },
+                    if t.writes { "✓" } else { "" },
+                ));
+            }
+            md.push('\n');
+        }
+    }
+
     md
 }
 
@@ -353,6 +370,48 @@ mod tests {
         assert_eq!(val["format"], "community-slice");
         assert!(val["nodes"].is_array());
         assert!(val["links"].is_array());
+    }
+
+    #[test]
+    fn render_ba_community_shows_data_access_when_present() {
+        let sym_a = make_node("Method:A#doA/0", NodeKind::Method, "doA");
+        let dbq = make_node("DbQuery:A#SQL", NodeKind::DbQuery, "SQL");
+        let tbl = make_node("DbTable:ACCOUNTS", NodeKind::DbTable, "ACCOUNTS");
+        let comm_a = make_node("Community:0", NodeKind::Community, "svc-a");
+        let nodes = [sym_a.clone(), dbq.clone(), tbl.clone()];
+        let edges = [
+            Edge {
+                src: sym_a.id.clone(),
+                dst: dbq.id.clone(),
+                kind: EdgeKind::ExecutesQuery,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: dbq.id.clone(),
+                dst: tbl.id.clone(),
+                kind: EdgeKind::WritesTable,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+        ];
+        let comm_edges = [member_edge("Method:A#doA/0", "Community:0")];
+        let g = WikiGraph::build(&nodes, &edges, &[comm_a], &comm_edges);
+        let comm = g.community_nodes[0].clone();
+        let mut sm = BTreeMap::new();
+        sm.insert("Community:0".to_string(), "svc-a".to_string());
+        let md = render_ba_community(&g, &comm, &sm, None);
+        assert!(md.contains("## Data Access"), "has data access section");
+        assert!(md.contains("ACCOUNTS"), "has table name");
+        assert!(md.contains("✓"), "has check mark for write");
+    }
+
+    #[test]
+    fn render_ba_community_omits_data_access_when_none() {
+        let g = two_community_graph();
+        let comm_a = g.community_nodes.iter().find(|n| n.name == "svc-a").unwrap().clone();
+        let md = render_ba_community(&g, &comm_a, &slug_map(), None);
+        assert!(!md.contains("## Data Access"), "no data access when no db tables");
     }
 
     #[test]

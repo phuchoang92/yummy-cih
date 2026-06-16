@@ -20,3 +20,6 @@
 # Local temp/cache
 .cache/
 tmp/
+
+# CIH analysis artifacts
+.cih/

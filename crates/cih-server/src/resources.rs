@@ -121,7 +121,7 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
             return Err(McpError::invalid_params(
                 format!("unknown section '{section}'"),
                 None,
-            ))
+            ));
         }
     };
 

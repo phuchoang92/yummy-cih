@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CIH Graph Browser</title>
+    <link rel="stylesheet" href="/graph/assets/styles.css" />
+  </head>
+  <body>
+    <div id="cih-graph-browser" class="shell">
+      <aside class="sidebar" aria-label="Graph search and navigation">
+        <div class="brand">
+          <div class="brand-mark">CIH</div>
+          <div>
+            <h1>Graph Browser</h1>
+            <p>Local code-intelligence graph</p>
+          </div>
+        </div>
+
+        <form id="search-form" class="search-form">
+          <label for="search-input">Search symbol, route, table, or feature</label>
+          <div class="search-row">
+            <input
+              id="search-input"
+              type="search"
+              name="q"
+              autocomplete="off"
+              placeholder="Overdraft, AccountService, /api/..."
+            />
+            <button type="submit">Search</button>
+          </div>
+        </form>
+
+        <nav class="tabs" aria-label="Graph views">
+          <button class="tab is-active" data-view="search" type="button">Search</button>
+          <button class="tab" data-view="impact" type="button">Impact</button>
+          <button class="tab" data-view="flow" type="button">Flow</button>
+          <button class="tab" data-view="communities" type="button">Communities</button>
+          <button class="tab" data-view="routes" type="button">Routes</button>
+        </nav>
+
+        <section class="controls" aria-label="View controls">
+          <div class="control-grid" data-panel="impact">
+            <label>
+              Direction
+              <select id="impact-direction">
+                <option value="upstream">Upstream</option>
+                <option value="downstream">Downstream</option>
+                <option value="both">Both</option>
+              </select>
+            </label>
+            <label>
+              Depth
+              <input id="impact-depth" type="number" min="1" max="8" value="4" />
+            </label>
+            <button id="load-impact" type="button">Load Impact</button>
+          </div>
+
+          <div class="control-grid is-hidden" data-panel="flow">
+            <label>
+              Depth
+              <input id="flow-depth" type="number" min="1" max="10" value="6" />
+            </label>
+            <button id="load-flow" type="button">Trace Flow</button>
+            <button id="copy-mermaid" type="button">Copy Mermaid</button>
+          </div>
+
+          <div class="control-grid is-hidden" data-panel="communities">
+            <button id="load-communities" type="button">Load Communities</button>
+          </div>
+
+          <div class="control-grid is-hidden" data-panel="routes">
+            <label>
+              Prefix
+              <input id="route-prefix" type="search" placeholder="/api" />
+            </label>
+            <button id="load-routes" type="button">Load Routes</button>
+            <button id="copy-openapi" type="button">Copy OpenAPI</button>
+          </div>
+        </section>
+
+        <section class="results" aria-label="Results">
+          <div class="section-title">
+            <h2 id="results-title">Results</h2>
+            <span id="result-count">0</span>
+          </div>
+          <div id="results-list" class="results-list"></div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="toolbar">
+          <div>
+            <div id="active-view-label" class="eyebrow">Search</div>
+            <h2 id="graph-title">Search the indexed graph</h2>
+          </div>
+          <div class="toolbar-actions">
+            <button id="fit-graph" type="button" title="Fit graph">Fit</button>
+            <button id="clear-graph" type="button" title="Clear graph">Clear</button>
+          </div>
+        </header>
+
+        <section class="graph-stage" aria-label="Graph visualization">
+          <svg id="graph-svg" role="img" aria-label="Code graph"></svg>
+          <div id="empty-state" class="empty-state">
+            <h3>No graph loaded</h3>
+            <p>Search for a symbol or load one of the graph views.</p>
+          </div>
+        </section>
+      </main>
+
+      <aside class="details" aria-label="Selected node details">
+        <div class="section-title">
+          <h2>Details</h2>
+          <span id="status-pill" class="status-pill">Ready</span>
+        </div>
+        <div id="selected-summary" class="selected-summary">
+          <p>Select a node or result to inspect context, callers, callees, files, and routes.</p>
+        </div>
+        <pre id="details-json" class="details-json">{}</pre>
+      </aside>
+    </div>
+
+    <script src="/graph/assets/app.js"></script>
+  </body>
+</html>

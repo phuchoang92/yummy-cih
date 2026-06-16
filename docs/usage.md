@@ -96,6 +96,16 @@ The MCP endpoint is:
 http://127.0.0.1:8080/mcp
 ```
 
+The built-in local graph browser is:
+
+```text
+http://127.0.0.1:8080/graph
+```
+
+Use it to search symbols, inspect context, render impact graphs, trace flows,
+view communities, and browse indexed routes while the full `yummy` frontend is
+being developed.
+
 ## CLI Commands
 
 ### Scan

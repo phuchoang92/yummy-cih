@@ -151,6 +151,23 @@ pub fn render_dev_community(
         }
     }
 
+    if let Some(tables) = graph.community_db_tables.get(comm_id) {
+        if !tables.is_empty() {
+            md.push_str("## DB Access\n\n");
+            md.push_str("| Table | Read | Write |\n");
+            md.push_str("|---|---|---|\n");
+            for t in tables {
+                md.push_str(&format!(
+                    "| `{}` | {} | {} |\n",
+                    t.table_name,
+                    if t.reads { "✓" } else { "" },
+                    if t.writes { "✓" } else { "" },
+                ));
+            }
+            md.push('\n');
+        }
+    }
+
     let mut ext_call_names: Vec<String> = Vec::new();
     for m in member_list {
         if let Some(ext_ids) = graph.external_calls.get(m.id.as_str()) {
@@ -357,6 +374,71 @@ mod tests {
         assert_eq!(val["format"], "d3-force");
         assert!(val["nodes"].is_array());
         assert!(val["links"].is_array());
+    }
+
+    #[test]
+    fn render_dev_community_shows_db_access_when_present() {
+        use cih_core::{EdgeKind, NodeId};
+        let cls = Node {
+            id: NodeId::new("Class:com.example.OrderService".to_string()),
+            kind: NodeKind::Class,
+            name: "OrderService".to_string(),
+            qualified_name: Some("com.example.OrderService".to_string()),
+            file: "OrderService.java".to_string(),
+            range: cih_core::Range::default(),
+            props: Some(serde_json::json!({"stereotype": "service"})),
+        };
+        let method = make_node("Method:com.example.OrderService#save/0", NodeKind::Method, "save");
+        let dbq = make_node("DbQuery:com.example.OrderService#SQL_SAVE", NodeKind::DbQuery, "SQL_SAVE");
+        let tbl = make_node("DbTable:ORDERS", NodeKind::DbTable, "ORDERS");
+        let comm = make_node("Community:0", NodeKind::Community, "order-service");
+        let nodes = [cls.clone(), method.clone(), dbq.clone(), tbl.clone()];
+        let edges = [
+            Edge {
+                src: method.id.clone(),
+                dst: dbq.id.clone(),
+                kind: EdgeKind::ExecutesQuery,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: dbq.id.clone(),
+                dst: tbl.id.clone(),
+                kind: EdgeKind::WritesTable,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+        ];
+        let comm_edges = [
+            Edge {
+                src: cls.id.clone(),
+                dst: NodeId::new("Community:0".to_string()),
+                kind: EdgeKind::MemberOf,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: method.id.clone(),
+                dst: NodeId::new("Community:0".to_string()),
+                kind: EdgeKind::MemberOf,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+        ];
+        let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
+        let comm_node = g.community_nodes[0].clone();
+        let md = render_dev_community(&g, &comm_node, &slug_map(), None);
+        assert!(md.contains("## DB Access"), "has db access section");
+        assert!(md.contains("ORDERS"), "has table name");
+        assert!(md.contains("✓"), "has check mark");
+    }
+
+    #[test]
+    fn render_dev_community_omits_db_access_when_none() {
+        let g = simple_dev_graph();
+        let comm = g.community_nodes[0].clone();
+        let md = render_dev_community(&g, &comm, &slug_map(), None);
+        assert!(!md.contains("## DB Access"), "no db access section when no tables");
     }
 
     #[test]

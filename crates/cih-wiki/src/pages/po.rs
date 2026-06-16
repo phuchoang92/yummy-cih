@@ -123,6 +123,24 @@ pub fn render_po_community(
         }
     }
 
+    if let Some(tables) = graph.community_db_tables.get(comm_id) {
+        if !tables.is_empty() {
+            md.push_str("## Core Tables\n\n");
+            md.push_str("| Table | Access |\n");
+            md.push_str("|---|---|\n");
+            for t in tables {
+                let access = match (t.reads, t.writes) {
+                    (true, true) => "Read + Write",
+                    (true, false) => "Read",
+                    (false, true) => "Write",
+                    _ => "—",
+                };
+                md.push_str(&format!("| `{}` | {} |\n", t.table_name, access));
+            }
+            md.push('\n');
+        }
+    }
+
     let procs = processes_for_community(graph, comm_id);
     if !procs.is_empty() {
         md.push_str("## Business Processes\n\n");
@@ -258,6 +276,57 @@ mod tests {
         let md = render_po_community(&g, &comm, &slug_map(), Some(&llm));
         assert!(md.contains("## Overview"), "has overview section");
         assert!(md.contains("Handles order management"), "has summary text");
+    }
+
+    #[test]
+    fn render_po_community_shows_core_tables_when_db_access_present() {
+        use cih_core::{EdgeKind, NodeId};
+        let method = make_node(
+            "Method:com.example.OrderService#find/0",
+            NodeKind::Method,
+            "find",
+        );
+        let dbq = make_node("DbQuery:com.example.OrderService#SQL", NodeKind::DbQuery, "SQL");
+        let tbl = make_node("DbTable:ORDERS", NodeKind::DbTable, "ORDERS");
+        let comm = make_node("Community:0", NodeKind::Community, "order-service");
+        let nodes = [method.clone(), dbq.clone(), tbl.clone()];
+        let edges = [
+            Edge {
+                src: method.id.clone(),
+                dst: dbq.id.clone(),
+                kind: EdgeKind::ExecutesQuery,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: dbq.id.clone(),
+                dst: tbl.id.clone(),
+                kind: EdgeKind::ReadsTable,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+        ];
+        let comm_edges = [Edge {
+            src: method.id.clone(),
+            dst: NodeId::new("Community:0".to_string()),
+            kind: EdgeKind::MemberOf,
+            confidence: 1.0,
+            reason: String::new(),
+        }];
+        let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
+        let comm_node = g.community_nodes[0].clone();
+        let md = render_po_community(&g, &comm_node, &slug_map(), None);
+        assert!(md.contains("## Core Tables"), "has core tables section");
+        assert!(md.contains("ORDERS"), "has table name");
+        assert!(md.contains("Read"), "has access type");
+    }
+
+    #[test]
+    fn render_po_community_omits_core_tables_when_none() {
+        let g = simple_graph();
+        let comm = g.community_nodes[0].clone();
+        let md = render_po_community(&g, &comm, &slug_map(), None);
+        assert!(!md.contains("## Core Tables"), "no core tables section when empty");
     }
 
     #[test]

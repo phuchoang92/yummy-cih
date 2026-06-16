@@ -188,9 +188,7 @@ pub fn render_openapi(routes: &[RouteInfo]) -> serde_json::Value {
         .map(|(path, methods)| {
             (
                 path,
-                serde_json::Value::Object(
-                    methods.into_iter().collect::<serde_json::Map<_, _>>(),
-                ),
+                serde_json::Value::Object(methods.into_iter().collect::<serde_json::Map<_, _>>()),
             )
         })
         .collect::<serde_json::Map<_, _>>()

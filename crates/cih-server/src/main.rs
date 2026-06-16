@@ -10,6 +10,7 @@
 //! docs.rs for the version you resolve — the tool BODIES (the `self.store.*`
 //! calls) are SDK-agnostic and stay as-is.
 
+mod browser;
 mod config;
 mod resources;
 mod search;
@@ -25,7 +26,6 @@ use cih_core::{
 };
 use cih_embed::{EmbedModelKind, EmbedStore};
 use cih_graph_store::{CommunityInfo, Direction, GraphStore, GraphStoreError, RouteInfo};
-use viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -42,6 +42,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
 use crate::config::{build_store, Config};
 use crate::search::{QueryArgs, QueryResult, SearchState};
@@ -579,7 +580,11 @@ impl CihServer {
             )
         })?;
         let method = args.method.to_ascii_uppercase();
-        let target_key = format!("{} {}", method, cih_core::normalize_contract_path(&args.path));
+        let target_key = format!(
+            "{} {}",
+            method,
+            cih_core::normalize_contract_path(&args.path)
+        );
         let mut consumers = Vec::new();
         for line in raw.lines().filter(|l| !l.trim().is_empty()) {
             let item: ContractMatch = serde_json::from_str(line).map_err(|e| {
@@ -648,13 +653,19 @@ impl CihServer {
         let reg = Registry::load();
         let provider_entry = reg.find(&args.provider).ok_or_else(|| {
             McpError::invalid_params(
-                format!("provider '{}' not in registry; run analyze first", args.provider),
+                format!(
+                    "provider '{}' not in registry; run analyze first",
+                    args.provider
+                ),
                 None,
             )
         })?;
         let consumer_entry = reg.find(&args.consumer).ok_or_else(|| {
             McpError::invalid_params(
-                format!("consumer '{}' not in registry; run analyze first", args.consumer),
+                format!(
+                    "consumer '{}' not in registry; run analyze first",
+                    args.consumer
+                ),
                 None,
             )
         })?;
@@ -701,13 +712,11 @@ impl CihServer {
         let mut results = Vec::new();
         for contract in &contracts {
             let route_node = provider_by_id.get(&contract.provider_id);
-            let handler_sig =
-                route_node.and_then(|n| node_prop_str_owned(n, "handler"));
+            let handler_sig = route_node.and_then(|n| node_prop_str_owned(n, "handler"));
             let method_node = handler_sig
                 .as_ref()
                 .and_then(|sig| provider_by_id.get(&format!("Method:{sig}")));
-            let return_type_raw =
-                method_node.and_then(|n| node_prop_str_owned(n, "returnType"));
+            let return_type_raw = method_node.and_then(|n| node_prop_str_owned(n, "returnType"));
             let dto_short = return_type_raw
                 .as_deref()
                 .map(strip_response_wrapper)
@@ -720,11 +729,7 @@ impl CihServer {
                     .iter()
                     .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Record))
                     .filter(|n| short_class_name(&n.name) == dto_short)
-                    .filter_map(|n| {
-                        n.qualified_name
-                            .clone()
-                            .or_else(|| Some(n.name.clone()))
-                    })
+                    .filter_map(|n| n.qualified_name.clone().or_else(|| Some(n.name.clone())))
                     .collect();
                 provider_nodes
                     .iter()
@@ -826,7 +831,11 @@ impl CihServer {
             }
         };
         let depth = args.max_depth.unwrap_or(6).clamp(1, 10);
-        let steps = self.store.flow_downstream(&id, depth).await.map_err(to_mcp)?;
+        let steps = self
+            .store
+            .flow_downstream(&id, depth)
+            .await
+            .map_err(to_mcp)?;
         if args.format.as_deref() == Some("mermaid") {
             return text_result(render_mermaid_flow(&id, &steps));
         }
@@ -966,12 +975,14 @@ impl CihServer {
         let test_classes: Vec<serde_json::Value> = tests
             .iter()
             .filter(|n| seen_files.insert(n.file.clone()))
-            .map(|n| serde_json::json!({
-                "id": n.id.as_str(),
-                "kind": n.kind.label(),
-                "name": n.name,
-                "file": n.file,
-            }))
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id.as_str(),
+                    "kind": n.kind.label(),
+                    "name": n.name,
+                    "file": n.file,
+                })
+            })
             .collect();
         json_result(&serde_json::json!({
             "changed_file_count": args.changed_files.len(),
@@ -1244,8 +1255,7 @@ mod tests {
 
     #[test]
     fn trace_flow_args_defaults() {
-        let args: TraceFlowArgs =
-            serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
+        let args: TraceFlowArgs = serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
         assert_eq!(args.entry_point, "Route:GET /");
         assert!(args.max_depth.is_none());
         assert!(args.format.is_none());
@@ -1261,10 +1271,9 @@ mod tests {
 
     #[test]
     fn trace_flow_args_accepts_format_mermaid() {
-        let args: TraceFlowArgs = serde_json::from_str(
-            r#"{"entry_point":"Route:GET /api/checkout","format":"mermaid"}"#,
-        )
-        .unwrap();
+        let args: TraceFlowArgs =
+            serde_json::from_str(r#"{"entry_point":"Route:GET /api/checkout","format":"mermaid"}"#)
+                .unwrap();
         assert_eq!(args.entry_point, "Route:GET /api/checkout");
         assert_eq!(args.format.as_deref(), Some("mermaid"));
     }
@@ -1278,10 +1287,9 @@ mod tests {
 
     #[test]
     fn regression_scope_args_parses_file_list() {
-        let args: RegressionScopeArgs = serde_json::from_str(
-            r#"{"changed_files":["src/main/java/com/acme/Foo.java"]}"#,
-        )
-        .unwrap();
+        let args: RegressionScopeArgs =
+            serde_json::from_str(r#"{"changed_files":["src/main/java/com/acme/Foo.java"]}"#)
+                .unwrap();
         assert_eq!(args.changed_files.len(), 1);
         assert_eq!(args.changed_files[0], "src/main/java/com/acme/Foo.java");
     }
@@ -1337,6 +1345,7 @@ async fn main() -> Result<()> {
     };
     let graph_key = cfg.graph_key.clone();
     let server = CihServer::new(store, cfg.artifacts_dir.clone(), embed_store, graph_key);
+    let browser_state = browser::BrowserState::new(server.store.clone(), server.search.clone());
 
     // Streamable HTTP MCP endpoint mounted at /mcp.
     let service = StreamableHttpService::new(
@@ -1344,10 +1353,13 @@ async fn main() -> Result<()> {
         Arc::new(LocalSessionManager::default()),
         Default::default(),
     );
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let app = axum::Router::new()
+        .nest_service("/mcp", service)
+        .merge(browser::router(browser_state));
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     tracing::info!("MCP (Streamable HTTP) listening on http://{}/mcp", cfg.bind);
+    tracing::info!("CIH graph browser listening on http://{}/graph", cfg.bind);
     axum::serve(listener, app).await?;
     Ok(())
 }

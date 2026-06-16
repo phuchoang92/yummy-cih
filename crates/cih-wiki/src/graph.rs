@@ -7,6 +7,13 @@ pub struct ProcessStep {
     pub symbol: Node,
 }
 
+#[derive(Clone, Debug)]
+pub struct DbTableAccess {
+    pub table_name: String,
+    pub reads: bool,
+    pub writes: bool,
+}
+
 pub struct WikiGraph {
     pub nodes_by_id: BTreeMap<String, Node>,
     pub community_nodes: Vec<Node>,
@@ -42,6 +49,15 @@ pub struct WikiGraph {
     pub community_stereotypes: BTreeMap<String, BTreeMap<String, usize>>,
     /// (src_community_id, dst_community_id, call_count) sorted by (src, dst)
     pub inter_community_calls: Vec<(String, String, usize)>,
+
+    /// method_id → [dbquery_id]
+    pub executes_query: BTreeMap<String, Vec<String>>,
+    /// dbquery_id → [dbtable_id]
+    pub query_reads_table: BTreeMap<String, Vec<String>>,
+    /// dbquery_id → [dbtable_id]
+    pub query_writes_table: BTreeMap<String, Vec<String>>,
+    /// community_id → sorted unique tables accessed (reads + writes combined)
+    pub community_db_tables: BTreeMap<String, Vec<DbTableAccess>>,
 }
 
 impl WikiGraph {
@@ -136,6 +152,9 @@ impl WikiGraph {
         let mut publishes: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut listens: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut routes: Vec<(Node, Node)> = Vec::new();
+        let mut executes_query: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut query_reads_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut query_writes_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for e in edges {
             let src = e.src.as_str().to_string();
@@ -164,6 +183,15 @@ impl WikiGraph {
                     {
                         routes.push((handler.clone(), route.clone()));
                     }
+                }
+                EdgeKind::ExecutesQuery => {
+                    executes_query.entry(src).or_default().push(dst);
+                }
+                EdgeKind::ReadsTable => {
+                    query_reads_table.entry(src).or_default().push(dst);
+                }
+                EdgeKind::WritesTable => {
+                    query_writes_table.entry(src).or_default().push(dst);
                 }
                 _ => {}
             }
@@ -257,6 +285,35 @@ impl WikiGraph {
             .map(|((a, b), c)| (a, b, c))
             .collect();
 
+        let mut raw_db: BTreeMap<String, BTreeMap<String, (bool, bool)>> = BTreeMap::new();
+        for (comm_id, members) in &members_by_community {
+            for member in members {
+                if let Some(query_ids) = executes_query.get(member.id.as_str()) {
+                    for qid in query_ids {
+                        for tid in query_reads_table.get(qid.as_str()).into_iter().flatten() {
+                            let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                            raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().0 = true;
+                        }
+                        for tid in query_writes_table.get(qid.as_str()).into_iter().flatten() {
+                            let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                            raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().1 = true;
+                        }
+                    }
+                }
+            }
+        }
+        let community_db_tables: BTreeMap<String, Vec<DbTableAccess>> = raw_db
+            .into_iter()
+            .map(|(comm_id, tables)| {
+                let mut v: Vec<DbTableAccess> = tables
+                    .into_iter()
+                    .map(|(name, (r, w))| DbTableAccess { table_name: name, reads: r, writes: w })
+                    .collect();
+                v.sort_by(|a, b| a.table_name.cmp(&b.table_name));
+                (comm_id, v)
+            })
+            .collect();
+
         WikiGraph {
             nodes_by_id,
             community_nodes: comm_vec,
@@ -278,6 +335,10 @@ impl WikiGraph {
             community_method_counts,
             community_stereotypes,
             inter_community_calls,
+            executes_query,
+            query_reads_table,
+            query_writes_table,
+            community_db_tables,
         }
     }
 
@@ -417,6 +478,59 @@ mod tests {
         assert_eq!(g.routes.len(), 1);
         assert_eq!(route_path(&g.routes[0].1), "/api/orders");
         assert_eq!(route_http_method(&g.routes[0].1), "GET");
+    }
+
+    #[test]
+    fn wiki_graph_indexes_db_table_access() {
+        let method = node("Method:com.example.Foo#find/0", NodeKind::Method, "find");
+        let dbq = node("DbQuery:com.example.Foo#SQL_FIND", NodeKind::DbQuery, "SQL_FIND");
+        let tbl_orders = node("DbTable:ORDERS", NodeKind::DbTable, "ORDERS");
+        let tbl_status = node("DbTable:ORDER_STATUS", NodeKind::DbTable, "ORDER_STATUS");
+        let comm = node("Community:0", NodeKind::Community, "order-svc");
+
+        let nodes = [method.clone(), dbq.clone(), tbl_orders.clone(), tbl_status.clone()];
+        let edges = [
+            Edge {
+                src: method.id.clone(),
+                dst: dbq.id.clone(),
+                kind: EdgeKind::ExecutesQuery,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: dbq.id.clone(),
+                dst: tbl_orders.id.clone(),
+                kind: EdgeKind::ReadsTable,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: dbq.id.clone(),
+                dst: tbl_status.id.clone(),
+                kind: EdgeKind::WritesTable,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+        ];
+        let comm_edges = [Edge {
+            src: method.id.clone(),
+            dst: comm.id.clone(),
+            kind: EdgeKind::MemberOf,
+            confidence: 1.0,
+            reason: String::new(),
+        }];
+
+        let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
+
+        let tables = g.community_db_tables.get("Community:0").unwrap();
+        assert_eq!(tables.len(), 2);
+        // "ORDERS" < "ORDER_STATUS" because 'S' (83) < '_' (95)
+        assert_eq!(tables[0].table_name, "ORDERS");
+        assert!(tables[0].reads);
+        assert!(!tables[0].writes);
+        assert_eq!(tables[1].table_name, "ORDER_STATUS");
+        assert!(!tables[1].reads);
+        assert!(tables[1].writes);
     }
 
     #[test]
