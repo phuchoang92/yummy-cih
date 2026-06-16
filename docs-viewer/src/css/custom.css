@@ -1,0 +1,38 @@
+:root {
+  --ifm-color-primary: #1a6b8a;
+  --ifm-color-primary-dark: #175f7a;
+  --ifm-color-primary-darker: #165973;
+  --ifm-color-primary-darkest: #124a5f;
+  --ifm-color-primary-light: #1d779a;
+  --ifm-color-primary-lighter: #1e7da1;
+  --ifm-color-primary-lightest: #228db5;
+  --ifm-code-font-size: 90%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #4db8d8;
+  --ifm-color-primary-dark: #32afd2;
+  --ifm-color-primary-darker: #26aacd;
+  --ifm-color-primary-darkest: #1990b0;
+  --ifm-color-primary-light: #68c1de;
+  --ifm-color-primary-lighter: #74c6e0;
+  --ifm-color-primary-lightest: #96d4e8;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Make role-based pages visually distinct */
+.theme-doc-markdown h2 {
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+  padding-bottom: 0.3rem;
+}
+
+/* Compact tables for class/method listings */
+table {
+  font-size: 0.875rem;
+}
+
+table code {
+  font-size: 0.8rem;
+  white-space: nowrap;
+}

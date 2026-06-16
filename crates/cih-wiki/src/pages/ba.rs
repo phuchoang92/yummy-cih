@@ -5,7 +5,7 @@ use crate::CommunityLlmSummary;
 
 pub fn render_ba_index(graph: &WikiGraph) -> String {
     let mut md = String::new();
-    md.push_str("---\nid: ba/index\ntitle: Workflow Overview\n---\n\n");
+    md.push_str("---\ntitle: Workflow Overview\n---\n\n");
     md.push_str("# Workflow Overview\n\n");
 
     md.push_str(&format!(
@@ -89,8 +89,8 @@ pub fn render_ba_community(
 
     let mut md = String::new();
     md.push_str(&format!(
-        "---\nid: ba/{}\ntitle: {}\n---\n\n",
-        slug, community.name
+        "---\ntitle: {}\n---\n\n",
+        community.name
     ));
     md.push_str(&format!("# {} — Workflow\n\n", community.name));
 

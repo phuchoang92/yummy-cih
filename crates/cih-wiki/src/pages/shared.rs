@@ -3,7 +3,7 @@ use crate::graph::{route_decorator, route_http_method, route_path, WikiGraph};
 
 pub fn render_routes_page(graph: &WikiGraph) -> String {
     let mut md = String::new();
-    md.push_str("---\nid: shared/routes\ntitle: API Routes\n---\n\n");
+    md.push_str("---\ntitle: API Routes\n---\n\n");
     md.push_str("# API Routes\n\n");
 
     if graph.routes.is_empty() {
@@ -156,7 +156,7 @@ mod tests {
         let (h, r) = route_pair("GET", "/api/orders", "com.example.OrderController#list/0");
         let g = graph_with_routes(vec![(h, r)]);
         let md = render_routes_page(&g);
-        assert!(md.contains("---\nid: shared/routes"), "has frontmatter");
+        assert!(md.contains("---\ntitle: API Routes"), "has frontmatter");
         assert!(md.contains("| Method |"), "has table header");
         assert!(md.contains("/api/orders"), "has path");
         assert!(md.contains("`GET`"), "has method");
@@ -177,7 +177,6 @@ mod tests {
         let g = graph_with_routes(vec![(h, r)]);
         let md = render_routes_page(&g);
         assert!(md.starts_with("---\n"), "page must start with frontmatter delimiter");
-        assert!(md.contains("id:"), "frontmatter must contain id");
         assert!(md.contains("title:"), "frontmatter must contain title");
     }
 }

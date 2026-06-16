@@ -1,5 +1,8 @@
 # Rust build output
 /target/
+
+# Node / Docusaurus
+node_modules/
 **/*.rs.bk
 
 # Environment and secrets

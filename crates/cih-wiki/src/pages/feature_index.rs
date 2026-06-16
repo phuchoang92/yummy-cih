@@ -20,8 +20,8 @@ pub fn render_feature_index(
     let title = format!("{} — Feature Overview", capitalize(feature));
     let mut md = String::new();
     md.push_str(&format!(
-        "---\nid: {}/index\ntitle: {}\n---\n\n",
-        feature, title
+        "---\ntitle: {}\n---\n\n",
+        title
     ));
     md.push_str(&format!("# {}\n\n", title));
 
@@ -118,7 +118,7 @@ mod tests {
         let mut dev_paths = HashMap::new();
         dev_paths.insert("Community:0".to_string(), "order/dev/order-service".to_string());
         let md = render_feature_index("order", &ids, &dev_paths, &g);
-        assert!(md.contains("---\nid: order/index"));
+        assert!(md.contains("---\ntitle: Order — Feature Overview"));
         assert!(md.contains("Order — Feature Overview"));
         assert!(md.contains("order-service"));
         assert!(md.contains("order/dev/order-service.md"));

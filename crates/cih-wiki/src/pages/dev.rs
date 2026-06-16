@@ -44,7 +44,7 @@ pub fn render_dev_index(
     unresolved_report: Option<&str>,
 ) -> String {
     let mut md = String::new();
-    md.push_str("---\nid: dev/index\ntitle: Technical Overview\n---\n\n");
+    md.push_str("---\ntitle: Technical Overview\n---\n\n");
     md.push_str("# Technical Overview\n\n");
 
     md.push_str("## Community Summary\n\n");
@@ -109,8 +109,8 @@ pub fn render_dev_community(
 
     let mut md = String::new();
     md.push_str(&format!(
-        "---\nid: {}\ntitle: {}\n---\n\n",
-        page_path, community.name
+        "---\ntitle: {}\n---\n\n",
+        community.name
     ));
     md.push_str(&format!("# {} — Technical Reference\n\n", community.name));
 
@@ -452,7 +452,7 @@ mod tests {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
         let md = render_dev_community(&g, &comm, "shared/dev/order-service", None);
-        assert!(md.contains("---\nid: shared/dev/order-service"), "has frontmatter");
+        assert!(md.contains("---\ntitle: order-service"), "has frontmatter");
         assert!(md.contains("OrderService"), "has class name");
         assert!(md.contains("service"), "has stereotype");
     }

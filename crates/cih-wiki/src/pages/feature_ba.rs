@@ -41,8 +41,8 @@ pub fn render_feature_ba(
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
     md.push_str(&format!(
-        "---\nid: {}/ba\ntitle: {}\n---\n\n",
-        feature, title
+        "---\ntitle: {}\n---\n\n",
+        title
     ));
     md.push_str(&format!("# {}\n\n", title));
 
@@ -206,7 +206,7 @@ mod tests {
     fn has_correct_frontmatter() {
         let (g, ids) = simple_graph();
         let md = render_feature_ba("order", &ids, &g, None);
-        assert!(md.contains("---\nid: order/ba\ntitle: Order — Business Analysis"));
+        assert!(md.contains("---\ntitle: Order — Business Analysis"));
     }
 
     #[test]

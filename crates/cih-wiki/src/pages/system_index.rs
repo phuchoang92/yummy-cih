@@ -19,7 +19,7 @@ pub fn render_system_index(
     repo_name: &str,
 ) -> String {
     let mut md = String::new();
-    md.push_str(&format!("---\nid: index\ntitle: {}\n---\n\n", repo_name));
+    md.push_str(&format!("---\nslug: /\ntitle: {}\n---\n\n", repo_name));
     md.push_str(&format!("# {}\n\n", repo_name));
     md.push_str(&format!(
         "**Features:** {} · **Modules:** {} · **Routes:** {}\n\n",
@@ -130,7 +130,7 @@ mod tests {
     fn renders_repo_name_and_feature_table() {
         let (g, groups) = simple_setup();
         let md = render_system_index(&groups, &g, "my-service");
-        assert!(md.contains("---\nid: index\ntitle: my-service"));
+        assert!(md.contains("---\nslug: /\ntitle: my-service"));
         assert!(md.contains("## Features"));
         assert!(md.contains("[Order](order/index.md)"));
     }

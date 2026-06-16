@@ -9,7 +9,7 @@ pub fn render_po_index(
     llm_enriched: bool,
 ) -> String {
     let mut md = String::new();
-    md.push_str("---\nid: po/index\ntitle: System Overview\n---\n\n");
+    md.push_str("---\ntitle: System Overview\n---\n\n");
     md.push_str("# System Overview\n\n");
 
     if llm_enriched {
@@ -66,8 +66,8 @@ pub fn render_po_community(
 
     let mut md = String::new();
     md.push_str(&format!(
-        "---\nid: po/{}\ntitle: {}\n---\n\n",
-        slug, community.name
+        "---\ntitle: {}\n---\n\n",
+        community.name
     ));
     md.push_str(&format!("# {}\n\n", community.name));
 
@@ -250,7 +250,7 @@ mod tests {
     fn render_po_index_lists_communities() {
         let g = simple_graph();
         let md = render_po_index(&g, &slug_map(), false);
-        assert!(md.contains("---\nid: po/index"), "has frontmatter");
+        assert!(md.contains("---\ntitle: System Overview"), "has frontmatter");
         assert!(md.contains("order-service"), "has community name");
         assert!(md.contains("Business Capabilities"), "has section header");
     }
@@ -260,7 +260,7 @@ mod tests {
         let g = simple_graph();
         let comm = g.community_nodes[0].clone();
         let md = render_po_community(&g, &comm, &slug_map(), None);
-        assert!(md.contains("---\nid: po/order-service"), "has frontmatter");
+        assert!(md.contains("---\ntitle: order-service"), "has frontmatter");
         assert!(md.contains("/api/orders"), "has route path");
     }
 

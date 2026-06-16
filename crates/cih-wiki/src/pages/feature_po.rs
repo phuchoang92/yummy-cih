@@ -40,8 +40,8 @@ pub fn render_feature_po(
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
     md.push_str(&format!(
-        "---\nid: {}/po\ntitle: {}\n---\n\n",
-        feature, title
+        "---\ntitle: {}\n---\n\n",
+        title
     ));
     md.push_str(&format!("# {}\n\n", title));
 
@@ -217,6 +217,6 @@ mod tests {
     fn has_correct_frontmatter() {
         let (g, ids) = simple_graph();
         let md = render_feature_po("payment", &ids, &g, None);
-        assert!(md.contains("---\nid: payment/po\ntitle: Payment — Business Overview"));
+        assert!(md.contains("---\ntitle: Payment — Business Overview"));
     }
 }
