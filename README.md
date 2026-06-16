@@ -1,86 +1,189 @@
-# CIH — Code Intelligence Hub (Rust engine + MCP service)
+# CIH — Code Intelligence Hub
 
-Milestone-1 scaffold: a Rust `rmcp` + `axum` **MCP server** over **Streamable HTTP**, backed by a
-**pluggable `GraphStore`** with a **FalkorDB** adapter (the open-source / dev backend). At go-live
-the same openCypher queries move to an Amazon Neptune adapter via a `CIH_GRAPH_BACKEND` flip.
+An MCP server that indexes Java/Spring codebases into a graph, then answers questions about
+structure, call chains, DB access, routes, and more.
 
-See `../cih-plan.md` for the full architecture and `../high-architecture` for the diagram.
+---
 
-## Workspace layout
+## Quick Start (Docker Compose)
+
+### 1. Pull images
+
+```bash
+docker compose pull
+```
+
+### 2. Start the stack
+
+```bash
+docker compose up -d
+```
+
+This starts two services:
+
+| Service | Port | Purpose |
+|---|---|---|
+| `falkordb` | 6380 (host) | Graph database (persisted in `falkordb-data` volume) |
+| `cih-server` | 8080 (host) | MCP server (tools: context, impact, search) |
+
+### 3. Index your Java project
+
+Run `cih-engine` inside the container, mounting your repo:
+
+```bash
+# Step 1 — Parse + resolve (writes artifacts to <repo>/.cih/)
+docker run --rm \
+  --network yummy-cih_default \
+  -v /path/to/your/java-project:/repo \
+  phuchoang29/yummy-cih:latest \
+  cih-engine analyze /repo --all
+
+# Step 2 — Community detection (groups related classes)
+docker run --rm \
+  --network yummy-cih_default \
+  -v /path/to/your/java-project:/repo \
+  phuchoang29/yummy-cih:latest \
+  cih-engine discover /repo
+
+# Step 3 — Generate wiki docs (PO / BA / Dev role pages)
+docker run --rm \
+  --network yummy-cih_default \
+  -v /path/to/your/java-project:/repo \
+  phuchoang29/yummy-cih:latest \
+  cih-engine wiki /repo --out /repo/.cih/wiki
+```
+
+Replace `/path/to/your/java-project` with the absolute path to your repo.
+
+> **Network name**: if your project folder is not `yummy-cih`, Docker names the default network
+> after your folder. Run `docker network ls | grep falkordb` to find the correct name.
+
+### 4. View the wiki
+
+The wiki is written as Markdown to `<your-repo>/.cih/wiki/pages/`. Open the files in any
+Markdown viewer or serve them locally:
+
+```bash
+# Quick preview with Python
+cd /path/to/your/java-project/.cih/wiki
+python3 -m http.server 3000
+# open http://localhost:3000/pages/po/index.md
+```
+
+Role pages generated:
+
+| Role | Path | Contents |
+|---|---|---|
+| PO | `pages/po/` | Routes, business processes, core DB tables per module |
+| BA | `pages/ba/` | Workflow steps, inter-module call flows, data access matrix |
+| Dev | `pages/dev/` | Classes, stereotypes, routes, DB access, test coverage |
+| Shared | `pages/shared/` | Full API route list (Markdown + OpenAPI JSON) |
+
+### 5. Connect Claude / MCP Inspector
+
+The MCP server listens on `http://localhost:8080/mcp` (Streamable HTTP / JSON-RPC).
+
+**MCP Inspector:**
+```bash
+npx @modelcontextprotocol/inspector
+# Connect to: http://localhost:8080/mcp
+```
+
+**Claude Desktop** — add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "cih": {
+      "command": "curl",
+      "args": ["-s", "http://localhost:8080/mcp"]
+    }
+  }
+}
+```
+
+---
+
+## Environment Variables
+
+All variables have defaults baked into the Docker image:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FALKOR_URL` | `redis://falkordb:6379` | FalkorDB connection (use service name inside compose) |
+| `CIH_GRAPH_KEY` | `cih` | Graph name in FalkorDB |
+| `CIH_BIND` | `0.0.0.0:8080` | MCP server listen address |
+| `CIH_ARTIFACTS_DIR` | `/data/artifacts` | Where analyze output is stored inside the container |
+| `HF_HOME` | `/data/hf-cache` | HuggingFace model cache (embedding model downloaded on first use) |
+
+Override in `docker-compose.yml` under the `cih-server → environment` section.
+
+---
+
+## Data Persistence
+
+Two Docker volumes are created automatically:
+
+| Volume | Mounted at | Contains |
+|---|---|---|
+| `falkordb-data` | FalkorDB container | Graph data (survives restarts) |
+| `cih-data` | cih-server `/data` | Artifacts + embedding model cache |
+
+To wipe and start fresh:
+```bash
+docker compose down -v   # removes volumes too
+```
+
+---
+
+## Stopping
+
+```bash
+docker compose down
+```
+
+---
+
+## Local Development Build
+
+Only needed if you want to modify the engine:
+
+```bash
+# Prerequisites: Rust stable, Docker (for FalkorDB)
+cargo build --release -p cih-server -p cih-engine
+
+# Run FalkorDB on port 6380 (brew redis uses 6379)
+docker compose up -d falkordb
+
+# Run the MCP server locally
+FALKOR_URL=redis://localhost:6380 CIH_GRAPH_KEY=cih \
+  ./target/release/cih-server
+
+# Index a project locally
+FALKOR_URL=redis://localhost:6380 CIH_GRAPH_KEY=cih \
+  ./target/release/cih-engine analyze /path/to/repo --all
+```
+
+Run tests:
+```bash
+cargo test --workspace
+```
+
+---
+
+## Workspace Layout
 
 ```
 yummy-cih/
 ├─ crates/
-│  ├─ cih-core/         domain types (NodeId, NodeKind, EdgeKind, Node, Edge, GraphArtifacts)
-│  ├─ cih-graph-store/  the GraphStore + BulkLoader ports + domain query types  ← the abstraction
-│  ├─ cih-falkor/       FalkorDB adapter (openCypher over the Redis protocol)
-│  └─ cih-server/      rmcp + axum MCP server (tools: context, impact)
-└─ Cargo.toml          workspace
+│  ├─ cih-core/        Domain types (NodeId, NodeKind, EdgeKind, Node, Edge, IR)
+│  ├─ cih-parse/       Java tree-sitter parser → ParsedFile IR + SQL scanner
+│  ├─ cih-resolve/     Edge resolver (DI-aware), DB access emitter
+│  ├─ cih-falkor/      FalkorDB adapter (openCypher over Redis protocol)
+│  ├─ cih-search/      BM25 + embedding search
+│  ├─ cih-wiki/        Wiki renderer (PO / BA / Dev role pages)
+│  └─ cih-engine/      CLI: analyze · discover · wiki commands
+│  └─ cih-server/      MCP server (rmcp + axum, Streamable HTTP)
+├─ docker-compose.yml
+├─ Dockerfile
+└─ ROADMAP.md
 ```
-
-`cih-core`, `cih-graph-store`, `cih-falkor` are pure Rust and compile-ready. `cih-server` targets a
-recent `rmcp`; see the version note below.
-
-## Prerequisites
-
-- Rust (stable) via [rustup](https://rustup.rs).
-- A running FalkorDB:
-
-```bash
-docker run -p 6379:6379 -it falkordb/falkordb:latest
-```
-
-## Run
-
-```bash
-cd yummy-cih
-# defaults: backend=falkor, bind=127.0.0.1:8080, FALKOR_URL=redis://127.0.0.1:6379, graph_key=cih
-cargo run -p cih-server
-```
-
-Environment variables:
-
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `CIH_GRAPH_BACKEND` | `falkor` | `falkor` \| `neptune` \| `postgres` |
-| `CIH_BIND` | `127.0.0.1:8080` | listen address |
-| `FALKOR_URL` | `redis://127.0.0.1:6379` | FalkorDB (Redis protocol) URL |
-| `CIH_GRAPH_KEY` | `cih` | FalkorDB graph name |
-
-## Seed a tiny graph + try a tool
-
-Seed two nodes and a CALLS edge directly in FalkorDB:
-
-```bash
-redis-cli GRAPH.QUERY cih "CREATE (a:Symbol {id:'Method:UserController#register', name:'register'})-[:CALLS]->(b:Symbol {id:'Method:UserService#save', name:'save'})"
-```
-
-The MCP endpoint is `POST http://127.0.0.1:8080/mcp` (Streamable HTTP / JSON-RPC). Easiest way to
-exercise it is the MCP Inspector:
-
-```bash
-npx @modelcontextprotocol/inspector
-# connect to: http://127.0.0.1:8080/mcp  → call `impact` with {"name":"Method:UserService#save"}
-```
-
-You should see `register` returned as an upstream (caller) of `save`.
-
-## rmcp version note (important)
-
-`rmcp` iterates fast. The `#[tool_router]` / `#[tool]` / `ServerHandler` macros and the
-`StreamableHttpService::new(...)` signature can differ between releases. If `cargo build` flags the
-wiring in `crates/cih-server/src/main.rs`, reconcile **only that wiring** against
-<https://docs.rs/rmcp> for the version you resolve — the tool bodies (the `self.store.*` calls) and
-the entire `cih-*` stack are SDK-agnostic and unchanged. Pin the exact version in `Cargo.toml` once
-it builds.
-
-## What's stubbed (next milestones)
-
-- `bulk_load` / `upsert_incremental` / `swap_version` on the FalkorDB adapter → the **BulkLoader**
-  milestone (UNWIND batches; later Neptune S3-CSV loader).
-- `call_chain` / `subgraph` parse FalkorDB replies via scalar columns only; full result parsing
-  uses the compact protocol later.
-- Switch the inline-escaped queries in `cih-falkor` to **FalkorDB query parameters** before prod.
-- Adapters: `cih-neptune` (go-live) and `cih-postgres` (recursive-CTE, ~$0 fallback).
-- The engine itself (parse → scope-res → MRO → graph → Leiden → BM25) lands behind this server and
-  produces the canonical `GraphArtifacts` the BulkLoader consumes.
