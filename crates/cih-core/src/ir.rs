@@ -7,7 +7,7 @@ use crate::{NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};
 
 /// Everything the parser extracts from one source file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedFile {
     /// Repo-relative path of the source file.
     pub file: String,
@@ -27,6 +27,43 @@ pub struct ParsedFile {
     /// these into ExternalEndpoint/KafkaTopic nodes plus cross-service edges.
     #[serde(default)]
     pub contract_sites: Vec<ContractSite>,
+    /// Static SQL constant fields (`private static final String QUERY_... = "..."`).
+    /// Used by the DB-access emit pass to link execution sites to SQL text.
+    #[serde(default)]
+    pub sql_constants: Vec<SqlConstant>,
+    /// Sites where a known DB execution API is called (DBUtil, JdbcTemplate, etc.).
+    #[serde(default)]
+    pub sql_execution_sites: Vec<SqlExecutionSite>,
+}
+
+/// A `private static final String` field whose initializer is (or folds to) a SQL string.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlConstant {
+    /// Field name, e.g. `"QUERY_GETCUSTOMOVERDRAFTTYPEBYCODE"`.
+    pub const_name: String,
+    /// FQCN of the declaring class.
+    pub owner_fqcn: String,
+    /// Folded SQL text (adjacent string literals concatenated).
+    pub sql_text: String,
+    /// True when any non-literal expression appeared in the initializer concat chain.
+    pub dynamic: bool,
+    pub range: Range,
+}
+
+/// A site where a DB execution API (DBUtil, JdbcTemplate, PreparedStatement) is called.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlExecutionSite {
+    /// Simple method name: `"executeQuery"`, `"prepareStatement"`, `"query"`, etc.
+    pub api_name: String,
+    /// Field-name argument referencing a SQL constant in the same class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub const_ref: Option<String>,
+    /// Inline SQL literal passed directly as an argument (not via a named constant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_sql: Option<String>,
+    /// Graph id of the enclosing callable — the `EXECUTES_QUERY` edge source.
+    pub in_callable: NodeId,
+    pub range: Range,
 }
 
 /// A source location that participates in an inter-service contract.

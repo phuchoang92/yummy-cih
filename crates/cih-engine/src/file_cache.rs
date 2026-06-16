@@ -297,6 +297,8 @@ mod tests {
             reference_sites: Vec::new(),
             type_bindings: Vec::new(),
             contract_sites: Vec::new(),
+            sql_constants: Vec::new(),
+            sql_execution_sites: Vec::new(),
         }
     }
 

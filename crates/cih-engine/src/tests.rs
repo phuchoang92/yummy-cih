@@ -399,3 +399,66 @@ fn discover_emits_community_and_process_artifacts() {
 
     fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn analyze_emit_writes_db_query_and_table_artifacts() {
+    let root = temp_repo();
+    write(
+        &root,
+        "src/main/java/com/bank/OverdraftAdapterImpl.java",
+        r#"package com.bank;
+import java.sql.Connection;
+public class OverdraftAdapterImpl {
+    private static final String QUERY_GET_TYPE =
+        "SELECT code, desc FROM CUSTOM_OVERDRAFT_TYPE WHERE code = ?";
+    private static final String QUERY_INSERT =
+        "INSERT INTO CUSTOM_OVERDRAFT (id, amount) VALUES (?, ?)";
+
+    public Object getType(Connection conn, String code) {
+        return DBUtil.executeQuery(conn, QUERY_GET_TYPE, code);
+    }
+
+    public void insert(Connection conn, long id, long amount) {
+        DBUtil.executeUpdate(conn, QUERY_INSERT, id, amount);
+    }
+}
+"#,
+    );
+
+    let scan = scan::scan_repo(&root).unwrap();
+    let emit = analyze_emit(&scan, all_scope()).unwrap();
+
+    let nodes_content = fs::read_to_string(emit.artifacts_dir.join("nodes.jsonl")).unwrap();
+    let edges_content = fs::read_to_string(emit.artifacts_dir.join("edges.jsonl")).unwrap();
+
+    assert!(
+        nodes_content.contains("\"kind\":\"DbQuery\""),
+        "nodes.jsonl should contain DbQuery nodes"
+    );
+    assert!(
+        nodes_content.contains("\"kind\":\"DbTable\""),
+        "nodes.jsonl should contain DbTable nodes"
+    );
+    assert!(
+        nodes_content.contains("CUSTOM_OVERDRAFT_TYPE"),
+        "DbTable for CUSTOM_OVERDRAFT_TYPE should be present"
+    );
+    assert!(
+        nodes_content.contains("CUSTOM_OVERDRAFT"),
+        "DbTable for CUSTOM_OVERDRAFT should be present"
+    );
+    assert!(
+        edges_content.contains("\"kind\":\"ExecutesQuery\""),
+        "EXECUTES_QUERY edges should be present"
+    );
+    assert!(
+        edges_content.contains("\"kind\":\"ReadsTable\""),
+        "READS_TABLE edge for SELECT should be present"
+    );
+    assert!(
+        edges_content.contains("\"kind\":\"WritesTable\""),
+        "WRITES_TABLE edge for INSERT should be present"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}

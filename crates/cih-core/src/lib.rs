@@ -19,7 +19,7 @@ pub use group::{
 };
 pub use ir::{
     BindingKind, ContractKind, ContractSite, ParsedFile, RawImport, RefKind, ReferenceSite,
-    SymbolDef, TypeBinding,
+    SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
 };
 pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
 pub use repo_map::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
@@ -62,6 +62,8 @@ pub enum NodeKind {
     Process,
     KafkaTopic,
     ExternalEndpoint,
+    DbQuery,
+    DbTable,
     Other,
 }
 
@@ -84,6 +86,8 @@ impl NodeKind {
             NodeKind::Process => "Process",
             NodeKind::KafkaTopic => "KafkaTopic",
             NodeKind::ExternalEndpoint => "ExternalEndpoint",
+            NodeKind::DbQuery => "DbQuery",
+            NodeKind::DbTable => "DbTable",
             NodeKind::Other => "Other",
         }
     }
@@ -106,6 +110,8 @@ impl NodeKind {
             "Process" => NodeKind::Process,
             "KafkaTopic" => NodeKind::KafkaTopic,
             "ExternalEndpoint" => NodeKind::ExternalEndpoint,
+            "DbQuery" => NodeKind::DbQuery,
+            "DbTable" => NodeKind::DbTable,
             _ => NodeKind::Other,
         }
     }
@@ -163,6 +169,18 @@ pub fn external_endpoint_id(method: &str, url_template: &str) -> NodeId {
     ))
 }
 
+pub fn db_query_const_id(owner_fqcn: &str, const_name: &str) -> NodeId {
+    NodeId::new(format!("DbQuery:{owner_fqcn}#{const_name}"))
+}
+
+pub fn db_query_inline_id(file: &str, line: u32, col: u32) -> NodeId {
+    NodeId::new(format!("DbQuery:{file}:{line}:{col}"))
+}
+
+pub fn db_table_id(table: &str) -> NodeId {
+    NodeId::new(format!("DbTable:{}", table.to_ascii_uppercase()))
+}
+
 /// Edge types (mirrors `gitnexus-shared` `RelationshipType`, trimmed for v1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
@@ -184,6 +202,9 @@ pub enum EdgeKind {
     ListensTo,
     ExternalCall,
     Tests,
+    ExecutesQuery,
+    ReadsTable,
+    WritesTable,
     Other,
 }
 
@@ -209,6 +230,9 @@ impl EdgeKind {
             EdgeKind::ListensTo => "LISTENS_TO",
             EdgeKind::ExternalCall => "EXTERNAL_CALL",
             EdgeKind::Tests => "TESTS",
+            EdgeKind::ExecutesQuery => "EXECUTES_QUERY",
+            EdgeKind::ReadsTable => "READS_TABLE",
+            EdgeKind::WritesTable => "WRITES_TABLE",
             EdgeKind::Other => "REL",
         }
     }
@@ -336,11 +360,27 @@ mod tests {
             NodeKind::Process,
             NodeKind::KafkaTopic,
             NodeKind::ExternalEndpoint,
+            NodeKind::DbQuery,
+            NodeKind::DbTable,
             NodeKind::Other,
         ] {
             assert_eq!(NodeKind::from_label(kind.label()), kind);
         }
         assert_eq!(NodeKind::from_label("Unknown"), NodeKind::Other);
+    }
+
+    #[test]
+    fn db_id_helpers_use_locked_scheme() {
+        assert_eq!(
+            db_query_const_id("com.bank.OverdraftAdapterImpl", "QUERY_FOO").as_str(),
+            "DbQuery:com.bank.OverdraftAdapterImpl#QUERY_FOO"
+        );
+        assert_eq!(
+            db_query_inline_id("src/main/java/Adapter.java", 42, 8).as_str(),
+            "DbQuery:src/main/java/Adapter.java:42:8"
+        );
+        assert_eq!(db_table_id("custom_overdraft_type").as_str(), "DbTable:CUSTOM_OVERDRAFT_TYPE");
+        assert_eq!(db_table_id("CUSTOM_OVERDRAFT").as_str(), "DbTable:CUSTOM_OVERDRAFT");
     }
 
     #[test]
@@ -452,6 +492,8 @@ mod tests {
                     end_col: 40,
                 },
             }],
+            sql_constants: vec![],
+            sql_execution_sites: vec![],
         };
 
         let encoded = serde_json::to_string(&parsed).unwrap();

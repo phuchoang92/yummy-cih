@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{Edge, GraphArtifacts, JarInfo, Node, RepoMap, VersionId};
+use cih_core::{self, Edge, GraphArtifacts, JarInfo, Node, RepoMap, VersionId};
 use cih_jar::JarApiExtractor;
 use cih_parse::{ParseOutput, ParsedUnit};
 use serde::Serialize;
@@ -309,12 +309,21 @@ pub(crate) fn analyze_from_scope_with_options(
         "JAR API extraction complete"
     );
 
+    let (db_nodes, db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
+    tracing::info!(
+        db_query_nodes = db_nodes.iter().filter(|n| n.kind == cih_core::NodeKind::DbQuery).count(),
+        db_table_nodes = db_nodes.iter().filter(|n| n.kind == cih_core::NodeKind::DbTable).count(),
+        "DB access emit complete"
+    );
+
     let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
     edges.extend(jar_edges);
+    edges.extend(db_edges);
 
     let mut all_nodes = parse_output.nodes;
     all_nodes.extend(resolve_output.nodes);
     all_nodes.extend(jar_nodes);
+    all_nodes.extend(db_nodes);
 
     let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
 

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use cih_core::{
     constructor_id, field_id, file_id, method_id, type_id, BindingKind, ContractKind, ContractSite,
     Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite,
-    SymbolDef, TypeBinding,
+    SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
 };
 use cih_lang::java::JavaProvider;
 use cih_lang::LanguageProvider;
@@ -51,6 +51,8 @@ struct FileBuilder {
     reference_sites: Vec<ReferenceSite>,
     type_bindings: Vec<TypeBinding>,
     contract_sites: Vec<ContractSite>,
+    sql_constants: Vec<SqlConstant>,
+    sql_execution_sites: Vec<SqlExecutionSite>,
     type_contexts: Vec<TypeContext>,
     callable_contexts: Vec<CallableContext>,
 }
@@ -76,6 +78,8 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParsedUnit> {
     collect_heritage_references(root, src, &mut builder);
     collect_spring_routes(root, src, &mut builder);
     collect_contract_sites(root, src, &mut builder);
+    collect_sql_constants(root, src, &mut builder);
+    collect_sql_execution_sites(root, src, &mut builder);
     normalize_builder(&mut builder);
 
     Ok(ParsedUnit {
@@ -90,6 +94,8 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParsedUnit> {
             reference_sites: builder.reference_sites,
             type_bindings: builder.type_bindings,
             contract_sites: builder.contract_sites,
+            sql_constants: builder.sql_constants,
+            sql_execution_sites: builder.sql_execution_sites,
         },
     })
 }
@@ -886,6 +892,261 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
             });
         }
     }
+}
+
+// ── SQL constant + execution site extraction ──────────────────────────────────
+
+/// Collect `private static final String QUERY_... = "..."` constants.
+fn collect_sql_constants(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    collect_sql_constants_in(root, src, builder, None);
+}
+
+fn collect_sql_constants_in(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut FileBuilder,
+    owner_fqcn: Option<&str>,
+) {
+    match node.kind() {
+        "class_declaration" | "interface_declaration" | "enum_declaration"
+        | "record_declaration" | "annotation_type_declaration" => {
+            let fqcn = type_context_at(node.start_byte() + 1, builder).map(|t| t.fqcn.clone());
+            let effective = fqcn.as_deref().or(owner_fqcn);
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_sql_constants_in(child, src, builder, effective);
+            }
+            return;
+        }
+        "field_declaration" => {
+            if let Some(owner) = owner_fqcn {
+                if let Some(constant) = try_extract_sql_constant(node, src, owner) {
+                    builder.sql_constants.push(constant);
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_sql_constants_in(child, src, builder, owner_fqcn);
+    }
+}
+
+fn try_extract_sql_constant(
+    node: TsNode<'_>,
+    src: &str,
+    owner_fqcn: &str,
+) -> Option<SqlConstant> {
+    // Must have `static` and `final` modifiers.
+    let mods = modifiers(node, src);
+    if !mods.iter().any(|m| m == "static") || !mods.iter().any(|m| m == "final") {
+        return None;
+    }
+    // Type must be `String`.
+    let type_node = node.child_by_field_name("type")?;
+    if text(type_node, src) != "String" {
+        return None;
+    }
+    // Find the variable declarator(s).
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let name_node = child.child_by_field_name("name")?;
+        let const_name = text(name_node, src);
+        // Only SCREAMING_SNAKE_CASE identifiers (all uppercase + digits + underscore).
+        if const_name.is_empty()
+            || !const_name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            continue;
+        }
+        let Some(value_node) = child.child_by_field_name("value") else {
+            continue;
+        };
+        let (sql_text, dynamic) = fold_string_init(value_node, src);
+        if sql_text.is_empty() && !dynamic {
+            continue;
+        }
+        return Some(SqlConstant {
+            const_name,
+            owner_fqcn: owner_fqcn.to_string(),
+            sql_text,
+            dynamic,
+            range: range_of(node),
+        });
+    }
+    None
+}
+
+/// Fold a string initializer expression into a single SQL string.
+/// String literals concatenated with `+` are joined; non-literal operands set `dynamic=true`.
+fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
+    match node.kind() {
+        "string_literal" => {
+            let raw = text(node, src);
+            // Strip surrounding quotes and unescape basic Java string escapes.
+            let inner = if raw.len() >= 2 {
+                &raw[1..raw.len() - 1]
+            } else {
+                ""
+            };
+            let unescaped = inner
+                .replace("\\n", " ")
+                .replace("\\r", " ")
+                .replace("\\t", " ")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
+            (unescaped, false)
+        }
+        "binary_expression" => {
+            // `left + right` — recursively fold.
+            if node.child_by_field_name("operator").map(|op| text(op, src)).as_deref()
+                != Some("+")
+            {
+                return (String::new(), true);
+            }
+            let left = node
+                .child_by_field_name("left")
+                .map(|n| fold_string_init(n, src))
+                .unwrap_or_default();
+            let right = node
+                .child_by_field_name("right")
+                .map(|n| fold_string_init(n, src))
+                .unwrap_or_default();
+            (
+                format!("{}{}", left.0, right.0),
+                left.1 || right.1,
+            )
+        }
+        "parenthesized_expression" => {
+            // Unwrap one layer of parentheses.
+            if let Some(inner) = node.named_child(0) {
+                fold_string_init(inner, src)
+            } else {
+                (String::new(), true)
+            }
+        }
+        _ => {
+            // Any non-literal operand (identifier, method call, etc.) → dynamic.
+            (String::new(), true)
+        }
+    }
+}
+
+/// Collect sites where a known DB execution API is called.
+fn collect_sql_execution_sites(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    collect_sql_execution_sites_in(root, src, builder);
+}
+
+fn collect_sql_execution_sites_in(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    if node.kind() == "method_invocation" {
+        if let Some(site) = try_extract_execution_site(node, src, builder) {
+            builder.sql_execution_sites.push(site);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_sql_execution_sites_in(child, src, builder);
+    }
+}
+
+/// DB execution APIs we recognise.
+const DBUTIL_METHODS: &[&str] = &["prepareStatement", "executeQuery", "executeUpdate"];
+const JDBC_TEMPLATE_METHODS: &[&str] =
+    &["query", "update", "queryForObject", "queryForList", "queryForMap", "batchUpdate"];
+
+fn try_extract_execution_site(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &FileBuilder,
+) -> Option<SqlExecutionSite> {
+    let method_name_node = node.child_by_field_name("name")?;
+    let method = text(method_name_node, src);
+    let range = range_of(node);
+    let in_callable = callable_id_for(node.start_byte(), builder);
+    let in_fqcn = context_for(node.start_byte(), builder).unwrap_or_default();
+
+    let object = node.child_by_field_name("object")?;
+    let receiver = text(object, src);
+
+    // ── DBUtil.prepareStatement / executeQuery / executeUpdate ────────────────
+    // Static call: receiver text is exactly "DBUtil".
+    if receiver == "DBUtil" && DBUTIL_METHODS.contains(&method.as_str()) {
+        let const_ref = nth_identifier_argument(node, src, 1); // 2nd arg = SQL constant
+        if const_ref.is_some() || method == "prepareStatement" {
+            return Some(SqlExecutionSite {
+                api_name: method,
+                const_ref,
+                inline_sql: None,
+                in_callable,
+                range,
+            });
+        }
+    }
+
+    // ── JdbcTemplate.query / update / etc. ───────────────────────────────────
+    if JDBC_TEMPLATE_METHODS.contains(&method.as_str())
+        && receiver_has_type(builder, &in_fqcn, &receiver, "JdbcTemplate")
+    {
+        // First argument is the SQL (identifier or string literal).
+        let (const_ref, inline_sql) = first_sql_argument(node, src);
+        if const_ref.is_some() || inline_sql.is_some() {
+            return Some(SqlExecutionSite {
+                api_name: method,
+                const_ref,
+                inline_sql,
+                in_callable,
+                range,
+            });
+        }
+    }
+
+    None
+}
+
+/// Return the Nth argument (0-based) if it's a plain identifier (field reference).
+fn nth_identifier_argument(node: TsNode<'_>, src: &str, n: usize) -> Option<String> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut count = 0;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() == "identifier" {
+            if count == n {
+                let name = text(child, src);
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+            count += 1;
+        } else if !matches!(child.kind(), "line_comment" | "block_comment") {
+            if count <= n {
+                count += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Return the first argument as (const_ref, inline_sql) — one will be Some.
+fn first_sql_argument(node: TsNode<'_>, src: &str) -> (Option<String>, Option<String>) {
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return (None, None);
+    };
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        match child.kind() {
+            "identifier" => return (Some(text(child, src)), None),
+            "string_literal" => {
+                return (None, unquote_spring_literal(&text(child, src)));
+            }
+            _ => continue,
+        }
+    }
+    (None, None)
 }
 
 fn method_declarations(node: TsNode<'_>) -> Vec<TsNode<'_>> {

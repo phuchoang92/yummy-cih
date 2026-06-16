@@ -265,6 +265,36 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   community id slug.
 - **35 new tests** (23 in `cih-wiki`, 4 in `wiki_cmd`, existing suites unchanged). 160 total.
 
+## Phase 10b — Table-Level DB Access Intelligence ✅ (2026-06-16)
+
+**Primary personas: Dev, BA, PO** — surfaces which methods read/write which Oracle tables.
+
+Banking code uses `DBUtil.prepareStatement / executeQuery / executeUpdate` with static SQL
+constants instead of Spring Data repositories. This phase adds first-class DB graph concepts
+so the wiki and MCP tools can answer "which methods touch `CUSTOM_OVERDRAFT`?"
+
+- **`NodeKind::DbQuery`** / **`NodeKind::DbTable`**: first-class graph nodes for SQL constants
+  and database tables. Stable IDs: `DbQuery:<fqcn>#<const_name>` and `DbTable:<TABLE_NAME>`.
+- **`EdgeKind::ExecutesQuery`** / **`ReadsTable`** / **`WritesTable`**: three new edge types
+  forming the path `Method → DbQuery → DbTable`.
+- **`SqlConstant` + `SqlExecutionSite` IR** (added to `ParsedFile`): parser extracts
+  `private static final String SCREAMING_SNAKE_CASE = "..."` constants (with string-literal
+  concatenation folding, `dynamic=true` on non-literal parts) and detects `DBUtil.*` /
+  `JdbcTemplate.*` execution sites pointing to those constants.
+- **`cih-parse/src/sql.rs`**: lightweight Oracle-aware SQL table scanner — strips block/line
+  comments, Oracle hints (`/*+ ... */`), schema prefixes; detects `SELECT/FROM/JOIN`,
+  `INSERT INTO`, `UPDATE`, `DELETE FROM`, `MERGE INTO`. Conservative: no false positives, some
+  missed tables in complex dynamic SQL.
+- **`cih-resolve::emit_db_access(&[ParsedFile])`**: links execution sites to constants via
+  same-file lookup; runs the SQL scanner; emits `DbQuery` + `DbTable` nodes and DB edges.
+  Cross-file constants → `dynamic=true`, no table edges (v1 scope).
+- **`DbQuery.props`**: `operation`, `constantName`, `sqlPreview` (first 120 chars),
+  `dynamic`, `tables`, `dialect: "oracle-like"`.
+- **Engine wiring**: `analyze_from_scope_with_options` calls `emit_db_access` after the resolve
+  pass and merges the DB nodes/edges into `nodes.jsonl` / `edges.jsonl`.
+- **27 new tests** across `cih-core`, `cih-parse` (SQL scanner + parser integration),
+  `cih-resolve` (emit unit tests), `cih-engine` (artifact integration test). **187 total**.
+
 ## Phase 15 — Flow Intelligence: trace_flow · feature_map ✅ (2026-06-15)
 
 **Primary personas: PO, BA**

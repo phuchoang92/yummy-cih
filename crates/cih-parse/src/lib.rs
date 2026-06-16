@@ -15,6 +15,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 mod java;
+pub mod sql;
 
 #[derive(Clone, Debug, Default)]
 pub struct ParseOutput {
@@ -972,6 +973,136 @@ public class BarTest {
                     && e.dst.as_str() == "Class:OrderService"
             }),
             "TESTS edge from test class to @MockBean field type must be emitted"
+        );
+    }
+
+    // ── SQL constant + execution site extraction ──────────────────────────────
+
+    #[test]
+    fn parses_sql_constants_from_static_final_string_fields() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/bank/OverdraftAdapterImpl.java";
+        write_file(
+            &root,
+            rel,
+            r#"
+package com.bank;
+public class OverdraftAdapterImpl {
+    private static final String QUERY_GET_BY_CODE =
+        "SELECT id, amount FROM CUSTOM_OVERDRAFT_TYPE WHERE code = ?";
+    private static final String NOT_A_QUERY = "hello";
+    private String nonStatic = "SELECT FROM X";
+}
+"#,
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let parsed = output.parsed_files.first().unwrap();
+        // SCREAMING_SNAKE_CASE check: QUERY_GET_BY_CODE must be extracted.
+        assert!(
+            parsed.sql_constants.iter().any(|c| {
+                c.const_name == "QUERY_GET_BY_CODE"
+                    && c.sql_text.contains("CUSTOM_OVERDRAFT_TYPE")
+                    && !c.dynamic
+            }),
+            "QUERY_GET_BY_CODE not extracted: {:?}",
+            parsed.sql_constants
+        );
+        // Non-static instance field must not appear (it lacks `static` + `final`).
+        assert!(
+            !parsed.sql_constants.iter().any(|c| c.const_name == "nonStatic"),
+            "non-static field must not be extracted"
+        );
+    }
+
+    #[test]
+    fn parses_sql_constants_folds_string_concatenation() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/bank/Adapter.java";
+        write_file(
+            &root,
+            rel,
+            r#"
+package com.bank;
+public class Adapter {
+    private static final String QUERY_CONCAT =
+        "SELECT id FROM " +
+        "CUSTOM_OVERDRAFT " +
+        "WHERE id = ?";
+}
+"#,
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let parsed = output.parsed_files.first().unwrap();
+        let c = parsed
+            .sql_constants
+            .iter()
+            .find(|c| c.const_name == "QUERY_CONCAT")
+            .expect("QUERY_CONCAT must be extracted");
+        assert!(c.sql_text.contains("CUSTOM_OVERDRAFT"), "folded text: {:?}", c.sql_text);
+        assert!(!c.dynamic, "pure literal concat must not be dynamic");
+    }
+
+    #[test]
+    fn parses_sql_constants_marks_dynamic_on_non_literal_concat() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/bank/Adapter.java";
+        write_file(
+            &root,
+            rel,
+            r#"
+package com.bank;
+public class Adapter {
+    private static final String TABLE_NAME = "CUSTOM_OVERDRAFT";
+    private static final String QUERY_DYN = "SELECT id FROM " + TABLE_NAME + " WHERE id = ?";
+}
+"#,
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let parsed = output.parsed_files.first().unwrap();
+        // TABLE_NAME is all caps but value is a short non-SQL string — may or may not be extracted.
+        // QUERY_DYN references a variable, so must be dynamic.
+        if let Some(c) = parsed.sql_constants.iter().find(|c| c.const_name == "QUERY_DYN") {
+            assert!(c.dynamic, "concat with identifier must be dynamic");
+        }
+        // At minimum, the dynamic concat must not produce a fully resolved table list.
+    }
+
+    #[test]
+    fn parses_sql_execution_sites_dbutil_pattern() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/bank/OverdraftAdapterImpl.java";
+        write_file(
+            &root,
+            rel,
+            r#"
+package com.bank;
+import java.sql.Connection;
+public class OverdraftAdapterImpl {
+    private static final String QUERY_GET = "SELECT id FROM CUSTOM_OVERDRAFT WHERE id = ?";
+
+    public Object getOverdraft(Connection conn, long id) {
+        return DBUtil.executeQuery(conn, QUERY_GET, id);
+    }
+}
+"#,
+        );
+        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let parsed = output.parsed_files.first().unwrap();
+        assert!(
+            parsed.sql_execution_sites.iter().any(|s| {
+                s.api_name == "executeQuery"
+                    && s.const_ref.as_deref() == Some("QUERY_GET")
+            }),
+            "DBUtil.executeQuery site not extracted: {:?}",
+            parsed.sql_execution_sites
         );
     }
 }

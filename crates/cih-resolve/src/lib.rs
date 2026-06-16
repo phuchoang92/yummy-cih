@@ -14,7 +14,9 @@ use cih_core::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod db_access;
 pub mod reports;
+pub use db_access::emit_db_access;
 pub use reports::write_unresolved_reports;
 
 /// Per-site diagnostic record for a reference that could not be resolved.
@@ -1446,6 +1448,8 @@ mod tests {
                     range: Range::default(),
                 },
             ],
+            sql_constants: vec![],
+            sql_execution_sites: vec![],
         };
 
         let out = resolve_edges(&[file]);
@@ -1516,6 +1520,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let service = ParsedFile {
             file: "com/acme/OwnerService.java".into(),
@@ -1533,6 +1539,8 @@ mod tests {
             )],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let controller = ParsedFile {
             file: "com/acme/OwnerController.java".into(),
@@ -1559,6 +1567,8 @@ mod tests {
                 5,
             )],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let thing = ParsedFile {
             file: "com/other/Thing.java".into(),
@@ -1568,6 +1578,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         vec![repo, service, controller, thing]
     }
@@ -1795,6 +1807,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let mammal = ParsedFile {
             file: "com/acme/Mammal.java".into(),
@@ -1808,6 +1822,8 @@ mod tests {
             reference_sites: vec![heritage("com.acme.Mammal", "Animal", RefKind::Implements)],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let dog = ParsedFile {
             file: "com/acme/Dog.java".into(),
@@ -1825,6 +1841,8 @@ mod tests {
             ],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         vec![animal, mammal, dog]
     }
@@ -1900,6 +1918,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let marker = ParsedFile {
             file: "com/acme/Marker.java".into(),
@@ -1912,6 +1932,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let child = ParsedFile {
             file: "com/acme/Child.java".into(),
@@ -1928,6 +1950,8 @@ mod tests {
             ],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let out = resolve_edges(&[base, marker, child]);
         // Exactly one METHOD_OVERRIDES to Base.act (not to Marker).
@@ -1984,6 +2008,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
 
         // Impl: UserServiceImpl implements UserService
@@ -2015,6 +2041,8 @@ mod tests {
             )],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
 
         // Caller: OrderController with field `userService: UserService` and call userService.save(u)
@@ -2056,6 +2084,8 @@ mod tests {
                 range: Range::default(),
             }],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
 
         vec![iface, impl_file, caller]
@@ -2136,6 +2166,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let make_impl = |name: &str| -> ParsedFile {
             let fqcn = format!("com.acme.{name}");
@@ -2162,6 +2194,8 @@ mod tests {
                 reference_sites: vec![heritage(&fqcn, "UserService", RefKind::Implements)],
                 type_bindings: vec![],
                 contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
             }
         };
         let caller = ParsedFile {
@@ -2202,6 +2236,8 @@ mod tests {
                 range: Range::default(),
             }],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let out = resolve_edges(&[
             iface,
@@ -2254,6 +2290,8 @@ mod tests {
                 reference_sites: vec![],
                 type_bindings: vec![],
                 contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
             };
             let caller = ParsedFile {
                 file: "com/acme/OrderController.java".into(),
@@ -2297,6 +2335,8 @@ mod tests {
                     range: Range::default(),
                 }],
                 contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
             };
             vec![concrete, caller]
         };
@@ -2360,6 +2400,8 @@ mod tests {
             )],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let out = resolve_edges(&[file]);
         assert_eq!(out.skipped, 1);
@@ -2385,6 +2427,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let caller = ParsedFile {
             file: "com/acme/Caller.java".into(),
@@ -2411,6 +2455,8 @@ mod tests {
                 range: Range::default(),
             }],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let out = resolve_edges(&[service, caller]);
         assert_eq!(out.skipped, 1);
@@ -2433,6 +2479,8 @@ mod tests {
             reference_sites: vec![heritage("com.acme.Child", "MissingParent", RefKind::Extends)],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let out = resolve_edges(&[child]);
         assert_eq!(out.skipped, 1);
@@ -2456,6 +2504,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let order = ParsedFile {
             file: "com/acme/Order.java".into(),
@@ -2468,6 +2518,8 @@ mod tests {
             reference_sites: vec![],
             type_bindings: vec![],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let service = ParsedFile {
             file: "com/acme/OrderService.java".into(),
@@ -2505,6 +2557,8 @@ mod tests {
                 },
             ],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let out = resolve_edges(&[order_factory, order, service]);
         let calls: Vec<_> = out
@@ -2547,6 +2601,8 @@ mod tests {
                 range: Range::default(),
             }],
             contract_sites: vec![],
+                sql_constants: vec![],
+                sql_execution_sites: vec![],
         };
         let out = resolve_edges(&[service]);
         assert_eq!(out.skipped, 1);
