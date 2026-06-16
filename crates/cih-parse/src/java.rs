@@ -215,14 +215,22 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let id = method_id(&owner.fqcn, &name, arity);
     let range = range_of(node);
     let return_type = return_type_name(node, src);
+    let param_types = param_type_names(node, src);
     let is_test_method = owner.is_test && is_test_method(node, src);
-    let props = match (is_bean_method(node, src), is_test_method, return_type.as_ref()) {
-        (false, false, None) => None,
-        (true, _, None) => Some(serde_json::json!({ "isBean": true })),
-        (false, true, None) => Some(serde_json::json!({ "isTest": true })),
-        (false, false, Some(rt)) => Some(serde_json::json!({ "returnType": rt })),
-        (true, _, Some(rt)) => Some(serde_json::json!({ "isBean": true, "returnType": rt })),
-        (false, true, Some(rt)) => Some(serde_json::json!({ "isTest": true, "returnType": rt })),
+    let is_bean = is_bean_method(node, src);
+    let props = {
+        let mut obj = serde_json::Map::new();
+        if is_bean { obj.insert("isBean".into(), serde_json::Value::Bool(true)); }
+        if is_test_method { obj.insert("isTest".into(), serde_json::Value::Bool(true)); }
+        if let Some(ref rt) = return_type {
+            obj.insert("returnType".into(), serde_json::Value::String(rt.clone()));
+        }
+        if !param_types.is_empty() {
+            obj.insert("paramTypes".into(), serde_json::Value::Array(
+                param_types.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+            ));
+        }
+        if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
     };
     builder.nodes.push(Node {
         id: id.clone(),
@@ -259,7 +267,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         owner: Some(owner.id.clone()),
         range,
         modifiers: modifiers(node, src),
-        param_types: param_type_names(node, src),
+        param_types,
         return_type,
         declared_type: None,
         stereotype: None,

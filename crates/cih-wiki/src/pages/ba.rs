@@ -110,7 +110,18 @@ pub fn render_ba_community(
                 md.push_str(&format!("### {}\n\n", proc_node.name));
                 if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
                     for (i, step) in steps.iter().enumerate() {
-                        md.push_str(&format!("{}. {}\n", i + 1, step.symbol.name));
+                        let loc = if !step.symbol.file.is_empty() && step.symbol.range.start_line > 0 {
+                            format!(
+                                " — `{}:{}`",
+                                step.symbol.file,
+                                step.symbol.range.start_line
+                            )
+                        } else if !step.symbol.file.is_empty() {
+                            format!(" — `{}`", step.symbol.file)
+                        } else {
+                            String::new()
+                        };
+                        md.push_str(&format!("{}. `{}`{}\n", i + 1, step.symbol.name, loc));
                     }
                     md.push('\n');
                 }

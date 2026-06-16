@@ -21,6 +21,7 @@
     svg: document.getElementById("graph-svg"),
     emptyState: document.getElementById("empty-state"),
     statusPill: document.getElementById("status-pill"),
+    graphCounts: document.getElementById("graph-counts"),
     selectedSummary: document.getElementById("selected-summary"),
     detailsJson: document.getElementById("details-json"),
     fitGraph: document.getElementById("fit-graph"),
@@ -39,9 +40,11 @@
 
   function setStatus(label, tone) {
     els.statusPill.textContent = label;
-    els.statusPill.style.color = tone === "error" ? "#b91c1c" : "";
-    els.statusPill.style.borderColor = tone === "error" ? "#fecaca" : "";
-    els.statusPill.style.background = tone === "error" ? "#fff1f2" : "";
+    els.statusPill.classList.toggle("is-error", tone === "error");
+    els.statusPill.classList.toggle(
+      "is-busy",
+      tone !== "error" && !["Ready", "No Context"].includes(label),
+    );
   }
 
   function setDetails(value) {
@@ -168,14 +171,14 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = "result-item";
-      const id = item.id || item.node_id || item.handler_id || "";
+      const id = item.handler_id || item.node_id || item.id || "";
       button.dataset.id = id;
       if (id && id === state.selectedId) button.classList.add("is-active");
 
       if (item.path && item.http_method) {
         button.innerHTML = `
           <div class="route-row">
-            <span class="method">${escapeHtml(item.http_method)}</span>
+            <span class="http-method">${escapeHtml(item.http_method)}</span>
             <div>
               <div class="result-title"><strong>${escapeHtml(item.path)}</strong></div>
               <div class="result-meta">${escapeHtml(item.handler_qualified || item.handler_name || "")}</div>
@@ -187,7 +190,8 @@
             <span class="kind">${escapeHtml(kindOf(item))}</span>
             <strong>${escapeHtml(item.name || shortLabel(id))}</strong>
           </div>
-          <div class="result-meta">${escapeHtml(item.qualified_name || item.file || id)}</div>`;
+          <div class="result-meta">${escapeHtml(item.qualified_name || item.file || id)}</div>
+          ${renderResultFooter(item)}`;
       }
 
       button.addEventListener("click", () => {
@@ -196,6 +200,18 @@
       });
       els.resultsList.appendChild(button);
     });
+  }
+
+  function renderResultFooter(item) {
+    const rank = item.rank ? `#${item.rank}` : "";
+    const score = Number.isFinite(item.score) ? item.score.toFixed(4) : "";
+    const sources = Array.isArray(item.sources) ? item.sources.join(" + ") : "";
+    if (!rank && !score && !sources) return "";
+    return `
+      <div class="result-footer">
+        <span>${escapeHtml([rank, score].filter(Boolean).join(" / "))}</span>
+        ${sources ? `<span class="source-pill">${escapeHtml(sources)}</span>` : "<span></span>"}
+      </div>`;
   }
 
   function escapeHtml(value) {
@@ -248,10 +264,15 @@
     const name = node.name || node.label || shortLabel(id);
     const kind = kindOf(node);
     const file = node.file || "";
+    const qualified = node.qualified_name || node.qualifiedName || "";
     els.selectedSummary.innerHTML = `
       <h3>${escapeHtml(name || "Selected node")}</h3>
-      <p><strong>${escapeHtml(kind)}</strong></p>
+      <div class="summary-row">
+        <span class="summary-chip">${escapeHtml(kind)}</span>
+        ${qualified ? `<span class="summary-chip">qualified</span>` : ""}
+      </div>
       <p>${escapeHtml(id)}</p>
+      ${qualified ? `<p>${escapeHtml(qualified)}</p>` : ""}
       ${file ? `<p>${escapeHtml(file)}</p>` : ""}`;
   }
 
@@ -373,6 +394,9 @@
   function drawGraph(graph, title) {
     state.currentGraph = graph || { nodes: [], links: [] };
     els.graphTitle.textContent = title || "Graph";
+    if (els.graphCounts) {
+      els.graphCounts.textContent = `${state.currentGraph.nodes.length} nodes / ${state.currentGraph.links.length} links`;
+    }
     els.emptyState.style.display = state.currentGraph.nodes.length ? "none" : "block";
     els.svg.innerHTML = "";
     if (!state.currentGraph.nodes.length) return;
@@ -401,7 +425,7 @@
     const linkLayer = svgEl("g", { class: "links" });
     const labelLayer = svgEl("g", { class: "link-labels" });
     const nodeLayer = svgEl("g", { class: "nodes" });
-    els.svg.append(linkLayer, labelLayer, nodeLayer);
+    els.svg.append(arrowDefs(), linkLayer, labelLayer, nodeLayer);
 
     const linkEls = links.map((link) => {
       const line = svgEl("line", { class: "graph-link" });
@@ -417,7 +441,11 @@
     });
 
     const nodeEls = nodes.map((node) => {
-      const group = svgEl("g", { class: "graph-node", tabindex: "0" });
+      const group = svgEl("g", {
+        class: `graph-node ${kindClass(node.kind)}`,
+        tabindex: "0",
+        "data-id": node.id,
+      });
       const radius = radiusFor(node);
       const circle = svgEl("circle", { r: String(radius) });
       const text = svgEl("text", { y: String(radius + 14) });
@@ -520,9 +548,7 @@
 
   function highlightSelected() {
     Array.from(els.svg.querySelectorAll(".graph-node")).forEach((group) => {
-      const title = group.querySelector("title");
-      const id = title ? title.textContent.split(": ").slice(1).join(": ") : "";
-      group.classList.toggle("is-selected", id === state.selectedId);
+      group.classList.toggle("is-selected", group.dataset.id === state.selectedId);
     });
     Array.from(document.querySelectorAll(".result-item")).forEach((item) => {
       item.classList.toggle("is-active", item.dataset.id === state.selectedId);
@@ -542,6 +568,33 @@
       default:
         return 14;
     }
+  }
+
+  function kindClass(kind) {
+    const normalized = String(kind || "node")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+    return `kind-${normalized || "node"}`;
+  }
+
+  function arrowDefs() {
+    const defs = svgEl("defs");
+    const marker = svgEl("marker", {
+      id: "arrow",
+      viewBox: "0 0 10 10",
+      refX: "9",
+      refY: "5",
+      markerWidth: "6",
+      markerHeight: "6",
+      orient: "auto-start-reverse",
+    });
+    const path = svgEl("path", {
+      d: "M 0 0 L 10 5 L 0 10 z",
+      fill: "#4b5565",
+    });
+    marker.appendChild(path);
+    defs.appendChild(marker);
+    return defs;
   }
 
   function svgEl(name, attrs = {}) {

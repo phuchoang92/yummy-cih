@@ -50,6 +50,9 @@ pub struct WikiGraph {
     /// (src_community_id, dst_community_id, call_count) sorted by (src, dst)
     pub inter_community_calls: Vec<(String, String, usize)>,
 
+    /// class_id → method/constructor nodes (from HasMethod edges), sorted by start_line
+    pub methods_by_class: BTreeMap<String, Vec<Node>>,
+
     /// method_id → [dbquery_id]
     pub executes_query: BTreeMap<String, Vec<String>>,
     /// dbquery_id → [dbtable_id]
@@ -152,6 +155,7 @@ impl WikiGraph {
         let mut publishes: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut listens: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut routes: Vec<(Node, Node)> = Vec::new();
+        let mut methods_by_class: BTreeMap<String, Vec<Node>> = BTreeMap::new();
         let mut executes_query: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut query_reads_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut query_writes_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -184,6 +188,11 @@ impl WikiGraph {
                         routes.push((handler.clone(), route.clone()));
                     }
                 }
+                EdgeKind::HasMethod => {
+                    if let Some(method_node) = nodes_by_id.get(&dst) {
+                        methods_by_class.entry(src).or_default().push(method_node.clone());
+                    }
+                }
                 EdgeKind::ExecutesQuery => {
                     executes_query.entry(src).or_default().push(dst);
                 }
@@ -195,6 +204,10 @@ impl WikiGraph {
                 }
                 _ => {}
             }
+        }
+
+        for methods in methods_by_class.values_mut() {
+            methods.sort_by_key(|m| m.range.start_line);
         }
 
         routes.sort_by(|(_, r1), (_, r2)| {
@@ -335,6 +348,7 @@ impl WikiGraph {
             community_method_counts,
             community_stereotypes,
             inter_community_calls,
+            methods_by_class,
             executes_query,
             query_reads_table,
             query_writes_table,

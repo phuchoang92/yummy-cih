@@ -3,6 +3,41 @@ use cih_core::{Node, NodeKind, RepoMap};
 use crate::graph::{node_stereotype, route_http_method, route_path, WikiGraph};
 use crate::CommunityLlmSummary;
 
+fn method_signature(node: &Node) -> String {
+    let params = node
+        .props
+        .as_ref()
+        .and_then(|p| p.get("paramTypes"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    format!("{}({})", node.name, params)
+}
+
+fn callee_display(node: &Node) -> String {
+    if let Some(qn) = &node.qualified_name {
+        if let Some(hash_pos) = qn.find('#') {
+            let class_part = &qn[..hash_pos];
+            let simple = class_part.rsplit('.').next().unwrap_or(class_part);
+            return format!("{}.{}", simple, node.name);
+        }
+    }
+    node.name.clone()
+}
+
+fn format_return_type(node: &Node) -> &str {
+    node.props
+        .as_ref()
+        .and_then(|p| p.get("returnType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("void")
+}
+
 pub fn render_dev_index(
     graph: &WikiGraph,
     repo_map: Option<&RepoMap>,
@@ -93,45 +128,107 @@ pub fn render_dev_community(
         .get(comm_id)
         .unwrap_or(&empty_members);
 
-    let classes: Vec<&Node> = member_list
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::Class
-                    | NodeKind::Interface
-                    | NodeKind::Enum
-                    | NodeKind::Record
-                    | NodeKind::Annotation
-            )
-        })
-        .collect();
-
-    if !classes.is_empty() {
-        md.push_str("## Classes\n\n");
-        md.push_str("| Class | Stereotype | Tests |\n");
-        md.push_str("|---|---|---|\n");
-
-        for cls in &classes {
-            let stereotype = node_stereotype(cls).unwrap_or("—");
-            let test_names: Vec<&str> = graph
-                .tests_in
-                .get(cls.id.as_str())
-                .iter()
-                .flat_map(|ids| ids.iter())
-                .filter_map(|id| graph.nodes_by_id.get(id).map(|n| n.name.as_str()))
-                .collect();
-            let test_display = if test_names.is_empty() {
-                "—".to_string()
-            } else {
-                test_names.join(", ")
-            };
-            md.push_str(&format!(
-                "| `{}` | {} | {} |\n",
-                cls.name, stereotype, test_display
-            ));
+    // Communities group methods (not classes); derive the parent class from each method's ID.
+    // Method id format: "Method:fqcn#name/arity" → class id: "Class:fqcn"
+    let mut class_to_methods: BTreeMap<String, Vec<&Node>> = BTreeMap::new();
+    for m in member_list {
+        if !matches!(m.kind, NodeKind::Method | NodeKind::Function | NodeKind::Constructor) {
+            continue;
         }
-        md.push('\n');
+        let cls_id = m
+            .id
+            .as_str()
+            .split_once('#')
+            .map(|(prefix, _)| {
+                let fqcn = prefix
+                    .trim_start_matches("Method:")
+                    .trim_start_matches("Constructor:");
+                format!("Class:{}", fqcn)
+            })
+            .unwrap_or_default();
+        if !cls_id.is_empty() {
+            class_to_methods.entry(cls_id).or_default().push(m);
+        }
+    }
+
+    if !class_to_methods.is_empty() {
+        md.push_str("## Classes\n\n");
+
+        for (cls_id, methods) in &class_to_methods {
+            let cls = graph.nodes_by_id.get(cls_id);
+            let cls_name = cls
+                .map(|n| n.name.as_str())
+                .unwrap_or_else(|| cls_id.trim_start_matches("Class:").rsplit('.').next().unwrap_or(cls_id));
+            let stereotype = cls.and_then(node_stereotype).unwrap_or("—");
+
+            let test_names: Vec<&str> = cls
+                .map(|c| {
+                    graph
+                        .tests_in
+                        .get(c.id.as_str())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| graph.nodes_by_id.get(id).map(|n| n.name.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            md.push_str(&format!("### `{}` · {}\n\n", cls_name, stereotype));
+
+            let file = cls.map(|c| c.file.as_str()).unwrap_or_else(|| {
+                methods.first().map(|m| m.file.as_str()).unwrap_or("")
+            });
+            if !file.is_empty() {
+                let line = cls.map(|c| c.range.start_line).unwrap_or(0);
+                if line > 0 {
+                    md.push_str(&format!("`{}` :{}\n\n", file, line));
+                } else {
+                    md.push_str(&format!("`{}`\n\n", file));
+                }
+            }
+
+            if !test_names.is_empty() {
+                md.push_str(&format!("Tests: {}\n\n", test_names.join(", ")));
+            }
+
+            let visible: Vec<&&Node> = methods
+                .iter()
+                .filter(|m| !matches!(m.kind, NodeKind::Constructor))
+                .collect();
+
+            if !visible.is_empty() {
+                md.push_str("| Method | Returns | Line | Calls |\n");
+                md.push_str("|---|---|---|---|\n");
+                for method in visible.iter().take(20) {
+                    let sig = method_signature(method);
+                    let ret = format_return_type(method);
+                    let line = if method.range.start_line > 0 {
+                        format!(":{}", method.range.start_line)
+                    } else {
+                        String::new()
+                    };
+                    let empty_calls: Vec<String> = Vec::new();
+                    let calls_display = graph
+                        .calls_out
+                        .get(method.id.as_str())
+                        .unwrap_or(&empty_calls)
+                        .iter()
+                        .take(3)
+                        .filter_map(|cid| graph.nodes_by_id.get(cid))
+                        .map(callee_display)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    md.push_str(&format!(
+                        "| `{}` | `{}` | {} | {} |\n",
+                        sig, ret, line, calls_display
+                    ));
+                }
+                if visible.len() > 20 {
+                    md.push_str(&format!("\n_…and {} more methods_\n", visible.len() - 20));
+                }
+                md.push('\n');
+            }
+        }
     }
 
     if let Some(routes) = graph.community_routes.get(comm_id) {

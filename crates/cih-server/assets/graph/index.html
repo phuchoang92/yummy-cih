@@ -4,19 +4,32 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CIH Graph Browser</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/graph/assets/styles.css" />
   </head>
   <body>
     <div id="cih-graph-browser" class="shell">
-      <aside class="sidebar" aria-label="Graph search and navigation">
-        <div class="brand">
+      <header class="topbar" aria-label="CIH graph browser status">
+        <div class="topbar-brand">
           <div class="brand-mark">CIH</div>
           <div>
             <h1>Graph Browser</h1>
-            <p>Local code-intelligence graph</p>
+            <p>Local graph inspection</p>
           </div>
         </div>
+        <div class="topbar-center">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span>Read-only</span>
+          <span class="topbar-divider"></span>
+          <span id="graph-counts">0 nodes / 0 links</span>
+        </div>
+        <div class="topbar-actions">
+          <span class="server-pill">127.0.0.1</span>
+          <span class="server-pill">FalkorDB</span>
+        </div>
+      </header>
 
+      <aside class="sidebar" aria-label="Graph search and navigation">
         <form id="search-form" class="search-form">
           <label for="search-input">Search symbol, route, table, or feature</label>
           <div class="search-row">
@@ -40,7 +53,11 @@
         </nav>
 
         <section class="controls" aria-label="View controls">
-          <div class="control-grid" data-panel="impact">
+          <div class="control-grid is-hidden" data-panel="search">
+            <div class="panel-note">Search results include a one-hop graph around the top matches.</div>
+          </div>
+
+          <div class="control-grid is-hidden" data-panel="impact">
             <label>
               Direction
               <select id="impact-direction">
@@ -102,7 +119,15 @@
 
         <section class="graph-stage" aria-label="Graph visualization">
           <svg id="graph-svg" role="img" aria-label="Code graph"></svg>
+          <div class="graph-legend" aria-label="Node type legend">
+            <span><i class="legend-dot route"></i>Route</span>
+            <span><i class="legend-dot class"></i>Class</span>
+            <span><i class="legend-dot method"></i>Method</span>
+            <span><i class="legend-dot community"></i>Community</span>
+            <span><i class="legend-dot external"></i>External</span>
+          </div>
           <div id="empty-state" class="empty-state">
+            <div class="empty-mark">◇</div>
             <h3>No graph loaded</h3>
             <p>Search for a symbol or load one of the graph views.</p>
           </div>
