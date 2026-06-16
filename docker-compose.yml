@@ -32,6 +32,31 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Docusaurus wiki viewer — supports multiple repos simultaneously.
+  # Start with: docker compose --profile docs up -d docs-viewer
+  # Open: http://localhost:3001
+  #
+  # Each volume mount adds one repo; the subfolder name becomes the URL prefix:
+  #   /wiki/my-app  →  http://localhost:3001/my-app/
+  #
+  # To add more repos, append more volume lines:
+  #   - /other/repo/.cih/wiki/pages:/wiki/other-repo:ro
+  #
+  # Single-repo mode (optional): replace CIH_WIKI_REPOS_DIR with:
+  #   CIH_WIKI_PATH: /wiki
+  # and mount one dir directly: - ${REPO_PATH}/.cih/wiki/pages:/wiki:ro
+  docs-viewer:
+    image: phuchoang29/yummy-cih-docs:latest
+    ports:
+      - "3001:3001"
+    environment:
+      CIH_WIKI_REPOS_DIR: /wiki
+    volumes:
+      - ${REPO_PATH}/.cih/wiki/pages:/wiki/${REPO_NAME:-repo}:ro
+      # - /path/to/other-repo/.cih/wiki/pages:/wiki/other-repo:ro
+    profiles: ["docs"]
+    restart: unless-stopped
+
   # One-shot indexer — not a long-running service.
   # Set REPO_PATH in .env or your shell, then run:
   #   docker compose run --rm engine analyze /repo --all

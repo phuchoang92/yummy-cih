@@ -1,22 +1,67 @@
 // @ts-check
+'use strict';
+
 const path = require('path');
+const fs = require('fs');
 const { themes: prismThemes } = require('prism-react-renderer');
 
-// Point at any repo's wiki output: CIH_WIKI_PATH=/path/to/repo/.cih/wiki/pages npm start
-const wikiPath = process.env.CIH_WIKI_PATH
+// ── Mode detection ────────────────────────────────────────────────────────────
+// Single-repo: set CIH_WIKI_PATH=/path/to/.cih/wiki/pages
+// Multi-repo:  set CIH_WIKI_REPOS_DIR=/wiki (each subdir = one repo)
+const singlePath = process.env.CIH_WIKI_PATH
   ? path.resolve(process.env.CIH_WIKI_PATH)
-  : path.resolve(__dirname, 'docs');
+  : null;
+const reposDir = process.env.CIH_WIKI_REPOS_DIR
+  ? path.resolve(process.env.CIH_WIKI_REPOS_DIR)
+  : '/wiki';
+const multiMode = !singlePath;
 
-// Auto-read repo name from manifest.json if present, otherwise fall back to env var or basename
-let repoName = process.env.CIH_REPO_NAME || path.basename(path.dirname(path.dirname(wikiPath)));
-try {
-  const manifest = require(path.join(wikiPath, '..', 'manifest.json'));
-  if (manifest.repo_name) repoName = manifest.repo_name;
-} catch {}
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function readRepoName(pagesDir) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(pagesDir, '..', 'manifest.json'), 'utf-8'));
+    if (m.repo_name) return m.repo_name;
+  } catch {}
+  return process.env.CIH_REPO_NAME || path.basename(path.dirname(path.dirname(pagesDir)));
+}
+
+function listRepoDirs(dir) {
+  try {
+    return fs.readdirSync(dir)
+      .filter(f => { try { return fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; } })
+      .sort();
+  } catch { return []; }
+}
+
+// ── Resolve repos ─────────────────────────────────────────────────────────────
+const repoDirs = multiMode ? listRepoDirs(reposDir) : [];
+
+// One @docusaurus/plugin-content-docs instance per repo in multi-repo mode.
+// The preset-classic docs plugin is disabled in this mode.
+const repoPlugins = repoDirs.map(slug => [
+  '@docusaurus/plugin-content-docs',
+  {
+    id: slug,
+    path: path.join(reposDir, slug),
+    routeBasePath: `/${slug}`,
+    sidebarPath: require.resolve('./sidebars.js'),
+    exclude: ['**/*.json'],
+    editUrl: undefined,
+  },
+]);
+
+// Navbar links in multi-repo mode: one item per repo
+const navItems = multiMode
+  ? repoDirs.map(slug => ({ label: slug, to: `/${slug}/`, position: 'left' }))
+  : [];
+
+const siteTitle = multiMode
+  ? 'CIH Docs'
+  : `${readRepoName(singlePath)} — CIH Docs`;
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
-  title: `${repoName} — CIH Docs`,
+  title: siteTitle,
   tagline: 'Code Intelligence Hub — Role-Based Documentation',
   favicon: undefined,
   url: 'http://localhost',
@@ -28,8 +73,6 @@ const config = {
     locales: ['en'],
   },
 
-  // Treat .md files as CommonMark — avoids JSX parse errors from generic
-  // type signatures like ResponseEntity<PaymentReceipt> in table cells.
   markdown: {
     format: 'detect',
     hooks: {
@@ -37,18 +80,22 @@ const config = {
     },
   },
 
+  plugins: repoPlugins,
+
   presets: [
     [
       'classic',
       /** @type {import('@docusaurus/preset-classic').Options} */
       ({
-        docs: {
-          path: wikiPath,
-          routeBasePath: '/',
-          sidebarPath: require.resolve('./sidebars.js'),
-          exclude: ['**/*.json'],
-          editUrl: undefined,
-        },
+        docs: multiMode
+          ? false  // disabled — each repo is its own plugin
+          : {
+              path: singlePath,
+              routeBasePath: '/',
+              sidebarPath: require.resolve('./sidebars.js'),
+              exclude: ['**/*.json'],
+              editUrl: undefined,
+            },
         blog: false,
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
@@ -61,8 +108,8 @@ const config = {
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
       navbar: {
-        title: repoName,
-        items: [],
+        title: siteTitle,
+        items: navItems,
       },
       footer: {
         style: 'dark',

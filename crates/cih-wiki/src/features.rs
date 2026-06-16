@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cih_core::NodeKind;
 
-use crate::graph::WikiGraph;
+use crate::graph::{route_path, WikiGraph};
 use crate::slugify::slugify;
 
 /// A group of communities that belong to the same feature/module.
@@ -36,11 +36,105 @@ pub fn infer_community_feature(community_id: &str, graph: &WikiGraph) -> String 
             *counts.entry(feat.to_string()).or_insert(0) += 1;
         }
     }
+    if counts.is_empty() {
+        if let Some(routes) = graph.community_routes.get(community_id) {
+            for (_, route) in routes {
+                if let Some(feature) = route_feature(&route_path(route)) {
+                    *counts.entry(feature).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    if counts.is_empty() {
+        if let Some(tables) = graph.community_db_tables.get(community_id) {
+            for table in tables {
+                if let Some(feature) = table_feature(&table.table_name) {
+                    *counts.entry(feature).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    if counts.is_empty() {
+        for member in members {
+            for topic_id in graph
+                .publishes
+                .get(member.id.as_str())
+                .into_iter()
+                .flatten()
+                .chain(graph.listens.get(member.id.as_str()).into_iter().flatten())
+            {
+                if let Some(feature) = topic_feature(topic_id) {
+                    *counts.entry(feature).or_insert(0) += 1;
+                }
+            }
+        }
+    }
     counts
         .into_iter()
         .max_by_key(|(_, v)| *v)
         .map(|(k, _)| k)
         .unwrap_or_else(|| "shared".to_string())
+}
+
+fn route_feature(path: &str) -> Option<String> {
+    path.split('/')
+        .filter_map(clean_feature_token)
+        .find(|token| !is_generic_route_token(token))
+}
+
+fn table_feature(table: &str) -> Option<String> {
+    table
+        .split(|ch: char| ch == '_' || ch == '.' || ch == '-' || ch == '/')
+        .filter_map(clean_feature_token)
+        .find(|token| !is_generic_route_token(token))
+}
+
+fn topic_feature(topic_id: &str) -> Option<String> {
+    let topic = topic_id.strip_prefix("KafkaTopic:").unwrap_or(topic_id);
+    topic
+        .split(|ch: char| ch == '_' || ch == '.' || ch == '-' || ch == '/')
+        .filter_map(clean_feature_token)
+        .find(|token| !is_generic_route_token(token))
+}
+
+fn clean_feature_token(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    if token.is_empty()
+        || token.starts_with('{')
+        || token.chars().all(|ch| ch.is_ascii_digit())
+        || is_version_segment(token)
+    {
+        return None;
+    }
+    let slug = slugify(token);
+    if slug == "community" {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
+fn is_version_segment(token: &str) -> bool {
+    let mut chars = token.chars();
+    matches!(chars.next(), Some('v') | Some('V')) && chars.all(|ch| ch.is_ascii_digit())
+}
+
+fn is_generic_route_token(token: &str) -> bool {
+    matches!(
+        token,
+        "api"
+            | "apis"
+            | "rest"
+            | "internal"
+            | "external"
+            | "service"
+            | "services"
+            | "common"
+            | "shared"
+            | "core"
+            | "app"
+            | "apps"
+    )
 }
 
 /// Group all communities in the graph by their dominant feature.
@@ -260,6 +354,38 @@ mod tests {
             &[member_edge(m.id.as_str(), "Community:0")],
         );
         assert_eq!(infer_community_feature("Community:0", &g), "shared");
+    }
+
+    #[test]
+    fn feature_falls_back_to_route_segment() {
+        let m = method_node("Method:com.example.Foo#bar/0", "Test.java");
+        let route = Node {
+            id: NodeId::new("Route:GET /api/v1/orders/{id}".to_string()),
+            kind: NodeKind::Route,
+            name: "GET /api/v1/orders/{id}".to_string(),
+            qualified_name: None,
+            file: "Test.java".to_string(),
+            range: Range::default(),
+            props: Some(serde_json::json!({
+                "httpMethod": "GET",
+                "path": "/api/v1/orders/{id}"
+            })),
+        };
+        let comm = comm_node("Community:0", "misc");
+        let route_edge = Edge {
+            src: m.id.clone(),
+            dst: route.id.clone(),
+            kind: EdgeKind::HandlesRoute,
+            confidence: 1.0,
+            reason: String::new(),
+        };
+        let g = WikiGraph::build(
+            &[m.clone(), route],
+            &[route_edge],
+            &[comm],
+            &[member_edge(m.id.as_str(), "Community:0")],
+        );
+        assert_eq!(infer_community_feature("Community:0", &g), "orders");
     }
 
     #[test]
