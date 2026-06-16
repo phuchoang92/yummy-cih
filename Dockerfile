@@ -18,7 +18,8 @@ RUN cargo build --release -p cih-server -p cih-engine
 # can COPY it without needing shell glob expansion.
 RUN find target/release/build -name "libonnxruntime.so*" ! -name "*.gz" \
     -exec cp -L {} /tmp/libonnxruntime.so \; 2>/dev/null ; \
-    ls -lh /tmp/libonnxruntime.so 2>/dev/null || echo "ort: no .so found (may be static)"
+    ls -lh /tmp/libonnxruntime.so 2>/dev/null || echo "ort: no .so found (may be static)"; \
+    touch /tmp/libonnxruntime.so
 
 # ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -32,8 +33,9 @@ COPY --from=builder /build/target/release/cih-server /usr/local/bin/cih-server
 COPY --from=builder /build/target/release/cih-engine /usr/local/bin/cih-engine
 
 # ONNX Runtime shared library (only present if fastembed uses dynamic linking)
-COPY --from=builder /tmp/libonnxruntime.so* /usr/local/lib/
-RUN ldconfig 2>/dev/null || true
+COPY --from=builder /tmp/libonnxruntime.so /usr/local/lib/libonnxruntime.so
+RUN test -s /usr/local/lib/libonnxruntime.so || rm -f /usr/local/lib/libonnxruntime.so; \
+    ldconfig 2>/dev/null || true
 
 # ── Volumes ───────────────────────────────────────────────────────────────────
 # /data   — graph artifacts + HuggingFace model cache (persist across runs)
