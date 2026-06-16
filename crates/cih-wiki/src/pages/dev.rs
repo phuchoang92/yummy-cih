@@ -98,19 +98,19 @@ pub fn render_dev_index(
     md
 }
 
+/// `page_path` is the full path without "pages/" prefix, e.g. `"payment/dev/payment-controller"`.
 pub fn render_dev_community(
     graph: &WikiGraph,
     community: &Node,
-    slug_map: &BTreeMap<String, String>,
+    page_path: &str,
     llm: Option<&CommunityLlmSummary>,
 ) -> String {
     let comm_id = community.id.as_str();
-    let slug = slug_map.get(comm_id).map(|s| s.as_str()).unwrap_or(comm_id);
 
     let mut md = String::new();
     md.push_str(&format!(
-        "---\nid: dev/{}\ntitle: {}\n---\n\n",
-        slug, community.name
+        "---\nid: {}\ntitle: {}\n---\n\n",
+        page_path, community.name
     ));
     md.push_str(&format!("# {} — Technical Reference\n\n", community.name));
 
@@ -447,18 +447,12 @@ mod tests {
         WikiGraph::build(&nodes, &edges, &[comm], &comm_edges)
     }
 
-    fn slug_map() -> BTreeMap<String, String> {
-        let mut m = BTreeMap::new();
-        m.insert("Community:0".to_string(), "order-service".to_string());
-        m
-    }
-
     #[test]
     fn render_dev_community_shows_classes() {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm, &slug_map(), None);
-        assert!(md.contains("---\nid: dev/order-service"), "has frontmatter");
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None);
+        assert!(md.contains("---\nid: shared/dev/order-service"), "has frontmatter");
         assert!(md.contains("OrderService"), "has class name");
         assert!(md.contains("service"), "has stereotype");
     }
@@ -524,7 +518,7 @@ mod tests {
         ];
         let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
         let comm_node = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm_node, &slug_map(), None);
+        let md = render_dev_community(&g, &comm_node, "shared/dev/order-service", None);
         assert!(md.contains("## DB Access"), "has db access section");
         assert!(md.contains("ORDERS"), "has table name");
         assert!(md.contains("✓"), "has check mark");
@@ -534,7 +528,7 @@ mod tests {
     fn render_dev_community_omits_db_access_when_none() {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm, &slug_map(), None);
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None);
         assert!(!md.contains("## DB Access"), "no db access section when no tables");
     }
 
@@ -547,7 +541,7 @@ mod tests {
             ba: String::new(),
             dev: "Service-repository pattern with 8 methods.".to_string(),
         };
-        let md = render_dev_community(&g, &comm, &slug_map(), Some(&llm));
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", Some(&llm));
         assert!(md.contains("## Summary"), "has summary section");
         assert!(
             md.contains("Service-repository pattern"),

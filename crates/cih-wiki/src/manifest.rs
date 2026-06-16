@@ -26,6 +26,8 @@ pub struct WikiStats {
     pub class_count: usize,
     pub test_class_count: usize,
     pub unresolved_ref_count: usize,
+    #[serde(default)]
+    pub feature_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -66,6 +68,7 @@ mod tests {
                 class_count: 42,
                 test_class_count: 8,
                 unresolved_ref_count: 3,
+                feature_count: 1,
             },
             roles: vec!["po".into(), "ba".into(), "dev".into()],
             nav: BTreeMap::new(),

@@ -1,0 +1,222 @@
+use std::collections::{BTreeMap, HashMap};
+
+use crate::graph::{route_http_method, route_path, WikiGraph};
+use crate::CommunityLlmSummary;
+
+fn capitalize(s: &str) -> String {
+    let mut out = s.to_string();
+    if let Some(first) = out.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    out
+}
+
+fn processes_for_community(graph: &WikiGraph, community_id: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    for (proc_id, steps) in &graph.process_steps {
+        if let Some(first) = steps.first() {
+            let sym_id = first.symbol.id.as_str().to_string();
+            if graph
+                .community_by_member
+                .get(&sym_id)
+                .map(|c| c.as_str())
+                == Some(community_id)
+            {
+                result.push(proc_id.clone());
+            }
+        }
+    }
+    result
+}
+
+/// Render the feature-level PO (business overview) page.
+/// Aggregates routes, tables, and LLM summaries from all communities in the feature.
+pub fn render_feature_po(
+    feature: &str,
+    community_ids: &[String],
+    graph: &WikiGraph,
+    llm_summaries: Option<&HashMap<String, CommunityLlmSummary>>,
+) -> String {
+    let title = format!("{} — Business Overview", capitalize(feature));
+    let mut md = String::new();
+    md.push_str(&format!(
+        "---\nid: {}/po\ntitle: {}\n---\n\n",
+        feature, title
+    ));
+    md.push_str(&format!("# {}\n\n", title));
+
+    // LLM overview (concat po summaries from all communities)
+    let po_texts: Vec<String> = community_ids
+        .iter()
+        .filter_map(|cid| {
+            llm_summaries
+                .and_then(|m| m.get(cid))
+                .map(|s| s.po.clone())
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if !po_texts.is_empty() {
+        md.push_str("## Overview\n\n");
+        for text in &po_texts {
+            md.push_str(text);
+            md.push_str("\n\n");
+        }
+    }
+
+    let total_routes: usize = community_ids
+        .iter()
+        .map(|cid| {
+            graph
+                .community_routes
+                .get(cid)
+                .map(|r| r.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let total_procs: usize = community_ids
+        .iter()
+        .map(|cid| processes_for_community(graph, cid).len())
+        .sum();
+
+    md.push_str(&format!(
+        "**Modules:** {} · **Routes:** {} · **Processes:** {}\n\n",
+        community_ids.len(),
+        total_routes,
+        total_procs,
+    ));
+
+    // Aggregated routes
+    let mut all_routes: Vec<(String, String)> = Vec::new();
+    for cid in community_ids {
+        if let Some(routes) = graph.community_routes.get(cid) {
+            for (_, route) in routes {
+                all_routes.push((
+                    route_http_method(route).to_string(),
+                    route_path(route).to_string(),
+                ));
+            }
+        }
+    }
+    if !all_routes.is_empty() {
+        md.push_str("## API Routes\n\n");
+        md.push_str("| Method | Path |\n");
+        md.push_str("|---|---|\n");
+        for (method, path) in &all_routes {
+            md.push_str(&format!("| `{}` | `{}` |\n", method, path));
+        }
+        md.push('\n');
+    }
+
+    // Aggregated DB tables
+    let mut tables: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for cid in community_ids {
+        if let Some(ts) = graph.community_db_tables.get(cid) {
+            for t in ts {
+                let e = tables.entry(t.table_name.clone()).or_default();
+                e.0 |= t.reads;
+                e.1 |= t.writes;
+            }
+        }
+    }
+    if !tables.is_empty() {
+        md.push_str("## Core Tables\n\n");
+        md.push_str("| Table | Access |\n");
+        md.push_str("|---|---|\n");
+        for (name, (reads, writes)) in &tables {
+            let access = match (reads, writes) {
+                (true, true) => "Read + Write",
+                (true, false) => "Read",
+                (false, true) => "Write",
+                _ => "—",
+            };
+            md.push_str(&format!("| `{}` | {} |\n", name, access));
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
+
+    fn method_node(id: &str) -> Node {
+        Node {
+            id: NodeId::new(id.to_string()),
+            kind: NodeKind::Method,
+            name: id.split('#').nth(1).unwrap_or("m").split('/').next().unwrap_or("m").to_string(),
+            qualified_name: None,
+            file: String::new(),
+            range: Range::default(),
+            props: None,
+        }
+    }
+
+    fn comm_node(id: &str, name: &str) -> Node {
+        Node {
+            id: NodeId::new(id.to_string()),
+            kind: NodeKind::Community,
+            name: name.to_string(),
+            qualified_name: None,
+            file: String::new(),
+            range: Range::default(),
+            props: None,
+        }
+    }
+
+    fn member_edge(method: &str, comm: &str) -> Edge {
+        Edge {
+            src: NodeId::new(method.to_string()),
+            dst: NodeId::new(comm.to_string()),
+            kind: EdgeKind::MemberOf,
+            confidence: 1.0,
+            reason: String::new(),
+        }
+    }
+
+    fn simple_graph() -> (WikiGraph, Vec<String>) {
+        let m = method_node("Method:A#do/0");
+        let c = comm_node("Community:0", "payment");
+        let g = WikiGraph::build(
+            &[m.clone()],
+            &[],
+            &[c],
+            &[member_edge(m.id.as_str(), "Community:0")],
+        );
+        (g, vec!["Community:0".to_string()])
+    }
+
+    #[test]
+    fn renders_overview_when_llm_present() {
+        let (g, ids) = simple_graph();
+        let mut sums = HashMap::new();
+        sums.insert(
+            "Community:0".to_string(),
+            CommunityLlmSummary {
+                po: "Handles payment flows.".to_string(),
+                ba: String::new(),
+                dev: String::new(),
+            },
+        );
+        let md = render_feature_po("payment", &ids, &g, Some(&sums));
+        assert!(md.contains("## Overview"));
+        assert!(md.contains("Handles payment flows"));
+    }
+
+    #[test]
+    fn omits_overview_when_no_llm() {
+        let (g, ids) = simple_graph();
+        let md = render_feature_po("payment", &ids, &g, None);
+        assert!(!md.contains("## Overview"));
+    }
+
+    #[test]
+    fn has_correct_frontmatter() {
+        let (g, ids) = simple_graph();
+        let md = render_feature_po("payment", &ids, &g, None);
+        assert!(md.contains("---\nid: payment/po\ntitle: Payment — Business Overview"));
+    }
+}

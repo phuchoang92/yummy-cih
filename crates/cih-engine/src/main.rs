@@ -153,13 +153,34 @@ enum Command {
         /// Output directory. Defaults to `<repo>/.cih/wiki`.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Enrich community pages with AI-written summaries via the Anthropic API.
-        /// Reads ANTHROPIC_API_KEY from the environment.
-        #[arg(long, env = "CIH_LLM_ENRICH")]
+        /// Enable LLM enrichment using an OpenAI-compatible API.
+        /// Reads CIH_LLM_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY from the environment.
+        #[arg(long, env = "CIH_LLM")]
+        llm: bool,
+        /// Deprecated: alias for --llm. Will be removed in a future release.
+        #[arg(long, env = "CIH_LLM_ENRICH", hide = true)]
         llm_enrich: bool,
-        /// Model for LLM enrichment.
-        #[arg(long, default_value = "claude-haiku-4-5-20251001")]
+        /// OpenAI-compatible API base URL.
+        #[arg(long, default_value = "https://api.openai.com/v1")]
+        llm_base_url: String,
+        /// Model name for LLM enrichment.
+        #[arg(long, default_value = "gpt-4o-mini")]
         llm_model: String,
+        /// Timeout in seconds per LLM API call.
+        #[arg(long, default_value = "30")]
+        llm_timeout_secs: u64,
+        /// Retries on transient LLM failures.
+        #[arg(long, default_value = "2")]
+        llm_retries: u32,
+        /// Maximum concurrent LLM calls.
+        #[arg(long, default_value = "8")]
+        llm_concurrency: usize,
+        /// Print evidence packs to stdout instead of calling the LLM.
+        #[arg(long)]
+        llm_debug_evidence: bool,
+        /// Print prompts to stdout without calling the LLM (dry run).
+        #[arg(long)]
+        llm_dry_run: bool,
         /// Print outcome as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -345,9 +366,28 @@ fn main() -> Result<()> {
         Command::Wiki {
             repo,
             out,
+            llm,
             llm_enrich,
+            llm_base_url,
             llm_model,
+            llm_timeout_secs,
+            llm_retries,
+            llm_concurrency,
+            llm_debug_evidence,
+            llm_dry_run,
             json,
-        } => wiki_cmd::run_wiki(&repo, out, llm_enrich, llm_model, json),
+        } => wiki_cmd::run_wiki(
+            &repo,
+            out,
+            llm || llm_enrich,
+            &llm_base_url,
+            &llm_model,
+            llm_timeout_secs,
+            llm_retries,
+            llm_concurrency,
+            llm_debug_evidence,
+            llm_dry_run,
+            json,
+        ),
     }
 }
