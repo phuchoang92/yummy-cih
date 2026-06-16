@@ -7,7 +7,7 @@ pub mod slugify;
 pub use cih_core::RepoMap;
 pub use features::FeatureGroup;
 pub use graph::WikiGraph;
-pub use manifest::{NavEntry, PageEntry, WikiManifest, WikiStats};
+pub use manifest::{NavEntry, PageEntry, WikiLlmInfo, WikiManifest, WikiStats};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -42,8 +42,8 @@ pub struct WikiInput<'a> {
     pub repo_map: Option<RepoMap>,
     /// Keyed by community_id (e.g. `"Community:3"`). `None` = graph-only mode.
     pub llm_summaries: Option<HashMap<String, CommunityLlmSummary>>,
-    /// Model name used for enrichment, recorded in the manifest.
-    pub llm_model: Option<String>,
+    /// LLM run metadata, recorded in the manifest when enrichment was requested.
+    pub llm_info: Option<WikiLlmInfo>,
 }
 
 #[derive(Debug)]
@@ -84,11 +84,8 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     let mut nav: BTreeMap<String, Vec<NavEntry>> = BTreeMap::new();
 
     // System index
-    let system_md = pages::system_index::render_system_index(
-        &feature_groups,
-        &graph,
-        &input.repo_name,
-    );
+    let system_md =
+        pages::system_index::render_system_index(&feature_groups, &graph, &input.repo_name);
     std::fs::write(out_dir.join("pages/index.md"), &system_md)?;
     all_pages.push(PageEntry {
         slug: "index".into(),
@@ -126,12 +123,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         let cids = &group.community_ids;
 
         // Feature landing index
-        let idx_md = pages::feature_index::render_feature_index(
-            feature,
-            cids,
-            &dev_paths,
-            &graph,
-        );
+        let idx_md = pages::feature_index::render_feature_index(feature, cids, &dev_paths, &graph);
         std::fs::write(out_dir.join(format!("pages/{}/index.md", feature)), &idx_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
             slug: format!("{}/index", feature),
@@ -253,8 +245,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         roles: vec!["po".into(), "ba".into(), "dev".into()],
         nav,
         pages: all_pages,
-        llm_enriched: if llm_enriched { Some(true) } else { None },
-        llm_model: input.llm_model,
+        llm: input.llm_info,
     };
 
     let manifest_path = out_dir.join("manifest.json");
@@ -281,14 +272,12 @@ fn capitalize(s: &str) -> String {
 fn count_unresolved_refs(report: Option<&str>) -> usize {
     report
         .and_then(|r| {
-            r.lines()
-                .find(|l| l.contains("**Total:**"))
-                .and_then(|l| {
-                    l.split("**Total:**")
-                        .nth(1)
-                        .and_then(|s| s.split('|').next())
-                        .and_then(|s| s.trim().parse::<usize>().ok())
-                })
+            r.lines().find(|l| l.contains("**Total:**")).and_then(|l| {
+                l.split("**Total:**")
+                    .nth(1)
+                    .and_then(|s| s.split('|').next())
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+            })
         })
         .unwrap_or(0)
 }
@@ -351,7 +340,7 @@ mod tests {
             unresolved_report: None,
             repo_map: None,
             llm_summaries: None,
-            llm_model: None,
+            llm_info: None,
         }
     }
 
@@ -378,7 +367,10 @@ mod tests {
         assert!(out.join("pages/index.md").exists(), "system index");
         assert!(out.join("pages/routes.md").exists(), "routes.md");
         // Feature-first paths: Test.java has no modules/ → feature=shared
-        assert!(out.join("pages/shared/index.md").exists(), "shared/index.md");
+        assert!(
+            out.join("pages/shared/index.md").exists(),
+            "shared/index.md"
+        );
         assert!(out.join("pages/shared/po.md").exists(), "shared/po.md");
         assert!(out.join("pages/shared/ba.md").exists(), "shared/ba.md");
         // class Foo → slug=foo
@@ -392,10 +384,7 @@ mod tests {
         let manifest: WikiManifest = serde_json::from_str(&manifest_json).unwrap();
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.repo_name, "test-service");
-        assert!(
-            manifest.llm_enriched.is_none(),
-            "llm_enriched absent when not enriched"
-        );
+        assert!(manifest.llm.is_none(), "llm absent when not enriched");
 
         let _ = std::fs::remove_dir_all(&out);
     }
@@ -435,17 +424,23 @@ mod tests {
             unresolved_report: None,
             repo_map: None,
             llm_summaries: Some(summaries),
-            llm_model: Some("claude-haiku-4-5-20251001".to_string()),
+            llm_info: Some(WikiLlmInfo {
+                provider: "anthropic".to_string(),
+                model: "claude-haiku-4-5-20251001".to_string(),
+                language: "en".to_string(),
+                evidence_file_count: 1,
+                enriched_community_count: 1,
+                failed_community_count: 0,
+                failed_community_ids: Vec::new(),
+            }),
         };
         let outcome = generate_wiki(input, &out).unwrap();
 
         let manifest_json = std::fs::read_to_string(out.join("manifest.json")).unwrap();
         let manifest: WikiManifest = serde_json::from_str(&manifest_json).unwrap();
-        assert_eq!(manifest.llm_enriched, Some(true));
-        assert_eq!(
-            manifest.llm_model.as_deref(),
-            Some("claude-haiku-4-5-20251001")
-        );
+        let llm = manifest.llm.as_ref().expect("llm metadata");
+        assert_eq!(Some(llm.model.as_str()), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(llm.provider, "anthropic");
         assert!(outcome.llm_enriched);
 
         // PO page for the shared feature includes LLM summary

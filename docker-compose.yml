@@ -20,11 +20,13 @@ services:
       FALKOR_URL: redis://falkordb:6379
       CIH_GRAPH_KEY: cih
       CIH_BIND: 0.0.0.0:8080
-      CIH_ARTIFACTS_DIR: /data/artifacts
+      # Points at the same artifacts the engine writes — enables BM25 query tool.
+      CIH_ARTIFACTS_DIR: /repo/.cih/artifacts
       HF_HOME: /data/hf-cache
       RUST_LOG: info,cih_server=debug
     volumes:
       - cih-data:/data
+      - ${REPO_PATH}:/repo:ro
     depends_on:
       falkordb:
         condition: service_healthy

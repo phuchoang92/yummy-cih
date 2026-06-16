@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WikiManifest {
@@ -13,9 +13,19 @@ pub struct WikiManifest {
     pub nav: BTreeMap<String, Vec<NavEntry>>,
     pub pages: Vec<PageEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub llm_enriched: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub llm_model: Option<String>,
+    pub llm: Option<WikiLlmInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WikiLlmInfo {
+    pub provider: String,
+    pub model: String,
+    pub language: String,
+    pub evidence_file_count: usize,
+    pub enriched_community_count: usize,
+    pub failed_community_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_community_ids: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -73,8 +83,7 @@ mod tests {
             roles: vec!["po".into(), "ba".into(), "dev".into()],
             nav: BTreeMap::new(),
             pages: vec![],
-            llm_enriched: None,
-            llm_model: None,
+            llm: None,
         }
     }
 
@@ -93,18 +102,27 @@ mod tests {
     fn manifest_llm_fields_absent_when_not_enriched() {
         let m = sample_manifest();
         let json = serde_json::to_string(&m).unwrap();
-        assert!(!json.contains("llm_enriched"), "llm_enriched should be absent");
-        assert!(!json.contains("llm_model"), "llm_model should be absent");
+        assert!(!json.contains("\"llm\""), "llm should be absent");
     }
 
     #[test]
     fn manifest_llm_fields_present_when_enriched() {
         let mut m = sample_manifest();
-        m.llm_enriched = Some(true);
-        m.llm_model = Some("claude-haiku-4-5-20251001".into());
+        m.llm = Some(WikiLlmInfo {
+            provider: "anthropic".into(),
+            model: "claude-haiku-4-5-20251001".into(),
+            language: "en".into(),
+            evidence_file_count: 1,
+            enriched_community_count: 4,
+            failed_community_count: 2,
+            failed_community_ids: vec!["Community:1".into(), "Community:2".into()],
+        });
         let json = serde_json::to_string(&m).unwrap();
-        assert!(json.contains("llm_enriched"), "llm_enriched should be present");
-        assert!(json.contains("llm_model"), "llm_model should be present");
-        assert!(json.contains("claude-haiku"), "model name should be present");
+        assert!(json.contains("\"llm\""), "llm should be present");
+        assert!(
+            json.contains("claude-haiku"),
+            "model name should be present"
+        );
+        assert!(json.contains("failed_community_count"));
     }
 }

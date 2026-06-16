@@ -5,6 +5,7 @@ mod embed;
 mod file_cache;
 mod group;
 mod group_cmd;
+mod llm;
 mod registry;
 mod scan;
 mod scope;
@@ -160,12 +161,27 @@ enum Command {
         /// Deprecated: alias for --llm. Will be removed in a future release.
         #[arg(long, env = "CIH_LLM_ENRICH", hide = true)]
         llm_enrich: bool,
+        /// LLM provider adapter.
+        #[arg(long, default_value = "openai-compatible")]
+        llm_provider: String,
+        /// JSON config file for --llm-provider http-json.
+        #[arg(long)]
+        llm_provider_config: Option<PathBuf>,
+        /// Explicit API key environment variable for the selected provider.
+        #[arg(long)]
+        llm_api_key_env: Option<String>,
+        /// External evidence file (.md or .txt) to include in LLM wiki prompts.
+        #[arg(long = "evidence")]
+        evidence: Vec<PathBuf>,
         /// OpenAI-compatible API base URL.
         #[arg(long, default_value = "https://api.openai.com/v1")]
         llm_base_url: String,
         /// Model name for LLM enrichment.
         #[arg(long, default_value = "gpt-4o-mini")]
         llm_model: String,
+        /// Maximum output tokens per LLM call.
+        #[arg(long, default_value = "600")]
+        llm_max_tokens: u32,
         /// Timeout in seconds per LLM API call.
         #[arg(long, default_value = "30")]
         llm_timeout_secs: u64,
@@ -181,6 +197,9 @@ enum Command {
         /// Print prompts to stdout without calling the LLM (dry run).
         #[arg(long)]
         llm_dry_run: bool,
+        /// Documentation language for LLM-generated text.
+        #[arg(long, default_value = "en")]
+        wiki_language: String,
         /// Print outcome as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -368,25 +387,37 @@ fn main() -> Result<()> {
             out,
             llm,
             llm_enrich,
+            llm_provider,
+            llm_provider_config,
+            llm_api_key_env,
+            evidence,
             llm_base_url,
             llm_model,
+            llm_max_tokens,
             llm_timeout_secs,
             llm_retries,
             llm_concurrency,
             llm_debug_evidence,
             llm_dry_run,
+            wiki_language,
             json,
         } => wiki_cmd::run_wiki(
             &repo,
             out,
             llm || llm_enrich,
+            &llm_provider,
+            llm_provider_config,
+            llm_api_key_env,
+            evidence,
             &llm_base_url,
             &llm_model,
+            llm_max_tokens,
             llm_timeout_secs,
             llm_retries,
             llm_concurrency,
             llm_debug_evidence,
             llm_dry_run,
+            &wiki_language,
             json,
         ),
     }

@@ -4,6 +4,7 @@ use crate::db::LoadOutcome;
 use crate::discover::run_discover_core;
 use crate::scope::{ScopeFile, ScopeRequest};
 use cih_core::JarInfo;
+use cih_wiki::WikiManifest;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,7 +75,10 @@ fn analyze_emit_writes_artifacts_without_a_database() {
     // Unresolved-ref report files exist on disk.
     let unresolved_jsonl = emit.artifacts_dir.join("unresolved-refs.jsonl");
     let unresolved_md = emit.artifacts_dir.join("unresolved-refs.md");
-    assert!(unresolved_jsonl.exists(), "unresolved-refs.jsonl should exist");
+    assert!(
+        unresolved_jsonl.exists(),
+        "unresolved-refs.jsonl should exist"
+    );
     assert!(unresolved_md.exists(), "unresolved-refs.md should exist");
     assert!(
         fs::read_to_string(&unresolved_md)
@@ -396,6 +400,112 @@ fn discover_emits_community_and_process_artifacts() {
     let nodes_jsonl = fs::read_to_string(discover.artifacts_dir.join("nodes.jsonl")).unwrap();
     assert!(nodes_jsonl.contains("\"kind\":\"Community\""));
     assert!(nodes_jsonl.contains("\"kind\":\"Process\""));
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+fn repo_with_wiki_artifacts() -> PathBuf {
+    let root = temp_repo();
+    let scan = scan::scan_repo(&root).unwrap();
+    analyze_emit(&scan, all_scope()).unwrap();
+    run_discover_core(&root).unwrap();
+    root
+}
+
+#[test]
+fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(
+        &root,
+        None,
+        false,
+        "openai-compatible",
+        None,
+        None,
+        Vec::new(),
+        "https://api.openai.com/v1",
+        "test-model",
+        600,
+        1,
+        0,
+        1,
+        false,
+        false,
+        "en",
+        false,
+    )
+    .unwrap();
+
+    let manifest_json = fs::read_to_string(root.join(".cih/wiki/manifest.json")).unwrap();
+    let manifest: WikiManifest = serde_json::from_str(&manifest_json).unwrap();
+    assert!(
+        manifest.llm.is_none(),
+        "graph-only wiki must omit llm metadata"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(
+        &root,
+        None,
+        true,
+        "openai-compatible",
+        None,
+        None,
+        Vec::new(),
+        "https://api.openai.com/v1",
+        "dry-model",
+        600,
+        1,
+        0,
+        1,
+        false,
+        true,
+        "vi",
+        false,
+    )
+    .unwrap();
+
+    let manifest_json = fs::read_to_string(root.join(".cih/wiki/manifest.json")).unwrap();
+    let manifest: WikiManifest = serde_json::from_str(&manifest_json).unwrap();
+    let llm = manifest.llm.expect("dry-run llm metadata");
+    assert_eq!(llm.provider, "openai-compatible");
+    assert_eq!(llm.model, "dry-model");
+    assert_eq!(llm.language, "vi");
+    assert_eq!(llm.failed_community_count, 0);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_command_http_json_requires_provider_config() {
+    let root = repo_with_wiki_artifacts();
+    let err = wiki_cmd::run_wiki(
+        &root,
+        None,
+        true,
+        "http-json",
+        None,
+        None,
+        Vec::new(),
+        "http://localhost",
+        "local",
+        600,
+        1,
+        0,
+        1,
+        false,
+        true,
+        "en",
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--llm-provider-config"));
 
     fs::remove_dir_all(&root).unwrap();
 }

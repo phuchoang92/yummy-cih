@@ -3,22 +3,35 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use cih_core::{GraphArtifacts, Node, RepoMap, VersionId};
-use cih_wiki::{CommunityLlmSummary, WikiGraph, WikiInput, generate_wiki};
+use cih_wiki::{generate_wiki, CommunityLlmSummary, WikiGraph, WikiInput, WikiLlmInfo};
 use rayon::prelude::*;
+
+use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
+use crate::llm::{make_adapter, resolve_api_key, LlmAdapter, LlmRequest};
 
 pub fn run_wiki(
     repo: &Path,
     out: Option<PathBuf>,
     run_llm: bool,
+    llm_provider: &str,
+    llm_provider_config: Option<PathBuf>,
+    llm_api_key_env: Option<String>,
+    evidence_paths: Vec<PathBuf>,
     llm_base_url: &str,
     llm_model: &str,
+    llm_max_tokens: u32,
     llm_timeout_secs: u64,
     llm_retries: u32,
     llm_concurrency: usize,
     llm_debug_evidence: bool,
     llm_dry_run: bool,
+    wiki_language: &str,
     json: bool,
 ) -> Result<()> {
+    if wiki_language != "en" && wiki_language != "vi" {
+        bail!("--wiki-language must be 'en' or 'vi'");
+    }
+
     let graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
     let nodes = graph_artifacts.read_nodes().with_context(|| {
         format!(
@@ -71,28 +84,21 @@ pub fn run_wiki(
         }
     });
 
-    // Resolve API key: CIH_LLM_API_KEY > OPENAI_API_KEY > ANTHROPIC_API_KEY
-    let api_key = std::env::var("CIH_LLM_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-        .ok();
-
-    if run_llm && !llm_dry_run && api_key.is_none() {
-        bail!(
-            "--llm requires an API key in CIH_LLM_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY"
-        );
-    }
-
+    let mut llm_info: Option<WikiLlmInfo> = None;
     let llm_summaries: Option<HashMap<String, CommunityLlmSummary>> = if run_llm {
         let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes, &community_edges);
-        let key = api_key.as_deref().unwrap_or("");
+        let adapter = make_adapter(llm_provider, llm_base_url, llm_provider_config.as_deref())?;
+        let api_key = resolve_api_key(llm_api_key_env.as_deref())?;
+        let evidence_corpus = EvidenceCorpus::load(&evidence_paths)?;
 
         if llm_debug_evidence {
             println!(
-                "[llm-debug] {} communities to enrich, model={}, base_url={}",
+                "[llm-debug] {} communities to enrich, provider={}, model={}, base_url={}, evidence_files={}",
                 community_nodes.len(),
+                llm_provider,
                 llm_model,
-                llm_base_url
+                llm_base_url,
+                evidence_corpus.file_count
             );
         }
 
@@ -109,11 +115,16 @@ pub fn run_wiki(
                     let r = enrich_one_community(
                         comm,
                         &wiki_graph,
-                        llm_base_url,
-                        key,
+                        repo,
+                        &evidence_corpus,
+                        adapter.as_ref(),
+                        api_key.as_deref(),
                         llm_model,
+                        llm_max_tokens,
                         llm_timeout_secs,
                         llm_retries,
+                        wiki_language,
+                        llm_debug_evidence,
                         llm_dry_run,
                     );
                     (comm.id.as_str().to_string(), r)
@@ -122,6 +133,7 @@ pub fn run_wiki(
         });
 
         let mut map = HashMap::new();
+        let mut failed_community_ids = Vec::new();
         for (id, result) in results {
             match result {
                 Ok(summary) => {
@@ -129,9 +141,20 @@ pub fn run_wiki(
                 }
                 Err(err) => {
                     tracing::warn!(community = %id, error = %err, "LLM enrichment failed");
+                    failed_community_ids.push(id);
                 }
             }
         }
+        failed_community_ids.sort();
+        llm_info = Some(WikiLlmInfo {
+            provider: llm_provider.to_string(),
+            model: llm_model.to_string(),
+            language: wiki_language.to_string(),
+            evidence_file_count: evidence_corpus.file_count,
+            enriched_community_count: map.len(),
+            failed_community_count: failed_community_ids.len(),
+            failed_community_ids,
+        });
         Some(map)
     } else {
         None
@@ -144,11 +167,7 @@ pub fn run_wiki(
         .unwrap_or("unknown")
         .to_string();
 
-    let llm_model_opt = if llm_summaries.is_some() {
-        Some(llm_model.to_string())
-    } else {
-        None
-    };
+    let llm_info_for_output = llm_info.clone();
 
     let input = WikiInput {
         nodes: &nodes,
@@ -161,7 +180,7 @@ pub fn run_wiki(
         unresolved_report,
         repo_map,
         llm_summaries,
-        llm_model: llm_model_opt,
+        llm_info,
     };
 
     let outcome = generate_wiki(input, &out_dir)?;
@@ -176,6 +195,7 @@ pub fn run_wiki(
                 "community_count": outcome.community_count,
                 "route_count": outcome.route_count,
                 "llm_enriched": outcome.llm_enriched,
+                "llm": llm_info_for_output,
             }))?
         );
     } else {
@@ -185,8 +205,14 @@ pub fn run_wiki(
             outcome.page_count, outcome.community_count, outcome.route_count
         );
         println!("  Manifest: {}", outcome.manifest_path.display());
-        if outcome.llm_enriched {
-            println!("  LLM enrichment: active (model={})", llm_model);
+        if let Some(info) = llm_info_for_output {
+            println!(
+                "  LLM enrichment: active (provider={}, model={}, enriched={}, failed={})",
+                info.provider,
+                info.model,
+                info.enriched_community_count,
+                info.failed_community_count
+            );
         }
     }
 
@@ -237,72 +263,40 @@ fn latest_community_artifacts(repo: &Path) -> Result<GraphArtifacts> {
 fn enrich_one_community(
     community: &Node,
     graph: &WikiGraph,
-    base_url: &str,
-    api_key: &str,
+    repo: &Path,
+    evidence_corpus: &EvidenceCorpus,
+    adapter: &dyn LlmAdapter,
+    api_key: Option<&str>,
     model: &str,
+    max_tokens: u32,
     timeout_secs: u64,
     retries: u32,
+    language: &str,
+    debug_evidence: bool,
     dry_run: bool,
 ) -> Result<CommunityLlmSummary> {
-    use cih_wiki::graph::{route_http_method, route_path};
+    let evidence_pack = build_evidence_pack(Some(repo), graph, community, evidence_corpus);
+    let evidence = evidence_pack.render();
+    let system = build_system_prompt(language);
+    let user = build_enrich_prompt(&community.name, &evidence);
 
-    let comm_id = community.id.as_str();
-
-    let routes: Vec<String> = graph
-        .community_routes
-        .get(comm_id)
-        .map(|rs| {
-            rs.iter()
-                .take(5)
-                .map(|(_, r)| format!("{} {}", route_http_method(r), route_path(r)))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let stereo_str = graph
-        .community_stereotypes
-        .get(comm_id)
-        .map(|s| {
-            s.iter()
-                .map(|(k, v)| format!("{} {}", v, k))
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_else(|| "—".to_string());
-
-    let caller_names: Vec<String> = graph
-        .callers_of(comm_id)
-        .iter()
-        .map(|(id, _)| graph.community_name(id).to_string())
-        .collect();
-    let callee_names: Vec<String> = graph
-        .callees_of(comm_id)
-        .iter()
-        .map(|(id, _)| graph.community_name(id).to_string())
-        .collect();
-
-    let route_str = if routes.is_empty() {
-        "none".to_string()
-    } else {
-        routes.join(", ")
-    };
-    let caller_str = if caller_names.is_empty() {
-        "none".to_string()
-    } else {
-        caller_names.join(", ")
-    };
-    let callee_str = if callee_names.is_empty() {
-        "none".to_string()
-    } else {
-        callee_names.join(", ")
-    };
-
-    let prompt =
-        build_enrich_prompt(&community.name, &route_str, &stereo_str, &caller_str, &callee_str);
+    if debug_evidence {
+        println!(
+            "--- [evidence] community: {} ({}) ---",
+            evidence_pack.community_name, evidence_pack.community_id
+        );
+        println!("{}", evidence);
+        return Ok(CommunityLlmSummary {
+            po: format!("[debug-evidence] {}", community.name),
+            ba: String::new(),
+            dev: String::new(),
+        });
+    }
 
     if dry_run {
         println!("--- [dry-run] community: {} ---", community.name);
-        println!("{}", prompt);
+        println!("System:\n{}\n", system);
+        println!("User:\n{}", user);
         return Ok(CommunityLlmSummary {
             po: format!("[dry-run] {}", community.name),
             ba: String::new(),
@@ -310,20 +304,21 @@ fn enrich_one_community(
         });
     }
 
-    let is_anthropic = base_url.contains("anthropic.com");
+    let request = LlmRequest {
+        system,
+        user,
+        model: model.to_string(),
+        max_tokens,
+        timeout_secs,
+    };
 
     let mut last_err = None;
     for attempt in 0..=(retries as usize) {
-        let result = if is_anthropic {
-            call_anthropic(base_url, api_key, model, &prompt, timeout_secs)
-        } else {
-            call_openai_compat(base_url, api_key, model, &prompt, timeout_secs)
-        };
-
-        match result {
-            Ok(text) => {
-                return parse_llm_summary(&text);
-            }
+        match adapter
+            .call(api_key, &request)
+            .and_then(|response| parse_llm_summary(&response.text))
+        {
+            Ok(summary) => return Ok(summary),
             Err(err) => {
                 if attempt < retries as usize {
                     tracing::debug!(
@@ -331,7 +326,9 @@ fn enrich_one_community(
                         error = %err,
                         "LLM call failed, retrying"
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(500 * (attempt + 1) as u64));
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        500 * (attempt + 1) as u64,
+                    ));
                     last_err = Some(err);
                 } else {
                     return Err(err);
@@ -342,89 +339,36 @@ fn enrich_one_community(
     Err(last_err.unwrap())
 }
 
-fn call_openai_compat(
-    base_url: &str,
-    api_key: &str,
-    model: &str,
-    prompt: &str,
-    timeout_secs: u64,
-) -> Result<String> {
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 400,
-        "messages": [{"role": "user", "content": prompt}]
-    });
-
-    let response = ureq::post(&url)
-        .set("Authorization", &format!("Bearer {}", api_key))
-        .set("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .send_json(body)
-        .context("OpenAI-compatible API request failed")?;
-
-    let resp: serde_json::Value =
-        response.into_json().context("failed to parse API response")?;
-
-    resp["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .with_context(|| format!("unexpected response shape: {:?}", resp))
+fn build_system_prompt(language: &str) -> String {
+    let mut prompt = String::from(
+        "You are a code documentation assistant. Write only from the provided evidence.\n\
+Do not invent behavior, routes, tables, or class names not in the evidence.\n\
+Cite evidence IDs (R1, T1, S1, B1, ...) when they support a claim.",
+    );
+    if language == "vi" {
+        prompt.push_str("\nWrite all documentation in Vietnamese.");
+    }
+    prompt
 }
 
-fn call_anthropic(
-    base_url: &str,
-    api_key: &str,
-    model: &str,
-    prompt: &str,
-    timeout_secs: u64,
-) -> Result<String> {
-    let url = format!("{}/messages", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 400,
-        "messages": [{"role": "user", "content": prompt}]
-    });
-
-    let response = ureq::post(&url)
-        .set("x-api-key", api_key)
-        .set("anthropic-version", "2023-06-01")
-        .set("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .send_json(body)
-        .context("Anthropic API request failed")?;
-
-    let resp: serde_json::Value =
-        response.into_json().context("failed to parse Anthropic API response")?;
-
-    resp["content"][0]["text"]
-        .as_str()
-        .map(|s| s.to_string())
-        .with_context(|| format!("unexpected Anthropic response shape: {:?}", resp))
-}
-
-fn build_enrich_prompt(
-    name: &str,
-    routes: &str,
-    stereotypes: &str,
-    called_by: &str,
-    calls_into: &str,
-) -> String {
+fn build_enrich_prompt(name: &str, evidence: &str) -> String {
+    let evidence = if evidence.trim().is_empty() {
+        "none"
+    } else {
+        evidence
+    };
     format!(
         r#"You are writing documentation summaries from a code analysis graph.
 Module: "{name}"
 
-Graph facts (do not invent anything beyond these):
-- Routes: {routes}
-- Class stereotypes: {stereotypes}
-- Called by: {called_by}
-- Calls into: {calls_into}
+Evidence:
+{evidence}
 
 Write exactly three JSON fields:
 {{
-  "po": "<2-3 sentences in plain business language — what this module does for users>",
-  "ba": "<2-3 sentences on workflows, contracts, and events — what flows in and out>",
-  "dev": "<2-3 sentences on technical structure — stereotypes, call patterns, dependencies>"
+  "po": "<2-3 sentences, plain business language, cite evidence IDs>",
+  "ba": "<2-3 sentences, workflows and contracts, cite evidence IDs>",
+  "dev": "<2-3 sentences, technical structure, cite evidence IDs>"
 }}
 Only output the JSON object. Do not add commentary."#
     )
@@ -432,21 +376,17 @@ Only output the JSON object. Do not add commentary."#
 
 fn parse_llm_summary(text: &str) -> Result<CommunityLlmSummary> {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
-        let po = val["po"].as_str().unwrap_or("").to_string();
-        let ba = val["ba"].as_str().unwrap_or("").to_string();
-        let dev = val["dev"].as_str().unwrap_or("").to_string();
-        if !po.is_empty() || !ba.is_empty() || !dev.is_empty() {
-            return Ok(CommunityLlmSummary { po, ba, dev });
+        if let Some(summary) = summary_from_value(&val) {
+            return Ok(summary);
         }
     }
     if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
         if start < end {
             let json_str = &text[start..=end];
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let po = val["po"].as_str().unwrap_or("").to_string();
-                let ba = val["ba"].as_str().unwrap_or("").to_string();
-                let dev = val["dev"].as_str().unwrap_or("").to_string();
-                return Ok(CommunityLlmSummary { po, ba, dev });
+                if let Some(summary) = summary_from_value(&val) {
+                    return Ok(summary);
+                }
             }
         }
     }
@@ -454,6 +394,17 @@ fn parse_llm_summary(text: &str) -> Result<CommunityLlmSummary> {
         "failed to extract JSON from LLM response: {:?}",
         &text[..text.len().min(200)]
     )
+}
+
+fn summary_from_value(val: &serde_json::Value) -> Option<CommunityLlmSummary> {
+    let po = val["po"].as_str().unwrap_or("").to_string();
+    let ba = val["ba"].as_str().unwrap_or("").to_string();
+    let dev = val["dev"].as_str().unwrap_or("").to_string();
+    if po.is_empty() && ba.is_empty() && dev.is_empty() {
+        None
+    } else {
+        Some(CommunityLlmSummary { po, ba, dev })
+    }
 }
 
 #[cfg(test)]
@@ -464,10 +415,7 @@ mod tests {
     fn enrich_prompt_contains_community_name_and_routes() {
         let prompt = build_enrich_prompt(
             "order-service",
-            "GET /api/orders, POST /api/orders",
-            "1 controller, 2 service",
-            "payment-service",
-            "notification-service",
+            "[R1] GET /api/orders\n[D1] Called by: payment-service; calls into: notification-service",
         );
         assert!(prompt.contains("order-service"));
         assert!(prompt.contains("GET /api/orders"));
@@ -479,6 +427,12 @@ mod tests {
     fn parse_llm_summary_errors_on_malformed_response() {
         let result = parse_llm_summary("Not JSON at all");
         assert!(result.is_err(), "malformed response should return Err");
+    }
+
+    #[test]
+    fn parse_llm_summary_errors_on_empty_json_fields() {
+        let result = parse_llm_summary(r#"{"po": "", "ba": "", "dev": ""}"#);
+        assert!(result.is_err(), "empty response should return Err");
     }
 
     #[test]

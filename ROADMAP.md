@@ -243,26 +243,36 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
 
 - **Build:** Next.js BFF running the **Claude Agent SDK** (Opus 4.8 deep / Sonnet 4.x chat),
   consuming CIH MCP tools; **persona-specific chat views** in yummy for Developer / PO / BA /
-  Tester; **Docusaurus** wiki auto-rebuilt from communities and processes.
+  Tester.
 - **MCP tool contract:** tools return structured JSON (not free text) so yummy can render diagrams,
   tables, and source citations alongside chat answers.
 - **Done when:** a PO asks "what APIs does the payment module expose?" → agent calls
   `route_map(prefix="/payment")` + `communities()` → cited answer rendered in yummy; wiki renders
   the community graph as navigable docs. 🎯 **Milestone: usable product for all four personas.**
+- **Pre-requisites now met:** wiki generation (10a), DB access in pages (10b), Docusaurus viewer
+  (`docs-viewer/` with `CIH_WIKI_PATH`), all four persona MCP tools (phases 15–22), agent workflow
+  docs (phase 20), and registry (phase 18) are all ✅. Remaining work is the yummy Next.js
+  frontend and Claude Agent SDK integration.
 
 ## Phase 10a — `cih-engine wiki`: Graph Artifacts to Role-Based Wiki Bundle ✅ (2026-06-16)
 
-- **`cih-engine wiki <repo> [--out <dir>] [--llm-enrich] [--json]`** — reads existing analyze +
-  discover JSONL artifacts, writes a self-contained Markdown + JSON wiki bundle for PO, BA, and Dev
-  readers. No FalkorDB, no MCP server — pure file-in, file-out.
+- **`cih-engine wiki <repo> [--out <dir>] [--llm] [--llm-provider <...>] [--json]`** — reads
+  existing analyze + discover JSONL artifacts, writes a self-contained Markdown + JSON wiki bundle
+  for PO, BA, and Dev readers. No FalkorDB, no MCP server — pure file-in, file-out.
 - **New crate `cih-wiki`**: `WikiGraph` (19 deterministic BTreeMap indexes), `generate_wiki()`
-  orchestration, page renderers (shared routes, PO, BA, Dev), OpenAPI + D3-force sidecars,
-  `manifest.json` (schema v1), Docusaurus-compatible frontmatter on every page.
-- **Optional `--llm-enrich`**: one Anthropic call per community (sequential, blocking via `ureq`);
-  structured `{"po","ba","dev"}` JSON summaries injected into community pages; graceful degradation
-  per community; `llm_enriched`/`llm_model` fields in manifest.
-- **Slug policy**: lowercase ASCII, non-alphanum → `-`, collapse, trim; collision suffix with
-  community id slug.
+  orchestration, **feature-first page hierarchy** (`pages/<feature>/po.md`, `ba.md`,
+  `dev/<class-slug>.md`), OpenAPI + D3-force sidecars, `manifest.json` (schema v1),
+  Docusaurus-compatible frontmatter on every page.
+- **Feature inference**: scans member file paths for `modules/<feature>/` segment, majority vote,
+  fallback to `shared`; primary class slug derived from PascalCase class name (kebab, collision
+  suffix `-2`/`-3`).
+- **LLM enrichment** (`--llm`): OpenAI-compatible or Anthropic calls via `--llm-provider`;
+  rayon parallel with `--llm-concurrency` (default 8); structured `{"po","ba","dev"}` JSON summaries
+  injected into community pages; `--llm-dry-run` for local testing; graceful degradation per
+  community.
+- **`docs-viewer/`**: Docusaurus 3 site in the yummy-cih repo; `CIH_WIKI_PATH=<path> npm start`
+  serves any repo's wiki output on port 3001; sidebar auto-generated from the feature folder
+  structure; repo name read from `manifest.json`.
 - **35 new tests** (23 in `cih-wiki`, 4 in `wiki_cmd`, existing suites unchanged). 160 total.
 
 ## Phase 10b — Table-Level DB Access Intelligence ✅ (2026-06-16)
@@ -294,6 +304,21 @@ so the wiki and MCP tools can answer "which methods touch `CUSTOM_OVERDRAFT`?"
   pass and merges the DB nodes/edges into `nodes.jsonl` / `edges.jsonl`.
 - **27 new tests** across `cih-core`, `cih-parse` (SQL scanner + parser integration),
   `cih-resolve` (emit unit tests), `cih-engine` (artifact integration test). **187 total**.
+
+## Phase 10c — Adapter-Based LLM Wiki Enrichment ⬜
+
+**Plan:** `PLAN-phase10b-llm-adapter.md` (plan file uses the label "10b"; 10c is the correct sequence number to avoid collision with DB access).
+
+Upgrades the existing `--llm` path from an implicit Anthropic-or-OpenAI choice to a pluggable adapter layer with a richer evidence pack and BRD file support.
+
+- **New `cih-engine/src/llm/` module**: `LlmAdapter` trait; `openai-compatible`, `anthropic`, and `http-json` adapters extracted from `wiki_cmd.rs`.
+- **`http-json` adapter**: JSON config with `{{prompt}}`/`{{model}}`/`{{api_key}}`/`{{env:VAR}}` substitution and dotted response path — covers Ollama, vLLM, LM Studio, and any custom REST API.
+- **Richer evidence pack**: all routes, stereotypes, callers/callees, DB tables, events/topics, bounded source snippets (3 × 10 lines), BRD file chunks (≥2-term match, cap 2 per community, 3 000-char total).
+- **New flags**: `--llm-provider <openai-compatible|anthropic|http-json>`, `--llm-provider-config <path>`, `--llm-api-key-env <VAR>`, `--evidence <path>` (repeatable), `--llm-max-tokens` (default 600), `--wiki-language <en|vi>`.
+- **Explicit provider selection**: removes `base_url.contains("anthropic.com")` implicit detection.
+- **Manifest extension**: `llm_provider`, `llm_language`, `llm_evidence_file_count`, `llm_enriched_community_count`, `llm_failed_community_count`.
+- **Migration**: existing `--llm` users with an Anthropic URL must add `--llm-provider anthropic`.
+- **Done when:** `wiki --llm --llm-provider http-json --llm-provider-config ollama.json` enriches pages from a local Ollama instance; BRD evidence improves PO page quality; all tests green.
 
 ## Phase 15 — Flow Intelligence: trace_flow · feature_map ✅ (2026-06-15)
 
@@ -535,20 +560,17 @@ Builds on Phase 21 HTTP contracts:
     HttpRoute contract, diffs provider response-DTO fields (via returnType → class → HasField edges)
     against consumer Accesses edges; reports `matched` / `provider_only` / `consumer_only` fields.
   - Workspace: **111 tests** green (no new tests added; tools verified via build).
+  - **Known gap:** `api_impact` and `shape_check` have no dedicated unit tests — covered by build
+    verification only. Add tests before relying on these tools in production.
 
-## Phase 23 — Generated wiki
+## Phase 23 — Generated wiki ✅ (covered by Phase 10a + docs-viewer)
 
 Source: `docs/gitnexus-discovery.md` §10
 
-```
-cih-engine wiki <repo> --out docs/generated/wiki
-```
-
-Generated Markdown pages: module overview (communities), API route catalog, process traces,
-community cohesion pages, dependency/JAR surface.
-Feeds Phase 10 Docusaurus wiki as the static content generator.
-
-- **Done when:** `cih-engine wiki` on a Spring app produces navigable Markdown Docusaurus can serve.
+`cih-engine wiki` (Phase 10a) delivers the full wiki generation pipeline. `docs-viewer/` (added
+2026-06-16) is the Docusaurus 3 viewer: `CIH_WIKI_PATH=<repo>/.cih/wiki/pages npm start`.
+Feature-first hierarchy, per-feature PO/BA/Dev pages, and LLM enrichment are all in place.
+No further work needed for this milestone.
 
 ## Phase 24 — Graph-assisted rename dry-run
 
@@ -634,29 +656,17 @@ Includes additional JVM language support (Kotlin) via new `LanguageProvider` imp
 
 ## Sequencing & parallelism
 
-- **Serial critical path:** 1 → 2 → 3 → 4 (gets you an accurate, queryable call graph).
-- **Then enrich (can overlap):** 5, 6, 7 once Phase 4's graph is stable; 8 and 9 independently.
-- **Product (10)** can start as soon as 4 + 6 give queryable + searchable data.
-- **Adapters (11)** can be written anytime after the `GraphStore` port is stable (post-Phase 2) —
-  they don't block the engine.
-- **14** is intentionally late (differentiator + breadth), after the core is proven.
-  *(Phase 13 is ✅ done as of 2026-06-14.)*
-- **Phases 15 & 16** can start once Phases 5 (communities) + 7 (routes) are stable — they add new
-  MCP tools over existing graph data. Phase 15's `ExternalCall`/`PublishesEvent`/`ListensTo` edge
-  kinds were delivered in Phase 21; Phase 16 still needs `EdgeKind::Tests` (small `cih-core` +
-  `cih-parse` extension).
-- **Phase 17** is output-format work that layers onto any tool at any time; prioritize when the
-  yummy frontend team requests diagram rendering.
-- **Phase 10** (product) can begin as soon as Phase 15 and 16 tools are available, since those
-  define the BA and Tester chat interactions in the yummy frontend.
-- **Phase 18** (registry + resources) should run before Phase 10 — `list_repos` and MCP
-  resources make yummy's agent orientation cheaper and more reliable.
-- **Phase 19** (ambiguous + detect_changes) can overlap with Phase 10; `detect_changes` feeds
-  Developer and Tester personas directly.
-- **Phase 20** (workflow docs) can be written any time; immediately improves Phase 10 prompts.
-- **Phases 21 → 22** require Phases 5 (processes) + 15 (trace_flow) for full value.
-- **Phase 23** (wiki) requires Phases 5 + 7; runs independently of 21.
-- **Phases 24 → 26** are deferred; no blocking dependency on near-term phases.
+Phases 1–22 are ✅ complete. What remains:
+
+- **Phase 10c** (LLM adapter) — self-contained `cih-engine` upgrade; no blockers; can start now.
+- **Phase 10** (product — yummy frontend + Agent SDK) — all MCP tools, wiki, registry, and workflow
+  docs are ready. Only the Next.js BFF and persona chat UI remain.
+- **Phase 11** (storage spike) — benchmark FalkorDB / Postgres-CTE / Neptune; needed before Phase 12.
+- **Phase 12** (AWS go-live) — requires Phase 11 backend decision; independent of product phases.
+- **Phase 14** (more languages) — self-contained; add after the core is proven in production.
+- **Phase 24** (rename dry-run), **Phase 25** (CFG/taint), **Phase 26** (multi-repo group) — deferred;
+  no blocking dependency on near-term phases.
+- **Phase 8 full-decompile** — rare exception path; proceed only when a specific dep requires it.
 
 ## Definition of done (overall v1)
 
