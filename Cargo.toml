@@ -15,6 +15,7 @@ members = [
   "crates/cih-graph-store",
   "crates/cih-falkor",
   "crates/cih-server",
+  "crates/cih-wiki",
 ]
 
 [workspace.package]
@@ -62,3 +63,4 @@ cih-search = { path = "crates/cih-search" }
 cih-embed = { path = "crates/cih-embed" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }
+cih-wiki = { path = "crates/cih-wiki" }

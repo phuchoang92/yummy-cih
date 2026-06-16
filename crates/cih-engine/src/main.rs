@@ -11,6 +11,7 @@ mod scope;
 #[cfg(test)]
 mod tests;
 mod versioning;
+mod wiki_cmd;
 
 use std::path::PathBuf;
 
@@ -144,6 +145,24 @@ enum Command {
     Group {
         #[command(subcommand)]
         command: GroupCommand,
+    },
+    /// Generate a role-based wiki bundle from existing graph artifacts.
+    Wiki {
+        /// Repository root with `.cih/artifacts/` and `.cih/artifacts-community/` from prior runs.
+        repo: PathBuf,
+        /// Output directory. Defaults to `<repo>/.cih/wiki`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Enrich community pages with AI-written summaries via the Anthropic API.
+        /// Reads ANTHROPIC_API_KEY from the environment.
+        #[arg(long, env = "CIH_LLM_ENRICH")]
+        llm_enrich: bool,
+        /// Model for LLM enrichment.
+        #[arg(long, default_value = "claude-haiku-4-5-20251001")]
+        llm_model: String,
+        /// Print outcome as JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -323,5 +342,12 @@ fn main() -> Result<()> {
                 json,
             } => group_cmd::run_group_sync(&name, json),
         },
+        Command::Wiki {
+            repo,
+            out,
+            llm_enrich,
+            llm_model,
+            json,
+        } => wiki_cmd::run_wiki(&repo, out, llm_enrich, llm_model, json),
     }
 }

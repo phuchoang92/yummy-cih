@@ -250,6 +250,21 @@ question. The yummy frontend exposes persona-filtered chat views over this singl
   `route_map(prefix="/payment")` + `communities()` → cited answer rendered in yummy; wiki renders
   the community graph as navigable docs. 🎯 **Milestone: usable product for all four personas.**
 
+## Phase 10a — `cih-engine wiki`: Graph Artifacts to Role-Based Wiki Bundle ✅ (2026-06-16)
+
+- **`cih-engine wiki <repo> [--out <dir>] [--llm-enrich] [--json]`** — reads existing analyze +
+  discover JSONL artifacts, writes a self-contained Markdown + JSON wiki bundle for PO, BA, and Dev
+  readers. No FalkorDB, no MCP server — pure file-in, file-out.
+- **New crate `cih-wiki`**: `WikiGraph` (19 deterministic BTreeMap indexes), `generate_wiki()`
+  orchestration, page renderers (shared routes, PO, BA, Dev), OpenAPI + D3-force sidecars,
+  `manifest.json` (schema v1), Docusaurus-compatible frontmatter on every page.
+- **Optional `--llm-enrich`**: one Anthropic call per community (sequential, blocking via `ureq`);
+  structured `{"po","ba","dev"}` JSON summaries injected into community pages; graceful degradation
+  per community; `llm_enriched`/`llm_model` fields in manifest.
+- **Slug policy**: lowercase ASCII, non-alphanum → `-`, collapse, trim; collision suffix with
+  community id slug.
+- **35 new tests** (23 in `cih-wiki`, 4 in `wiki_cmd`, existing suites unchanged). 160 total.
+
 ## Phase 15 — Flow Intelligence: trace_flow · feature_map ✅ (2026-06-15)
 
 **Primary personas: PO, BA**

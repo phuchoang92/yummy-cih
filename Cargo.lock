@@ -513,6 +513,7 @@ dependencies = [
  "cih-jar",
  "cih-parse",
  "cih-resolve",
+ "cih-wiki",
  "clap",
  "globset",
  "ignore",
@@ -524,6 +525,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "ureq",
  "zip",
 ]
 
@@ -625,6 +627,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cih-wiki"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cih-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
