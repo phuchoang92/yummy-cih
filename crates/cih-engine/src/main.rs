@@ -154,32 +154,39 @@ enum Command {
         /// Output directory. Defaults to `<repo>/.cih/wiki`.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Enable LLM enrichment using an OpenAI-compatible API.
-        /// Reads CIH_LLM_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY from the environment.
+        /// Enable LLM enrichment. Set an API key env var before using:
+        /// DEEPSEEK_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or CIH_LLM_API_KEY.
         #[arg(long, env = "CIH_LLM")]
         llm: bool,
         /// Deprecated: alias for --llm. Will be removed in a future release.
         #[arg(long, env = "CIH_LLM_ENRICH", hide = true)]
         llm_enrich: bool,
-        /// LLM provider adapter.
+        /// LLM provider adapter. One of:
+        ///   deepseek          — DeepSeek API (DEEPSEEK_API_KEY, model: deepseek-chat)
+        ///   gemini            — Google Gemini API (GEMINI_API_KEY, model: gemini-2.5-flash)
+        ///   anthropic         — Anthropic API (ANTHROPIC_API_KEY, model: claude-haiku-4-5-20251001)
+        ///   openai-compatible — Any OpenAI-compatible endpoint (use with --llm-base-url)
+        ///   http-json         — Custom HTTP adapter (use with --llm-provider-config)
         #[arg(long, default_value = "openai-compatible")]
         llm_provider: String,
         /// JSON config file for --llm-provider http-json.
         #[arg(long)]
         llm_provider_config: Option<PathBuf>,
-        /// Explicit API key environment variable for the selected provider.
+        /// Override which env var holds the API key. Defaults to auto-detect from provider.
         #[arg(long)]
         llm_api_key_env: Option<String>,
         /// External evidence file (.md or .txt) to include in LLM wiki prompts.
         #[arg(long = "evidence")]
         evidence: Vec<PathBuf>,
-        /// OpenAI-compatible API base URL.
+        /// Base URL for --llm-provider openai-compatible. Ignored for deepseek/gemini/anthropic.
         #[arg(long, default_value = "https://api.openai.com/v1")]
         llm_base_url: String,
-        /// Model name for LLM enrichment.
+        /// Model name for LLM enrichment. Provider-specific defaults:
+        ///   deepseek-chat (deepseek), gemini-2.5-flash (gemini),
+        ///   claude-haiku-4-5-20251001 (anthropic), gpt-4o-mini (openai-compatible).
         #[arg(long, default_value = "gpt-4o-mini")]
         llm_model: String,
-        /// Maximum output tokens per LLM call.
+        /// Maximum output tokens per LLM call. Increase to 4096 for Gemini to avoid truncation.
         #[arg(long, default_value = "600")]
         llm_max_tokens: u32,
         /// Timeout in seconds per LLM API call.

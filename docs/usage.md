@@ -106,6 +106,14 @@ Use it to search symbols, inspect context, render impact graphs, trace flows,
 view communities, and browse indexed routes while the full `yummy` frontend is
 being developed.
 
+## LLM Enrichment
+
+The `wiki` command can call an LLM to generate richer documentation (descriptions, business summaries, feature grouping). See **[docs/llm-providers.md](llm-providers.md)** for the full provider guide, including:
+
+- Quick-start commands for DeepSeek, Gemini, Anthropic, OpenAI, and self-hosted models.
+- API key environment variable names per provider.
+- `--wiki-mode` options (`graph`, `llm-summary`, `llm-full`).
+
 ## CLI Commands
 
 ### Scan
