@@ -16,6 +16,11 @@ pub(crate) fn run_discover(
     no_load: bool,
     json: bool,
 ) -> Result<()> {
+    let span = tracing::info_span!("discover", repo = %repo.display());
+    let _enter = span.enter();
+
+    tracing::info!(repo = %repo.display(), "starting discover");
+
     let emit = run_discover_core(&repo)?;
 
     let load = if no_load {
@@ -64,12 +69,33 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
         .read_edges()
         .with_context(|| format!("failed to read {}", source.edges_path.display()))?;
 
+    tracing::info!(
+        source_version = %source.version.0,
+        nodes = nodes.len(),
+        edges = edges.len(),
+        "source graph loaded"
+    );
+
     let mut community_cfg = cih_community::CommunityConfig::default();
     if cih_community::is_large_graph(&nodes) {
+        tracing::info!(
+            nodes = nodes.len(),
+            resolution = 2.0,
+            max_iterations = 3,
+            "large graph detected — using higher resolution"
+        );
         community_cfg.resolution = 2.0;
         community_cfg.max_iterations = 3;
     }
+
+    tracing::info!("running community detection");
     let community_output = cih_community::detect_communities(&nodes, &edges, &community_cfg);
+    tracing::info!(
+        communities = community_output.nodes.len(),
+        edges = community_output.edges.len(),
+        "community detection complete"
+    );
+
     let symbol_count = nodes
         .iter()
         .filter(|n| {
@@ -79,9 +105,17 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
             )
         })
         .count();
+    tracing::debug!(symbols = symbol_count, "symbol count for process config");
     let process_cfg = cih_community::ProcessConfig::for_symbol_count(symbol_count);
+
+    tracing::info!("tracing business processes");
     let process_output =
         cih_community::trace_processes(&nodes, &edges, &community_output.memberships, &process_cfg);
+    tracing::info!(
+        processes = process_output.nodes.len(),
+        edges = process_output.edges.len(),
+        "process tracing complete"
+    );
 
     let mut output_nodes = community_output.nodes;
     output_nodes.extend(process_output.nodes);
@@ -97,6 +131,8 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
     });
 
     let version = discover_version(&output_nodes, &output_edges);
+    tracing::debug!(version = %version, "community version computed");
+
     let artifacts_dir = repo.join(".cih").join("artifacts-community").join(&version);
     let artifacts = GraphArtifacts::write(
         &artifacts_dir,
@@ -111,6 +147,14 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
         )
     })?;
     prune_other_versions(&repo.join(".cih").join("artifacts-community"), &version)?;
+
+    tracing::info!(
+        version = %version,
+        path = %artifacts_dir.display(),
+        nodes = output_nodes.len(),
+        edges = output_edges.len(),
+        "community artifacts written"
+    );
 
     let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
 

@@ -69,6 +69,17 @@ pub fn run_wiki(
         bail!("--grouping must be one of: graph, llm");
     }
 
+    let span = tracing::info_span!("wiki", repo = %repo.display());
+    let _enter = span.enter();
+
+    tracing::info!(
+        repo = %repo.display(),
+        mode = wiki_mode,
+        grouping = grouping,
+        llm = effective_run_llm,
+        "starting wiki"
+    );
+
     let graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
     let nodes = graph_artifacts.read_nodes().with_context(|| {
         format!(
@@ -83,6 +94,13 @@ pub fn run_wiki(
         )
     })?;
 
+    tracing::info!(
+        graph_version = %graph_artifacts.version.0,
+        nodes = nodes.len(),
+        edges = edges.len(),
+        "graph artifacts loaded"
+    );
+
     let (all_community_nodes, community_edges, community_version) =
         match latest_community_artifacts(repo) {
             Ok(a) => {
@@ -93,9 +111,15 @@ pub fn run_wiki(
                     format!("failed to read community edges from {}", a.edges_path.display())
                 })?;
                 let ver = a.version.0.clone();
+                tracing::info!(
+                    community_version = %ver,
+                    communities = nodes.len(),
+                    "community artifacts loaded"
+                );
                 (nodes, edges, ver)
             }
             Err(_) => {
+                tracing::info!("no community artifacts found — generating wiki without feature grouping; run `discover` first for richer docs");
                 eprintln!(
                     "info: no community artifacts found — generating wiki without feature grouping. \
                      Run `discover` first for richer docs."
@@ -106,6 +130,7 @@ pub fn run_wiki(
 
     // Apply --filter-community and --max-communities before any LLM or wiki work.
     let community_nodes: Vec<Node> = {
+        let before = all_community_nodes.len();
         let mut filtered = all_community_nodes;
         if !filter_community.is_empty() {
             let filters_lower: Vec<String> = filter_community.iter().map(|f| f.to_lowercase()).collect();
@@ -116,6 +141,15 @@ pub fn run_wiki(
         }
         if let Some(max) = max_communities {
             filtered.truncate(max);
+        }
+        if filtered.len() != before {
+            tracing::info!(
+                before = before,
+                after = filtered.len(),
+                filter_community = ?filter_community,
+                max_communities = ?max_communities,
+                "community filter applied"
+            );
         }
         filtered
     };
@@ -188,6 +222,13 @@ pub fn run_wiki(
         let done_count = AtomicU32::new(0);
         let total = community_nodes.len();
 
+        tracing::info!(
+            communities = total,
+            concurrency = concurrency,
+            model = llm_model,
+            provider = llm_provider,
+            "starting LLM community enrichment"
+        );
         eprintln!("[cih-wiki] enriching {} communities (concurrency={}, model={})", total, concurrency, llm_model);
 
         // Results: (comm_id, evidence_hash, Result<summary>)
@@ -286,6 +327,12 @@ pub fn run_wiki(
             }
         }
         failed_community_ids.sort();
+        tracing::info!(
+            enriched = map.len(),
+            failed = failed_community_ids.len(),
+            circuit_open = circuit_open,
+            "LLM community enrichment complete"
+        );
         if circuit_open {
             tracing::warn!("LLM circuit breaker opened after {} consecutive failures; remaining communities skipped", CIRCUIT_BREAKER_THRESHOLD);
         }
@@ -311,9 +358,10 @@ pub fn run_wiki(
     // Controller enrichment — runs alongside community enrichment when LLM is active
     let controller_summaries: Option<HashMap<String, ControllerLlmSummary>> = if effective_run_llm {
         let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes, &community_edges);
+        tracing::info!(controllers = wiki_graph.routes_by_controller.len(), "starting LLM controller enrichment");
         let adapter = make_adapter(llm_provider, llm_base_url, llm_provider_config.as_deref())?;
         let api_key = resolve_api_key(llm_api_key_env.as_deref())?;
-        Some(enrich_controllers(
+        let result = enrich_controllers(
             &wiki_graph,
             adapter.as_ref(),
             api_key.as_deref(),
@@ -322,7 +370,9 @@ pub fn run_wiki(
             llm_timeout_secs,
             wiki_language,
             llm_dry_run,
-        ))
+        );
+        tracing::info!(enriched = result.len(), "LLM controller enrichment complete");
+        Some(result)
     } else {
         None
     };
@@ -405,7 +455,17 @@ pub fn run_wiki(
         filter_feature,
     };
 
+    tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");
     let outcome = generate_wiki(input, &out_dir)?;
+
+    tracing::info!(
+        pages = outcome.page_count,
+        communities = outcome.community_count,
+        routes = outcome.route_count,
+        llm_enriched = outcome.llm_enriched,
+        out_dir = %outcome.out_dir.display(),
+        "wiki generation complete"
+    );
 
     // Update wiki_meta.json with evidence hashes and cached LLM summaries.
     if !summaries_for_cache.is_empty() {
