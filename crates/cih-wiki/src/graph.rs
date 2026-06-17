@@ -61,6 +61,30 @@ pub struct WikiGraph {
     pub query_writes_table: BTreeMap<String, Vec<String>>,
     /// community_id → sorted unique tables accessed (reads + writes combined)
     pub community_db_tables: BTreeMap<String, Vec<DbTableAccess>>,
+
+    /// controller_class_name → [(handler_method, route_node)] sorted by path/method
+    pub routes_by_controller: BTreeMap<String, Vec<(Node, Node)>>,
+    /// controller_class_name → feature slug
+    pub controller_feature: BTreeMap<String, String>,
+}
+
+fn controller_name_from_handler_id(handler_id: &str) -> &str {
+    let without_kind = handler_id.strip_prefix("Method:").unwrap_or(handler_id);
+    let fqcn = without_kind.split('#').next().unwrap_or(without_kind);
+    fqcn.rsplit('.').next().unwrap_or(fqcn)
+}
+
+fn feature_from_file_path(file: &str) -> String {
+    let prefix = "modules/";
+    if let Some(start) = file.find(prefix) {
+        let rest = &file[start + prefix.len()..];
+        if let Some(end) = rest.find('/') {
+            if end > 0 {
+                return rest[..end].to_string();
+            }
+        }
+    }
+    "shared".to_string()
 }
 
 impl WikiGraph {
@@ -216,6 +240,19 @@ impl WikiGraph {
                 .then(route_http_method(r1).cmp(&route_http_method(r2)))
         });
 
+        let mut routes_by_controller: BTreeMap<String, Vec<(Node, Node)>> = BTreeMap::new();
+        let mut controller_feature: BTreeMap<String, String> = BTreeMap::new();
+        for (handler, route) in &routes {
+            let ctrl = controller_name_from_handler_id(handler.id.as_str()).to_string();
+            routes_by_controller
+                .entry(ctrl.clone())
+                .or_default()
+                .push((handler.clone(), route.clone()));
+            controller_feature
+                .entry(ctrl)
+                .or_insert_with(|| feature_from_file_path(&handler.file));
+        }
+
         let mut community_routes: BTreeMap<String, Vec<(Node, Node)>> = BTreeMap::new();
         let mut community_tests_set: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut community_class_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -353,6 +390,8 @@ impl WikiGraph {
             query_reads_table,
             query_writes_table,
             community_db_tables,
+            routes_by_controller,
+            controller_feature,
         }
     }
 

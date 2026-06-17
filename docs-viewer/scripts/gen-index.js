@@ -28,13 +28,13 @@ if (process.env.CIH_WIKI_PATH) {
 
   // Build community cards from manifest.pages (only community-level po pages)
   const pages = Array.isArray(manifest?.pages) ? manifest.pages : [];
-  const poPages = pages.filter(p => p.role === 'po' && p.kind === 'community');
+  // Use nav entries (features) for community cards — each feature = one card
+  const navFeatures = Object.keys(manifest?.nav || {}).filter(k => k !== 'system');
 
-  const communityCards = poPages.map(p => {
-    const name = p.title || p.slug;
-    const href = p.path ? '/docs/' + p.path.replace(/^pages\//, '') : `/docs/${p.slug}`;
-    return { name, href };
-  });
+  const communityCards = navFeatures.map(feature => ({
+    name: feature.charAt(0).toUpperCase() + feature.slice(1),
+    href: `/docs/${feature}/`,
+  }));
 
   const cardsJs = communityCards.length > 0
     ? communityCards.map(c =>
@@ -99,9 +99,9 @@ export default function Home() {
 
         <div className="cih-section-title">Browse by persona</div>
         <div className="cih-persona-nav">
-          <PersonaBtn href="/docs/po/" cls="po" icon="👔" label="Product Owner" desc="Business capabilities &amp; stakeholder view" />
-          <PersonaBtn href="/docs/ba/" cls="ba" icon="📊" label="Business Analyst" desc="Workflows, contracts &amp; event flows" />
-          <PersonaBtn href="/docs/dev/" cls="dev" icon="⚙️" label="Developer" desc="Technical structure, calls &amp; tests" />
+          <PersonaBtn href="/docs/system/po" cls="po" icon="👔" label="Product Owner" desc="Business capabilities &amp; stakeholder view" />
+          <PersonaBtn href="/docs/system/ba" cls="ba" icon="📊" label="Business Analyst" desc="Workflows, contracts &amp; event flows" />
+          <PersonaBtn href="/docs/" cls="dev" icon="⚙️" label="Developer" desc="Technical structure, calls &amp; tests" />
         </div>
 
         {COMMUNITIES.length > 0 && (

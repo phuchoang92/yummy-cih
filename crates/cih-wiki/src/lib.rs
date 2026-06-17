@@ -25,6 +25,7 @@ use anyhow::Result;
 use cih_core::{Node, NodeKind};
 use features::{build_dev_page_paths, group_communities_by_feature};
 use graph::node_stereotype;
+use slugify::slugify;
 
 /// Pre-computed short AI summaries for one community (all three roles).
 /// Used in `llm-summary` mode. Produced by `enrich_communities()`; passed into `WikiInput`.
@@ -351,6 +352,46 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 community_id: Some(comm_id.clone()),
             });
             page_count += 1;
+        }
+
+        // Controller pages for this feature
+        let mut feature_controllers: Vec<(&str, &Vec<(Node, Node)>)> = graph
+            .routes_by_controller
+            .iter()
+            .filter(|(ctrl, _)| {
+                graph
+                    .controller_feature
+                    .get(*ctrl)
+                    .map(|f| f.as_str() == feature.as_str())
+                    .unwrap_or(false)
+            })
+            .map(|(ctrl, routes)| (ctrl.as_str(), routes))
+            .collect();
+        feature_controllers.sort_by_key(|(ctrl, _)| *ctrl);
+
+        if !feature_controllers.is_empty() {
+            std::fs::create_dir_all(out_dir.join(format!("pages/{}/controllers", feature)))?;
+            for (ctrl_name, routes) in &feature_controllers {
+                let slug = slugify(ctrl_name);
+                let ctrl_md = pages::feature_po::render_controller_page(ctrl_name, routes);
+                let page_path = format!("{}/controllers/{}", feature, slug);
+                std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &ctrl_md)?;
+                nav.entry(feature.clone()).or_default().push(NavEntry {
+                    slug: page_path.clone(),
+                    title: ctrl_name.to_string(),
+                    kind: "controller".into(),
+                });
+                all_pages.push(PageEntry {
+                    slug: page_path.clone(),
+                    role: feature.clone(),
+                    title: ctrl_name.to_string(),
+                    kind: "controller".into(),
+                    path: format!("pages/{}.md", page_path),
+                    json_path: None,
+                    community_id: None,
+                });
+                page_count += 1;
+            }
         }
     }
 

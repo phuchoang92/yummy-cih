@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
+use cih_core::Node;
+
 use crate::graph::{route_http_method, route_path, WikiGraph};
+use crate::slugify::slugify;
 use crate::{CommunityLlmFull, CommunityLlmSummary};
 
 fn capitalize(s: &str) -> String {
@@ -193,7 +196,72 @@ pub fn render_feature_po(
         md.push('\n');
     }
 
+    // Controllers section — one entry per controller class in this feature
+    let mut feature_controllers: Vec<(&String, &Vec<(Node, Node)>)> = graph
+        .routes_by_controller
+        .iter()
+        .filter(|(ctrl, _)| {
+            graph
+                .controller_feature
+                .get(*ctrl)
+                .map(|f| f.as_str() == feature)
+                .unwrap_or(false)
+        })
+        .collect();
+    feature_controllers.sort_by_key(|(ctrl, _)| ctrl.as_str());
+
+    if !feature_controllers.is_empty() {
+        md.push_str("## Controllers\n\n");
+        md.push_str("| Controller | Routes |\n");
+        md.push_str("|---|---|\n");
+        for (ctrl_name, routes) in &feature_controllers {
+            let slug = slugify(ctrl_name);
+            md.push_str(&format!(
+                "| [{}](controllers/{}.md) | {} |\n",
+                ctrl_name,
+                slug,
+                routes.len()
+            ));
+        }
+        md.push('\n');
+    }
+
     md
+}
+
+/// Render a single controller's route page (PO-facing).
+pub fn render_controller_page(controller_name: &str, routes: &[(Node, Node)]) -> String {
+    let route_count = routes.len();
+    let mut md = String::new();
+    md.push_str(&format!("---\ntitle: {}\nrole: po\n---\n\n", controller_name));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
+    md.push_str(&format!("# {}\n\n", controller_name));
+    md.push_str(&format!(
+        "**{} route{}**\n\n",
+        route_count,
+        if route_count == 1 { "" } else { "s" }
+    ));
+    md.push_str("| Method | Path | Handler |\n");
+    md.push_str("|---|---|---|\n");
+    for (handler, route) in routes {
+        let method_name = handler_method_name(handler.id.as_str());
+        md.push_str(&format!(
+            "| `{}` | `{}` | `{}` |\n",
+            route_http_method(route),
+            route_path(route),
+            method_name,
+        ));
+    }
+    md.push('\n');
+    md
+}
+
+fn handler_method_name(handler_id: &str) -> &str {
+    handler_id
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(handler_id)
 }
 
 #[cfg(test)]
