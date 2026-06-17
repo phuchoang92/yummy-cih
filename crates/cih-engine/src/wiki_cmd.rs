@@ -32,33 +32,101 @@ fn load_wiki_meta(out_dir: &Path) -> Option<WikiMeta> {
     serde_json::from_str(&text).ok()
 }
 
-pub fn run_wiki(
-    repo: &Path,
-    out: Option<PathBuf>,
-    run_llm: bool,
-    llm_provider: &str,
-    llm_provider_config: Option<PathBuf>,
-    llm_api_key_env: Option<String>,
-    evidence_paths: Vec<PathBuf>,
-    llm_base_url: &str,
-    llm_model: &str,
-    llm_max_tokens: u32,
-    llm_timeout_secs: u64,
-    llm_retries: u32,
-    llm_concurrency: usize,
-    llm_debug_evidence: bool,
-    llm_dry_run: bool,
-    wiki_language: &str,
-    wiki_mode: &str,
-    grouping: &str,
-    html: bool,
-    incremental: bool,
-    save_evidence: bool,
-    filter_community: Vec<String>,
-    max_communities: Option<usize>,
-    filter_feature: Vec<String>,
-    json: bool,
-) -> Result<()> {
+pub struct WikiConfig {
+    pub repo: PathBuf,
+    pub out: Option<PathBuf>,
+    pub run_llm: bool,
+    pub llm_provider: String,
+    pub llm_provider_config: Option<PathBuf>,
+    pub llm_api_key_env: Option<String>,
+    pub evidence_paths: Vec<PathBuf>,
+    pub llm_base_url: String,
+    pub llm_model: String,
+    pub llm_max_tokens: u32,
+    pub llm_timeout_secs: u64,
+    pub llm_retries: u32,
+    pub llm_concurrency: usize,
+    pub llm_debug_evidence: bool,
+    pub llm_dry_run: bool,
+    pub wiki_language: String,
+    pub wiki_mode: String,
+    pub grouping: String,
+    pub html: bool,
+    pub incremental: bool,
+    pub save_evidence: bool,
+    pub filter_community: Vec<String>,
+    pub max_communities: Option<usize>,
+    pub filter_feature: Vec<String>,
+    pub json: bool,
+}
+
+impl Default for WikiConfig {
+    fn default() -> Self {
+        Self {
+            repo: PathBuf::new(),
+            out: None,
+            run_llm: false,
+            llm_provider: "openai-compatible".into(),
+            llm_provider_config: None,
+            llm_api_key_env: None,
+            evidence_paths: vec![],
+            llm_base_url: "https://api.openai.com/v1".into(),
+            llm_model: String::new(),
+            llm_max_tokens: 1024,
+            llm_timeout_secs: 30,
+            llm_retries: 2,
+            llm_concurrency: 4,
+            llm_debug_evidence: false,
+            llm_dry_run: false,
+            wiki_language: "en".into(),
+            wiki_mode: "graph".into(),
+            grouping: "graph".into(),
+            html: false,
+            incremental: false,
+            save_evidence: false,
+            filter_community: vec![],
+            max_communities: None,
+            filter_feature: vec![],
+            json: false,
+        }
+    }
+}
+
+pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
+    let WikiConfig {
+        repo,
+        out,
+        run_llm,
+        llm_provider,
+        llm_provider_config,
+        llm_api_key_env,
+        evidence_paths,
+        llm_base_url,
+        llm_model,
+        llm_max_tokens,
+        llm_timeout_secs,
+        llm_retries,
+        llm_concurrency,
+        llm_debug_evidence,
+        llm_dry_run,
+        wiki_language,
+        wiki_mode,
+        grouping,
+        html,
+        incremental,
+        save_evidence,
+        filter_community,
+        max_communities,
+        filter_feature,
+        json,
+    } = cfg;
+    let repo = repo.as_path();
+    let llm_provider = llm_provider.as_str();
+    let llm_base_url = llm_base_url.as_str();
+    let llm_model = llm_model.as_str();
+    let wiki_language = wiki_language.as_str();
+    let wiki_mode = wiki_mode.as_str();
+    let grouping = grouping.as_str();
     if wiki_language != "en" && wiki_language != "vi" {
         bail!("--wiki-language must be 'en' or 'vi'");
     }
@@ -216,7 +284,10 @@ pub fn run_wiki(
 
     let mut llm_info: Option<WikiLlmInfo> = None;
     let mut summaries_for_cache: Vec<(String, String, CommunityLlmSummary)> = Vec::new();
-    let llm_summaries: Option<HashMap<String, CommunityLlmSummary>> = if effective_run_llm {
+    let (llm_summaries, controller_summaries): (
+        Option<HashMap<String, CommunityLlmSummary>>,
+        Option<HashMap<String, ControllerLlmSummary>>,
+    ) = if effective_run_llm {
         // Incremental: load previous wiki_meta.json to find unchanged communities.
         let prev_meta: Option<WikiMeta> = if incremental {
             load_wiki_meta(&out_dir)
@@ -249,11 +320,13 @@ pub fn run_wiki(
         );
         eprintln!("[cih-wiki] enriching {} communities (concurrency={}, model={})", total, concurrency, llm_model);
 
-        // Results: (comm_id, evidence_hash, Result<summary>)
-        let results: Vec<(String, String, Result<CommunityLlmSummary>)> = pool.as_ref().unwrap().install(|| {
-            community_nodes
-                .par_iter()
-                .map(|comm| {
+        // community enrichment (par) + controller enrichment (sequential) run concurrently
+        let (community_raw, ctrl): (Vec<(String, String, Result<CommunityLlmSummary>)>, Option<HashMap<String, ControllerLlmSummary>>) =
+            pool.as_ref().unwrap().install(|| {
+                rayon::join(
+                    || community_nodes
+                        .par_iter()
+                        .map(|comm| {
                     let comm_id = comm.id.as_str().to_string();
                     let pack = build_evidence_pack(Some(repo), &wiki_graph, comm, &evidence_corpus);
                     let ev_hash = fnv64(&pack.render());
@@ -302,16 +375,35 @@ pub fn run_wiki(
                         consecutive_failures.store(0, Ordering::Relaxed);
                     }
                     (comm_id, ev_hash, r)
-                })
-                .collect()
-        });
+                        })
+                        .collect::<Vec<_>>(),
+                    || {
+                        tracing::info!(
+                            controllers = wiki_graph.routes_by_controller.len(),
+                            "starting LLM controller enrichment"
+                        );
+                        let r = enrich_controllers(
+                            &wiki_graph,
+                            adapter.as_ref().unwrap().as_ref(),
+                            api_key.as_deref(),
+                            llm_model,
+                            llm_max_tokens,
+                            llm_timeout_secs,
+                            wiki_language,
+                            llm_dry_run,
+                        );
+                        tracing::info!(enriched = r.len(), "LLM controller enrichment complete");
+                        Some(r)
+                    },
+                )
+            });
 
         let mut map: HashMap<String, CommunityLlmSummary> = HashMap::new();
         // evidence_hash_map: community_id -> hash (for cache write)
         let mut ev_hash_map: HashMap<String, String> = HashMap::new();
         let mut failed_community_ids = Vec::new();
         let mut circuit_open = false;
-        for (id, ev_hash, result) in results {
+        for (id, ev_hash, result) in community_raw {
             ev_hash_map.insert(id.clone(), ev_hash);
             match result {
                 Ok(summary) => {
@@ -352,9 +444,9 @@ pub fn run_wiki(
             failed_community_count: failed_community_ids.len(),
             failed_community_ids,
         });
-        Some(map)
+        (Some(map), ctrl)
     } else {
-        None
+        (None, None)
     };
 
     // llm-full: additional richer per-community content for dev + BA pages.
@@ -380,25 +472,6 @@ pub fn run_wiki(
         }
         tracing::info!(enriched = map.len(), "LLM full enrichment complete");
         Some(map)
-    } else {
-        None
-    };
-
-    // Controller enrichment — runs alongside community enrichment when LLM is active
-    let controller_summaries: Option<HashMap<String, ControllerLlmSummary>> = if effective_run_llm {
-        tracing::info!(controllers = wiki_graph.routes_by_controller.len(), "starting LLM controller enrichment");
-        let result = enrich_controllers(
-            &wiki_graph,
-            adapter.as_ref().unwrap().as_ref(),
-            api_key.as_deref(),
-            llm_model,
-            llm_max_tokens,
-            llm_timeout_secs,
-            wiki_language,
-            llm_dry_run,
-        );
-        tracing::info!(enriched = result.len(), "LLM controller enrichment complete");
-        Some(result)
     } else {
         None
     };

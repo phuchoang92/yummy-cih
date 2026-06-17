@@ -415,33 +415,12 @@ fn repo_with_wiki_artifacts() -> PathBuf {
 #[test]
 fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
     let root = repo_with_wiki_artifacts();
-    wiki_cmd::run_wiki(
-        &root,
-        None,
-        false,
-        "openai-compatible",
-        None,
-        None,
-        Vec::new(),
-        "https://api.openai.com/v1",
-        "test-model",
-        600,
-        1,
-        0,
-        1,
-        false,
-        false,
-        "en",
-        "graph",
-        "graph",
-        false,
-        false,
-        false,
-        Vec::new(),
-        None,
-        Vec::new(),
-        false,
-    )
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: "graph".into(),
+        grouping: "graph".into(),
+        ..wiki_cmd::WikiConfig::default()
+    })
     .unwrap();
 
     let manifest_json = fs::read_to_string(root.join(".cih/wiki/manifest.json")).unwrap();
@@ -457,33 +436,15 @@ fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
 #[test]
 fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
     let root = repo_with_wiki_artifacts();
-    wiki_cmd::run_wiki(
-        &root,
-        None,
-        true,
-        "openai-compatible",
-        None,
-        None,
-        Vec::new(),
-        "https://api.openai.com/v1",
-        "dry-model",
-        600,
-        1,
-        0,
-        1,
-        false,
-        true,
-        "vi",
-        "llm-summary",
-        "graph",
-        false,
-        false,
-        false,
-        Vec::new(),
-        None,
-        Vec::new(),
-        false,
-    )
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        run_llm: true,
+        llm_model: "dry-model".into(),
+        llm_dry_run: true,
+        wiki_language: "vi".into(),
+        wiki_mode: "llm-summary".into(),
+        ..wiki_cmd::WikiConfig::default()
+    })
     .unwrap();
 
     let manifest_json = fs::read_to_string(root.join(".cih/wiki/manifest.json")).unwrap();
@@ -500,33 +461,16 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
 #[test]
 fn wiki_command_http_json_requires_provider_config() {
     let root = repo_with_wiki_artifacts();
-    let err = wiki_cmd::run_wiki(
-        &root,
-        None,
-        true,
-        "http-json",
-        None,
-        None,
-        Vec::new(),
-        "http://localhost",
-        "local",
-        600,
-        1,
-        0,
-        1,
-        false,
-        true,
-        "en",
-        "llm-summary",
-        "graph",
-        false,
-        false,
-        false,
-        Vec::new(),
-        None,
-        Vec::new(),
-        false,
-    )
+    let err = wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        run_llm: true,
+        llm_provider: "http-json".into(),
+        llm_base_url: "http://localhost".into(),
+        llm_model: "local".into(),
+        llm_dry_run: true,
+        wiki_mode: "llm-summary".into(),
+        ..wiki_cmd::WikiConfig::default()
+    })
     .unwrap_err()
     .to_string();
     assert!(err.contains("--llm-provider-config"));
