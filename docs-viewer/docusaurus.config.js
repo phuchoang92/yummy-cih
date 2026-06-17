@@ -91,7 +91,7 @@ const config = {
           ? false  // disabled — each repo is its own plugin
           : {
               path: singlePath,
-              routeBasePath: '/',
+              routeBasePath: '/docs',
               sidebarPath: require.resolve('./sidebars.js'),
               exclude: ['**/*.json'],
               editUrl: undefined,

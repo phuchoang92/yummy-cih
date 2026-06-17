@@ -32,7 +32,7 @@ if (process.env.CIH_WIKI_PATH) {
 
   const communityCards = poPages.map(p => {
     const name = p.title || p.slug;
-    const href = p.path ? p.path.replace(/^pages\//, '/') : `/${p.slug}`;
+    const href = p.path ? '/docs/' + p.path.replace(/^pages\//, '') : `/docs/${p.slug}`;
     return { name, href };
   });
 
@@ -99,9 +99,9 @@ export default function Home() {
 
         <div className="cih-section-title">Browse by persona</div>
         <div className="cih-persona-nav">
-          <PersonaBtn href="/po/" cls="po" icon="👔" label="Product Owner" desc="Business capabilities &amp; stakeholder view" />
-          <PersonaBtn href="/ba/" cls="ba" icon="📊" label="Business Analyst" desc="Workflows, contracts &amp; event flows" />
-          <PersonaBtn href="/dev/" cls="dev" icon="⚙️" label="Developer" desc="Technical structure, calls &amp; tests" />
+          <PersonaBtn href="/docs/po/" cls="po" icon="👔" label="Product Owner" desc="Business capabilities &amp; stakeholder view" />
+          <PersonaBtn href="/docs/ba/" cls="ba" icon="📊" label="Business Analyst" desc="Workflows, contracts &amp; event flows" />
+          <PersonaBtn href="/docs/dev/" cls="dev" icon="⚙️" label="Developer" desc="Technical structure, calls &amp; tests" />
         </div>
 
         {COMMUNITIES.length > 0 && (
