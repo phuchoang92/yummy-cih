@@ -21,8 +21,7 @@ fn write_jsonl(refs: &[UnresolvedRef], dir: &Path) -> io::Result<()> {
     let file = fs::File::create(&path)?;
     let mut w = BufWriter::new(file);
     for r in refs {
-        serde_json::to_writer(&mut w, r)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        serde_json::to_writer(&mut w, r).map_err(io::Error::other)?;
         w.write_all(b"\n")?;
     }
     Ok(())
