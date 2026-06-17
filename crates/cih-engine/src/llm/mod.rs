@@ -33,6 +33,10 @@ pub fn make_adapter(
     match provider {
         "openai-compatible" => Ok(Box::new(openai::OpenAiAdapter::new(base_url))),
         "anthropic" => Ok(Box::new(anthropic::AnthropicAdapter::new(base_url))),
+        "deepseek" => Ok(Box::new(openai::OpenAiAdapter::new("https://api.deepseek.com"))),
+        "gemini" => Ok(Box::new(openai::OpenAiAdapter::new(
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        ))),
         "http-json" => {
             let config_path = provider_config.ok_or_else(|| {
                 anyhow!("--llm-provider http-json requires --llm-provider-config <path>")
@@ -40,7 +44,7 @@ pub fn make_adapter(
             Ok(Box::new(http_json::HttpJsonAdapter::load(config_path)?))
         }
         other => bail!(
-            "unknown --llm-provider '{}'; expected openai-compatible | anthropic | http-json",
+            "unknown --llm-provider '{}'; expected openai-compatible | anthropic | deepseek | gemini | http-json",
             other
         ),
     }
@@ -104,6 +108,8 @@ pub fn resolve_api_key(llm_api_key_env: Option<&str>) -> Result<Option<String>> 
     }
 
     Ok(std::env::var("CIH_LLM_API_KEY")
+        .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
+        .or_else(|_| std::env::var("GEMINI_API_KEY"))
         .or_else(|_| std::env::var("OPENAI_API_KEY"))
         .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
         .ok())
@@ -144,6 +150,8 @@ mod tests {
     fn make_adapter_accepts_builtin_providers() {
         assert!(make_adapter("openai-compatible", "http://localhost", None).is_ok());
         assert!(make_adapter("anthropic", "http://localhost", None).is_ok());
+        assert!(make_adapter("deepseek", "http://localhost", None).is_ok());
+        assert!(make_adapter("gemini", "http://localhost", None).is_ok());
     }
 
     #[test]
