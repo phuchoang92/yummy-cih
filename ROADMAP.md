@@ -305,7 +305,7 @@ so the wiki and MCP tools can answer "which methods touch `CUSTOM_OVERDRAFT`?"
 - **27 new tests** across `cih-core`, `cih-parse` (SQL scanner + parser integration),
   `cih-resolve` (emit unit tests), `cih-engine` (artifact integration test). **187 total**.
 
-## Phase 10c — Adapter-Based LLM Wiki Enrichment ⬜
+## Phase 10c — Adapter-Based LLM Wiki Enrichment ✅ (2026-06-17)
 
 **Plan:** `PLAN-phase10b-llm-adapter.md` (plan file uses the label "10b"; 10c is the correct sequence number to avoid collision with DB access).
 
@@ -658,7 +658,7 @@ Includes additional JVM language support (Kotlin) via new `LanguageProvider` imp
 
 Phases 1–22 are ✅ complete. What remains:
 
-- **Phase 10c** (LLM adapter) — self-contained `cih-engine` upgrade; no blockers; can start now.
+- **Phase 10c** (LLM adapter) — ✅ done.
 - **Phase 10** (product — yummy frontend + Agent SDK) — all MCP tools, wiki, registry, and workflow
   docs are ready. Only the Next.js BFF and persona chat UI remain.
 - **Phase 11** (storage spike) — benchmark FalkorDB / Postgres-CTE / Neptune; needed before Phase 12.

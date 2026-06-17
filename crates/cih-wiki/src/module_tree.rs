@@ -180,9 +180,10 @@ pub fn validate_module_tree(tree: &WikiModuleTree, graph: &WikiGraph) -> Result<
         .map(|n| n.id.as_str().to_string())
         .collect();
     let mut seen_ids = BTreeSet::new();
-    let mut seen_slugs = BTreeSet::new();
+    // Top-level slugs must be globally unique (they map to URL prefixes).
+    let mut top_level_slugs = BTreeSet::new();
     for module in &tree.modules {
-        validate_module_node(module, &valid_communities, &mut seen_ids, &mut seen_slugs)?;
+        validate_module_node(module, &valid_communities, &mut seen_ids, &mut top_level_slugs, true)?;
     }
     Ok(())
 }
@@ -192,6 +193,7 @@ fn validate_module_node(
     valid_communities: &BTreeSet<String>,
     seen_ids: &mut BTreeSet<String>,
     seen_slugs: &mut BTreeSet<String>,
+    check_slug: bool,
 ) -> Result<()> {
     if node.id.trim().is_empty() {
         bail!("module tree contains an empty module id");
@@ -202,7 +204,8 @@ fn validate_module_node(
     if !seen_ids.insert(node.id.clone()) {
         bail!("duplicate module id '{}'", node.id);
     }
-    if !seen_slugs.insert(node.slug.clone()) {
+    // Child slugs only need to be unique within their parent directory, not globally.
+    if check_slug && !seen_slugs.insert(node.slug.clone()) {
         bail!("duplicate module slug '{}'", node.slug);
     }
     for community_id in &node.community_ids {
@@ -223,8 +226,10 @@ fn validate_module_node(
             bail!("module '{}' repeats file path '{}'", node.id, path);
         }
     }
+    // Children: check slug uniqueness among siblings only (same parent directory).
+    let mut sibling_slugs = BTreeSet::new();
     for child in &node.children {
-        validate_module_node(child, valid_communities, seen_ids, seen_slugs)?;
+        validate_module_node(child, valid_communities, seen_ids, &mut sibling_slugs, true)?;
     }
     Ok(())
 }
