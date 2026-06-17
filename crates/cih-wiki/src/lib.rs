@@ -39,6 +39,17 @@ pub struct CommunityLlmSummary {
     pub dev: String,
 }
 
+/// LLM-generated metadata for one controller class.
+/// Produced by `enrich_controllers()` in `cih-engine`; passed into `WikiInput`.
+#[derive(Clone, Debug, Default)]
+pub struct ControllerLlmSummary {
+    /// 1-2 sentences in plain business language describing what this controller handles.
+    pub description: String,
+    /// Business domain slug inferred by LLM (e.g. "payment"). Applied only when the
+    /// file-path heuristic returns "shared", to move the controller to the right feature.
+    pub feature: Option<String>,
+}
+
 /// Richer per-community LLM content for `llm-full` mode.
 /// Each field is a markdown string that is inserted into the relevant page section.
 #[derive(Clone, Debug, Default)]
@@ -83,6 +94,8 @@ pub struct WikiInput<'a> {
     pub first_module_tree: Option<WikiModuleTree>,
     /// Per-community evidence packs to save to .cih/wiki/evidence/ (--save-evidence).
     pub save_evidence: Option<HashMap<String, String>>,
+    /// Keyed by controller class name. Populated when LLM enrichment is active.
+    pub controller_summaries: Option<HashMap<String, ControllerLlmSummary>>,
 }
 
 #[derive(Debug)]
@@ -359,11 +372,21 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             .routes_by_controller
             .iter()
             .filter(|(ctrl, _)| {
-                graph
+                let graph_feature = graph
                     .controller_feature
                     .get(*ctrl)
-                    .map(|f| f.as_str() == feature.as_str())
-                    .unwrap_or(false)
+                    .map(|f| f.as_str())
+                    .unwrap_or("shared");
+                // Apply LLM feature override only when file-path heuristic gives "shared"
+                let effective_feature = if graph_feature == "shared" {
+                    input.controller_summaries.as_ref()
+                        .and_then(|m| m.get(*ctrl))
+                        .and_then(|s| s.feature.as_deref())
+                        .unwrap_or("shared")
+                } else {
+                    graph_feature
+                };
+                effective_feature == feature.as_str()
             })
             .map(|(ctrl, routes)| (ctrl.as_str(), routes))
             .collect();
@@ -373,7 +396,11 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             std::fs::create_dir_all(out_dir.join(format!("pages/{}/controllers", feature)))?;
             for (ctrl_name, routes) in &feature_controllers {
                 let slug = slugify(ctrl_name);
-                let ctrl_md = pages::feature_po::render_controller_page(ctrl_name, routes);
+                let description = input.controller_summaries.as_ref()
+                    .and_then(|m| m.get(*ctrl_name))
+                    .map(|s| s.description.as_str())
+                    .filter(|s| !s.is_empty());
+                let ctrl_md = pages::feature_po::render_controller_page(ctrl_name, routes, description);
                 let page_path = format!("{}/controllers/{}", feature, slug);
                 std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &ctrl_md)?;
                 nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -513,6 +540,7 @@ mod tests {
             generation: WikiGenerationInfo::default(),
             first_module_tree: None,
             save_evidence: None,
+            controller_summaries: None,
         }
     }
 
@@ -612,6 +640,7 @@ mod tests {
             generation: WikiGenerationInfo::default(),
             first_module_tree: None,
             save_evidence: None,
+            controller_summaries: None,
         };
         let outcome = generate_wiki(input, &out).unwrap();
 

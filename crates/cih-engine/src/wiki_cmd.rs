@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use anyhow::{bail, Context, Result};
 use cih_core::{GraphArtifacts, Node, RepoMap, VersionId};
 use cih_wiki::{
-    generate_wiki, CommunityLlmSummary, WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo,
-    WikiMeta, WikiModuleCacheEntry, WikiModuleTree,
+    generate_wiki, CommunityLlmSummary, ControllerLlmSummary, WikiGenerationInfo, WikiGraph,
+    WikiInput, WikiLlmInfo, WikiMeta, WikiModuleCacheEntry, WikiModuleTree,
 };
+use cih_wiki::graph::{route_http_method, route_path};
 use rayon::prelude::*;
 
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
@@ -299,6 +300,25 @@ pub fn run_wiki(
         None
     };
 
+    // Controller enrichment — runs alongside community enrichment when LLM is active
+    let controller_summaries: Option<HashMap<String, ControllerLlmSummary>> = if effective_run_llm {
+        let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes, &community_edges);
+        let adapter = make_adapter(llm_provider, llm_base_url, llm_provider_config.as_deref())?;
+        let api_key = resolve_api_key(llm_api_key_env.as_deref())?;
+        Some(enrich_controllers(
+            &wiki_graph,
+            adapter.as_ref(),
+            api_key.as_deref(),
+            llm_model,
+            llm_max_tokens,
+            llm_timeout_secs,
+            wiki_language,
+            llm_dry_run,
+        ))
+    } else {
+        None
+    };
+
     // LLM grouping: propose a module tree via LLM before page generation
     let llm_module_tree: Option<WikiModuleTree> = if grouping == "llm" {
         let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes, &community_edges);
@@ -373,6 +393,7 @@ pub fn run_wiki(
         },
         first_module_tree: None,
         save_evidence: save_evidence_map,
+        controller_summaries,
     };
 
     let outcome = generate_wiki(input, &out_dir)?;
@@ -627,6 +648,175 @@ fn summary_from_value(val: &serde_json::Value) -> Option<CommunityLlmSummary> {
     } else {
         Some(CommunityLlmSummary { po, ba, dev })
     }
+}
+
+const CONTROLLER_BATCH_SIZE: usize = 10;
+const MAX_ROUTES_PER_CONTROLLER: usize = 15;
+
+fn enrich_controllers(
+    graph: &WikiGraph,
+    adapter: &dyn LlmAdapter,
+    api_key: Option<&str>,
+    model: &str,
+    max_tokens: u32,
+    timeout_secs: u64,
+    language: &str,
+    dry_run: bool,
+) -> HashMap<String, ControllerLlmSummary> {
+    let mut controllers: Vec<(&String, &Vec<(cih_core::Node, cih_core::Node)>)> =
+        graph.routes_by_controller.iter().collect();
+    controllers.sort_by_key(|(name, _)| name.as_str());
+
+    if controllers.is_empty() {
+        return HashMap::new();
+    }
+
+    eprintln!(
+        "[cih-wiki] enriching {} controllers (batch_size={})",
+        controllers.len(),
+        CONTROLLER_BATCH_SIZE
+    );
+
+    let mut result = HashMap::new();
+
+    for batch in controllers.chunks(CONTROLLER_BATCH_SIZE) {
+        let user_prompt = build_controller_batch_prompt(batch, language);
+
+        if dry_run {
+            println!("--- [dry-run] controller batch ---\n{}", user_prompt);
+            for (name, _) in batch {
+                result.insert(
+                    name.to_string(),
+                    ControllerLlmSummary {
+                        description: format!("[dry-run] {}", name),
+                        feature: None,
+                    },
+                );
+            }
+            continue;
+        }
+
+        let request = LlmRequest {
+            system: build_controller_system_prompt(language),
+            user: user_prompt,
+            model: model.to_string(),
+            max_tokens,
+            timeout_secs,
+        };
+
+        match adapter.call(api_key, &request) {
+            Ok(response) => {
+                let batch_result = parse_controller_batch(&response.text);
+                let n = batch_result.len();
+                result.extend(batch_result);
+                eprintln!("[cih-wiki] controller batch: {} enriched", n);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "controller enrichment batch failed — continuing");
+            }
+        }
+    }
+
+    result
+}
+
+fn build_controller_system_prompt(language: &str) -> String {
+    let mut s = String::from(
+        "You are a code documentation assistant. Write concise business descriptions \
+         from the provided API route signatures. Do not invent behavior not implied by \
+         the route paths and method names.",
+    );
+    if language == "vi" {
+        s.push_str(" Write all descriptions in Vietnamese.");
+    }
+    s
+}
+
+fn build_controller_batch_prompt(
+    batch: &[(&String, &Vec<(cih_core::Node, cih_core::Node)>)],
+    _language: &str,
+) -> String {
+    let mut s = String::from(
+        "Document these REST API controllers for business stakeholders.\n\
+         For each controller provide:\n\
+         - \"description\": 1-2 sentences in plain business language\n\
+         - \"feature\": business domain slug (e.g. \"payment\", \"auth\", \"order\") \
+           inferred from the class name and routes\n\n\
+         Respond with a single JSON object only:\n\
+         { \"ControllerName\": { \"description\": \"...\", \"feature\": \"slug\" }, ... }\n\n\
+         Controllers:\n\n",
+    );
+
+    for (ctrl_name, routes) in batch {
+        s.push_str(ctrl_name);
+        s.push_str(":\n");
+        for (handler, route) in routes.iter().take(MAX_ROUTES_PER_CONTROLLER) {
+            let method = route_http_method(route);
+            let path = route_path(route);
+            let handler_name = handler
+                .id
+                .as_str()
+                .split('#')
+                .nth(1)
+                .and_then(|x| x.split('/').next())
+                .unwrap_or("handler");
+            s.push_str(&format!("  {} {} — {}\n", method, path, handler_name));
+        }
+        if routes.len() > MAX_ROUTES_PER_CONTROLLER {
+            s.push_str(&format!(
+                "  ... and {} more routes\n",
+                routes.len() - MAX_ROUTES_PER_CONTROLLER
+            ));
+        }
+        s.push('\n');
+    }
+
+    s
+}
+
+fn parse_controller_batch(text: &str) -> HashMap<String, ControllerLlmSummary> {
+    let mut result = HashMap::new();
+
+    // Strip markdown code fences that some models (e.g. Gemini) add
+    let cleaned = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let val: serde_json::Value = if let Ok(v) = serde_json::from_str(cleaned) {
+        v
+    } else if let (Some(s), Some(e)) = (cleaned.find('{'), cleaned.rfind('}')) {
+        if s < e {
+            match serde_json::from_str(&cleaned[s..=e]) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to parse controller batch JSON");
+                    return result;
+                }
+            }
+        } else {
+            return result;
+        }
+    } else {
+        return result;
+    };
+
+    if let Some(obj) = val.as_object() {
+        for (ctrl_name, ctrl_val) in obj {
+            let description = ctrl_val["description"].as_str().unwrap_or("").to_string();
+            let feature = ctrl_val["feature"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            if !description.is_empty() || feature.is_some() {
+                result.insert(ctrl_name.clone(), ControllerLlmSummary { description, feature });
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

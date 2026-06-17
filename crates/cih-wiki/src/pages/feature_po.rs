@@ -230,12 +230,20 @@ pub fn render_feature_po(
 }
 
 /// Render a single controller's route page (PO-facing).
-pub fn render_controller_page(controller_name: &str, routes: &[(Node, Node)]) -> String {
+pub fn render_controller_page(
+    controller_name: &str,
+    routes: &[(Node, Node)],
+    description: Option<&str>,
+) -> String {
     let route_count = routes.len();
     let mut md = String::new();
     md.push_str(&format!("---\ntitle: {}\nrole: po\n---\n\n", controller_name));
     md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
     md.push_str(&format!("# {}\n\n", controller_name));
+    if let Some(desc) = description.filter(|s| !s.is_empty()) {
+        md.push_str(desc);
+        md.push_str("\n\n");
+    }
     md.push_str(&format!(
         "**{} route{}**\n\n",
         route_count,

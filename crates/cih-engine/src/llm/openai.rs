@@ -29,12 +29,23 @@ impl LlmAdapter for OpenAiAdapter {
             "messages": messages
         });
 
-        let response = ureq::post(&url)
+        let response = match ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", api_key))
             .set("Content-Type", "application/json")
             .timeout(std::time::Duration::from_secs(req.timeout_secs))
             .send_json(body)
-            .context("OpenAI-compatible API request failed")?;
+        {
+            Ok(r) => r,
+            Err(ureq::Error::Status(status, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                anyhow::bail!(
+                    "OpenAI-compatible API HTTP {}: {}",
+                    status,
+                    &body[..body.len().min(1000)]
+                );
+            }
+            Err(err) => return Err(anyhow::anyhow!(err).context("OpenAI-compatible API request failed")),
+        };
 
         let resp: serde_json::Value = response
             .into_json()
