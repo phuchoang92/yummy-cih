@@ -596,3 +596,108 @@ public class OverdraftAdapterImpl {
 
     fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn discover_preserves_analyze_artifacts_on_disk() {
+    let root = temp_repo();
+    write(
+        &root,
+        "src/main/java/com/example/OwnerService.java",
+        "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() { helper(); }\n  private void helper() {}\n}\n",
+    );
+    let scan = scan::scan_repo(&root).unwrap();
+    let analyze = analyze_emit(&scan, all_scope()).unwrap();
+
+    let analyze_nodes = analyze.artifacts.nodes_path.clone();
+    let analyze_edges = analyze.artifacts.edges_path.clone();
+    let analyze_version = analyze.artifacts.version.0.clone();
+
+    run_discover_core(&root).unwrap();
+
+    assert!(analyze_nodes.exists(), "analyze nodes.jsonl must survive discover");
+    assert!(analyze_edges.exists(), "analyze edges.jsonl must survive discover");
+
+    let latest = crate::versioning::latest_graph_artifacts(&root).unwrap();
+    assert_eq!(
+        latest.version.0, analyze_version,
+        "latest_graph_artifacts must still return the analyze version after discover"
+    );
+    assert!(
+        latest.nodes_path.to_string_lossy().contains("artifacts/"),
+        "latest_graph_artifacts path must be under .cih/artifacts/, not artifacts-community/"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn discover_outcome_source_artifacts_point_to_analyze_dir() {
+    let root = temp_repo();
+    write(
+        &root,
+        "src/main/java/com/example/OwnerService.java",
+        "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() { helper(); }\n  private void helper() {}\n}\n",
+    );
+    let scan = scan::scan_repo(&root).unwrap();
+    analyze_emit(&scan, all_scope()).unwrap();
+
+    let discover = run_discover_core(&root).unwrap();
+
+    assert!(
+        discover.source_artifacts.nodes_path
+            .to_string_lossy()
+            .contains("artifacts/"),
+        "source_artifacts must be under .cih/artifacts/"
+    );
+    assert!(
+        !discover.source_artifacts.nodes_path
+            .to_string_lossy()
+            .contains("artifacts-community"),
+        "source_artifacts must NOT be under .cih/artifacts-community/"
+    );
+    assert!(
+        discover.artifacts.nodes_path
+            .to_string_lossy()
+            .contains("artifacts-community"),
+        "discover.artifacts must be under .cih/artifacts-community/"
+    );
+    assert_ne!(
+        discover.source_artifacts.version.0,
+        discover.artifacts.version.0,
+        "source and community versions must differ"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn discover_load_artifacts_are_analyze_then_community() {
+    let root = temp_repo();
+    write(
+        &root,
+        "src/main/java/com/example/OwnerService.java",
+        "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() { helper(); }\n  private void helper() {}\n}\n",
+    );
+    let scan = scan::scan_repo(&root).unwrap();
+    let analyze = analyze_emit(&scan, all_scope()).unwrap();
+
+    let discover = run_discover_core(&root).unwrap();
+    let artifact_sets = discover.artifact_sets_for_load();
+
+    // Canonicalize both sides: macOS temp_dir() symlinks may differ from canonicalized paths.
+    assert_eq!(
+        artifact_sets[0].nodes_path.canonicalize().unwrap(),
+        analyze.artifacts.nodes_path.canonicalize().unwrap()
+    );
+    assert_eq!(
+        artifact_sets[0].edges_path.canonicalize().unwrap(),
+        analyze.artifacts.edges_path.canonicalize().unwrap()
+    );
+    assert_eq!(artifact_sets[0].version.0, analyze.artifacts.version.0);
+
+    assert_eq!(artifact_sets[1].nodes_path, discover.artifacts.nodes_path);
+    assert_eq!(artifact_sets[1].edges_path, discover.artifacts.edges_path);
+    assert_eq!(artifact_sets[1].version.0, discover.artifacts.version.0);
+
+    fs::remove_dir_all(&root).unwrap();
+}

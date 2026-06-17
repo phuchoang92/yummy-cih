@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use cih_core::{EdgeKind, GraphArtifacts, NodeKind, VersionId};
 use serde::Serialize;
 
-use crate::db::{load_to_falkor, LoadOutcome};
+use crate::db::{load_many_to_falkor, LoadOutcome};
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
 use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
@@ -24,7 +24,8 @@ pub(crate) fn run_discover(
     } else {
         let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
         let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_to_falkor(url, key, &emit.artifacts) {
+        let artifact_sets = emit.artifact_sets_for_load();
+        match load_many_to_falkor(url, key, &artifact_sets) {
             Ok(stats) => {
                 tracing::info!(
                     nodes = stats.nodes,
@@ -114,7 +115,7 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
     let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
 
     Ok(DiscoverOutcome {
-        source_version: source.version.0,
+        source_artifacts: source,
         artifacts,
         artifacts_dir,
         version,
@@ -142,7 +143,7 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
 
 /// Everything `run_discover_core` produced (DB-free), used to load + report.
 pub(crate) struct DiscoverOutcome {
-    pub(crate) source_version: String,
+    pub(crate) source_artifacts: GraphArtifacts,
     pub(crate) artifacts: GraphArtifacts,
     pub(crate) artifacts_dir: PathBuf,
     pub(crate) version: String,
@@ -156,9 +157,13 @@ pub(crate) struct DiscoverOutcome {
 }
 
 impl DiscoverOutcome {
+    pub(crate) fn artifact_sets_for_load(&self) -> [&GraphArtifacts; 2] {
+        [&self.source_artifacts, &self.artifacts]
+    }
+
     fn summary<'a>(&'a self, load: &'a LoadOutcome) -> DiscoverSummary<'a> {
         DiscoverSummary {
-            source_version: &self.source_version,
+            source_version: self.source_artifacts.version.0.as_str(),
             version: &self.version,
             artifacts_path: self.artifacts_dir.display().to_string(),
             community_count: self.community_count,
@@ -177,7 +182,7 @@ impl DiscoverOutcome {
     fn print_human(&self, load: &LoadOutcome) {
         println!(
             "Discover: source graph {} -> {} communities, {} processes.",
-            self.source_version, self.community_count, self.process_count
+            self.source_artifacts.version.0, self.community_count, self.process_count
         );
         println!(
             "Edges: {} MEMBER_OF, {} STEP_IN_PROCESS.",
