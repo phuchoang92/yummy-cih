@@ -93,31 +93,38 @@ pages/
       <class-name>.md         ← technical reference per module (classes, routes, DB)
 ```
 
-**With LLM enrichment** — adds AI-generated summaries to every page:
+**With LLM enrichment** — adds AI-generated summaries to every page.
+Set the API key for your chosen provider, then pass `--llm`:
 
 ```bash
+# DeepSeek (recommended — reliable, cheap, clean JSON output)
+DEEPSEEK_API_KEY="sk-..." \
+docker compose run --rm engine wiki /repo \
+  --llm --llm-provider deepseek --llm-model deepseek-chat --llm-max-tokens 4096
+
+# Google Gemini
+GEMINI_API_KEY="AQ...." \
+docker compose run --rm engine wiki /repo \
+  --llm --llm-provider gemini --llm-model gemini-2.5-flash --llm-max-tokens 4096
+
+# Anthropic Claude
+ANTHROPIC_API_KEY="sk-ant-..." \
+docker compose run --rm engine wiki /repo \
+  --llm --llm-provider anthropic --llm-model claude-haiku-4-5-20251001
+
 # OpenAI
+OPENAI_API_KEY="sk-..." \
+docker compose run --rm engine wiki /repo \
+  --llm --llm-provider openai-compatible --llm-model gpt-4o-mini
+
+# Local Ollama (no key needed)
 docker compose run --rm engine wiki /repo \
   --llm --llm-provider openai-compatible \
-  --llm-model gpt-4o-mini \
-  --llm-base-url https://api.openai.com/v1
-
-# Anthropic
-docker compose run --rm engine wiki /repo \
-  --llm --llm-provider anthropic \
-  --llm-model claude-haiku-4-5-20251001 \
-  --llm-base-url https://api.anthropic.com/v1
-
-# Local Ollama
-docker compose run --rm engine wiki /repo \
-  --llm --llm-provider http-json \
-  --llm-provider-config /repo/ollama.json
+  --llm-base-url http://localhost:11434/v1 --llm-model llama3:8b
 ```
 
-Set the API key in your shell before running:
-```bash
-export CIH_LLM_API_KEY=sk-...
-```
+See **[docs/llm-providers.md](docs/llm-providers.md)** for the full provider reference,
+API key env var names, and recommended `--llm-max-tokens` values.
 
 ### 6. View the wiki in a browser
 
@@ -216,7 +223,7 @@ Then just run `analyze /repo` without extra flags — the scope file is picked u
 | `CIH_BIND` | `0.0.0.0:8080` | MCP server listen address |
 | `CIH_ARTIFACTS_DIR` | `/repo/.cih/artifacts` | Artifact path for BM25 `query` tool |
 | `HF_HOME` | `/data/hf-cache` | HuggingFace model cache (downloaded on first `embed`) |
-| `CIH_LLM_API_KEY` | — | API key for `wiki --llm` (falls back to `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) |
+| `CIH_LLM_API_KEY` | — | API key for `wiki --llm` (also accepts `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) |
 
 Override any variable under `cih-server → environment` in `docker-compose.yml`.
 

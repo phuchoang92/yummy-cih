@@ -307,7 +307,7 @@ so the wiki and MCP tools can answer "which methods touch `CUSTOM_OVERDRAFT`?"
 
 ## Phase 10c — Adapter-Based LLM Wiki Enrichment ✅ (2026-06-17)
 
-**Plan:** `PLAN-phase10b-llm-adapter.md` (plan file uses the label "10b"; 10c is the correct sequence number to avoid collision with DB access).
+**Plan:** `docs/plans/phase-10c-llm-adapter-plan.md` (plan file uses the label "10b"; 10c is the correct sequence number to avoid collision with DB access).
 
 Upgrades the existing `--llm` path from an implicit Anthropic-or-OpenAI choice to a pluggable adapter layer with a richer evidence pack and BRD file support.
 
