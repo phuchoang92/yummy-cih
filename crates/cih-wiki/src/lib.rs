@@ -96,6 +96,9 @@ pub struct WikiInput<'a> {
     pub save_evidence: Option<HashMap<String, String>>,
     /// Keyed by controller class name. Populated when LLM enrichment is active.
     pub controller_summaries: Option<HashMap<String, ControllerLlmSummary>>,
+    /// Only generate pages for features whose name contains one of these substrings
+    /// (case-insensitive). Empty = no filter.
+    pub filter_feature: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -140,7 +143,30 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     }
 
     // Feature grouping — the core of the new hierarchy
-    let feature_groups = group_communities_by_feature(&graph);
+    let mut feature_groups = group_communities_by_feature(&graph);
+
+    // No communities (discover not run): synthesize one group per feature found in
+    // controller file paths so controller pages still get generated.
+    if feature_groups.is_empty() && !graph.routes_by_controller.is_empty() {
+        let mut features: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for feat in graph.controller_feature.values() {
+            features.insert(feat.clone());
+        }
+        feature_groups = features
+            .into_iter()
+            .map(|feature| FeatureGroup { feature, community_ids: vec![] })
+            .collect();
+    }
+
+    // Apply --filter-feature: keep only groups whose name contains a filter substring.
+    if !input.filter_feature.is_empty() {
+        let filters: Vec<String> = input.filter_feature.iter().map(|f| f.to_lowercase()).collect();
+        feature_groups.retain(|g| {
+            let name = g.feature.to_lowercase();
+            filters.iter().any(|f| name.contains(f.as_str()))
+        });
+    }
+
     let dev_paths = build_dev_page_paths(&feature_groups, &graph);
 
     let module_tree = input.module_tree.unwrap_or_else(|| {
@@ -541,6 +567,7 @@ mod tests {
             first_module_tree: None,
             save_evidence: None,
             controller_summaries: None,
+            filter_feature: vec![],
         }
     }
 
@@ -641,6 +668,7 @@ mod tests {
             first_module_tree: None,
             save_evidence: None,
             controller_summaries: None,
+            filter_feature: vec![],
         };
         let outcome = generate_wiki(input, &out).unwrap();
 

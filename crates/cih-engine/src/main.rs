@@ -226,6 +226,11 @@ enum Command {
         /// Can be specified multiple times to include several groups.
         #[arg(long = "filter-community")]
         filter_community: Vec<String>,
+        /// Only generate pages for features (module directories) whose name contains this substring
+        /// (case-insensitive). Works with or without a prior `discover` run.
+        /// Can be specified multiple times.
+        #[arg(long = "filter-feature")]
+        filter_feature: Vec<String>,
         /// Limit total number of communities processed (useful for quick tests).
         #[arg(long)]
         max_communities: Option<usize>,
@@ -436,6 +441,7 @@ fn main() -> Result<()> {
             save_evidence,
             filter_community,
             max_communities,
+            filter_feature,
             json,
         } => wiki_cmd::run_wiki(
             &repo,
@@ -461,6 +467,7 @@ fn main() -> Result<()> {
             save_evidence,
             filter_community,
             max_communities,
+            filter_feature,
             json,
         ),
     }

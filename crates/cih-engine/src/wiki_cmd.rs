@@ -55,6 +55,7 @@ pub fn run_wiki(
     save_evidence: bool,
     filter_community: Vec<String>,
     max_communities: Option<usize>,
+    filter_feature: Vec<String>,
     json: bool,
 ) -> Result<()> {
     if wiki_language != "en" && wiki_language != "vi" {
@@ -82,19 +83,26 @@ pub fn run_wiki(
         )
     })?;
 
-    let community_artifacts = latest_community_artifacts(repo)?;
-    let all_community_nodes = community_artifacts.read_nodes().with_context(|| {
-        format!(
-            "failed to read community nodes from {}",
-            community_artifacts.nodes_path.display()
-        )
-    })?;
-    let community_edges = community_artifacts.read_edges().with_context(|| {
-        format!(
-            "failed to read community edges from {}",
-            community_artifacts.edges_path.display()
-        )
-    })?;
+    let (all_community_nodes, community_edges, community_version) =
+        match latest_community_artifacts(repo) {
+            Ok(a) => {
+                let nodes = a.read_nodes().with_context(|| {
+                    format!("failed to read community nodes from {}", a.nodes_path.display())
+                })?;
+                let edges = a.read_edges().with_context(|| {
+                    format!("failed to read community edges from {}", a.edges_path.display())
+                })?;
+                let ver = a.version.0.clone();
+                (nodes, edges, ver)
+            }
+            Err(_) => {
+                eprintln!(
+                    "info: no community artifacts found — generating wiki without feature grouping. \
+                     Run `discover` first for richer docs."
+                );
+                (Vec::new(), Vec::new(), String::new())
+            }
+        };
 
     // Apply --filter-community and --max-communities before any LLM or wiki work.
     let community_nodes: Vec<Node> = {
@@ -332,7 +340,7 @@ pub fn run_wiki(
             llm_max_tokens,
             llm_timeout_secs,
             &graph_artifacts.version.0,
-            &community_artifacts.version.0,
+            &community_version,
         ) {
             Ok(tree) => {
                 tracing::info!(modules = tree.modules.len(), "LLM grouping proposed {} modules", tree.modules.len());
@@ -377,7 +385,7 @@ pub fn run_wiki(
         community_edges: &community_edges,
         repo_name,
         graph_version: graph_artifacts.version.0.clone(),
-        community_version: community_artifacts.version.0.clone(),
+        community_version,
         unresolved_report,
         repo_map,
         llm_summaries,
@@ -394,6 +402,7 @@ pub fn run_wiki(
         first_module_tree: None,
         save_evidence: save_evidence_map,
         controller_summaries,
+        filter_feature,
     };
 
     let outcome = generate_wiki(input, &out_dir)?;

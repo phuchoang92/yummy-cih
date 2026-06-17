@@ -439,6 +439,7 @@ fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
         false,
         Vec::new(),
         None,
+        Vec::new(),
         false,
     )
     .unwrap();
@@ -480,6 +481,7 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
         false,
         Vec::new(),
         None,
+        Vec::new(),
         false,
     )
     .unwrap();
@@ -522,6 +524,7 @@ fn wiki_command_http_json_requires_provider_config() {
         false,
         Vec::new(),
         None,
+        Vec::new(),
         false,
     )
     .unwrap_err()
