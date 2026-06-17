@@ -50,7 +50,7 @@ pub fn trace_process_paths(
                 .filter(|next| !contains_ancestor(&states, state_idx, *next))
                 .collect();
             callees.sort_by(|a, b| digraph[*a].as_str().cmp(digraph[*b].as_str()));
-            callees.dedup();
+            callees.dedup_by_key(|n| *n);
             callees.truncate(cfg.max_branching);
 
             if callees.is_empty() || state.depth >= cfg.max_trace_depth {
@@ -146,7 +146,7 @@ pub(crate) fn deduplicate_traces(
         let encoded = encode_trace(&trace, digraph);
         if retained
             .iter()
-            .any(|(kept, _)| kept.contains(encoded.as_str()))
+            .any(|(kept, _)| is_subtrace_of(&encoded, kept))
         {
             continue;
         }
@@ -177,6 +177,18 @@ pub(crate) fn deduplicate_traces(
     }
 
     by_endpoint.into_values().collect()
+}
+
+/// Returns true when every `->` segment of `candidate` appears as a contiguous
+/// subsequence of segments in `of`. A plain `of.contains(candidate)` would also
+/// match if one node-ID string happened to be a substring of another node-ID string.
+fn is_subtrace_of(candidate: &str, of: &str) -> bool {
+    let c: Vec<&str> = candidate.split("->").collect();
+    let o: Vec<&str> = of.split("->").collect();
+    if c.len() > o.len() {
+        return false;
+    }
+    o.windows(c.len()).any(|w| w == c.as_slice())
 }
 
 fn trace_crosses_communities(
@@ -305,6 +317,52 @@ mod tests {
         assert!(encoded.iter().any(|s| s.ends_with("Method:B#b/0")));
         assert!(encoded.iter().any(|s| s.ends_with("Method:C#c/0")));
         assert!(!encoded.iter().any(|s| s.ends_with("Method:D#d/0")));
+    }
+
+    #[test]
+    fn parallel_edges_to_same_target_are_deduped() {
+        // Two edges A→B with different weights; callee B must appear only once.
+        let (mut graph, nodes) = graph_with_nodes(&["A", "B"]);
+        graph.add_edge(nodes[0], nodes[1], 1.0);
+        graph.add_edge(nodes[0], nodes[1], 0.8); // parallel edge
+
+        let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
+        assert_eq!(traces.len(), 1, "parallel edges must not produce duplicate traces");
+    }
+
+    #[test]
+    fn dedup_does_not_false_positive_on_shared_node_id_prefix() {
+        // "Pay" and "PayService" share "Pay" as a name prefix.
+        // A trace ending at PayService must NOT be suppressed because "Pay" is
+        // a substring of "PayService" in the raw encoded string.
+        let (mut graph, nodes) = graph_with_nodes(&["Root", "Pay", "PayService"]);
+        graph.add_edge(nodes[0], nodes[1], 1.0);    // Root → Pay
+        graph.add_edge(nodes[0], nodes[2], 1.0);    // Root → PayService
+
+        let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
+        let encoded: Vec<_> = traces.iter().map(|t| encode_trace(t, &graph)).collect();
+
+        // Both traces must survive deduplication — neither is a sub-trace of the other.
+        assert!(
+            encoded.iter().any(|s| s.ends_with("Method:Pay#pay/0")),
+            "trace ending at Pay must not be incorrectly suppressed"
+        );
+        assert!(
+            encoded.iter().any(|s| s.ends_with("Method:PayService#payservice/0")),
+            "trace ending at PayService must not be incorrectly suppressed"
+        );
+    }
+
+    #[test]
+    fn is_subtrace_of_checks_segments_not_substring() {
+        // "A->B" is a sub-trace of "X->A->B->C"
+        assert!(is_subtrace_of("A->B", "X->A->B->C"));
+        // "A->B" is NOT a sub-trace of "XA->XB->C" even though raw substring could match
+        assert!(!is_subtrace_of("A->B", "XA->XB->C"));
+        // Single-element trace
+        assert!(is_subtrace_of("B", "A->B->C"));
+        // Longer candidate than host
+        assert!(!is_subtrace_of("A->B->C->D", "A->B->C"));
     }
 
     #[test]
