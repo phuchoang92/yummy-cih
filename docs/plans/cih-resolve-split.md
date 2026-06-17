@@ -31,14 +31,14 @@ None of these must change signature or behavior.
 
 ```
 crates/cih-resolve/src/
-  lib.rs           ~40 lines  — module decls, public types, re-exports, resolve_edges
-  types.rs        ~120 lines  — pure string/type helpers (no struct dependencies)
-  index.rs        ~430 lines  — ResolveIndex, FileContext, build/lookup methods
-  contracts.rs    ~105 lines  — resolve_contract_edges (standalone public fn)
-  emit.rs         ~570 lines  — EdgeEmitter, emit passes, build_mro_map, c3_linearize
-  tests.rs        ~900 lines  — existing unit tests (moved from lib.rs)
-  reports.rs       ~96 lines  — unchanged
-  db_access.rs    ~371 lines  — unchanged
+  lib.rs            ~60 lines  — module decls, public types, re-exports, resolve_edges
+  types.rs         ~105 lines  — pure string/type helpers (no struct dependencies)
+  index.rs         ~445 lines  — ResolveIndex, FileContext, build/lookup methods
+  contracts.rs     ~110 lines  — resolve_contract_edges (standalone public fn)
+  emit.rs          ~635 lines  — EdgeEmitter, emit passes, build_mro_map, c3_linearize
+  tests.rs        ~1300 lines  — existing unit tests (moved from lib.rs)
+  reports.rs        ~96 lines  — unchanged
+  db_access.rs     ~371 lines  — unchanged
 ```
 
 ---
@@ -80,7 +80,9 @@ Moves:
 - `struct ResolveIndex` (keep `pub(crate)`)
 - `struct FileContext` (keep **private** within `index.rs` — `EdgeEmitter` never accesses its
   fields directly, only calls methods on `ResolveIndex`)
-- `impl ResolveIndex` — all methods stay `pub(crate)` or private as they are now
+- `impl ResolveIndex` — methods that were already `pub(crate)` stay `pub(crate)`; private
+  methods stay private. One exception: `di_impl` was private in `lib.rs` but must become
+  `pub(crate)` because `emit.rs` calls `self.index.di_impl()` across the module boundary.
 
 One new method required (see Cross-module visibility issue below):
 ```rust
@@ -102,6 +104,9 @@ conceptual muddle (it is not part of the reference-resolution pipeline).
 
 `lib.rs` adds `pub use contracts::resolve_contract_edges;` to preserve the public API.
 
+Note: `contracts.rs` also needs `use std::collections::BTreeMap` for internal node
+deduplication — this is not in `cih_core` and must be added explicitly.
+
 ### `emit.rs` — EdgeEmitter + MRO helpers
 
 Moves:
@@ -115,12 +120,19 @@ so they can live here without additional visibility changes.
 
 Uses:
 ```rust
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use cih_core::{file_id, Edge, EdgeKind, Node, NodeId, ParsedFile,
+               RawImport, RefKind, ReferenceSite};
 use crate::{UnresolvedRef, ResolveOutput};
 use crate::index::ResolveIndex;
 use crate::contracts::resolve_contract_edges;
-use crate::types::{class_of, is_simple_ident, starts_uppercase, call_name,
-                   split_last_dot_outside_parens};
+use crate::types::{call_name, class_of, is_simple_ident,
+                   split_last_dot_outside_parens, starts_uppercase};
 ```
+
+Do **not** include `BindingKind` or `SymbolDef` — `BindingKind` is not used directly in
+`emit.rs`, and `SymbolDef` is only accessed through type inference via `all_methods()` and
+never named explicitly. Both would produce unused-import warnings.
 
 ### `tests.rs` — unit tests
 
@@ -130,13 +142,18 @@ Replaces `use super::*;` with explicit imports:
 ```rust
 use crate::index::ResolveIndex;
 use crate::types::simple_of;
-use crate::{resolve_edges, resolve_contract_edges, UnresolvedRef, ResolveOutput};
+use crate::resolve_edges;
 use cih_core::{
-    constructor_id, external_endpoint_id, field_id, kafka_topic_id, method_id, type_id,
-    BindingKind, ContractKind, ContractSite, EdgeKind, NodeKind, Range, ReferenceSite,
-    SymbolDef, TypeBinding, RawImport, ParsedFile,
+    constructor_id, external_endpoint_id, field_id, file_id, kafka_topic_id, method_id, type_id,
+    BindingKind, ContractKind, ContractSite, EdgeKind, NodeId, NodeKind, Range, ReferenceSite,
+    RawImport, SymbolDef, TypeBinding, ParsedFile,
 };
 ```
+
+Do **not** import `resolve_contract_edges`, `UnresolvedRef`, or `ResolveOutput` — the tests
+never name those types explicitly (results are accessed via field names on the inferred return
+value of `resolve_edges()`). Importing them would produce unused-import warnings. `file_id`
+and `NodeId` are required by tests that construct node IDs directly.
 
 All 23 test functions and their private helper functions (`type_def`, `method_def`,
 `field_def`, `ctor_def`, `binding`, `import`, `heritage`, `make_di_scenario`, `workspace`)
@@ -178,8 +195,15 @@ Run `cargo test -p cih-resolve` before starting. Expected: 29 tests pass (23 in
 
 ### Step 1 — Create `types.rs`
 
-Cut lines 1152–1318 from `lib.rs` (from `fn stable_dedup` through
-`fn split_last_dot_outside_parens`). Create `src/types.rs` with this content.
+Cut two **non-contiguous** ranges from `lib.rs` into `src/types.rs`:
+
+- Lines 1152–1157 (`fn stable_dedup`) — the one helper that precedes `build_mro_map`
+- Lines 1223–1318 (`fn is_type_kind` through `fn split_last_dot_outside_parens`) — all
+  eleven pure helpers
+
+**Do not cut lines 1158–1222** (`fn build_mro_map` and `fn c3_linearize`). Those
+functions take `&ResolveIndex` and belong in `emit.rs` (Step 4). Cutting the entire range
+1152–1318 would incorrectly place them in `types.rs`.
 
 Mark these `pub(crate)` (they are currently private module-level fns in `lib.rs`):
 `is_type_kind`, `simple_of`, `class_of`, `base_type_name`, `pick_binding`,
@@ -230,6 +254,7 @@ Create `src/contracts.rs`.
 
 Add required imports at the top of `contracts.rs`:
 ```rust
+use std::collections::BTreeMap;
 use cih_core::{external_endpoint_id, kafka_topic_id, ContractKind, Edge, EdgeKind, Node,
                NodeKind, ParsedFile};
 ```
@@ -246,9 +271,13 @@ Verify: `cargo check -p cih-resolve`
 
 ### Step 4 — Create `emit.rs`
 
-Cut lines 493–1047 from `lib.rs` (`struct EdgeEmitter` through the closing `}` of
-`impl EdgeEmitter`). Also cut lines 1159–1221 (`fn build_mro_map` and
-`fn c3_linearize`). Create `src/emit.rs` with both sections.
+Cut two ranges from `lib.rs` into `src/emit.rs`:
+
+- Lines 493–1047 (`struct EdgeEmitter` through the closing `}` of `impl EdgeEmitter`)
+- Lines 1158–1222 (`fn build_mro_map` and `fn c3_linearize`) — these were intentionally
+  left in `lib.rs` by Step 1 and are cut here
+
+Place `build_mro_map` and `c3_linearize` after the `impl EdgeEmitter` block in `emit.rs`.
 
 Update `emit_mro_edges` to use the accessor:
 ```rust
@@ -261,13 +290,13 @@ self.index.all_methods().iter().flat_map(...)
 At the top of `emit.rs`:
 ```rust
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use cih_core::{file_id, BindingKind, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile,
-               RefKind, ReferenceSite, RawImport, SymbolDef};
+use cih_core::{file_id, Edge, EdgeKind, Node, NodeId, ParsedFile,
+               RawImport, RefKind, ReferenceSite};
 use crate::{UnresolvedRef, ResolveOutput};
 use crate::index::ResolveIndex;
 use crate::contracts::resolve_contract_edges;
-use crate::types::{class_of, is_simple_ident, starts_uppercase, call_name,
-                   split_last_dot_outside_parens};
+use crate::types::{call_name, class_of, is_simple_ident,
+                   split_last_dot_outside_parens, starts_uppercase};
 ```
 
 Add to `lib.rs`:
@@ -299,7 +328,7 @@ Target `lib.rs` skeleton:
 //! Phase 4.1/4.2 — resolution indexes and reference-site edge emission.
 // ... module doc ...
 
-use cih_core::{NodeId, Range};
+use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};
 
 pub mod db_access;
@@ -387,3 +416,7 @@ cargo clippy -p cih-resolve --all-targets -- -D warnings
   would misrepresent the dependency relationship.
 - The `#[cfg(test)] pub(crate) fn implementors` on `ResolveIndex` (line 429) moves
   intact to `index.rs` — the attribute already limits it to test builds.
+- `fn di_impl` was private in the original `lib.rs` (called only from within that file).
+  After the split it must become `pub(crate)` because `emit.rs` calls
+  `self.index.di_impl()` across the module boundary. This is the only method whose
+  visibility must be promoted during the split.

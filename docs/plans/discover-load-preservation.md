@@ -39,7 +39,8 @@ enrichment, so MCP tools can traverse from a community into its member methods a
 
 Add a second function that accepts a slice of artifact references. It opens one staging
 session, calls `bulk_load` for each artifact set in order (analyze first, community second),
-then publishes once. `load_to_falkor` remains unchanged as a thin wrapper.
+then publishes once. Keep `load_to_falkor`'s signature unchanged, but rewrite its body as a
+thin wrapper over `load_many_to_falkor` so the staging/publish logic has only one owner.
 
 ```rust
 /// Load multiple artifact sets into one staging graph, then publish atomically.
@@ -94,6 +95,18 @@ pub(crate) fn load_many_to_falkor(
 }
 ```
 
+Then preserve the existing single-artifact public-in-crate interface:
+
+```rust
+pub(crate) fn load_to_falkor(
+    url: &str,
+    graph_key: &str,
+    artifacts: &GraphArtifacts,
+) -> Result<cih_graph_store::LoadStats> {
+    load_many_to_falkor(url, graph_key, &[artifacts])
+}
+```
+
 **Why a single staging session matters:** both `bulk_load` calls must run on the same
 `FalkorStore` instance before `publish_to` is called. If `publish_to` were called after the
 first artifact set, the live graph would contain only analyze data; the community load would
@@ -131,7 +144,21 @@ Derive `source_version` wherever it is used:
 - `DiscoverOutcome::summary` (line 162): `source_version: self.source_artifacts.version.0.as_str()`
 - `DiscoverOutcome::print_human` (line 179): `self.source_artifacts.version.0`
 
-**2b. `run_discover_core`: save full `source` instead of just its version**
+**2b. Add a small load-order helper on `DiscoverOutcome`**
+
+This gives the DB load path and tests one shared, explicit source of truth for artifact order.
+
+```rust
+impl DiscoverOutcome {
+    pub(crate) fn artifact_sets_for_load(&self) -> [&GraphArtifacts; 2] {
+        [&self.source_artifacts, &self.artifacts]
+    }
+
+    // existing summary / print_human methods...
+}
+```
+
+**2c. `run_discover_core`: save full `source` instead of just its version**
 
 Currently (line 117):
 ```rust
@@ -151,7 +178,7 @@ Ok(DiscoverOutcome {
 })
 ```
 
-**2c. `run_discover`: replace `load_to_falkor` with `load_many_to_falkor`**
+**2d. `run_discover`: replace `load_to_falkor` with `load_many_to_falkor`**
 
 Currently (line 27):
 ```rust
@@ -160,7 +187,8 @@ match load_to_falkor(url, key, &emit.artifacts) {
 
 Change to:
 ```rust
-match load_many_to_falkor(url, key, &[&emit.source_artifacts, &emit.artifacts]) {
+let artifact_sets = emit.artifact_sets_for_load();
+match load_many_to_falkor(url, key, &artifact_sets) {
 ```
 
 Update the import at the top of `discover.rs`:
@@ -173,7 +201,7 @@ sets combined.
 
 ---
 
-### 3. `crates/cih-engine/src/tests.rs` — add two new tests
+### 3. `crates/cih-engine/src/tests.rs` — add three new tests
 
 **Test 1 — `discover_preserves_analyze_artifacts_on_disk`**
 
@@ -276,39 +304,76 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
 }
 ```
 
+**Test 3 — `discover_load_artifacts_are_analyze_then_community`**
+
+Verifies the actual fixed load selection without requiring a FalkorDB instance.
+
+```rust
+#[test]
+fn discover_load_artifacts_are_analyze_then_community() {
+    let root = temp_repo();
+    write(
+        &root,
+        "src/main/java/com/example/OwnerService.java",
+        "package com.example;\n@Service\nclass OwnerService {\n  public void findAll() { helper(); }\n  private void helper() {}\n}\n",
+    );
+    let scan = scan::scan_repo(&root).unwrap();
+    let analyze = analyze_emit(&scan, all_scope()).unwrap();
+
+    let discover = run_discover_core(&root).unwrap();
+    let artifact_sets = discover.artifact_sets_for_load();
+
+    assert_eq!(artifact_sets[0].nodes_path, analyze.artifacts.nodes_path);
+    assert_eq!(artifact_sets[0].edges_path, analyze.artifacts.edges_path);
+    assert_eq!(artifact_sets[0].version.0, analyze.artifacts.version.0);
+
+    assert_eq!(artifact_sets[1].nodes_path, discover.artifacts.nodes_path);
+    assert_eq!(artifact_sets[1].edges_path, discover.artifacts.edges_path);
+    assert_eq!(artifact_sets[1].version.0, discover.artifacts.version.0);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+```
+
 ---
 
 ## Files changed
 
 | File | Change |
 |---|---|
-| `crates/cih-engine/src/db.rs` | Add `load_many_to_falkor` |
-| `crates/cih-engine/src/discover.rs` | `source_version: String` → `source_artifacts: GraphArtifacts`; update two `impl` methods; switch `run_discover` to `load_many_to_falkor` |
-| `crates/cih-engine/src/tests.rs` | Add two new tests |
+| `crates/cih-engine/src/db.rs` | Add `load_many_to_falkor`; make `load_to_falkor` delegate to it |
+| `crates/cih-engine/src/discover.rs` | `source_version: String` → `source_artifacts: GraphArtifacts`; add `artifact_sets_for_load`; switch `run_discover` to `load_many_to_falkor` |
+| `crates/cih-engine/src/tests.rs` | Add three new tests |
 
-`analyze.rs`, `db.rs` existing `load_to_falkor`, CLI flags, disk layout — all unchanged.
+`analyze.rs`, `resolve` path, CLI flags, and disk layout are unchanged. `load_to_falkor`
+keeps the same signature and single-artifact behavior.
 
 ---
 
 ## Implementation order
 
-1. Add `load_many_to_falkor` to `db.rs`. Run `cargo check -p cih-engine`.
+1. Add `load_many_to_falkor` to `db.rs`, then rewrite `load_to_falkor` as a wrapper.
+   Run `cargo check -p cih-engine`.
 2. Update `DiscoverOutcome` struct field in `discover.rs`. Fix the two `impl` methods that
    use `source_version`. Run `cargo check -p cih-engine`.
-3. Update `run_discover_core` to store `source_artifacts: source`. Run `cargo check`.
-4. Update `run_discover` to call `load_many_to_falkor`. Run `cargo check`.
-5. Add the two tests to `tests.rs`. Run `cargo test -p cih-engine`.
-6. Run `cargo test --workspace`.
+3. Add `DiscoverOutcome::artifact_sets_for_load()` returning source artifacts first and
+   community artifacts second. Run `cargo check`.
+4. Update `run_discover_core` to store `source_artifacts: source`. Run `cargo check`.
+5. Update `run_discover` to call `load_many_to_falkor` with `emit.artifact_sets_for_load()`.
+   Run `cargo check`.
+6. Add the three tests to `tests.rs`. Run `cargo test -p cih-engine discover`.
+7. Run `cargo test -p cih-engine` and `cargo test --workspace`.
 
 ---
 
 ## Acceptance criteria
 
-- [ ] `cargo test -p cih-engine discover` — both new tests pass
-- [ ] `cargo test -p cih-engine` — all existing tests pass (74 currently)
+- [ ] `cargo test -p cih-engine discover` — all three new discover tests pass
+- [ ] `cargo test -p cih-engine` — all existing tests plus the three new tests pass
 - [ ] `cargo test --workspace` — no regressions
 - [ ] `load_to_falkor` signature is unchanged — zero changes to `analyze.rs` or `resolve` path
 - [ ] After `discover`, FalkorDB staging receives analyze nodes first, community nodes second,
-      then a single `publish_to` — verified by reading `load_many_to_falkor` code structure
+      then a single `publish_to` — enforced by `DiscoverOutcome::artifact_sets_for_load()`
+      and the load-order test
 - [ ] `DiscoverSummary.falkor_nodes` and `falkor_edges` report combined counts from both
       artifact sets
