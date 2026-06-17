@@ -61,7 +61,11 @@ Output is written to `/path/to/my-repo/.cih/wiki/pages/`.
 
 ---
 
-## Run the viewer
+## Pull & run from Docker Hub
+
+No build step needed. `docker run` pulls automatically on first use; run
+`docker pull phuchoang29/yummy-cih-docs:latest` explicitly only when you want
+to force a refresh to the latest version.
 
 ### Single repo
 
@@ -93,6 +97,12 @@ docker run -d \
 Open:
 - http://localhost:3001/repo-a/
 - http://localhost:3001/repo-b/
+
+### Stop & remove
+
+```bash
+docker stop cih-docs && docker rm cih-docs
+```
 
 ### Via Docker Compose
 
