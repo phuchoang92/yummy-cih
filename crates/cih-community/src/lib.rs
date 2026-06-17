@@ -48,6 +48,7 @@ pub struct ProcessConfig {
     pub max_processes: usize,
     pub min_steps: usize,
     pub min_trace_confidence: f32,
+    pub max_states_per_entry: usize,
 }
 
 impl ProcessConfig {
@@ -58,6 +59,7 @@ impl ProcessConfig {
             max_processes: 20.max(300.min(symbol_count / 10)),
             min_steps: 3,
             min_trace_confidence: 0.5,
+            max_states_per_entry: 50_000,
         }
     }
 }

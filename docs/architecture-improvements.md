@@ -131,16 +131,24 @@ format!(
 )
 ```
 
-### 4b. BFS O(n) cycle check → O(1)
+### 4b. BFS process tracing queue memory
 **File:** `crates/cih-community/src/bfs.rs:35`
 
-`path.contains(next)` is O(path length) for every BFS neighbor. Replace:
+The process tracing BFS must not clone a full path and seen set for every active branch.
+Use a parent-pointer arena:
+
 ```rust
-// Before:
-let (path_vec, path_set) = &state;  // carry HashSet alongside Vec
-if path_set.contains(&next) { continue; }
+struct TraceState {
+    node: NodeIndex,
+    parent: Option<usize>,
+    depth: usize,
+}
 ```
-The `Vec<NodeIndex>` is still the result; the `HashSet<NodeIndex>` is dropped after the trace.
+
+Queue only `usize` state indexes. Detect cycles by walking parent pointers up to
+`max_trace_depth`, and reconstruct `Vec<NodeIndex>` only when a terminal trace is accepted.
+Also keep a hard `max_states_per_entry` cap so highly connected utility hubs cannot grow
+the frontier without bound.
 
 ### 4c. Remove duplicate `build()` free function
 **Files:** `crates/cih-search/src/bm25.rs:34–36`, `crates/cih-search/src/lib.rs:12`
