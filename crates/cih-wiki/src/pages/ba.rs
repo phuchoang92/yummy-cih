@@ -5,7 +5,8 @@ use crate::CommunityLlmSummary;
 
 pub fn render_ba_index(graph: &WikiGraph) -> String {
     let mut md = String::new();
-    md.push_str("---\ntitle: Workflow Overview\n---\n\n");
+    md.push_str("---\ntitle: Workflow Overview\nrole: ba\n---\n\n");
+    md.push_str("<div class=\"role-banner role-ba\"><span class=\"role-dot\"></span>Business Analyst<span class=\"role-desc\">Workflows, contracts &amp; event flows</span></div>\n\n");
     md.push_str("# Workflow Overview\n\n");
 
     md.push_str(&format!(
@@ -89,9 +90,10 @@ pub fn render_ba_community(
 
     let mut md = String::new();
     md.push_str(&format!(
-        "---\ntitle: {}\n---\n\n",
+        "---\ntitle: {}\nrole: ba\n---\n\n",
         community.name
     ));
+    md.push_str("<div class=\"role-banner role-ba\"><span class=\"role-dot\"></span>Business Analyst<span class=\"role-desc\">Workflows, contracts &amp; event flows</span></div>\n\n");
     md.push_str(&format!("# {} — Workflow\n\n", community.name));
 
     if let Some(summary) = llm {

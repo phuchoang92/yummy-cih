@@ -9,7 +9,8 @@ pub fn render_po_index(
     llm_enriched: bool,
 ) -> String {
     let mut md = String::new();
-    md.push_str("---\ntitle: System Overview\n---\n\n");
+    md.push_str("---\ntitle: System Overview\nrole: po\n---\n\n");
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
     md.push_str("# System Overview\n\n");
 
     if llm_enriched {
@@ -66,9 +67,10 @@ pub fn render_po_community(
 
     let mut md = String::new();
     md.push_str(&format!(
-        "---\ntitle: {}\n---\n\n",
+        "---\ntitle: {}\nrole: po\n---\n\n",
         community.name
     ));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
     md.push_str(&format!("# {}\n\n", community.name));
 
     if let Some(summary) = llm {

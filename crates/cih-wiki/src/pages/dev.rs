@@ -45,7 +45,8 @@ pub fn render_dev_index(
     unresolved_report: Option<&str>,
 ) -> String {
     let mut md = String::new();
-    md.push_str("---\ntitle: Technical Overview\n---\n\n");
+    md.push_str("---\ntitle: Technical Overview\nrole: dev\n---\n\n");
+    md.push_str("<div class=\"role-banner role-dev\"><span class=\"role-dot\"></span>Developer<span class=\"role-desc\">Technical structure, calls &amp; tests</span></div>\n\n");
     md.push_str("# Technical Overview\n\n");
 
     md.push_str("## Community Summary\n\n");
@@ -111,9 +112,10 @@ pub fn render_dev_community(
 
     let mut md = String::new();
     md.push_str(&format!(
-        "---\ntitle: {}\n---\n\n",
+        "---\ntitle: {}\nrole: dev\n---\n\n",
         community.name
     ));
+    md.push_str("<div class=\"role-banner role-dev\"><span class=\"role-dot\"></span>Developer<span class=\"role-desc\">Technical structure, calls &amp; tests</span></div>\n\n");
     md.push_str(&format!("# {} — Technical Reference\n\n", community.name));
 
     if let Some(full) = llm_full {

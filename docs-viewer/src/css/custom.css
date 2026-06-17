@@ -1,38 +1,446 @@
+/* ── CIH Docs — custom theme ─────────────────────────────────────────────── */
+
+/* ── Design tokens ───────────────────────────────────────────────────────── */
 :root {
-  --ifm-color-primary: #1a6b8a;
-  --ifm-color-primary-dark: #175f7a;
-  --ifm-color-primary-darker: #165973;
-  --ifm-color-primary-darkest: #124a5f;
-  --ifm-color-primary-light: #1d779a;
-  --ifm-color-primary-lighter: #1e7da1;
-  --ifm-color-primary-lightest: #228db5;
-  --ifm-code-font-size: 90%;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  /* Brand */
+  --ifm-color-primary:           #1a6b8a;
+  --ifm-color-primary-dark:      #175f7a;
+  --ifm-color-primary-darker:    #165973;
+  --ifm-color-primary-darkest:   #124a5f;
+  --ifm-color-primary-light:     #1d779a;
+  --ifm-color-primary-lighter:   #1e7da1;
+  --ifm-color-primary-lightest:  #228db5;
+
+  /* Role: Product Owner — emerald */
+  --cih-po-bg:        #ecfdf5;
+  --cih-po-border:    #10b981;
+  --cih-po-text:      #065f46;
+  --cih-po-pill-bg:   #d1fae5;
+
+  /* Role: Business Analyst — violet */
+  --cih-ba-bg:        #f5f3ff;
+  --cih-ba-border:    #8b5cf6;
+  --cih-ba-text:      #4c1d95;
+  --cih-ba-pill-bg:   #ede9fe;
+
+  /* Role: Developer — blue */
+  --cih-dev-bg:       #eff6ff;
+  --cih-dev-border:   #3b82f6;
+  --cih-dev-text:     #1e3a8a;
+  --cih-dev-pill-bg:  #dbeafe;
+
+  /* Typography */
+  --ifm-font-family-base: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --ifm-font-size-base:   15px;
+  --ifm-line-height-base: 1.7;
+  --ifm-code-font-size:   87%;
+
+  /* Layout */
+  --ifm-container-width:    1200px;
+  --ifm-container-width-xl: 1400px;
+  --ifm-navbar-height:      58px;
+
+  /* Misc */
+  --ifm-global-radius:    6px;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.08);
 }
 
 [data-theme='dark'] {
-  --ifm-color-primary: #4db8d8;
-  --ifm-color-primary-dark: #32afd2;
-  --ifm-color-primary-darker: #26aacd;
-  --ifm-color-primary-darkest: #1990b0;
-  --ifm-color-primary-light: #68c1de;
-  --ifm-color-primary-lighter: #74c6e0;
+  --ifm-color-primary:          #4db8d8;
+  --ifm-color-primary-dark:     #32afd2;
+  --ifm-color-primary-darker:   #26aacd;
+  --ifm-color-primary-darkest:  #1990b0;
+  --ifm-color-primary-light:    #68c1de;
+  --ifm-color-primary-lighter:  #74c6e0;
   --ifm-color-primary-lightest: #96d4e8;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+
+  --cih-po-bg:       #052e1c;
+  --cih-po-border:   #34d399;
+  --cih-po-text:     #6ee7b7;
+  --cih-po-pill-bg:  #064e3b;
+
+  --cih-ba-bg:       #2e1065;
+  --cih-ba-border:   #a78bfa;
+  --cih-ba-text:     #c4b5fd;
+  --cih-ba-pill-bg:  #4c1d95;
+
+  --cih-dev-bg:       #172554;
+  --cih-dev-border:   #60a5fa;
+  --cih-dev-text:     #93c5fd;
+  --cih-dev-pill-bg:  #1e3a8a;
+
+  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 255, 0.08);
 }
 
-/* Make role-based pages visually distinct */
+/* ── Navbar ──────────────────────────────────────────────────────────────── */
+.navbar {
+  box-shadow: 0 1px 0 0 var(--ifm-toc-border-color);
+  backdrop-filter: saturate(180%) blur(8px);
+}
+
+.navbar__brand strong {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* ── Role banners ────────────────────────────────────────────────────────── */
+.role-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 1rem;
+  border-radius: var(--ifm-global-radius);
+  margin-bottom: 1.5rem;
+  border-left: 4px solid;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.role-banner.role-po  { background: var(--cih-po-bg);  border-color: var(--cih-po-border);  color: var(--cih-po-text);  }
+.role-banner.role-ba  { background: var(--cih-ba-bg);  border-color: var(--cih-ba-border);  color: var(--cih-ba-text);  }
+.role-banner.role-dev { background: var(--cih-dev-bg); border-color: var(--cih-dev-border); color: var(--cih-dev-text); }
+
+.role-banner .role-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.role-banner.role-po  .role-dot { background: var(--cih-po-border);  }
+.role-banner.role-ba  .role-dot { background: var(--cih-ba-border);  }
+.role-banner.role-dev .role-dot { background: var(--cih-dev-border); }
+
+.role-banner .role-desc {
+  margin-left: auto;
+  font-weight: 400;
+  opacity: 0.75;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.78rem;
+}
+
+/* ── Role pill badges (inline use) ──────────────────────────────────────── */
+.role-pill {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  margin-left: 0.4rem;
+}
+.role-pill.role-po  { background: var(--cih-po-pill-bg);  color: var(--cih-po-text);  }
+.role-pill.role-ba  { background: var(--cih-ba-pill-bg);  color: var(--cih-ba-text);  }
+.role-pill.role-dev { background: var(--cih-dev-pill-bg); color: var(--cih-dev-text); }
+
+/* ── Typography ──────────────────────────────────────────────────────────── */
+.theme-doc-markdown {
+  font-size: var(--ifm-font-size-base);
+  line-height: var(--ifm-line-height-base);
+}
+
+.theme-doc-markdown h1 {
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.5rem;
+}
+
 .theme-doc-markdown h2 {
+  font-size: 1.2rem;
+  font-weight: 700;
   border-bottom: 1px solid var(--ifm-toc-border-color);
   padding-bottom: 0.3rem;
+  margin-top: 2rem;
+  letter-spacing: -0.01em;
 }
 
-/* Compact tables for class/method listings */
-table {
+.theme-doc-markdown h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--ifm-color-primary);
+}
+
+/* ── Tables ──────────────────────────────────────────────────────────────── */
+.theme-doc-markdown table {
+  font-size: 0.845rem;
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.25rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: var(--ifm-global-radius);
+  overflow: hidden;
+}
+
+.theme-doc-markdown table thead tr {
+  background: var(--ifm-table-head-background);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ifm-color-secondary-darkest);
+}
+
+.theme-doc-markdown table tbody tr:hover {
+  background: var(--ifm-menu-color-background-hover);
+  transition: background 0.1s;
+}
+
+.theme-doc-markdown table code {
+  font-size: 0.78rem;
+  white-space: nowrap;
+  background: var(--ifm-code-background);
+  padding: 0.1em 0.4em;
+  border-radius: 3px;
+}
+
+/* Method badge coloring */
+.theme-doc-markdown table td code[class*="GET"]    { color: #16a34a; }
+.theme-doc-markdown table td code[class*="POST"]   { color: #2563eb; }
+.theme-doc-markdown table td code[class*="PUT"]    { color: #d97706; }
+.theme-doc-markdown table td code[class*="DELETE"] { color: #dc2626; }
+.theme-doc-markdown table td code[class*="PATCH"]  { color: #7c3aed; }
+
+/* ── Code blocks ─────────────────────────────────────────────────────────── */
+.theme-code-block {
+  border: 1px solid var(--ifm-toc-border-color) !important;
+  border-radius: var(--ifm-global-radius) !important;
+  font-size: 0.82rem !important;
+}
+
+.theme-code-block-highlighted-line {
+  background-color: var(--docusaurus-highlighted-code-line-bg) !important;
+  display: block;
+  margin: 0 calc(-1 * var(--ifm-pre-padding));
+  padding: 0 var(--ifm-pre-padding);
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+.menu__link {
+  font-size: 0.855rem;
+  border-radius: 5px;
+  padding: 0.3rem 0.75rem;
+}
+
+.menu__link--active {
+  font-weight: 600;
+}
+
+/* Color sidebar items by path segment */
+.menu__link[href*="/po/"]:not(.menu__link--active) {
+  border-left: 2px solid transparent;
+}
+.menu__link[href*="/po/"]:hover,
+.menu__link[href*="/po/"].menu__link--active {
+  border-left: 2px solid var(--cih-po-border);
+  color: var(--cih-po-border);
+}
+
+.menu__link[href*="/ba/"]:not(.menu__link--active) {
+  border-left: 2px solid transparent;
+}
+.menu__link[href*="/ba/"]:hover,
+.menu__link[href*="/ba/"].menu__link--active {
+  border-left: 2px solid var(--cih-ba-border);
+  color: var(--cih-ba-border);
+}
+
+.menu__link[href*="/dev/"]:not(.menu__link--active) {
+  border-left: 2px solid transparent;
+}
+.menu__link[href*="/dev/"]:hover,
+.menu__link[href*="/dev/"].menu__link--active {
+  border-left: 2px solid var(--cih-dev-border);
+  color: var(--cih-dev-border);
+}
+
+/* ── TOC ─────────────────────────────────────────────────────────────────── */
+.table-of-contents__link {
+  font-size: 0.8rem;
+}
+
+.table-of-contents__link--active {
+  font-weight: 600;
+  color: var(--ifm-color-primary);
+}
+
+/* ── Admonitions ─────────────────────────────────────────────────────────── */
+.admonition {
+  border-radius: var(--ifm-global-radius);
   font-size: 0.875rem;
 }
 
-table code {
-  font-size: 0.8rem;
+/* ── CIH Homepage ────────────────────────────────────────────────────────── */
+.cih-hero {
+  padding: 3rem 2rem 2rem;
+  max-width: 860px;
+  margin: 0 auto;
+}
+
+.cih-hero h1 {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin-bottom: 0.25rem;
+}
+
+.cih-hero .cih-subtitle {
+  font-size: 1rem;
+  color: var(--ifm-color-secondary-darkest);
+  margin-bottom: 2rem;
+}
+
+.cih-stats-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 2.5rem;
+}
+
+.cih-stat-card {
+  flex: 1;
+  min-width: 120px;
+  padding: 0.9rem 1.2rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: var(--ifm-global-radius);
+  text-align: center;
+}
+
+.cih-stat-card .cih-stat-num {
+  font-size: 1.6rem;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--ifm-color-primary);
+}
+
+.cih-stat-card .cih-stat-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ifm-color-secondary-darkest);
+  margin-top: 0.2rem;
+}
+
+.cih-persona-nav {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 2.5rem;
+}
+
+.cih-persona-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.1rem;
+  border-radius: var(--ifm-global-radius);
+  text-decoration: none !important;
+  font-weight: 600;
+  font-size: 0.875rem;
+  border: 2px solid;
+  transition: background 0.12s, transform 0.1s;
+}
+.cih-persona-btn:hover {
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.cih-persona-btn.po {
+  border-color: var(--cih-po-border);
+  color: var(--cih-po-text) !important;
+  background: var(--cih-po-bg);
+}
+.cih-persona-btn.ba {
+  border-color: var(--cih-ba-border);
+  color: var(--cih-ba-text) !important;
+  background: var(--cih-ba-bg);
+}
+.cih-persona-btn.dev {
+  border-color: var(--cih-dev-border);
+  color: var(--cih-dev-text) !important;
+  background: var(--cih-dev-bg);
+}
+
+.cih-section-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ifm-color-secondary-darkest);
+  margin-bottom: 0.75rem;
+}
+
+.cih-community-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 2rem;
+}
+
+.cih-community-card {
+  display: block;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: var(--ifm-global-radius);
+  text-decoration: none !important;
+  color: inherit !important;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.cih-community-card:hover {
+  border-color: var(--ifm-color-primary);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  text-decoration: none;
+}
+
+.cih-community-card .cih-card-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.3rem;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cih-community-card .cih-card-meta {
+  font-size: 0.72rem;
+  color: var(--ifm-color-secondary-darkest);
+  display: flex;
+  gap: 0.75rem;
+}
+
+/* Multi-repo homepage */
+.cih-repo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.cih-repo-card {
+  display: block;
+  padding: 1.1rem 1.3rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: var(--ifm-global-radius);
+  text-decoration: none !important;
+  color: inherit !important;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.cih-repo-card:hover {
+  border-color: var(--ifm-color-primary);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+}
+.cih-repo-card strong {
+  font-size: 1rem;
+  display: block;
+  margin-bottom: 0.2rem;
+}
+.cih-repo-card small {
+  color: var(--ifm-color-secondary-darkest);
+  font-size: 0.78rem;
 }
