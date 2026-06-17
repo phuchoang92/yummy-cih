@@ -3,15 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result};
 use cih_core::{
     constructor_id, field_id, file_id, method_id, type_id, BindingKind, ContractKind, ContractSite,
-    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite,
-    SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
+    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind,
+    ReferenceSite, SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
 };
-use cih_lang::java::JavaProvider;
-use cih_lang::LanguageProvider;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, QueryCursor, Tree};
 
-use crate::ParsedUnit;
+use crate::LanguageProvider;
+use super::JavaProvider;
 
 #[derive(Clone, Debug)]
 struct TypeContext {
@@ -57,10 +56,7 @@ struct FileBuilder {
     callable_contexts: Vec<CallableContext>,
 }
 
-pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParsedUnit> {
-    let provider = JavaProvider::new();
-    // Uses cih-lang's thread-local parser: one parser per rayon worker, reused
-    // across the files that worker processes (no per-file parser construction).
+pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> Result<ParsedUnit> {
     let tree = provider
         .parse(src)
         .with_context(|| format!("failed to parse {rel}"))?;
@@ -74,7 +70,7 @@ pub(crate) fn parse_java_file(rel: &str, src: &str) -> Result<ParsedUnit> {
     };
 
     collect_declarations(root, src, &mut builder, None);
-    collect_query_ir(&provider, &tree, src, &mut builder);
+    collect_query_ir(provider, &tree, src, &mut builder);
     collect_heritage_references(root, src, &mut builder);
     collect_spring_routes(root, src, &mut builder);
     collect_contract_sites(root, src, &mut builder);
@@ -180,10 +176,6 @@ fn collect_declarations(
             "method_declaration" => collect_method(node, src, builder, owner),
             "constructor_declaration" => collect_constructor(node, src, builder, owner),
             "field_declaration" => collect_fields(node, src, builder, owner),
-            // TODO(phase-3 gap): enum constants (`enum_constant`) and record header
-            // components (`formal_parameter` in a `record_declaration`) are not yet
-            // emitted as Field members. Acceptable for structure; revisit if context
-            // queries need them.
             _ => {}
         }
     }
@@ -248,8 +240,6 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         confidence: 1.0,
         reason: "member".into(),
     });
-    // @Test method → TESTS edge to the owner class (test method covers the production class
-    // it's named after; deeper method-level coverage follows CALLS edges at query time).
     if is_test_method {
         builder.edges.push(Edge {
             src: id.clone(),
@@ -328,8 +318,6 @@ fn collect_constructor(
 
 fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner: &TypeContext) {
     let declared_type = node.child_by_field_name("type").map(|ty| text(ty, src));
-    // In a test class, @MockBean / @Autowired fields create a structural TESTS link from the
-    // test class to the production type (test class exercises that type's public API).
     let is_mock_field = owner.is_test && is_mock_or_injected_field(node, src);
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -361,19 +349,12 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             confidence: 1.0,
             reason: "member".into(),
         });
-        // TESTS edge: test class → raw type name resolved as a Class node id.
-        // The type is unresolved here; we emit the edge using the raw simple name.
-        // Phase 4 resolution does not process TESTS edges — the FalkorDB Cypher query
-        // matches by name when the type is actually in the graph.
         if is_mock_field {
             if let Some(raw_ty) = declared_type.as_deref() {
-                // Strip generics: "List<Order>" → "Order" is done via simple_type_name.
                 let simple = simple_type_name(raw_ty);
                 if !simple.is_empty() {
                     builder.edges.push(Edge {
                         src: owner.id.clone(),
-                        // Use a Class: prefix; if it's an interface it will be found by
-                        // candidates_by_name at query time anyway.
                         dst: NodeId::new(format!("Class:{simple}")),
                         kind: EdgeKind::Tests,
                         confidence: 0.7,
@@ -520,9 +501,6 @@ fn reference_anchor<'a>(captures: &'a BTreeMap<String, TsNode<'a>>) -> Option<Re
     None
 }
 
-/// Build a `TypeBinding` from a `@type-binding.*` query match (params, locals,
-/// fields, `var` inference, patterns, aliases). The anchor capture's tag (and, for
-/// `.annotation`, the anchor node kind) determines the `BindingKind`.
 fn type_binding(
     captures: &BTreeMap<String, TsNode<'_>>,
     src: &str,
@@ -553,12 +531,9 @@ fn binding_kind(tag: &str, anchor: TsNode<'_>) -> BindingKind {
         "type-binding.parameter" => BindingKind::Param,
         "type-binding.call-result" => BindingKind::CallResult,
         "type-binding.alias" => BindingKind::Alias,
-        // `var x = new User();` — concrete inferred local.
         "type-binding.constructor" => BindingKind::Local,
         "type-binding.return" => BindingKind::Return,
         "type-binding.pattern" => BindingKind::Pattern,
-        // `.annotation` covers fields AND locals/enhanced-for — the anchor node
-        // kind disambiguates (field_declaration → Field, otherwise Local).
         "type-binding.annotation" => match anchor.kind() {
             "field_declaration" => BindingKind::Field,
             _ => BindingKind::Local,
@@ -617,9 +592,6 @@ fn collect_heritage_references(node: TsNode<'_>, src: &str, builder: &mut FileBu
     }
 }
 
-/// The enclosing type's `(fqcn, node id)` for a heritage clause — the EXTENDS/
-/// IMPLEMENTS edge source. Cloned up front so the immutable index borrow ends
-/// before the emit functions borrow `builder` mutably.
 fn heritage_owner(node: TsNode<'_>, builder: &FileBuilder) -> (String, NodeId) {
     match type_context_at(node.start_byte(), builder) {
         Some(ctx) => (ctx.fqcn.clone(), ctx.id.clone()),
@@ -902,9 +874,6 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
     }
 }
 
-// ── SQL constant + execution site extraction ──────────────────────────────────
-
-/// Collect `private static final String QUERY_... = "..."` constants.
 fn collect_sql_constants(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
     collect_sql_constants_in(root, src, builder, None);
 }
@@ -946,17 +915,14 @@ fn try_extract_sql_constant(
     src: &str,
     owner_fqcn: &str,
 ) -> Option<SqlConstant> {
-    // Must have `static` and `final` modifiers.
     let mods = modifiers(node, src);
     if !mods.iter().any(|m| m == "static") || !mods.iter().any(|m| m == "final") {
         return None;
     }
-    // Type must be `String`.
     let type_node = node.child_by_field_name("type")?;
     if text(type_node, src) != "String" {
         return None;
     }
-    // Find the variable declarator(s).
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() != "variable_declarator" {
@@ -964,7 +930,6 @@ fn try_extract_sql_constant(
         }
         let name_node = child.child_by_field_name("name")?;
         let const_name = text(name_node, src);
-        // Only SCREAMING_SNAKE_CASE identifiers (all uppercase + digits + underscore).
         if const_name.is_empty()
             || !const_name
                 .chars()
@@ -990,13 +955,10 @@ fn try_extract_sql_constant(
     None
 }
 
-/// Fold a string initializer expression into a single SQL string.
-/// String literals concatenated with `+` are joined; non-literal operands set `dynamic=true`.
 fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
     match node.kind() {
         "string_literal" => {
             let raw = text(node, src);
-            // Strip surrounding quotes and unescape basic Java string escapes.
             let inner = if raw.len() >= 2 {
                 &raw[1..raw.len() - 1]
             } else {
@@ -1011,7 +973,6 @@ fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
             (unescaped, false)
         }
         "binary_expression" => {
-            // `left + right` — recursively fold.
             if node.child_by_field_name("operator").map(|op| text(op, src)).as_deref()
                 != Some("+")
             {
@@ -1031,21 +992,16 @@ fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
             )
         }
         "parenthesized_expression" => {
-            // Unwrap one layer of parentheses.
             if let Some(inner) = node.named_child(0) {
                 fold_string_init(inner, src)
             } else {
                 (String::new(), true)
             }
         }
-        _ => {
-            // Any non-literal operand (identifier, method call, etc.) → dynamic.
-            (String::new(), true)
-        }
+        _ => (String::new(), true),
     }
 }
 
-/// Collect sites where a known DB execution API is called.
 fn collect_sql_execution_sites(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
     collect_sql_execution_sites_in(root, src, builder);
 }
@@ -1062,7 +1018,6 @@ fn collect_sql_execution_sites_in(node: TsNode<'_>, src: &str, builder: &mut Fil
     }
 }
 
-/// DB execution APIs we recognise.
 const DBUTIL_METHODS: &[&str] = &["prepareStatement", "executeQuery", "executeUpdate"];
 const JDBC_TEMPLATE_METHODS: &[&str] =
     &["query", "update", "queryForObject", "queryForList", "queryForMap", "batchUpdate"];
@@ -1081,10 +1036,8 @@ fn try_extract_execution_site(
     let object = node.child_by_field_name("object")?;
     let receiver = text(object, src);
 
-    // ── DBUtil.prepareStatement / executeQuery / executeUpdate ────────────────
-    // Static call: receiver text is exactly "DBUtil".
     if receiver == "DBUtil" && DBUTIL_METHODS.contains(&method.as_str()) {
-        let const_ref = nth_identifier_argument(node, src, 1); // 2nd arg = SQL constant
+        let const_ref = nth_identifier_argument(node, src, 1);
         if const_ref.is_some() || method == "prepareStatement" {
             return Some(SqlExecutionSite {
                 api_name: method,
@@ -1096,11 +1049,9 @@ fn try_extract_execution_site(
         }
     }
 
-    // ── JdbcTemplate.query / update / etc. ───────────────────────────────────
     if JDBC_TEMPLATE_METHODS.contains(&method.as_str())
         && receiver_has_type(builder, &in_fqcn, &receiver, "JdbcTemplate")
     {
-        // First argument is the SQL (identifier or string literal).
         let (const_ref, inline_sql) = first_sql_argument(node, src);
         if const_ref.is_some() || inline_sql.is_some() {
             return Some(SqlExecutionSite {
@@ -1116,7 +1067,6 @@ fn try_extract_execution_site(
     None
 }
 
-/// Return the Nth argument (0-based) if it's a plain identifier (field reference).
 fn nth_identifier_argument(node: TsNode<'_>, src: &str, n: usize) -> Option<String> {
     let arguments = node.child_by_field_name("arguments")?;
     let mut count = 0;
@@ -1139,7 +1089,6 @@ fn nth_identifier_argument(node: TsNode<'_>, src: &str, n: usize) -> Option<Stri
     None
 }
 
-/// Return the first argument as (const_ref, inline_sql) — one will be Some.
 fn first_sql_argument(node: TsNode<'_>, src: &str) -> (Option<String>, Option<String>) {
     let Some(arguments) = node.child_by_field_name("arguments") else {
         return (None, None);
@@ -1408,8 +1357,6 @@ fn spring_http_method(annotation: &str) -> Option<&'static str> {
         "PutMapping" => Some("PUT"),
         "DeleteMapping" => Some("DELETE"),
         "PatchMapping" => Some("PATCH"),
-        // `@RequestMapping` is a class prefix here. Method-level forms need
-        // `method = RequestMethod.X`, which Phase 3 intentionally skips.
         _ => None,
     }
 }
@@ -1431,7 +1378,6 @@ fn route_values(annotation: TsNode<'_>, src: &str) -> Vec<String> {
                     out.push(value);
                 }
             }
-            // Positional array: @GetMapping({"/a", "/b"})
             "element_value_array_initializer" | "array_initializer" => {
                 for string_node in string_literals(child) {
                     if let Some(value) = unquote_spring_literal(&text(string_node, src)) {
@@ -1594,9 +1540,6 @@ fn parameter_count(node: TsNode<'_>) -> u16 {
     let mut count = 0u16;
     let mut cursor = parameters.walk();
     for child in parameters.named_children(&mut cursor) {
-        // `receiver_parameter` (`void m(Foo this, ...)`) is NOT an argument callers
-        // pass — counting it would make the method-id arity off-by-one versus call
-        // sites (which count arguments), silently breaking Phase-4 resolution.
         if matches!(child.kind(), "formal_parameter" | "spread_parameter") {
             count = count.saturating_add(1);
         }
@@ -1604,9 +1547,6 @@ fn parameter_count(node: TsNode<'_>) -> u16 {
     count
 }
 
-/// Raw (unresolved) parameter type names for a method/constructor, ordered, with
-/// the same `formal_parameter | spread_parameter` filter as `parameter_count` (so
-/// `param_types.len()` matches arity; the explicit receiver is excluded).
 fn param_type_names(node: TsNode<'_>, src: &str) -> Vec<String> {
     let Some(parameters) = node.child_by_field_name("parameters") else {
         return Vec::new();
@@ -1627,7 +1567,6 @@ fn param_type_names(node: TsNode<'_>, src: &str) -> Vec<String> {
     out
 }
 
-/// Raw return type name for a method (`None` for `void` / no type field).
 fn return_type_name(node: TsNode<'_>, src: &str) -> Option<String> {
     let ty = node.child_by_field_name("type")?;
     if ty.kind() == "void_type" {
@@ -1688,8 +1627,6 @@ fn callable_context_at(byte: usize, builder: &FileBuilder) -> Option<&CallableCo
         .max_by_key(|ctx| ctx.start_byte)
 }
 
-/// The graph node id of the callable enclosing `byte` (the edge SOURCE for a
-/// reference). Falls back to the enclosing type, then the file — never dangles.
 fn callable_id_for(byte: usize, builder: &FileBuilder) -> NodeId {
     callable_context_at(byte, builder)
         .map(|ctx| ctx.id.clone())
@@ -1745,9 +1682,6 @@ fn modifiers(node: TsNode<'_>, src: &str) -> Vec<String> {
         .collect()
 }
 
-/// The class's specific stereotype, read from its OWN annotations only (not the body,
-/// so a `@Service` with a `@GetMapping` method is not mistaken for a controller).
-/// First matching annotation wins.
 fn class_stereotype(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<&'static str> {
     for annotation in annotations(node) {
         let mapped = match annotation_name(annotation, src).as_deref() {
@@ -1757,7 +1691,7 @@ fn class_stereotype(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<&'
             Some("Configuration") => "configuration",
             Some("Component") => "component",
             Some("Entity") => "entity",
-            Some("Path") => "resource", // JAX-RS
+            Some("Path") => "resource",
             Some("SpringBootTest")
             | Some("ExtendWith")
             | Some("RunWith")
@@ -1769,7 +1703,6 @@ fn class_stereotype(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<&'
         };
         return Some(mapped);
     }
-    // Naming-convention fallback: *Test / *Tests / *IT / *Spec
     if simple_name.ends_with("Test")
         || simple_name.ends_with("Tests")
         || simple_name.ends_with("IT")
@@ -1804,8 +1737,6 @@ fn is_mock_or_injected_field(node: TsNode<'_>, src: &str) -> bool {
     })
 }
 
-/// Strip generic parameters and array brackets from a raw type name.
-/// "List<Order>" → "List", "Order[]" → "Order", "Order" → "Order".
 fn simple_type_name(raw: &str) -> &str {
     let s = raw.trim();
     let s = s.split('<').next().unwrap_or(s);
@@ -1826,13 +1757,10 @@ const JPA_INTERFACES: &[&str] = &[
     "JpaSpecificationExecutor",
 ];
 
-/// Returns `(is_jpa_repo, entity_type_short_name)`.
-/// Checks the `implements` clause for known Spring Data interfaces.
 fn jpa_repository_props(node: TsNode<'_>, src: &str) -> (bool, Option<String>) {
     let Some(interfaces_node) = node.child_by_field_name("interfaces") else {
         return (false, None);
     };
-    // super_interfaces → type_list → (type_identifier | generic_type)*
     let scan_node = first_named_child(interfaces_node, "interface_type_list")
         .or_else(|| first_named_child(interfaces_node, "type_list"))
         .unwrap_or(interfaces_node);
@@ -1846,14 +1774,11 @@ fn jpa_repository_props(node: TsNode<'_>, src: &str) -> (bool, Option<String>) {
                 }
             }
             "generic_type" => {
-                // generic_type has no "name" field; the type identifier is the first named child.
                 let Some(name_node) = child.named_child(0) else {
                     continue;
                 };
                 let name = text(name_node, src);
                 if JPA_INTERFACES.contains(&name.as_str()) {
-                    // generic_type: [type_identifier, type_arguments]; type_arguments has no field name.
-                    // Use named_child(1) to access type_arguments, then named_child(0) for entity type.
                     let entity = child
                         .named_child(1)
                         .and_then(|args| args.named_child(0))
@@ -1882,10 +1807,8 @@ fn build_class_props(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<s
 
 fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     let mut cursor = node.walk();
-    let found = node
-        .named_children(&mut cursor)
-        .find(|child| child.kind() == kind);
-    found
+    let result = node.named_children(&mut cursor).find(|child| child.kind() == kind);
+    result
 }
 
 fn normalize_builder(builder: &mut FileBuilder) {

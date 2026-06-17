@@ -193,7 +193,7 @@ pub(crate) fn analyze_emit_with_options(
     request: ScopeRequest,
     cache: AnalyzeCacheOptions,
 ) -> Result<EmitOutcome> {
-    let scope_file = scope::resolve(&scan.repo_map, &scan.java_files, request)?;
+    let scope_file = scope::resolve(&scan.repo_map, &scan.source_files, request)?;
     let scope_path = scope::write_scope_file(&scope_file)?;
     analyze_from_scope_with_options(scope_file, scope_path, &scan.repo_map.jars, cache)
 }
@@ -427,6 +427,12 @@ enum ParseScopeOutcome {
     },
 }
 
+fn default_registry() -> cih_parse::LanguageRegistry {
+    let mut r = cih_parse::LanguageRegistry::new();
+    r.register(cih_lang::java::JavaProvider::new());
+    r
+}
+
 fn parse_scope(
     repo_root: &Path,
     cih_dir: &Path,
@@ -439,7 +445,7 @@ fn parse_scope(
 
     if !cache.use_cache {
         tracing::info!(files = files.len(), "cache disabled — parsing all files");
-        let unit_output = cih_parse::parse_file_units(repo_root, files)?;
+        let unit_output = cih_parse::parse_file_units(repo_root, files, &default_registry())?;
         for unit in &unit_output.units {
             if let Some(hash) = current_hashes.get(&unit.rel) {
                 save_cached_parsed(cih_dir, hash, unit)?;
@@ -554,7 +560,7 @@ fn parse_scope(
         cache_hits_pre,
     );
 
-    let unit_output = cih_parse::parse_file_units(repo_root, &to_parse)?;
+    let unit_output = cih_parse::parse_file_units(repo_root, &to_parse, &default_registry())?;
     tracing::info!(
         parsed = unit_output.units.len(),
         skipped = unit_output.skipped.len(),

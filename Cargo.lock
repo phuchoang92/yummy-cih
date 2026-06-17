@@ -511,6 +511,7 @@ dependencies = [
  "cih-falkor",
  "cih-graph-store",
  "cih-jar",
+ "cih-lang",
  "cih-parse",
  "cih-resolve",
  "cih-wiki",
@@ -570,7 +571,10 @@ dependencies = [
 name = "cih-lang"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "cih-core",
  "once_cell",
+ "serde_json",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-java",

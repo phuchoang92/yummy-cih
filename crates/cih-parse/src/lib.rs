@@ -11,11 +11,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use cih_core::{file_id, folder_id, Edge, EdgeKind, Node, NodeId, ParsedFile, Range};
+use cih_lang::LanguageProvider;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-mod java;
 pub mod sql;
+
+pub use cih_core::ParsedUnit;
 
 #[derive(Clone, Debug, Default)]
 pub struct ParseOutput {
@@ -44,25 +46,45 @@ pub struct ParseArtifacts {
     pub parsed_files_path: PathBuf,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ParsedUnit {
-    pub rel: String,
-    pub nodes: Vec<Node>,
-    pub edges: Vec<Edge>,
-    pub parsed_file: ParsedFile,
+pub struct LanguageRegistry {
+    providers: Vec<Box<dyn LanguageProvider>>,
 }
 
-pub fn parse_files(repo_root: &Path, files: &[String]) -> Result<ParseOutput> {
-    let output = parse_file_units(repo_root, files)?;
+impl LanguageRegistry {
+    pub fn new() -> Self {
+        Self { providers: vec![] }
+    }
+
+    pub fn register(&mut self, p: impl LanguageProvider + 'static) {
+        self.providers.push(Box::new(p));
+    }
+
+    pub fn provider_for(&self, path: &str) -> Option<&dyn LanguageProvider> {
+        self.providers
+            .iter()
+            .find(|p| p.extensions().iter().any(|ext| path.ends_with(ext)))
+            .map(|p| p.as_ref())
+    }
+
+    pub fn all_extensions(&self) -> Vec<&'static str> {
+        self.providers
+            .iter()
+            .flat_map(|p| p.extensions().iter().copied())
+            .collect()
+    }
+}
+
+pub fn parse_files(repo_root: &Path, files: &[String], registry: &LanguageRegistry) -> Result<ParseOutput> {
+    let output = parse_file_units(repo_root, files, registry)?;
     Ok(parse_output_from_units(output.units, output.skipped))
 }
 
-pub fn parse_file_units(repo_root: &Path, files: &[String]) -> Result<ParseUnitsOutput> {
+pub fn parse_file_units(repo_root: &Path, files: &[String], registry: &LanguageRegistry) -> Result<ParseUnitsOutput> {
     // Per-file failures are collected, not propagated: one unreadable/garbage file
     // must not abort indexing of a 12k-file repo.
     let results = files
         .par_iter()
-        .map(|rel| (rel.clone(), parse_one(repo_root, rel)))
+        .map(|rel| (rel.clone(), parse_one(registry, repo_root, rel)))
         .collect::<Vec<_>>();
 
     let mut units = Vec::new();
@@ -148,13 +170,16 @@ pub fn load_parsed_files(dir: &Path) -> Result<Vec<ParsedFile>> {
     Ok(out)
 }
 
-fn parse_one(repo_root: &Path, rel: &str) -> Result<ParsedUnit> {
+fn parse_one(registry: &LanguageRegistry, repo_root: &Path, rel: &str) -> Result<ParsedUnit> {
     let path = repo_root.join(rel);
     let src =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     // The File node + its Folder ancestry + CONTAINS edges are emitted centrally by
     // `add_structure_path` during merge, so the parse unit only carries declarations.
-    java::parse_java_file(rel, &src)
+    registry
+        .provider_for(rel)
+        .ok_or_else(|| anyhow::anyhow!("no language provider for {rel}"))?
+        .parse_file(rel, &src)
 }
 
 fn add_structure_path(
@@ -238,6 +263,12 @@ mod tests {
         constructor_id, field_id, method_id, type_id, BindingKind, ContractKind, RefKind,
     };
 
+    fn java_registry() -> LanguageRegistry {
+        let mut r = LanguageRegistry::new();
+        r.register(cih_lang::java::JavaProvider::new());
+        r
+    }
+
     fn temp_repo() -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -292,7 +323,7 @@ class OwnerController extends Base implements Handler {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let parsed = output.parsed_files.first().unwrap();
@@ -409,7 +440,7 @@ class OwnerController extends Base implements Handler {
         fs::write(&good_path, "package com.example;\nclass Ok {}\n").unwrap();
 
         let missing = "src/main/java/com/example/Missing.java"; // never created on disk
-        let output = parse_files(&root, &[good.to_string(), missing.to_string()]).unwrap();
+        let output = parse_files(&root, &[good.to_string(), missing.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         // The good file parsed; the missing one was skipped, not fatal.
@@ -435,7 +466,7 @@ class OwnerController extends Base implements Handler {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         // Arity counts the single argument `int x`, not the explicit receiver.
@@ -482,7 +513,7 @@ class Plain {}
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(
@@ -522,7 +553,7 @@ class OwnerController {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
         let parsed = output.parsed_files.first().unwrap();
 
@@ -596,7 +627,7 @@ class Multi {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         for path in ["Route:GET /a", "Route:GET /b"] {
@@ -647,7 +678,7 @@ class ContractClient {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
         let parsed = output.parsed_files.first().unwrap();
 
@@ -719,7 +750,7 @@ class AppConfig {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let bean_id = method_id("com.example.AppConfig", "dataSource", 0);
@@ -748,7 +779,7 @@ class AppConfig {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let id = method_id("com.example.Plain", "produce", 0);
@@ -767,7 +798,7 @@ class AppConfig {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(
@@ -794,7 +825,7 @@ class AppConfig {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(
@@ -815,7 +846,7 @@ class AppConfig {
         )
         .unwrap();
 
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(
@@ -849,7 +880,7 @@ public class OrderServiceTest {
 }
 "#,
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         // Node props should carry stereotype="test"
@@ -875,7 +906,7 @@ public class OrderServiceTest {
             rel,
             "package com.example;\npublic class PaymentServiceIT {}\n",
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let test_node = output
@@ -907,7 +938,7 @@ public class FooTest {
 }
 "#,
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         // The @Test method node should have isTest=true in props.
@@ -961,7 +992,7 @@ public class BarTest {
 }
 "#,
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let test_class_id = type_id(cih_core::NodeKind::Class, "com.example.BarTest");
@@ -995,7 +1026,7 @@ public class OverdraftAdapterImpl {
 }
 "#,
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let parsed = output.parsed_files.first().unwrap();
@@ -1033,7 +1064,7 @@ public class Adapter {
 }
 "#,
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let parsed = output.parsed_files.first().unwrap();
@@ -1061,7 +1092,7 @@ public class Adapter {
 }
 "#,
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let parsed = output.parsed_files.first().unwrap();
@@ -1092,7 +1123,7 @@ public class OverdraftAdapterImpl {
 }
 "#,
         );
-        let output = parse_files(&root, &[rel.to_string()]).unwrap();
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         let parsed = output.parsed_files.first().unwrap();
@@ -1104,5 +1135,22 @@ public class OverdraftAdapterImpl {
             "DBUtil.executeQuery site not extracted: {:?}",
             parsed.sql_execution_sites
         );
+    }
+
+    #[test]
+    fn registry_dispatches_to_correct_provider_by_extension() {
+        // A registry with a mock second provider that claims ".txt" extension.
+        // Verifies that provider_for routes by extension and that a Java file
+        // dispatches to JavaProvider while an unknown extension returns None.
+        let mut r = LanguageRegistry::new();
+        r.register(cih_lang::java::JavaProvider::new());
+
+        assert!(r.provider_for("Foo.java").is_some(), "Java provider should match .java");
+        assert!(r.provider_for("Foo.py").is_none(), "No provider registered for .py");
+        assert!(r.provider_for("Foo.txt").is_none(), "No provider registered for .txt");
+
+        let exts = r.all_extensions();
+        assert!(exts.contains(&".java"), "all_extensions should include .java");
+        assert!(!exts.contains(&".py"), ".py not registered");
     }
 }

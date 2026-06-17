@@ -198,6 +198,16 @@ pub struct TypeBinding {
     pub range: Range,
 }
 
+/// Per-file parse output: graph nodes/edges produced for this file, plus the
+/// unresolved IR that the resolution phase consumes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParsedUnit {
+    pub rel: String,
+    pub nodes: Vec<crate::Node>,
+    pub edges: Vec<crate::Edge>,
+    pub parsed_file: ParsedFile,
+}
+
 /// Origin of a [`TypeBinding`] — determines resolution precedence (nearest
 /// param/local beats a field) and how `raw_type` is interpreted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

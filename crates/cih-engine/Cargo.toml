@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 cih-core.workspace = true
 cih-community.workspace = true
+cih-lang.workspace = true
 cih-wiki.workspace = true
 cih-embed.workspace = true
 cih-falkor.workspace = true

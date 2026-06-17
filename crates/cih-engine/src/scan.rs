@@ -80,11 +80,11 @@ struct ModuleAggregate {
 #[derive(Clone, Debug)]
 pub(crate) struct ScanResult {
     pub repo_map: RepoMap,
-    pub java_files: Vec<OwnedJavaFile>,
+    pub source_files: Vec<OwnedSourceFile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnedJavaFile {
+pub(crate) struct OwnedSourceFile {
     pub rel: String,
     pub module_rel: Option<String>,
 }
@@ -178,9 +178,9 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     }
 
     let (all_deps, own_group_prefix, artifact_to_name) = jar_discovery_inputs(&candidates);
-    let (aggregates, mut owned_java_files) = collect_java_aggregates(&candidates, &java_files);
+    let (aggregates, mut owned_source_files) = collect_java_aggregates(&candidates, &java_files);
     let modules = build_modules_from_aggregates(candidates, aggregates, &artifact_to_name);
-    owned_java_files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    owned_source_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let discovered_jars = discover_and_link_jars(&root, &all_deps, &own_group_prefix);
     tracing::info!(jars = discovered_jars.len(), "JAR discovery complete");
@@ -206,7 +206,7 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
 
     Ok(ScanResult {
         repo_map,
-        java_files: owned_java_files,
+        source_files: owned_source_files,
     })
 }
 
@@ -243,13 +243,13 @@ fn jar_discovery_inputs(
 fn collect_java_aggregates(
     candidates: &[ModuleCandidate],
     java_files: &[JavaFileInfo],
-) -> (BTreeMap<String, ModuleAggregate>, Vec<OwnedJavaFile>) {
+) -> (BTreeMap<String, ModuleAggregate>, Vec<OwnedSourceFile>) {
     let mut aggregates: BTreeMap<String, ModuleAggregate> = BTreeMap::new();
-    let mut owned_java_files = Vec::new();
+    let mut owned_source_files = Vec::new();
 
     for java in java_files {
         let module_rel = find_owner_module(candidates, &java.path).map(str::to_string);
-        owned_java_files.push(OwnedJavaFile {
+        owned_source_files.push(OwnedSourceFile {
             rel: java.path.clone(),
             module_rel: module_rel.clone(),
         });
@@ -265,7 +265,7 @@ fn collect_java_aggregates(
         }
     }
 
-    (aggregates, owned_java_files)
+    (aggregates, owned_source_files)
 }
 
 fn build_modules_from_aggregates(
@@ -417,23 +417,23 @@ mod tests {
         assert_eq!(decompiled.java_files, 1);
         assert_eq!(decompiled.spring.services, 1);
 
-        assert_eq!(scan.java_files.len(), 3);
+        assert_eq!(scan.source_files.len(), 3);
         assert_eq!(
-            scan.java_files
+            scan.source_files
                 .iter()
                 .find(|file| file.rel.ends_with("OwnerController.java"))
                 .and_then(|file| file.module_rel.as_deref()),
             Some("app")
         );
         assert_eq!(
-            scan.java_files
+            scan.source_files
                 .iter()
                 .find(|file| file.rel.ends_with("OwnerRepository.java"))
                 .and_then(|file| file.module_rel.as_deref()),
             Some("infra")
         );
         assert_eq!(
-            scan.java_files
+            scan.source_files
                 .iter()
                 .find(|file| file.rel.ends_with("LibService.java"))
                 .and_then(|file| file.module_rel.as_deref()),

@@ -7,7 +7,7 @@ use cih_core::RepoMap;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::scan::OwnedJavaFile;
+use crate::scan::OwnedSourceFile;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -43,7 +43,7 @@ impl ScopeRequest {
 
 pub(crate) fn resolve(
     repo_map: &RepoMap,
-    java_files: &[OwnedJavaFile],
+    java_files: &[OwnedSourceFile],
     request: ScopeRequest,
 ) -> Result<ScopeFile> {
     if !request.has_selector() {
@@ -165,7 +165,7 @@ fn module_matches(module_rel: Option<&str>, selected: &BTreeSet<String>) -> bool
 }
 
 fn matches_selector(
-    file: &OwnedJavaFile,
+    file: &OwnedSourceFile,
     request: &ScopeRequest,
     selected_module_rels: &BTreeSet<String>,
     include_globs: Option<&GlobSet>,
@@ -243,7 +243,7 @@ mod tests {
         }
     }
 
-    fn java_files() -> Vec<OwnedJavaFile> {
+    fn source_files() -> Vec<OwnedSourceFile> {
         vec![
             owned("app/src/main/java/App.java", Some("app")),
             owned("infra/src/main/java/Repo.java", Some("infra")),
@@ -254,8 +254,8 @@ mod tests {
         ]
     }
 
-    fn owned(rel: &str, module_rel: Option<&str>) -> OwnedJavaFile {
-        OwnedJavaFile {
+    fn owned(rel: &str, module_rel: Option<&str>) -> OwnedSourceFile {
+        OwnedSourceFile {
             rel: rel.into(),
             module_rel: module_rel.map(str::to_string),
         }
@@ -265,7 +265,7 @@ mod tests {
     fn module_selector_keeps_only_that_modules_files() {
         let scope = resolve(
             &repo_map(),
-            &java_files(),
+            &source_files(),
             ScopeRequest {
                 modules: vec!["app".into()],
                 ..ScopeRequest::default()
@@ -282,7 +282,7 @@ mod tests {
     fn all_excludes_decompiled_unless_requested() {
         let without_decompiled = resolve(
             &repo_map(),
-            &java_files(),
+            &source_files(),
             ScopeRequest {
                 all: true,
                 ..ScopeRequest::default()
@@ -293,7 +293,7 @@ mod tests {
 
         let with_decompiled = resolve(
             &repo_map(),
-            &java_files(),
+            &source_files(),
             ScopeRequest {
                 all: true,
                 include_decompiled: true,
@@ -308,7 +308,7 @@ mod tests {
     fn exclude_glob_removes_matches_after_selection() {
         let scope = resolve(
             &repo_map(),
-            &java_files(),
+            &source_files(),
             ScopeRequest {
                 all: true,
                 exclude: vec!["infra/**".into()],
@@ -326,8 +326,8 @@ mod tests {
             all: true,
             ..ScopeRequest::default()
         };
-        let first = resolve(&repo_map(), &java_files(), request.clone()).unwrap();
-        let second = resolve(&repo_map(), &java_files(), request).unwrap();
+        let first = resolve(&repo_map(), &source_files(), request.clone()).unwrap();
+        let second = resolve(&repo_map(), &source_files(), request).unwrap();
         assert_eq!(first.version, second.version);
     }
 

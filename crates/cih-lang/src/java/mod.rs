@@ -1,9 +1,11 @@
 use std::cell::RefCell;
 
 use once_cell::sync::Lazy;
-use tree_sitter::{Language, Node, Parser, Query};
+use tree_sitter::{Language, Node as TsNode, Parser, Query};
 
 use crate::{LanguageProvider, Stereotype};
+
+mod parse;
 
 pub const JAVA_SCOPE_QUERY: &str = include_str!("query.scm");
 
@@ -53,12 +55,16 @@ impl LanguageProvider for JavaProvider {
         &QUERY
     }
 
-    fn package_of(&self, root: Node<'_>, src: &str) -> Option<String> {
+    fn package_of(&self, root: TsNode<'_>, src: &str) -> Option<String> {
         package_of(root, src)
     }
 
     fn stereotype(&self, def_text: &str) -> Option<Stereotype> {
         stereotype(def_text)
+    }
+
+    fn parse_file(&self, rel: &str, src: &str) -> anyhow::Result<cih_core::ParsedUnit> {
+        parse::parse_java_file(self, rel, src)
     }
 }
 
@@ -66,7 +72,7 @@ fn language() -> Language {
     tree_sitter_java::LANGUAGE.into()
 }
 
-fn package_of(root: Node<'_>, src: &str) -> Option<String> {
+fn package_of(root: TsNode<'_>, src: &str) -> Option<String> {
     let bytes = src.as_bytes();
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
