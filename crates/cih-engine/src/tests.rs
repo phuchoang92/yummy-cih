@@ -432,6 +432,11 @@ fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
         false,
         false,
         "en",
+        "graph",
+        "graph",
+        false,
+        false,
+        false,
         false,
     )
     .unwrap();
@@ -466,6 +471,11 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
         false,
         true,
         "vi",
+        "llm-summary",
+        "graph",
+        false,
+        false,
+        false,
         false,
     )
     .unwrap();
@@ -501,6 +511,11 @@ fn wiki_command_http_json_requires_provider_config() {
         false,
         true,
         "en",
+        "llm-summary",
+        "graph",
+        false,
+        false,
+        false,
         false,
     )
     .unwrap_err()

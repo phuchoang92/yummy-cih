@@ -1,0 +1,406 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
+
+use anyhow::{bail, Result};
+use cih_core::RepoMap;
+use serde::{Deserialize, Serialize};
+
+use crate::features::{build_dev_page_paths, group_communities_by_feature};
+use crate::graph::WikiGraph;
+use crate::slugify::slugify;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WikiModuleTree {
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub source: ModuleTreeSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_commit: Option<String>,
+    pub graph_version: String,
+    pub community_version: String,
+    pub modules: Vec<WikiModuleNode>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleTreeSource {
+    Graph,
+    Llm,
+    UserEdited,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WikiModuleNode {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub community_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<WikiModuleNode>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WikiMeta {
+    pub schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_commit: Option<String>,
+    pub graph_version: String,
+    pub community_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub prompt_version: String,
+    #[serde(default)]
+    pub module_cache: BTreeMap<String, WikiModuleCacheEntry>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WikiModuleCacheEntry {
+    pub content_hash: String,
+    pub evidence_hash: String,
+    pub page_paths: Vec<String>,
+    /// Cached LLM summary for incremental mode (may be absent for graph-only runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_po: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_ba: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_dev: Option<String>,
+}
+
+pub fn build_graph_module_tree(
+    graph: &WikiGraph,
+    repo_map: Option<&RepoMap>,
+    graph_version: &str,
+    community_version: &str,
+    repo_commit: Option<String>,
+) -> WikiModuleTree {
+    let groups = group_communities_by_feature(graph);
+    let dev_paths = build_dev_page_paths(&groups, graph);
+    let mut modules = Vec::new();
+
+    for group in groups {
+        let mut file_paths = BTreeSet::new();
+        let mut module_names = BTreeSet::new();
+        for comm_id in &group.community_ids {
+            if let Some(members) = graph.members_by_community.get(comm_id) {
+                for member in members {
+                    if !member.file.is_empty() && is_repo_relative(&member.file) {
+                        file_paths.insert(member.file.clone());
+                        if let Some(name) = repo_module_for_file(repo_map, &member.file) {
+                            module_names.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+
+        let description = if module_names.is_empty() {
+            Some(format!(
+                "Graph-derived module from {} communities and {} files.",
+                group.community_ids.len(),
+                file_paths.len()
+            ))
+        } else {
+            Some(format!(
+                "Graph-derived module from {} communities, {} files, and build modules: {}.",
+                group.community_ids.len(),
+                file_paths.len(),
+                module_names.into_iter().collect::<Vec<_>>().join(", ")
+            ))
+        };
+
+        let children = group
+            .community_ids
+            .iter()
+            .map(|comm_id| {
+                let comm_name = graph.community_name(comm_id).to_string();
+                let page_slug = dev_paths
+                    .get(comm_id)
+                    .and_then(|p| p.rsplit('/').next())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| slugify(&comm_name));
+                WikiModuleNode {
+                    id: format!("module:{}:{}", group.feature, slugify(comm_id)),
+                    slug: page_slug,
+                    title: comm_name,
+                    description: Some(format!("Community {}", comm_id)),
+                    community_ids: vec![comm_id.clone()],
+                    file_paths: sorted_member_files(graph, comm_id),
+                    children: Vec::new(),
+                }
+            })
+            .collect();
+
+        modules.push(WikiModuleNode {
+            id: format!("feature:{}", group.feature),
+            slug: group.feature.clone(),
+            title: title_from_slug(&group.feature),
+            description,
+            community_ids: group.community_ids,
+            file_paths: file_paths.into_iter().collect(),
+            children,
+        });
+    }
+
+    WikiModuleTree {
+        schema_version: 1,
+        generated_at: cih_core::now_rfc3339(),
+        source: ModuleTreeSource::Graph,
+        repo_commit,
+        graph_version: graph_version.to_string(),
+        community_version: community_version.to_string(),
+        modules,
+    }
+}
+
+pub fn read_module_tree(path: &Path) -> Result<WikiModuleTree> {
+    let raw = std::fs::read_to_string(path)?;
+    let mut tree: WikiModuleTree = serde_json::from_str(&raw)?;
+    tree.source = ModuleTreeSource::UserEdited;
+    Ok(tree)
+}
+
+pub fn validate_module_tree(tree: &WikiModuleTree, graph: &WikiGraph) -> Result<()> {
+    if tree.schema_version != 1 {
+        bail!(
+            "unsupported module_tree schema_version {}; expected 1",
+            tree.schema_version
+        );
+    }
+    let valid_communities: BTreeSet<String> = graph
+        .community_nodes
+        .iter()
+        .map(|n| n.id.as_str().to_string())
+        .collect();
+    let mut seen_ids = BTreeSet::new();
+    let mut seen_slugs = BTreeSet::new();
+    for module in &tree.modules {
+        validate_module_node(module, &valid_communities, &mut seen_ids, &mut seen_slugs)?;
+    }
+    Ok(())
+}
+
+fn validate_module_node(
+    node: &WikiModuleNode,
+    valid_communities: &BTreeSet<String>,
+    seen_ids: &mut BTreeSet<String>,
+    seen_slugs: &mut BTreeSet<String>,
+) -> Result<()> {
+    if node.id.trim().is_empty() {
+        bail!("module tree contains an empty module id");
+    }
+    if node.slug.trim().is_empty() {
+        bail!("module '{}' contains an empty slug", node.id);
+    }
+    if !seen_ids.insert(node.id.clone()) {
+        bail!("duplicate module id '{}'", node.id);
+    }
+    if !seen_slugs.insert(node.slug.clone()) {
+        bail!("duplicate module slug '{}'", node.slug);
+    }
+    for community_id in &node.community_ids {
+        if !valid_communities.contains(community_id) {
+            bail!(
+                "module '{}' references unknown community '{}'",
+                node.id,
+                community_id
+            );
+        }
+    }
+    let mut sibling_files = BTreeSet::new();
+    for path in &node.file_paths {
+        if !is_repo_relative(path) {
+            bail!("module '{}' has unsafe file path '{}'", node.id, path);
+        }
+        if !sibling_files.insert(path) {
+            bail!("module '{}' repeats file path '{}'", node.id, path);
+        }
+    }
+    for child in &node.children {
+        validate_module_node(child, valid_communities, seen_ids, seen_slugs)?;
+    }
+    Ok(())
+}
+
+pub fn build_wiki_meta(
+    tree: &WikiModuleTree,
+    model: Option<String>,
+    language: Option<String>,
+) -> WikiMeta {
+    WikiMeta {
+        schema_version: 1,
+        repo_commit: tree.repo_commit.clone(),
+        graph_version: tree.graph_version.clone(),
+        community_version: tree.community_version.clone(),
+        model,
+        language,
+        prompt_version: "phase10c-1".to_string(),
+        module_cache: BTreeMap::new(),
+    }
+}
+
+fn sorted_member_files(graph: &WikiGraph, community_id: &str) -> Vec<String> {
+    let mut files = BTreeSet::new();
+    if let Some(members) = graph.members_by_community.get(community_id) {
+        for member in members {
+            if !member.file.is_empty() && is_repo_relative(&member.file) {
+                files.insert(member.file.clone());
+            }
+        }
+    }
+    files.into_iter().collect()
+}
+
+fn repo_module_for_file(repo_map: Option<&RepoMap>, file: &str) -> Option<String> {
+    let repo_map = repo_map?;
+    repo_map
+        .modules
+        .iter()
+        .filter(|m| !m.rel_path.is_empty() && file.starts_with(&m.rel_path))
+        .max_by_key(|m| m.rel_path.len())
+        .map(|m| m.name.clone())
+}
+
+fn title_from_slug(slug: &str) -> String {
+    slug.split('-')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut chars = s.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = first.to_ascii_uppercase().to_string();
+                    out.push_str(chars.as_str());
+                    out
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_repo_relative(path: &str) -> bool {
+    if path.trim().is_empty() || Path::new(path).is_absolute() {
+        return false;
+    }
+    !Path::new(path).components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
+
+    fn method_node(id: &str, file: &str) -> Node {
+        Node {
+            id: NodeId::new(id.to_string()),
+            kind: NodeKind::Method,
+            name: "handle".to_string(),
+            qualified_name: None,
+            file: file.to_string(),
+            range: Range::default(),
+            props: None,
+        }
+    }
+
+    fn comm_node(id: &str, name: &str) -> Node {
+        Node {
+            id: NodeId::new(id.to_string()),
+            kind: NodeKind::Community,
+            name: name.to_string(),
+            qualified_name: None,
+            file: String::new(),
+            range: Range::default(),
+            props: None,
+        }
+    }
+
+    fn member_edge(method: &str, comm: &str) -> Edge {
+        Edge {
+            src: NodeId::new(method.to_string()),
+            dst: NodeId::new(comm.to_string()),
+            kind: EdgeKind::MemberOf,
+            confidence: 1.0,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn graph_module_tree_uses_feature_groups() {
+        let m = method_node(
+            "Method:com.example.modules.order.OrderService#save/0",
+            "src/main/java/com/example/modules/order/OrderService.java",
+        );
+        let comm = comm_node("Community:0", "Order");
+        let graph = WikiGraph::build(
+            &[m.clone()],
+            &[],
+            &[comm],
+            &[member_edge(m.id.as_str(), "Community:0")],
+        );
+        let tree = build_graph_module_tree(&graph, None, "g1", "c1", Some("abc".into()));
+        assert_eq!(tree.modules.len(), 1);
+        assert_eq!(tree.modules[0].slug, "order");
+        assert_eq!(tree.modules[0].community_ids, vec!["Community:0"]);
+        validate_module_tree(&tree, &graph).unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_unknown_community() {
+        let graph = WikiGraph::build(&[], &[], &[], &[]);
+        let tree = WikiModuleTree {
+            schema_version: 1,
+            generated_at: "now".to_string(),
+            source: ModuleTreeSource::Graph,
+            repo_commit: None,
+            graph_version: "g".to_string(),
+            community_version: "c".to_string(),
+            modules: vec![WikiModuleNode {
+                id: "feature:bad".to_string(),
+                slug: "bad".to_string(),
+                title: "Bad".to_string(),
+                description: None,
+                community_ids: vec!["Community:999".to_string()],
+                file_paths: vec![],
+                children: vec![],
+            }],
+        };
+        assert!(validate_module_tree(&tree, &graph).is_err());
+    }
+
+    #[test]
+    fn validation_rejects_unsafe_paths() {
+        let comm = comm_node("Community:0", "Order");
+        let graph = WikiGraph::build(&[], &[], &[comm], &[]);
+        let tree = WikiModuleTree {
+            schema_version: 1,
+            generated_at: "now".to_string(),
+            source: ModuleTreeSource::Graph,
+            repo_commit: None,
+            graph_version: "g".to_string(),
+            community_version: "c".to_string(),
+            modules: vec![WikiModuleNode {
+                id: "feature:bad".to_string(),
+                slug: "bad".to_string(),
+                title: "Bad".to_string(),
+                description: None,
+                community_ids: vec!["Community:0".to_string()],
+                file_paths: vec!["../Secret.java".to_string()],
+                children: vec![],
+            }],
+        };
+        assert!(validate_module_tree(&tree, &graph).is_err());
+    }
+}

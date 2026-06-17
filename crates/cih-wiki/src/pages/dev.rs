@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use cih_core::{Node, NodeKind, RepoMap};
 use crate::graph::{node_stereotype, route_http_method, route_path, WikiGraph};
-use crate::CommunityLlmSummary;
+use crate::mermaid;
+use crate::{CommunityLlmFull, CommunityLlmSummary};
 
 fn method_signature(node: &Node) -> String {
     let params = node
@@ -104,6 +105,7 @@ pub fn render_dev_community(
     community: &Node,
     page_path: &str,
     llm: Option<&CommunityLlmSummary>,
+    llm_full: Option<&CommunityLlmFull>,
 ) -> String {
     let comm_id = community.id.as_str();
 
@@ -114,12 +116,36 @@ pub fn render_dev_community(
     ));
     md.push_str(&format!("# {} — Technical Reference\n\n", community.name));
 
-    if let Some(summary) = llm {
+    if let Some(full) = llm_full {
+        if !full.dev_responsibility.is_empty() {
+            md.push_str("## Responsibility\n\n");
+            md.push_str(&full.dev_responsibility);
+            md.push_str("\n\n");
+        }
+        if !full.dev_key_classes.is_empty() {
+            md.push_str("## Key Classes\n\n");
+            md.push_str(&full.dev_key_classes);
+            md.push_str("\n\n");
+        }
+        if !full.dev_entry_points.is_empty() {
+            md.push_str("## Entry Points\n\n");
+            md.push_str(&full.dev_entry_points);
+            md.push_str("\n\n");
+        }
+    } else if let Some(summary) = llm {
         if !summary.dev.is_empty() {
             md.push_str("## Summary\n\n");
             md.push_str(&summary.dev);
             md.push_str("\n\n");
         }
+    }
+
+    // Community interaction diagram
+    if let Some(diagram) = mermaid::community_call_diagram(graph, comm_id) {
+        md.push_str("## Community Interactions\n\n");
+        md.push_str("```mermaid\n");
+        md.push_str(&diagram);
+        md.push_str("```\n\n");
     }
 
     let empty_members: Vec<Node> = Vec::new();
@@ -451,7 +477,7 @@ mod tests {
     fn render_dev_community_shows_classes() {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None);
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None);
         assert!(md.contains("---\ntitle: order-service"), "has frontmatter");
         assert!(md.contains("OrderService"), "has class name");
         assert!(md.contains("service"), "has stereotype");
@@ -518,7 +544,7 @@ mod tests {
         ];
         let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
         let comm_node = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm_node, "shared/dev/order-service", None);
+        let md = render_dev_community(&g, &comm_node, "shared/dev/order-service", None, None);
         assert!(md.contains("## DB Access"), "has db access section");
         assert!(md.contains("ORDERS"), "has table name");
         assert!(md.contains("✓"), "has check mark");
@@ -528,7 +554,7 @@ mod tests {
     fn render_dev_community_omits_db_access_when_none() {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None);
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None);
         assert!(!md.contains("## DB Access"), "no db access section when no tables");
     }
 
@@ -541,7 +567,7 @@ mod tests {
             ba: String::new(),
             dev: "Service-repository pattern with 8 methods.".to_string(),
         };
-        let md = render_dev_community(&g, &comm, "shared/dev/order-service", Some(&llm));
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", Some(&llm), None);
         assert!(md.contains("## Summary"), "has summary section");
         assert!(
             md.contains("Service-repository pattern"),

@@ -14,6 +14,14 @@ pub struct WikiManifest {
     pub pages: Vec<PageEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm: Option<WikiLlmInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<WikiGenerationInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_tree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wiki_meta_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -26,6 +34,27 @@ pub struct WikiLlmInfo {
     pub failed_community_count: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_community_ids: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WikiGenerationInfo {
+    pub mode: String,
+    pub grouping: String,
+    pub review_required: bool,
+    pub html_viewer: bool,
+    pub incremental: bool,
+}
+
+impl Default for WikiGenerationInfo {
+    fn default() -> Self {
+        Self {
+            mode: "graph".to_string(),
+            grouping: "graph".to_string(),
+            review_required: false,
+            html_viewer: false,
+            incremental: false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -84,6 +113,10 @@ mod tests {
             nav: BTreeMap::new(),
             pages: vec![],
             llm: None,
+            generation: None,
+            module_tree_path: None,
+            wiki_meta_path: None,
+            warnings: vec![],
         }
     }
 
@@ -124,5 +157,29 @@ mod tests {
             "model name should be present"
         );
         assert!(json.contains("failed_community_count"));
+    }
+
+    #[test]
+    fn manifest_generation_fields_are_optional_and_round_trip() {
+        let mut m = sample_manifest();
+        m.generation = Some(WikiGenerationInfo {
+            mode: "llm-full".into(),
+            grouping: "graph".into(),
+            review_required: false,
+            html_viewer: true,
+            incremental: true,
+        });
+        m.module_tree_path = Some("module_tree.json".into());
+        m.wiki_meta_path = Some("wiki_meta.json".into());
+        m.warnings.push("fallback used".into());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"generation\""));
+        assert!(json.contains("module_tree.json"));
+        let decoded: WikiManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.generation.as_ref().unwrap().mode,
+            "llm-full"
+        );
+        assert_eq!(decoded.warnings, vec!["fallback used"]);
     }
 }

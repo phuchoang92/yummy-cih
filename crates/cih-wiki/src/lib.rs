@@ -1,13 +1,22 @@
 pub mod features;
 pub mod graph;
+pub mod html;
 pub mod manifest;
+pub mod mermaid;
+pub mod module_tree;
 pub mod pages;
 pub mod slugify;
 
 pub use cih_core::RepoMap;
 pub use features::FeatureGroup;
 pub use graph::WikiGraph;
-pub use manifest::{NavEntry, PageEntry, WikiLlmInfo, WikiManifest, WikiStats};
+pub use manifest::{
+    NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats,
+};
+pub use module_tree::{
+    build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
+    ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
+};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -17,8 +26,8 @@ use cih_core::{Node, NodeKind};
 use features::{build_dev_page_paths, group_communities_by_feature};
 use graph::node_stereotype;
 
-/// Pre-computed AI summaries for one community (all three roles).
-/// Produced by the engine's `enrich_communities()`; passed into `WikiInput`.
+/// Pre-computed short AI summaries for one community (all three roles).
+/// Used in `llm-summary` mode. Produced by `enrich_communities()`; passed into `WikiInput`.
 #[derive(Clone, Debug, Default)]
 pub struct CommunityLlmSummary {
     /// 2-3 sentences in plain business language.
@@ -27,6 +36,25 @@ pub struct CommunityLlmSummary {
     pub ba: String,
     /// 2-3 sentences on technical structure.
     pub dev: String,
+}
+
+/// Richer per-community LLM content for `llm-full` mode.
+/// Each field is a markdown string that is inserted into the relevant page section.
+#[derive(Clone, Debug, Default)]
+pub struct CommunityLlmFull {
+    // PO page sections
+    pub po_summary: String,
+    pub po_capabilities: String,
+    pub po_workflows: String,
+    pub po_open_questions: String,
+    // BA page sections
+    pub ba_process_overview: String,
+    pub ba_contracts: String,
+    pub ba_business_rules: String,
+    // Dev page sections
+    pub dev_responsibility: String,
+    pub dev_key_classes: String,
+    pub dev_entry_points: String,
 }
 
 pub struct WikiInput<'a> {
@@ -40,10 +68,20 @@ pub struct WikiInput<'a> {
     /// Contents of `unresolved-refs.md` if present.
     pub unresolved_report: Option<String>,
     pub repo_map: Option<RepoMap>,
-    /// Keyed by community_id (e.g. `"Community:3"`). `None` = graph-only mode.
+    /// Keyed by community_id. `None` = graph-only mode. Used in `llm-summary` mode.
     pub llm_summaries: Option<HashMap<String, CommunityLlmSummary>>,
+    /// Keyed by community_id. Used in `llm-full` mode alongside `llm_summaries`.
+    pub llm_full: Option<HashMap<String, CommunityLlmFull>>,
     /// LLM run metadata, recorded in the manifest when enrichment was requested.
     pub llm_info: Option<WikiLlmInfo>,
+    /// Accepted module tree. If omitted, a deterministic graph-derived tree is built.
+    pub module_tree: Option<WikiModuleTree>,
+    /// Generation metadata recorded in the manifest.
+    pub generation: WikiGenerationInfo,
+    /// Optional first LLM-proposed tree, kept for review/reproducibility.
+    pub first_module_tree: Option<WikiModuleTree>,
+    /// Per-community evidence packs to save to .cih/wiki/evidence/ (--save-evidence).
+    pub save_evidence: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug)]
@@ -67,13 +105,62 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     let unresolved_count = count_unresolved_refs(input.unresolved_report.as_deref());
     let class_count: usize = graph.community_class_counts.values().sum();
     let test_class_count = count_test_classes(&graph);
-    let llm_enriched = input.llm_summaries.is_some();
+    let llm_enriched = input.llm_summaries.is_some() || input.llm_full.is_some();
+
+    // Save evidence packs to disk if requested.
+    if let Some(evidence_map) = &input.save_evidence {
+        let ev_dir = out_dir.join("evidence");
+        std::fs::create_dir_all(&ev_dir)?;
+        for (comm_id, pack_text) in evidence_map {
+            let slug = comm_id
+                .replace("Community:", "community-")
+                .replace([':', '/'], "-");
+            std::fs::write(
+                ev_dir.join(format!("{}.json", slug)),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "community_id": comm_id,
+                    "evidence": pack_text,
+                }))?,
+            )?;
+        }
+    }
 
     // Feature grouping — the core of the new hierarchy
     let feature_groups = group_communities_by_feature(&graph);
     let dev_paths = build_dev_page_paths(&feature_groups, &graph);
 
+    let module_tree = input.module_tree.unwrap_or_else(|| {
+        build_graph_module_tree(
+            &graph,
+            input.repo_map.as_ref(),
+            &input.graph_version,
+            &input.community_version,
+            None,
+        )
+    });
+    validate_module_tree(&module_tree, &graph)?;
+    let wiki_meta = build_wiki_meta(
+        &module_tree,
+        input.llm_info.as_ref().map(|info| info.model.clone()),
+        input.llm_info.as_ref().map(|info| info.language.clone()),
+    );
+
     // Create directories
+    std::fs::create_dir_all(out_dir)?;
+    std::fs::write(
+        out_dir.join("module_tree.json"),
+        serde_json::to_string_pretty(&module_tree)?,
+    )?;
+    if let Some(first_tree) = &input.first_module_tree {
+        std::fs::write(
+            out_dir.join("first_module_tree.json"),
+            serde_json::to_string_pretty(first_tree)?,
+        )?;
+    }
+    std::fs::write(
+        out_dir.join("wiki_meta.json"),
+        serde_json::to_string_pretty(&wiki_meta)?,
+    )?;
     std::fs::create_dir_all(out_dir.join("pages"))?;
     for group in &feature_groups {
         std::fs::create_dir_all(out_dir.join(format!("pages/{}/dev", group.feature)))?;
@@ -82,6 +169,45 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     let mut page_count = 0usize;
     let mut all_pages: Vec<PageEntry> = Vec::new();
     let mut nav: BTreeMap<String, Vec<NavEntry>> = BTreeMap::new();
+
+    let stats = WikiStats {
+        community_count: graph.community_nodes.len(),
+        route_count: graph.routes.len(),
+        process_count: graph.process_nodes.len(),
+        class_count,
+        test_class_count,
+        unresolved_ref_count: unresolved_count,
+        feature_count: feature_groups.len(),
+    };
+
+    if input.generation.review_required {
+        let manifest = WikiManifest {
+            schema_version: 1,
+            generated_at: cih_core::now_rfc3339(),
+            repo_name: input.repo_name,
+            graph_version: input.graph_version,
+            community_version: input.community_version,
+            stats,
+            roles: vec!["po".into(), "ba".into(), "dev".into()],
+            nav,
+            pages: all_pages,
+            llm: input.llm_info,
+            generation: Some(input.generation),
+            module_tree_path: Some("module_tree.json".into()),
+            wiki_meta_path: Some("wiki_meta.json".into()),
+            warnings: Vec::new(),
+        };
+        let manifest_path = out_dir.join("manifest.json");
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        return Ok(WikiOutcome {
+            out_dir: out_dir.to_path_buf(),
+            manifest_path,
+            page_count: 0,
+            community_count: graph.community_nodes.len(),
+            route_count: graph.routes.len(),
+            llm_enriched,
+        });
+    }
 
     // System index
     let system_md =
@@ -147,6 +273,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             cids,
             &graph,
             input.llm_summaries.as_ref(),
+            input.llm_full.as_ref(),
         );
         std::fs::write(out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -171,6 +298,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             cids,
             &graph,
             input.llm_summaries.as_ref(),
+            input.llm_full.as_ref(),
         );
         std::fs::write(out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -200,7 +328,8 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 .map(|s| s.as_str())
                 .unwrap_or("shared/dev/community");
             let llm = input.llm_summaries.as_ref().and_then(|m| m.get(comm_id));
-            let md = pages::dev::render_dev_community(&graph, &comm, page_path, llm);
+            let llm_full = input.llm_full.as_ref().and_then(|m| m.get(comm_id));
+            let md = pages::dev::render_dev_community(&graph, &comm, page_path, llm, llm_full);
             let json_val = pages::dev::render_dev_community_json(&graph, &comm);
             std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &md)?;
             std::fs::write(
@@ -225,16 +354,6 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         }
     }
 
-    let stats = WikiStats {
-        community_count: graph.community_nodes.len(),
-        route_count: graph.routes.len(),
-        process_count: graph.process_nodes.len(),
-        class_count,
-        test_class_count,
-        unresolved_ref_count: unresolved_count,
-        feature_count: feature_groups.len(),
-    };
-
     let manifest = WikiManifest {
         schema_version: 1,
         generated_at: cih_core::now_rfc3339(),
@@ -246,10 +365,17 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         nav,
         pages: all_pages,
         llm: input.llm_info,
+        generation: Some(input.generation.clone()),
+        module_tree_path: Some("module_tree.json".into()),
+        wiki_meta_path: Some("wiki_meta.json".into()),
+        warnings: Vec::new(),
     };
 
     let manifest_path = out_dir.join("manifest.json");
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    if input.generation.html_viewer {
+        html::write_html_viewer(out_dir, &manifest)?;
+    }
 
     Ok(WikiOutcome {
         out_dir: out_dir.to_path_buf(),
@@ -340,7 +466,12 @@ mod tests {
             unresolved_report: None,
             repo_map: None,
             llm_summaries: None,
+            llm_full: None,
             llm_info: None,
+            module_tree: None,
+            generation: WikiGenerationInfo::default(),
+            first_module_tree: None,
+            save_evidence: None,
         }
     }
 
@@ -364,6 +495,8 @@ mod tests {
         let outcome = generate_wiki(input, &out).unwrap();
 
         assert!(out.join("manifest.json").exists(), "manifest.json");
+        assert!(out.join("module_tree.json").exists(), "module_tree.json");
+        assert!(out.join("wiki_meta.json").exists(), "wiki_meta.json");
         assert!(out.join("pages/index.md").exists(), "system index");
         assert!(out.join("pages/routes.md").exists(), "routes.md");
         // Feature-first paths: Test.java has no modules/ → feature=shared
@@ -424,6 +557,7 @@ mod tests {
             unresolved_report: None,
             repo_map: None,
             llm_summaries: Some(summaries),
+            llm_full: None,
             llm_info: Some(WikiLlmInfo {
                 provider: "anthropic".to_string(),
                 model: "claude-haiku-4-5-20251001".to_string(),
@@ -433,6 +567,10 @@ mod tests {
                 failed_community_count: 0,
                 failed_community_ids: Vec::new(),
             }),
+            module_tree: None,
+            generation: WikiGenerationInfo::default(),
+            first_module_tree: None,
+            save_evidence: None,
         };
         let outcome = generate_wiki(input, &out).unwrap();
 

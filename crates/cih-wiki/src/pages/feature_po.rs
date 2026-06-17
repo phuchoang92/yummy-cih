@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
-use crate::CommunityLlmSummary;
+use crate::{CommunityLlmFull, CommunityLlmSummary};
 
 fn capitalize(s: &str) -> String {
     let mut out = s.to_string();
@@ -36,6 +36,7 @@ pub fn render_feature_po(
     community_ids: &[String],
     graph: &WikiGraph,
     llm_summaries: Option<&HashMap<String, CommunityLlmSummary>>,
+    llm_full: Option<&HashMap<String, CommunityLlmFull>>,
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
@@ -45,22 +46,79 @@ pub fn render_feature_po(
     ));
     md.push_str(&format!("# {}\n\n", title));
 
-    // LLM overview (concat po summaries from all communities)
-    let po_texts: Vec<String> = community_ids
+    // llm-full mode: richer sections per community
+    let full_entries: Vec<&CommunityLlmFull> = community_ids
         .iter()
-        .filter_map(|cid| {
-            llm_summaries
-                .and_then(|m| m.get(cid))
-                .map(|s| s.po.clone())
-        })
-        .filter(|s| !s.is_empty())
+        .filter_map(|cid| llm_full.and_then(|m| m.get(cid)))
         .collect();
 
-    if !po_texts.is_empty() {
-        md.push_str("## Overview\n\n");
-        for text in &po_texts {
-            md.push_str(text);
-            md.push_str("\n\n");
+    if !full_entries.is_empty() {
+        let summaries: Vec<&str> = full_entries
+            .iter()
+            .map(|f| f.po_summary.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !summaries.is_empty() {
+            md.push_str("## Overview\n\n");
+            for s in &summaries {
+                md.push_str(s);
+                md.push_str("\n\n");
+            }
+        }
+        let caps: Vec<&str> = full_entries
+            .iter()
+            .map(|f| f.po_capabilities.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !caps.is_empty() {
+            md.push_str("## Capabilities\n\n");
+            for s in &caps {
+                md.push_str(s);
+                md.push_str("\n\n");
+            }
+        }
+        let workflows: Vec<&str> = full_entries
+            .iter()
+            .map(|f| f.po_workflows.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !workflows.is_empty() {
+            md.push_str("## Workflows\n\n");
+            for s in &workflows {
+                md.push_str(s);
+                md.push_str("\n\n");
+            }
+        }
+        let questions: Vec<&str> = full_entries
+            .iter()
+            .map(|f| f.po_open_questions.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !questions.is_empty() {
+            md.push_str("## Open Questions\n\n");
+            for s in &questions {
+                md.push_str(s);
+                md.push_str("\n\n");
+            }
+        }
+    } else {
+        // llm-summary mode fallback
+        let po_texts: Vec<String> = community_ids
+            .iter()
+            .filter_map(|cid| {
+                llm_summaries
+                    .and_then(|m| m.get(cid))
+                    .map(|s| s.po.clone())
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if !po_texts.is_empty() {
+            md.push_str("## Overview\n\n");
+            for text in &po_texts {
+                md.push_str(text);
+                md.push_str("\n\n");
+            }
         }
     }
 
@@ -201,7 +259,7 @@ mod tests {
                 dev: String::new(),
             },
         );
-        let md = render_feature_po("payment", &ids, &g, Some(&sums));
+        let md = render_feature_po("payment", &ids, &g, Some(&sums), None);
         assert!(md.contains("## Overview"));
         assert!(md.contains("Handles payment flows"));
     }
@@ -209,14 +267,14 @@ mod tests {
     #[test]
     fn omits_overview_when_no_llm() {
         let (g, ids) = simple_graph();
-        let md = render_feature_po("payment", &ids, &g, None);
+        let md = render_feature_po("payment", &ids, &g, None, None);
         assert!(!md.contains("## Overview"));
     }
 
     #[test]
     fn has_correct_frontmatter() {
         let (g, ids) = simple_graph();
-        let md = render_feature_po("payment", &ids, &g, None);
+        let md = render_feature_po("payment", &ids, &g, None, None);
         assert!(md.contains("---\ntitle: Payment — Business Overview"));
     }
 }

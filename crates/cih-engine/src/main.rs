@@ -200,6 +200,28 @@ enum Command {
         /// Documentation language for LLM-generated text.
         #[arg(long, default_value = "en")]
         wiki_language: String,
+        /// Wiki generation mode: graph (no LLM), llm-summary, or llm-full.
+        #[arg(long, default_value = "graph")]
+        wiki_mode: String,
+        /// Community grouping strategy: graph (deterministic) or llm (LLM-proposed).
+        #[arg(long, default_value = "graph")]
+        grouping: String,
+        /// Write a standalone index.html viewer alongside the Markdown files.
+        #[arg(long)]
+        html: bool,
+        /// Skip communities whose evidence hash has not changed since the last run.
+        #[arg(long)]
+        incremental: bool,
+        /// Save per-community evidence packs to .cih/wiki/evidence/<slug>.json.
+        #[arg(long = "save-evidence")]
+        save_evidence: bool,
+        /// Only generate docs for communities whose name contains this substring (case-insensitive).
+        /// Can be specified multiple times to include several groups.
+        #[arg(long = "filter-community")]
+        filter_community: Vec<String>,
+        /// Limit total number of communities processed (useful for quick tests).
+        #[arg(long)]
+        max_communities: Option<usize>,
         /// Print outcome as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -400,6 +422,13 @@ fn main() -> Result<()> {
             llm_debug_evidence,
             llm_dry_run,
             wiki_language,
+            wiki_mode,
+            grouping,
+            html,
+            incremental,
+            save_evidence,
+            filter_community,
+            max_communities,
             json,
         } => wiki_cmd::run_wiki(
             &repo,
@@ -418,6 +447,13 @@ fn main() -> Result<()> {
             llm_debug_evidence,
             llm_dry_run,
             &wiki_language,
+            &wiki_mode,
+            &grouping,
+            html,
+            incremental,
+            save_evidence,
+            filter_community,
+            max_communities,
             json,
         ),
     }
