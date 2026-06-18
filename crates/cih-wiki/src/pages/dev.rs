@@ -159,9 +159,11 @@ pub fn render_dev_community(
         }
     }
 
-    // Community interaction diagram
-    if let Some(diagram) = mermaid::community_call_diagram(graph, comm_id) {
-        md.push_str("## Community Interactions\n\n");
+    // Class-level call diagram: shows which classes this community calls (and is called by).
+    // Operates on class-to-class edges rather than community-to-community, so it correctly
+    // shows controller→service relationships even when Louvain co-locates them.
+    if let Some(diagram) = mermaid::class_call_diagram(graph, comm_id) {
+        md.push_str("## Class Interactions\n\n");
         md.push_str("```mermaid\n");
         md.push_str(&diagram);
         md.push_str("```\n\n");

@@ -101,6 +101,108 @@ fn find_processes_for_member<'a>(
     if result.is_empty() { None } else { Some(result) }
 }
 
+/// Generate a `flowchart LR` class-level call diagram for a community's dev page.
+/// Shows classes inside the community and the external classes/services they call.
+/// This is more useful than community_call_diagram for tightly-coupled communities
+/// (e.g. controller+service in the same Louvain cluster) because it operates on
+/// class-to-class edges regardless of community boundaries.
+pub fn class_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String> {
+    let members = graph.members_by_community.get(comm_id)?;
+
+    // Derive home class IDs from member method IDs
+    let home_class_ids: std::collections::HashSet<String> = members
+        .iter()
+        .filter_map(|m| class_id_of(m.id.as_str()))
+        .collect();
+
+    if home_class_ids.is_empty() {
+        return None;
+    }
+
+    // Build class-to-class call edges:
+    // for each method in the community, find callee methods and their classes
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut all_class_ids: std::collections::HashSet<String> = home_class_ids.clone();
+
+    for member in members {
+        let Some(caller_class) = class_id_of(member.id.as_str()) else { continue };
+        let Some(callees) = graph.calls_out.get(member.id.as_str()) else { continue };
+        for callee in callees {
+            let Some(callee_class) = class_id_of(callee) else { continue };
+            if callee_class == caller_class {
+                continue; // skip intra-class calls
+            }
+            let edge = (caller_class.clone(), callee_class.clone());
+            if !edges.contains(&edge) {
+                edges.push(edge);
+                all_class_ids.insert(callee_class);
+            }
+            if edges.len() >= MAX_EDGES {
+                break;
+            }
+        }
+        if edges.len() >= MAX_EDGES {
+            break;
+        }
+    }
+
+    if edges.is_empty() {
+        return None;
+    }
+
+    // Filter: only include nodes reachable through an edge
+    let mut seen_nodes: Vec<String> = Vec::new();
+    for (src, dst) in &edges {
+        if !seen_nodes.contains(src) { seen_nodes.push(src.clone()); }
+        if !seen_nodes.contains(dst) { seen_nodes.push(dst.clone()); }
+        if seen_nodes.len() >= MAX_NODES { break; }
+    }
+
+    let class_label = |cid: &str| -> String {
+        let simple = cid.trim_start_matches("Class:")
+            .rsplit('.')
+            .next()
+            .unwrap_or(cid)
+            .to_string();
+        // look up stereotype from the Class node
+        let stereo = graph.nodes_by_id.get(cid)
+            .and_then(|n| n.props.as_ref())
+            .and_then(|p| p.get("stereotype"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        match stereo {
+            Some(s) => format!("{} ({})", simple, s),
+            None => simple,
+        }
+    };
+
+    let truncated = edges.len() >= MAX_EDGES || seen_nodes.len() >= MAX_NODES;
+    let mut out = String::from("flowchart LR\n");
+    for cid in &seen_nodes {
+        let label = sanitize(&class_label(cid));
+        let nid = node_id(cid);
+        out.push_str(&format!("  {}[\"{}\"]\n", nid, label));
+    }
+    for (src, dst) in &edges {
+        if seen_nodes.contains(src) && seen_nodes.contains(dst) {
+            out.push_str(&format!("  {} --> {}\n", node_id(src), node_id(dst)));
+        }
+    }
+    if truncated {
+        out.push_str("  %%diagram truncated\n");
+    }
+    Some(out)
+}
+
+fn class_id_of(method_id: &str) -> Option<String> {
+    let stripped = method_id
+        .trim_start_matches("Method:")
+        .trim_start_matches("Constructor:")
+        .trim_start_matches("Function:");
+    // "pkg.ClassName#methodName/arity" → "Class:pkg.ClassName"
+    stripped.split_once('#').map(|(fqcn, _)| format!("Class:{}", fqcn))
+}
+
 /// Generate a `flowchart LR` diagram showing how communities call each other,
 /// filtered to calls involving `comm_id`.
 pub fn community_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String> {

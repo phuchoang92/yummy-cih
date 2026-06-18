@@ -923,6 +923,49 @@ public class OrderServiceTest {
     }
 
     #[test]
+    fn name_suffix_fallback_stereotypes() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("CartEndpoint",   "package com.example;\npublic class CartEndpoint {}\n",   "controller"),
+            ("OrderResource",  "package com.example;\npublic class OrderResource {}\n",  "resource"),
+            ("PaymentApi",     "package com.example;\npublic class PaymentApi {}\n",     "controller"),
+            ("CheckoutHandler","package com.example;\npublic class CheckoutHandler {}\n","handler"),
+            ("PricingFacade",  "package com.example;\npublic class PricingFacade {}\n",  "service"),
+            ("ItemRepository", "package com.example;\npublic class ItemRepository {}\n", "repository"),
+            ("InventoryService","package com.example;\npublic class InventoryService {}\n","service"),
+        ];
+        for (class_name, src, expected) in cases {
+            let root = temp_repo();
+            let rel = format!("src/main/java/com/example/{class_name}.java");
+            write_file(&root, &rel, src);
+            let output = parse_files(&root, &[rel.clone()], &java_registry()).unwrap();
+            fs::remove_dir_all(&root).unwrap();
+            let node = output.nodes.iter().find(|n| &n.name == class_name)
+                .unwrap_or_else(|| panic!("{class_name} node must exist"));
+            let stereotype = node.props.as_ref()
+                .and_then(|p| p.get("stereotype"))
+                .and_then(|v| v.as_str());
+            assert_eq!(stereotype, Some(*expected),
+                "{class_name} must have stereotype={expected}, got {stereotype:?}");
+        }
+    }
+
+    #[test]
+    fn annotation_stereotype_wins_over_name_suffix() {
+        // @Service annotation on a class named XxxController → "service", not "controller"
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/CartController.java";
+        write_file(&root, rel,
+            "package com.example;\nimport org.springframework.stereotype.Service;\n@Service\npublic class CartController {}\n",
+        );
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let node = output.nodes.iter().find(|n| n.name == "CartController").expect("node must exist");
+        let stereotype = node.props.as_ref()
+            .and_then(|p| p.get("stereotype")).and_then(|v| v.as_str());
+        assert_eq!(stereotype, Some("service"), "@Service must win over Controller suffix");
+    }
+
+    #[test]
     fn test_method_emits_tests_edge_and_prop() {
         let root = temp_repo();
         let rel = "src/test/java/com/example/FooTest.java";

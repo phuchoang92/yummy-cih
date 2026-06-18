@@ -1721,6 +1721,23 @@ fn class_stereotype(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<&'
     {
         return Some("test");
     }
+    // Name-suffix fallbacks — lower priority than annotations above.
+    // Covers non-standard naming: Endpoint (Quarkus/WebFlux), Resource (JAX-RS),
+    // Api (OpenAPI-generated), Handler (HTTP handlers), Facade/Service/Repository conventions.
+    for (suffix, stereo) in [
+        ("Controller", "controller"),
+        ("Endpoint",   "controller"),
+        ("Resource",   "resource"),
+        ("Api",        "controller"),
+        ("Handler",    "handler"),
+        ("Facade",     "service"),
+        ("Repository", "repository"),
+        ("Service",    "service"),
+    ] {
+        if simple_name.ends_with(suffix) {
+            return Some(stereo);
+        }
+    }
     None
 }
 
