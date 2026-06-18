@@ -367,7 +367,7 @@ fn enforce_size_cap(items: &mut Vec<EvidenceItem>) {
             if items[idx].kind != kind {
                 continue;
             }
-            while render_len(items) > MAX_EVIDENCE_CHARS && items[idx].text.len() > 120 {
+            while render_len(items) > MAX_EVIDENCE_CHARS && items[idx].text.len() > 123 {
                 let new_len = items[idx].text.len().saturating_sub(200).max(120);
                 items[idx].text.truncate(new_len);
                 items[idx].text.push_str("...");

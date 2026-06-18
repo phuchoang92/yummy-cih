@@ -26,3 +26,4 @@ tmp/
 
 # CIH analysis artifacts
 .cih/
+.gitnexus

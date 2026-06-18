@@ -59,7 +59,7 @@ docker compose run --rm engine discover /repo
 docker compose run --rm engine wiki /repo
 ```
 
-Output is written to `/path/to/my-repo/.cih/wiki/pages/`.
+Output is written to `/path/to/my-repo/.cih/wiki/` (contains `pages/` and `manifest.json`).
 
 ---
 
@@ -75,10 +75,13 @@ to force a refresh to the latest version.
 docker run -d \
   --name cih-docs \
   -p 3001:3001 \
-  -e CIH_WIKI_PATH=/wiki \
-  -v /path/to/my-repo/.cih/wiki/pages:/wiki:ro \
+  -e CIH_WIKI_PATH=/wiki/pages \
+  -v /path/to/my-repo/.cih/wiki:/wiki:ro \
   phuchoang29/yummy-cih-docs:latest
 ```
+
+Mount the whole `.cih/wiki/` directory (not just `pages/`) so the container can also
+read `manifest.json` one level up from `pages/` — this powers the landing page community cards.
 
 Open: http://localhost:3001
 
@@ -90,7 +93,6 @@ Each volume mount adds one repo. The subfolder name becomes the URL prefix.
 docker run -d \
   --name cih-docs \
   -p 3001:3001 \
-  -e CIH_WIKI_REPOS_DIR=/wiki \
   -v /path/to/repo-a/.cih/wiki/pages:/wiki/repo-a:ro \
   -v /path/to/repo-b/.cih/wiki/pages:/wiki/repo-b:ro \
   phuchoang29/yummy-cih-docs:latest
@@ -137,6 +139,6 @@ docker compose --profile docs restart docs-viewer
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CIH_WIKI_PATH` | — | Single-repo mode: path to `pages/` inside the container |
+| `CIH_WIKI_PATH` | — | Single-repo mode: path to `pages/` inside the container (e.g. `/wiki/pages` when `.cih/wiki` is mounted at `/wiki`) |
 | `CIH_WIKI_REPOS_DIR` | `/wiki` | Multi-repo mode: parent dir, each subdir = one repo |
 | `CIH_REPO_NAME` | folder name | Display name override (fallback when no `manifest.json`) |
