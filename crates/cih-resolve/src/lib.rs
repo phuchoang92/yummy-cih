@@ -13,11 +13,13 @@ mod contracts;
 pub mod db_access;
 mod emit;
 mod index;
+pub mod integration_xml;
 pub mod reports;
 mod types;
 
 pub use contracts::resolve_contract_edges;
 pub use db_access::emit_db_access;
+pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
 pub use reports::write_unresolved_reports;
 
 /// Per-site diagnostic record for a reference that could not be resolved.

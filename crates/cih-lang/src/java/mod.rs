@@ -182,6 +182,81 @@ class OwnerController {
         assert!(found.contains("type-binding.type")); // field type binding
     }
 
+    const SPRING_ROUTES: &str = r#"
+package com.example;
+
+@RestController
+@RequestMapping("/owners")
+class OwnerController {
+    @GetMapping("/{id}")
+    public Owner findOwner(Long id) { return null; }
+}
+"#;
+
+    const JAXRS_ROUTES: &str = r#"
+package com.example;
+
+import javax.ws.rs.GET;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+
+@Path("/accounts")
+class AccountResource {
+    @GET
+    @Path("/{id}")
+    public Account get(Long id) { return null; }
+
+    @POST
+    public void create(Account a) {}
+}
+"#;
+
+    fn route_nodes(src: &str) -> Vec<cih_core::Node> {
+        let provider = JavaProvider::new();
+        let unit = provider
+            .parse_file("Sample.java", src)
+            .expect("sample should parse");
+        unit.nodes
+            .into_iter()
+            .filter(|n| n.kind == cih_core::NodeKind::Route)
+            .collect()
+    }
+
+    #[test]
+    fn spring_mvc_routes_emit_route_annotations_and_source() {
+        let routes = route_nodes(SPRING_ROUTES);
+        let route = routes
+            .iter()
+            .find(|n| n.name == "GET /owners/{id}")
+            .expect("spring route present");
+        let props = route.props.as_ref().unwrap();
+        assert_eq!(props["source"], "spring_mvc");
+        assert_eq!(
+            props["route_annotations"],
+            serde_json::json!(["GetMapping"])
+        );
+        assert_eq!(props["path"], "/owners/{id}");
+    }
+
+    #[test]
+    fn jaxrs_routes_extracted_with_path_prefix() {
+        let routes = route_nodes(JAXRS_ROUTES);
+        let names: BTreeSet<String> = routes.iter().map(|n| n.name.clone()).collect();
+        assert!(names.contains("GET /accounts/{id}"), "names={names:?}");
+        assert!(names.contains("POST /accounts"), "names={names:?}");
+
+        let get = routes
+            .iter()
+            .find(|n| n.name == "GET /accounts/{id}")
+            .unwrap();
+        let props = get.props.as_ref().unwrap();
+        assert_eq!(props["source"], "jax_rs");
+        assert_eq!(props["route_annotations"], serde_json::json!(["GET", "Path"]));
+
+        let post = routes.iter().find(|n| n.name == "POST /accounts").unwrap();
+        assert_eq!(post.props.as_ref().unwrap()["route_annotations"], serde_json::json!(["POST"]));
+    }
+
     #[test]
     fn stereotype_detects_java_framework_annotations() {
         let provider = JavaProvider::new();

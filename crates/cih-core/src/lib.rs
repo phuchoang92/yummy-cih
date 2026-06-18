@@ -64,6 +64,8 @@ pub enum NodeKind {
     ExternalEndpoint,
     DbQuery,
     DbTable,
+    IntegrationRoute,
+    MessageDestination,
     Other,
 }
 
@@ -88,6 +90,8 @@ impl NodeKind {
             NodeKind::ExternalEndpoint => "ExternalEndpoint",
             NodeKind::DbQuery => "DbQuery",
             NodeKind::DbTable => "DbTable",
+            NodeKind::IntegrationRoute => "IntegrationRoute",
+            NodeKind::MessageDestination => "MessageDestination",
             NodeKind::Other => "Other",
         }
     }
@@ -112,9 +116,29 @@ impl NodeKind {
             "ExternalEndpoint" => NodeKind::ExternalEndpoint,
             "DbQuery" => NodeKind::DbQuery,
             "DbTable" => NodeKind::DbTable,
+            "IntegrationRoute" => NodeKind::IntegrationRoute,
+            "MessageDestination" => NodeKind::MessageDestination,
             _ => NodeKind::Other,
         }
     }
+}
+
+/// Origin framework for an HTTP route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteSource {
+    SpringMvc,
+    JaxRs,
+}
+
+/// Origin XML dialect for an integration route / message destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationSource {
+    CamelXml,
+    BlueprintXml,
+    SpringXml,
+    CxfXml,
 }
 
 pub fn file_id(rel: &str) -> NodeId {
@@ -181,6 +205,14 @@ pub fn db_table_id(table: &str) -> NodeId {
     NodeId::new(format!("DbTable:{}", table.to_ascii_uppercase()))
 }
 
+pub fn integration_route_id(source: &str, route_id: &str) -> NodeId {
+    NodeId::new(format!("IntegrationRoute:{source}:{route_id}"))
+}
+
+pub fn message_destination_id(dest_type: &str, name: &str) -> NodeId {
+    NodeId::new(format!("MessageDestination:{dest_type}:{name}"))
+}
+
 /// Edge types (mirrors `gitnexus-shared` `RelationshipType`, trimmed for v1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
@@ -205,6 +237,7 @@ pub enum EdgeKind {
     ExecutesQuery,
     ReadsTable,
     WritesTable,
+    IntegrationLink,
     Other,
 }
 
@@ -233,6 +266,7 @@ impl EdgeKind {
             EdgeKind::ExecutesQuery => "EXECUTES_QUERY",
             EdgeKind::ReadsTable => "READS_TABLE",
             EdgeKind::WritesTable => "WRITES_TABLE",
+            EdgeKind::IntegrationLink => "INTEGRATION_LINK",
             EdgeKind::Other => "REL",
         }
     }
@@ -362,6 +396,8 @@ mod tests {
             NodeKind::ExternalEndpoint,
             NodeKind::DbQuery,
             NodeKind::DbTable,
+            NodeKind::IntegrationRoute,
+            NodeKind::MessageDestination,
             NodeKind::Other,
         ] {
             assert_eq!(NodeKind::from_label(kind.label()), kind);

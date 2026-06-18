@@ -322,14 +322,30 @@ pub(crate) fn analyze_from_scope_with_options(
         "DB access emit complete"
     );
 
+    let (xml_nodes, xml_edges) = extract_integration_xml_in_repo(&repo_root);
+    tracing::info!(
+        integration_route_nodes = xml_nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::IntegrationRoute)
+            .count(),
+        message_destination_nodes = xml_nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::MessageDestination)
+            .count(),
+        integration_edges = xml_edges.len(),
+        "integration XML extraction complete"
+    );
+
     let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
     edges.extend(jar_edges);
     edges.extend(db_edges);
+    edges.extend(xml_edges);
 
     let mut all_nodes = parse_output.nodes;
     all_nodes.extend(resolve_output.nodes);
     all_nodes.extend(jar_nodes);
     all_nodes.extend(db_nodes);
+    all_nodes.extend(xml_nodes);
 
     let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
 
@@ -831,6 +847,73 @@ pub(crate) fn extract_jar_api(jars: &[JarInfo], fqcns: &[String]) -> (Vec<Node>,
         }
     }
     (all_nodes, all_edges, failed)
+}
+
+/// Scan the repo for `*.xml` files and run the integration-XML extractor on each.
+/// Best-effort: unreadable files are skipped with a warning, never fatal. Nodes
+/// are deduplicated by id (e.g. the same MessageDestination referenced twice).
+pub(crate) fn extract_integration_xml_in_repo(repo_root: &Path) -> (Vec<Node>, Vec<Edge>) {
+    use std::collections::HashSet;
+
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut seen_node_ids: HashSet<String> = HashSet::new();
+
+    let walker = ignore::WalkBuilder::new(repo_root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .build();
+
+    for result in walker {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!(error = %err, "integration-xml: walk error — skipping");
+                continue;
+            }
+        };
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let path = entry.path();
+        let is_xml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("xml"))
+            .unwrap_or(false);
+        if !is_xml {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(repo_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(err) => {
+                tracing::warn!(file = %rel, error = %err, "integration-xml: read failed — skipping");
+                continue;
+            }
+        };
+
+        let output = cih_resolve::extract_integration_xml(&rel, &content);
+        if output.nodes.is_empty() && output.edges.is_empty() {
+            continue;
+        }
+        for node in output.nodes {
+            if seen_node_ids.insert(node.id.as_str().to_string()) {
+                nodes.push(node);
+            }
+        }
+        edges.extend(output.edges);
+    }
+
+    (nodes, edges)
 }
 
 /// Read `.cih/repo-map.json` and return its JAR catalog. Returns an empty vec

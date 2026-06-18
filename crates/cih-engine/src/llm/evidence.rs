@@ -17,6 +17,8 @@ enum EvidenceKind {
     Table,
     Event,
     External,
+    IntegrationRoute,
+    MessageDestination,
     Snippet,
     Brd,
 }
@@ -105,6 +107,8 @@ pub fn build_evidence_pack(
     push_tables(&mut items, graph, comm_id);
     push_events(&mut items, graph, comm_id);
     push_external_calls(&mut items, graph, comm_id);
+    push_integration_routes(&mut items, graph, comm_id);
+    push_message_destinations(&mut items, graph, comm_id);
     if let Some(repo) = repo {
         push_source_snippets(&mut items, repo, graph, comm_id);
     }
@@ -330,6 +334,73 @@ fn push_external_calls(items: &mut Vec<EvidenceItem>, graph: &WikiGraph, comm_id
             text: format!(
                 "External calls: {}",
                 endpoints.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        });
+    }
+}
+
+/// Files touched by this community's members. Integration XML nodes are not
+/// assigned to communities directly, so we attribute them by shared file.
+fn community_files(graph: &WikiGraph, comm_id: &str) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    if let Some(members) = graph.members_by_community.get(comm_id) {
+        for member in members {
+            if !member.file.is_empty() {
+                files.insert(member.file.clone());
+            }
+        }
+    }
+    files
+}
+
+fn push_integration_routes(items: &mut Vec<EvidenceItem>, graph: &WikiGraph, comm_id: &str) {
+    let files = community_files(graph, comm_id);
+    if files.is_empty() {
+        return;
+    }
+    let mut idx = 0usize;
+    for node in graph.nodes_by_id.values() {
+        if node.kind != NodeKind::IntegrationRoute || !files.contains(&node.file) {
+            continue;
+        }
+        let source = node
+            .props
+            .as_ref()
+            .and_then(|p| p.get("source"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("xml");
+        idx += 1;
+        items.push(EvidenceItem {
+            id: format!("I{idx}"),
+            kind: EvidenceKind::IntegrationRoute,
+            text: format!("{} ({source} route in {})", node.name, node.file),
+        });
+    }
+}
+
+fn push_message_destinations(items: &mut Vec<EvidenceItem>, graph: &WikiGraph, comm_id: &str) {
+    let files = community_files(graph, comm_id);
+    if files.is_empty() {
+        return;
+    }
+    let mut idx = 0usize;
+    for node in graph.nodes_by_id.values() {
+        if node.kind != NodeKind::MessageDestination || !files.contains(&node.file) {
+            continue;
+        }
+        let dest_type = node
+            .props
+            .as_ref()
+            .and_then(|p| p.get("destination_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        idx += 1;
+        items.push(EvidenceItem {
+            id: format!("M{idx}"),
+            kind: EvidenceKind::MessageDestination,
+            text: format!(
+                "{dest_type}:{} (message destination in {})",
+                node.name, node.file
             ),
         });
     }

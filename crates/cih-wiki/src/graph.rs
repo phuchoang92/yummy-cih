@@ -534,11 +534,19 @@ pub fn route_http_method(route: &Node) -> String {
 }
 
 pub fn route_decorator(route: &Node) -> &str {
-    route
-        .props
-        .as_ref()
+    let props = route.props.as_ref();
+    // Prefer the legacy `decorator` string; fall back to the first entry of the
+    // newer `route_annotations` array (Spring MVC + JAX-RS extraction).
+    props
         .and_then(|p| p.get("decorator"))
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            props
+                .and_then(|p| p.get("route_annotations"))
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("")
 }
 

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use cih_core::{
     constructor_id, field_id, file_id, method_id, type_id, BindingKind, ContractKind, ContractSite,
     Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind,
-    ReferenceSite, SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
+    ReferenceSite, RouteSource, SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
 };
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, QueryCursor, Tree};
@@ -32,11 +32,12 @@ struct CallableContext {
 }
 
 #[derive(Clone, Debug)]
-struct SpringRoute {
-    annotation: String,
+struct MethodRoute {
+    annotations: Vec<String>,
     http_method: &'static str,
     path: String,
     range: Range,
+    source: RouteSource,
 }
 
 #[derive(Default)]
@@ -72,7 +73,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
     collect_declarations(root, src, &mut builder, None);
     collect_query_ir(provider, &tree, src, &mut builder);
     collect_heritage_references(root, src, &mut builder);
-    collect_spring_routes(root, src, &mut builder);
+    collect_method_routes(root, src, &mut builder);
     collect_contract_sites(root, src, &mut builder);
     collect_sql_constants(root, src, &mut builder);
     collect_sql_execution_sites(root, src, &mut builder);
@@ -161,7 +162,7 @@ fn collect_declarations(
             id,
             kind,
             fqcn,
-            spring_prefix: spring_class_prefix(node, src),
+            spring_prefix: spring_class_prefix(node, src).or_else(|| jaxrs_class_prefix(node, src)),
             is_test: stereotype.as_deref() == Some("test"),
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
@@ -670,19 +671,19 @@ fn emit_heritage_reference(
     });
 }
 
-fn collect_spring_routes(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+fn collect_method_routes(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
     if node.kind() == "method_declaration" {
-        emit_spring_routes_for_method(node, src, builder);
+        emit_method_routes_for_method(node, src, builder);
     }
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_spring_routes(child, src, builder);
+        collect_method_routes(child, src, builder);
     }
 }
 
-fn emit_spring_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
-    let routes = spring_method_routes(node, src);
+fn emit_method_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    let routes = method_routes(node, src);
     if routes.is_empty() {
         return;
     }
@@ -690,15 +691,23 @@ fn emit_spring_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut File
     let Some(callable) = callable_context_at(node.start_byte(), builder).cloned() else {
         return;
     };
+    // Class-level prefix may come from Spring's @RequestMapping or JAX-RS's @Path.
     let prefix = type_context_at(node.start_byte(), builder)
-        .and_then(|ctx| ctx.spring_prefix.as_deref())
-        .unwrap_or("")
-        .to_string();
+        .and_then(|ctx| ctx.spring_prefix.clone())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_default();
 
     for route in routes {
         let path = normalize_route_path(&route.path, &prefix);
         let name = format!("{} {path}", route.http_method);
         let route_id = NodeId::new(format!("Route:{name}"));
+        let reason = match route.source {
+            RouteSource::SpringMvc => format!(
+                "spring-{}",
+                route.annotations.first().map(String::as_str).unwrap_or("")
+            ),
+            RouteSource::JaxRs => format!("jaxrs-{}", route.http_method),
+        };
         builder.nodes.push(Node {
             id: route_id.clone(),
             kind: NodeKind::Route,
@@ -709,7 +718,8 @@ fn emit_spring_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut File
             props: Some(serde_json::json!({
                 "httpMethod": route.http_method,
                 "path": path,
-                "decorator": route.annotation,
+                "route_annotations": route.annotations,
+                "source": route.source,
                 "handler": callable.in_fqcn,
             })),
         });
@@ -718,7 +728,7 @@ fn emit_spring_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut File
             dst: route_id,
             kind: EdgeKind::HandlesRoute,
             confidence: 1.0,
-            reason: format!("spring-{}", route.annotation),
+            reason,
         });
     }
 }
@@ -752,7 +762,7 @@ fn emit_feign_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) 
         let Some(callable) = callable_context_at(method.start_byte(), builder).cloned() else {
             continue;
         };
-        for route in spring_method_routes(method, src) {
+        for route in spring_method_routes_inner(method, src) {
             let url = if let Some(base) = base.as_deref().filter(|base| base.starts_with('/')) {
                 normalize_route_path(&route.path, base)
             } else {
@@ -1321,7 +1331,28 @@ fn spring_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> {
         .and_then(|annotation| first_route_value(annotation, src))
 }
 
-fn spring_method_routes(node: TsNode<'_>, src: &str) -> Vec<SpringRoute> {
+fn jaxrs_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> {
+    annotations(node)
+        .into_iter()
+        .find(|annotation| annotation_name(*annotation, src).as_deref() == Some("Path"))
+        .and_then(|annotation| first_route_value(annotation, src))
+}
+
+/// Collect routes from both Spring MVC and JAX-RS annotations on a method,
+/// deduplicated by (http_method, path) and sorted for stable output.
+fn method_routes(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
+    let mut routes = spring_method_routes_inner(node, src);
+    routes.extend(jaxrs_method_routes_inner(node, src));
+    routes.sort_by(|a, b| {
+        a.http_method
+            .cmp(b.http_method)
+            .then(a.path.cmp(&b.path))
+    });
+    routes.dedup_by(|a, b| a.http_method == b.http_method && a.path == b.path);
+    routes
+}
+
+fn spring_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
     let mut routes = Vec::new();
     for annotation in annotations(node) {
         let Some(annotation_name) = annotation_name(annotation, src) else {
@@ -1333,24 +1364,79 @@ fn spring_method_routes(node: TsNode<'_>, src: &str) -> Vec<SpringRoute> {
         let paths = route_values(annotation, src);
         if paths.is_empty() {
             // bare @GetMapping / @DeleteMapping with no path → inherits class-level prefix
-            routes.push(SpringRoute {
-                annotation: annotation_name.clone(),
+            routes.push(MethodRoute {
+                annotations: vec![annotation_name.clone()],
                 http_method,
                 path: String::new(),
                 range: range_of(annotation),
+                source: RouteSource::SpringMvc,
             });
         } else {
             for path in paths {
-                routes.push(SpringRoute {
-                    annotation: annotation_name.clone(),
+                routes.push(MethodRoute {
+                    annotations: vec![annotation_name.clone()],
                     http_method,
                     path,
                     range: range_of(annotation),
+                    source: RouteSource::SpringMvc,
                 });
             }
         }
     }
     routes
+}
+
+/// JAX-RS routes: HTTP verb comes from `@GET`/`@POST`/... and the method-level
+/// path (if any) from `@Path`. Class-level `@Path` is applied separately as the
+/// route prefix in [`emit_method_routes_for_method`].
+fn jaxrs_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
+    let verb = annotations(node)
+        .into_iter()
+        .find_map(|annotation| {
+            annotation_name(annotation, src)
+                .as_deref()
+                .and_then(jaxrs_http_method)
+                .map(|method| (method, annotation))
+        });
+    let Some((http_method, verb_annotation)) = verb else {
+        return Vec::new();
+    };
+
+    let path_annotation = annotations(node)
+        .into_iter()
+        .find(|annotation| annotation_name(*annotation, src).as_deref() == Some("Path"));
+    let paths = path_annotation
+        .map(|annotation| route_values(annotation, src))
+        .unwrap_or_default();
+    let verb_name = annotation_name(verb_annotation, src).unwrap_or_else(|| http_method.to_string());
+    let mut annotation_names = vec![verb_name];
+    if path_annotation.is_some() {
+        annotation_names.push("Path".to_string());
+    }
+    annotation_names.sort();
+
+    let range = range_of(verb_annotation);
+    if paths.is_empty() {
+        // No @Path on the method → inherits the class-level @Path prefix.
+        vec![MethodRoute {
+            annotations: annotation_names,
+            http_method,
+            path: String::new(),
+            range,
+            source: RouteSource::JaxRs,
+        }]
+    } else {
+        paths
+            .into_iter()
+            .map(|path| MethodRoute {
+                annotations: annotation_names.clone(),
+                http_method,
+                path,
+                range,
+                source: RouteSource::JaxRs,
+            })
+            .collect()
+    }
 }
 
 fn annotations(node: TsNode<'_>) -> Vec<TsNode<'_>> {
@@ -1387,6 +1473,19 @@ fn spring_http_method(annotation: &str) -> Option<&'static str> {
         "PutMapping" => Some("PUT"),
         "DeleteMapping" => Some("DELETE"),
         "PatchMapping" => Some("PATCH"),
+        _ => None,
+    }
+}
+
+fn jaxrs_http_method(annotation: &str) -> Option<&'static str> {
+    match annotation {
+        "GET" => Some("GET"),
+        "POST" => Some("POST"),
+        "PUT" => Some("PUT"),
+        "DELETE" => Some("DELETE"),
+        "PATCH" => Some("PATCH"),
+        "HEAD" => Some("HEAD"),
+        "OPTIONS" => Some("OPTIONS"),
         _ => None,
     }
 }
