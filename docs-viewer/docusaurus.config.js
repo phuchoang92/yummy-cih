@@ -5,7 +5,6 @@ const path = require('path');
 const fs = require('fs');
 const { themes: prismThemes } = require('prism-react-renderer');
 
-// ── Mode detection ────────────────────────────────────────────────────────────
 // Single-repo: set CIH_WIKI_PATH=/path/to/.cih/wiki/pages
 // Multi-repo:  set CIH_WIKI_REPOS_DIR=/wiki (each subdir = one repo)
 const singlePath = process.env.CIH_WIKI_PATH
@@ -16,7 +15,6 @@ const reposDir = process.env.CIH_WIKI_REPOS_DIR
   : '/wiki';
 const multiMode = !singlePath;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function readRepoName(pagesDir) {
   try {
     const m = JSON.parse(fs.readFileSync(path.join(pagesDir, '..', 'manifest.json'), 'utf-8'));
@@ -28,16 +26,30 @@ function readRepoName(pagesDir) {
 function listRepoDirs(dir) {
   try {
     return fs.readdirSync(dir)
-      .filter(f => { try { return fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; } })
+      .filter(f => {
+        try { return fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; }
+      })
       .sort();
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
-// ── Resolve repos ─────────────────────────────────────────────────────────────
 const repoDirs = multiMode ? listRepoDirs(reposDir) : [];
+const siteTitle = multiMode
+  ? 'CIH Docs'
+  : `${readRepoName(singlePath)} — CIH Docs`;
 
-// One @docusaurus/plugin-content-docs instance per repo in multi-repo mode.
-// The preset-classic docs plugin is disabled in this mode.
+const singleDocsConfig = {
+  path: singlePath,
+  routeBasePath: '/docs',
+  sidebarPath: require.resolve('./sidebars.js'),
+  exclude: ['**/*.json'],
+  editUrl: undefined,
+};
+
+// One plugin-content-docs instance per repo in multi-repo mode.
+// The preset-classic docs plugin is disabled in that mode.
 const repoPlugins = repoDirs.map(slug => [
   '@docusaurus/plugin-content-docs',
   {
@@ -50,17 +62,12 @@ const repoPlugins = repoDirs.map(slug => [
   },
 ]);
 
-// Navbar links in multi-repo mode: one item per repo
 const navItems = multiMode
   ? repoDirs.map(slug => ({ label: slug, to: `/${slug}/`, position: 'left' }))
   : [];
 
-const siteTitle = multiMode
-  ? 'CIH Docs'
-  : `${readRepoName(singlePath)} — CIH Docs`;
-
 /** @type {import('@docusaurus/types').Config} */
-const config = {
+module.exports = {
   title: siteTitle,
   tagline: 'Code Intelligence Hub — Role-Based Documentation',
   favicon: undefined,
@@ -81,6 +88,7 @@ const config = {
     },
   },
 
+  themes: ['@docusaurus/theme-mermaid'],
   plugins: repoPlugins,
 
   presets: [
@@ -88,15 +96,7 @@ const config = {
       'classic',
       /** @type {import('@docusaurus/preset-classic').Options} */
       ({
-        docs: multiMode
-          ? false  // disabled — each repo is its own plugin
-          : {
-              path: singlePath,
-              routeBasePath: '/docs',
-              sidebarPath: require.resolve('./sidebars.js'),
-              exclude: ['**/*.json'],
-              editUrl: undefined,
-            },
+        docs: multiMode ? false : singleDocsConfig,
         blog: false,
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
@@ -131,7 +131,3 @@ const config = {
       },
     }),
 };
-
-config.themes = ['@docusaurus/theme-mermaid'];
-
-module.exports = config;
