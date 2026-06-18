@@ -196,8 +196,9 @@ pub fn detect_communities(
                         let name = simple.strip_suffix("Controller")
                             .or_else(|| simple.strip_suffix("Resource"))
                             .unwrap_or(simple);
-                        let name_lower = name.to_lowercase();
-                        *controller_counts.entry(name_lower.clone()).or_insert(0) += 1;
+                        // strip role prefix (Admin/Pos/Public) to get domain e.g. "ActivityLog"
+                        let domain = strip_role_prefix(name).to_string();
+                        *controller_counts.entry(domain.clone()).or_insert(0) += 1;
                         all_controllers.insert(simple.to_string());
                     }
                 }
@@ -240,10 +241,9 @@ pub fn detect_communities(
                 let n = capitalize_first(&seg);
                 break 'naming (n, "route_prefix");
             }
-            // 2. Controller
+            // 2. Controller — seg is PascalCase domain e.g. "ActivityLog"
             if let Some(seg) = best_by_count(&controller_counts) {
-                let n = capitalize_first(&seg);
-                break 'naming (n, "controller");
+                break 'naming (seg, "controller");
             }
             // 3. DB table prefix
             if let Some(tname) = best_by_count(&table_counts) {
@@ -270,7 +270,7 @@ pub fn detect_communities(
         let feature = if naming_reason == "fallback" {
             String::new()
         } else {
-            display_name.to_lowercase().replace(' ', "-")
+            pascal_to_kebab_slug(&display_name)
         };
 
         let primary_stereotype = {
@@ -485,6 +485,34 @@ pub fn trace_processes(
     }
 
     out
+}
+
+/// Strip a leading role prefix word (Admin, Pos, Public, Private, Internal) from a PascalCase name.
+/// "AdminActivityLog" → "ActivityLog", "PosOrder" → "Order", "ActivityLog" → "ActivityLog"
+fn strip_role_prefix(name: &str) -> &str {
+    const PREFIXES: &[&str] = &["Admin", "Pos", "Public", "Private", "Internal"];
+    for prefix in PREFIXES {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            // Only strip if what follows starts with an uppercase letter (proper word boundary)
+            if rest.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                return rest;
+            }
+        }
+    }
+    name
+}
+
+/// Convert a PascalCase name to a kebab-case feature slug.
+/// "ActivityLog" → "activity-log", "AdminBanner" → "admin-banner", "Orders" → "orders"
+fn pascal_to_kebab_slug(name: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in name.char_indices() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push('-');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    if out.is_empty() { "shared".to_string() } else { out }
 }
 
 fn first_non_generic_path_segment(path: &str) -> Option<String> {
