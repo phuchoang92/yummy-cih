@@ -30,7 +30,7 @@ must make it easy — not expensive — to onboard the next team.
 | Spring MVC route extraction | ✅ | @GetMapping, @PostMapping, @RequestMapping, etc. |
 | DB access extraction | ✅ | JPA, named queries |
 | `cih-engine analyze` | ✅ | Graph artifacts (`nodes.jsonl`, `edges.jsonl`) |
-| `cih-engine discover` | ✅ | Community detection (Leiden), process tracing (BFS), stereotyping |
+| `cih-engine discover` | ✅ | Community detection (Leiden), process tracing (BFS), stereotyping — CLI may display "Louvain" in some help text; the algorithm is Leiden (see `leiden.rs`); terminology should be normalised when next touching discover docs |
 | `cih-wiki` render | ✅ | PO/BA/Dev pages per feature and community |
 | LLM wiki enrichment | ✅ | Per-community and feature-level summaries (llm-summary mode) |
 | Process evidence (P-items) | ✅ | Process nodes wired into LLM evidence packs |
@@ -77,6 +77,16 @@ Refactor `spring_method_routes` into a per-framework architecture:
 - Add `RouteSource` enum in `cih-core`: `SpringMvc | JaxRs` — serialized snake_case, no magic strings.
 
 **1b — XML Integration Extraction** (`crates/cih-resolve/src/integration_xml.rs` — new)
+
+> **Why `cih-resolve`, not `cih-lang`?**
+> `cih-lang` is responsible for parsing a single source file into raw symbol facts (classes,
+> methods, annotations). XML wiring files do not define symbols in isolation — they wire
+> together Java beans and services that were defined by `cih-lang`. Extracting them requires
+> Java symbol facts to already exist so that wiring edges can reference real node IDs. That
+> dependency on post-parse symbol state is what makes this a resolve-layer concern, not a
+> parse-layer concern. The rule: if an extractor needs to cross-reference symbols from another
+> source file or config file, it belongs in `cih-resolve`; if it only reads one file to emit
+> raw facts, it belongs in `cih-lang`.
 
 - Glob patterns for Camel, Blueprint, Spring XML, CXF config files; filter by namespace signature.
 - Emit `IntegrationRoute`, `MessageDestination`, `ExternalEndpoint` node kinds.
@@ -475,7 +485,11 @@ cih-engine embed /path/to/ocb-sp05
 # Via MCP: search_code("rate limiting") — inspect result quality
 
 # Phase 4
-cih-server  # future agent endpoint enabled by config/flags
+# Placeholder — exact command/env shape to be decided before implementation.
+# Current expectation: cih-server --agent-mode or a sub-command added to cih-engine,
+# reusing the existing provider config env vars (GEMINI_API_KEY, OPENAI_API_KEY, etc.)
+# and exposing the agent as an MCP endpoint alongside existing graph/search endpoints.
+cih-server  # agent endpoint enabled via flag or sub-command (TBD)
 # Ask: "What does POST /orders do?" — verify specific, grounded answer
 
 # Phase 5
