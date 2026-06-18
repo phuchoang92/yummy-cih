@@ -115,6 +115,29 @@ enum Command {
         /// Print the summary as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
+
+        // ── Community detection overrides ──────────────────────────────────
+        /// Louvain resolution. Higher = more, smaller communities; lower = fewer, larger ones.
+        /// Default: 1.0 (2.0 for large graphs, but see --min-community-size).
+        #[arg(long)]
+        resolution: Option<f64>,
+        /// Drop communities smaller than this many members. Default: 2 (3 for large graphs).
+        #[arg(long)]
+        min_community_size: Option<usize>,
+
+        // ── Process trace overrides ────────────────────────────────────────
+        /// Maximum BFS depth per process trace. Default: 10.
+        #[arg(long)]
+        max_trace_depth: Option<usize>,
+        /// Maximum number of processes kept after deduplication. Default: scales with codebase size.
+        #[arg(long)]
+        max_processes: Option<usize>,
+        /// Maximum call-graph branching factor per BFS step. Default: 4.
+        #[arg(long)]
+        max_branching: Option<usize>,
+        /// Minimum edge confidence to follow during BFS (0.0–1.0). Default: 0.5.
+        #[arg(long)]
+        min_trace_confidence: Option<f32>,
     },
     /// Embed searchable graph nodes from the latest analyzed artifacts into pgvector.
     Embed {
@@ -353,7 +376,27 @@ fn main() -> Result<()> {
             graph_key,
             no_load,
             json,
-        } => discover::run_discover(repo, falkor_url, graph_key, no_load, json),
+            resolution,
+            min_community_size,
+            max_trace_depth,
+            max_processes,
+            max_branching,
+            min_trace_confidence,
+        } => discover::run_discover(
+            repo,
+            falkor_url,
+            graph_key,
+            no_load,
+            json,
+            discover::DiscoverOverrides {
+                resolution,
+                min_community_size,
+                max_trace_depth,
+                max_processes,
+                max_branching,
+                min_trace_confidence,
+            },
+        ),
         Command::Embed {
             repo,
             pg_url,

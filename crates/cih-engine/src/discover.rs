@@ -9,19 +9,32 @@ use crate::db::{load_many_to_falkor, LoadOutcome};
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
 use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
+/// CLI overrides for community detection and process tracing.
+/// Each field is `None` (use heuristic) or `Some(x)` (override).
+#[derive(Default)]
+pub(crate) struct DiscoverOverrides {
+    pub resolution: Option<f64>,
+    pub min_community_size: Option<usize>,
+    pub max_trace_depth: Option<usize>,
+    pub max_processes: Option<usize>,
+    pub max_branching: Option<usize>,
+    pub min_trace_confidence: Option<f32>,
+}
+
 pub(crate) fn run_discover(
     repo: PathBuf,
     falkor_url: Option<String>,
     graph_key: Option<String>,
     no_load: bool,
     json: bool,
+    overrides: DiscoverOverrides,
 ) -> Result<()> {
     let span = tracing::info_span!("discover", repo = %repo.display());
     let _enter = span.enter();
 
     tracing::info!(repo = %repo.display(), "starting discover");
 
-    let emit = run_discover_core(&repo)?;
+    let emit = run_discover_core(&repo, &overrides)?;
 
     let load = if no_load {
         tracing::info!("Skipping FalkorDB load (--no-load)");
@@ -60,7 +73,7 @@ pub(crate) fn run_discover(
     Ok(())
 }
 
-pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
+pub(crate) fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<DiscoverOutcome> {
     let source = latest_graph_artifacts(repo)?;
     let nodes = source
         .read_nodes()
@@ -91,8 +104,15 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
         community_cfg.max_iterations = 3;
         community_cfg.min_community_size = 3;
     }
+    // Apply CLI overrides on top of heuristics.
+    if let Some(v) = overrides.resolution         { community_cfg.resolution = v; }
+    if let Some(v) = overrides.min_community_size { community_cfg.min_community_size = v; }
 
-    tracing::info!("running community detection");
+    tracing::info!(
+        resolution = community_cfg.resolution,
+        min_community_size = community_cfg.min_community_size,
+        "running community detection"
+    );
     let community_output = cih_community::detect_communities(&nodes, &edges, &community_cfg);
     tracing::info!(
         communities = community_output.nodes.len(),
@@ -110,7 +130,12 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
         })
         .count();
     tracing::debug!(symbols = symbol_count, "symbol count for process config");
-    let process_cfg = cih_community::ProcessConfig::for_symbol_count(symbol_count);
+    let mut process_cfg = cih_community::ProcessConfig::for_symbol_count(symbol_count);
+    // Apply CLI overrides on top of heuristics.
+    if let Some(v) = overrides.max_trace_depth     { process_cfg.max_trace_depth = v; }
+    if let Some(v) = overrides.max_processes        { process_cfg.max_processes = v; }
+    if let Some(v) = overrides.max_branching        { process_cfg.max_branching = v; }
+    if let Some(v) = overrides.min_trace_confidence { process_cfg.min_trace_confidence = v; }
 
     tracing::info!("tracing business processes");
     let process_output =

@@ -385,7 +385,7 @@ fn discover_emits_community_and_process_artifacts() {
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
     assert!(analyze.resolved_edge_count >= 2);
 
-    let discover = run_discover_core(&root).unwrap();
+    let discover = run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
     assert!(discover.artifacts_dir.join("nodes.jsonl").exists());
     assert!(discover.artifacts_dir.join("edges.jsonl").exists());
     assert!(
@@ -408,7 +408,7 @@ fn repo_with_wiki_artifacts() -> PathBuf {
     let root = temp_repo();
     let scan = scan::scan_repo(&root).unwrap();
     analyze_emit(&scan, all_scope()).unwrap();
-    run_discover_core(&root).unwrap();
+    run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
     root
 }
 
@@ -556,7 +556,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
     let analyze_edges = analyze.artifacts.edges_path.clone();
     let analyze_version = analyze.artifacts.version.0.clone();
 
-    run_discover_core(&root).unwrap();
+    run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
         analyze_nodes.exists(),
@@ -591,7 +591,7 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
     let scan = scan::scan_repo(&root).unwrap();
     analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(&root).unwrap();
+    let discover = run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
         discover
@@ -636,7 +636,7 @@ fn discover_load_artifacts_are_analyze_then_community() {
     let scan = scan::scan_repo(&root).unwrap();
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(&root).unwrap();
+    let discover = run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
     let artifact_sets = discover.artifact_sets_for_load();
 
     // Canonicalize both sides: macOS temp_dir() symlinks may differ from canonicalized paths.
