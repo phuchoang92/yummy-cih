@@ -1311,13 +1311,24 @@ fn spring_method_routes(node: TsNode<'_>, src: &str) -> Vec<SpringRoute> {
         let Some(http_method) = spring_http_method(&annotation_name) else {
             continue;
         };
-        for path in route_values(annotation, src) {
+        let paths = route_values(annotation, src);
+        if paths.is_empty() {
+            // bare @GetMapping / @DeleteMapping with no path → inherits class-level prefix
             routes.push(SpringRoute {
                 annotation: annotation_name.clone(),
                 http_method,
-                path,
+                path: String::new(),
                 range: range_of(annotation),
             });
+        } else {
+            for path in paths {
+                routes.push(SpringRoute {
+                    annotation: annotation_name.clone(),
+                    http_method,
+                    path,
+                    range: range_of(annotation),
+                });
+            }
         }
     }
     routes

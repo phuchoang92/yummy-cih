@@ -376,15 +376,26 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 out_dir.join(format!("pages/{}.json", page_path)),
                 serde_json::to_string_pretty(&json_val)?,
             )?;
+            let dev_title = page_path
+                .split('/')
+                .last()
+                .map(|s| s.split('-').map(|w| {
+                    let mut c = w.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    }
+                }).collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| comm.name.clone());
             nav.entry(feature.clone()).or_default().push(NavEntry {
                 slug: page_path.to_string(),
-                title: comm.name.clone(),
+                title: dev_title.clone(),
                 kind: "dev".into(),
             });
             all_pages.push(PageEntry {
                 slug: page_path.to_string(),
                 role: feature.clone(),
-                title: comm.name.clone(),
+                title: dev_title.clone(),
                 kind: "dev".into(),
                 path: format!("pages/{}.md", page_path),
                 json_path: Some(format!("pages/{}.json", page_path)),

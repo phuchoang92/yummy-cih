@@ -121,6 +121,10 @@ const config = {
         darkTheme: prismThemes.dracula,
         additionalLanguages: ['java', 'bash', 'json'],
       },
+      tableOfContents: {
+        minHeadingLevel: 2,
+        maxHeadingLevel: 4,
+      },
       colorMode: {
         defaultMode: 'light',
         disableSwitch: false,

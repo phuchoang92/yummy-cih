@@ -293,7 +293,23 @@ pub fn detect_communities(
         let primary_stereotype = {
             let mut stereo_counts: BTreeMap<&str, usize> = BTreeMap::new();
             for mid in &member_ids {
-                if let Some(n) = source_by_id.get(mid) {
+                // stereotypes are on Class nodes; derive class id from method id
+                // Method:pkg.ClassName#method/arity → Class:pkg.ClassName
+                let class_id = mid.as_str()
+                    .split_once('#')
+                    .map(|(prefix, _)| {
+                        let fqcn = prefix
+                            .trim_start_matches("Method:")
+                            .trim_start_matches("Constructor:")
+                            .trim_start_matches("Function:");
+                        format!("Class:{}", fqcn)
+                    });
+                let class_node_id = class_id.as_ref().map(|s| NodeId::new(s.clone()));
+                let node = class_node_id
+                    .as_ref()
+                    .and_then(|cid| source_by_id.get(cid))
+                    .or_else(|| source_by_id.get(mid));
+                if let Some(n) = node {
                     if let Some(s) = n.props.as_ref()
                         .and_then(|p| p.get("stereotype"))
                         .and_then(|v| v.as_str())
@@ -580,6 +596,7 @@ fn first_non_generic_path_segment(path: &str) -> Option<String> {
     const GENERIC: &[&str] = &[
         "api", "apis", "rest", "internal", "external", "service", "services",
         "common", "shared", "core", "app", "apps",
+        "admin", "pos", "public", "private",
     ];
     for part in path.split('/') {
         let part = part.trim();

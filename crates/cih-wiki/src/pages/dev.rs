@@ -109,14 +109,31 @@ pub fn render_dev_community(
     llm_full: Option<&CommunityLlmFull>,
 ) -> String {
     let comm_id = community.id.as_str();
+    // Derive a unique title from the last path segment (e.g. "warehouse-service-2" → "Warehouse Service 2")
+    let page_title = page_path
+        .split('/')
+        .last()
+        .map(|s| {
+            s.split('-')
+                .map(|word| {
+                    let mut c = word.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_else(|| community.name.clone());
 
     let mut md = String::new();
     md.push_str(&format!(
         "---\ntitle: {}\nrole: dev\n---\n\n",
-        community.name
+        page_title
     ));
     md.push_str("<div class=\"role-banner role-dev\"><span class=\"role-dot\"></span>Developer<span class=\"role-desc\">Technical structure, calls &amp; tests</span></div>\n\n");
-    md.push_str(&format!("# {} — Technical Reference\n\n", community.name));
+    md.push_str(&format!("# {} — Technical Reference\n\n", page_title));
 
     if let Some(full) = llm_full {
         if !full.dev_responsibility.is_empty() {

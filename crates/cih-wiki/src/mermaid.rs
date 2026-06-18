@@ -128,24 +128,73 @@ pub fn community_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String
         }
     }
 
-    if comm_ids.len() < 2 {
+    // Compute a base label per community: "DisplayName (stereotype)"
+    let base_label_of = |cid: &str| -> String {
+        let display = graph.community_display_name(cid);
+        let stereotype = graph
+            .nodes_by_id
+            .get(cid)
+            .and_then(|n| n.props.as_ref())
+            .and_then(|p| p.get("primary_stereotype"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        match stereotype {
+            Some(s) => format!("{} ({})", display, s),
+            None => display.to_string(),
+        }
+    };
+
+    // Merge communities that share the same base label into one canonical ID.
+    // This collapses Louvain split-class artifacts (e.g. two "Cart (controller)" clusters).
+    let mut label_to_canonical: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    let mut canonical_for: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for &cid in &comm_ids {
+        let lbl = base_label_of(cid);
+        let canon = *label_to_canonical.entry(lbl).or_insert(cid);
+        canonical_for.insert(cid, canon);
+    }
+
+    // Deduplicated node list (canonical IDs only)
+    let mut seen_nodes: Vec<&str> = Vec::new();
+    for &cid in &comm_ids {
+        let canon = canonical_for[cid];
+        if !seen_nodes.contains(&canon) {
+            seen_nodes.push(canon);
+        }
+    }
+
+    if seen_nodes.len() < 2 {
         return None;
     }
 
     let truncated = comm_ids.len() >= MAX_NODES || relevant.len() >= MAX_EDGES;
+
     let mut out = String::from("flowchart LR\n");
-    for cid in &comm_ids {
-        let label = sanitize(&graph.community_name(cid));
+    for &cid in &seen_nodes {
+        let label = sanitize(&base_label_of(cid));
         let nid = node_id(cid);
         out.push_str(&format!("  {}[\"{}\"]\n", nid, label));
     }
+
+    // Emit edges using canonical IDs; drop self-loops produced by merging
+    let mut seen_edges: Vec<(String, String)> = Vec::new();
     for (src, dst, count) in relevant.iter().take(MAX_EDGES) {
-        let label = if *count > 1 {
+        let csrc = canonical_for.get(src.as_str()).copied().unwrap_or(src.as_str());
+        let cdst = canonical_for.get(dst.as_str()).copied().unwrap_or(dst.as_str());
+        if csrc == cdst {
+            continue; // merged — intra-class call, skip
+        }
+        let edge_key = (csrc.to_string(), cdst.to_string());
+        if seen_edges.contains(&edge_key) {
+            continue;
+        }
+        seen_edges.push(edge_key);
+        let arrow = if *count > 1 {
             format!(" --\"{}x\"--> ", count)
         } else {
             " --> ".to_string()
         };
-        out.push_str(&format!("  {}{}{}\n", node_id(src), label, node_id(dst)));
+        out.push_str(&format!("  {}{}{}\n", node_id(csrc), arrow, node_id(cdst)));
     }
     if truncated {
         out.push_str("  %%diagram truncated\n");
