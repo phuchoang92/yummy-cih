@@ -29,13 +29,17 @@ must make it easy — not expensive — to onboard the next team.
 | Java parsing (tree-sitter) | ✅ | Methods, classes, fields, interfaces |
 | Spring MVC route extraction | ✅ | @GetMapping, @PostMapping, @RequestMapping, etc. |
 | DB access extraction | ✅ | JPA, named queries |
-| `cih-engine analyze` | ✅ | Graph artifacts (nodes.json, edges.json) |
+| `cih-engine analyze` | ✅ | Graph artifacts (`nodes.jsonl`, `edges.jsonl`) |
 | `cih-engine discover` | ✅ | Community detection (Leiden), process tracing (BFS), stereotyping |
 | `cih-wiki` render | ✅ | PO/BA/Dev pages per feature and community |
 | LLM wiki enrichment | ✅ | Per-community and feature-level summaries (llm-summary mode) |
 | Process evidence (P-items) | ✅ | Process nodes wired into LLM evidence packs |
 | Feature-level LLM caching | ✅ | FeatureMetaEntry in wiki_meta.json |
 | FalkorDB graph storage | ✅ | Nodes/edges persisted; MCP tools running |
+| `cih-embed` | ✅ partial | Chunking, text extraction, embedding model/store plumbing exist; AST-strip and production benchmarking remain |
+| `cih-search` | ✅ partial | BM25, tokenization, and RRF exist; unified production retrieval API still needs hardening |
+| Built-in graph browser | ✅ | Local `/graph` UI and bounded graph APIs exist in `cih-server` |
+| Multi-language core vocabulary | ✅ partial | `NodeKind::Function` exists; integration/message node kinds and extractor contracts remain |
 
 ---
 
@@ -130,14 +134,18 @@ Phase 1's extraction on a real production codebase, not just eval fixtures.
 
 **2b — Community Detection Tuning**
 
-- Add `--community-resolution` flag to `discover` command.
+- Keep the existing `discover --resolution` flag as the manual override; do not add a duplicate
+  `--community-resolution` flag.
 - Add `architecture_hint: monolith | microservice | event_driven | batch` to `repo-map.json`.
   Auto-detected heuristic: >500 files + multi-Maven-module → `monolith`. Community detection
-  reads this to set default Leiden resolution parameter.
+  reads this to choose default resolution, min-community-size, and max-iteration settings.
+- For monoliths, avoid automatic over-fragmentation. Start with conservative/default resolution
+  and increase `min_community_size`; only raise resolution when eval output proves communities
+  are too coarse.
 
 **2c — Wiki Quality Validation**
 
-- Run full `analyze → discover → wiki --llm-summary` on ocb-sp05.
+- Run full `analyze → discover → wiki --llm --wiki-mode llm-summary` on ocb-sp05.
 - LLM citations `[R1]`, `[P1]` must reference real evidence items (verify against
   `--llm-debug-evidence` output).
 
@@ -153,16 +161,21 @@ Phase 1's extraction on a real production codebase, not just eval fixtures.
 
 ---
 
-## Phase 3 — Semantic Embedding Layer
-**Scope:** 6–10 weeks | **Enables:** Semantic code search
+## Phase 3 — Retrieval Hardening: Embeddings + BM25 + RRF
+**Scope:** 4–8 weeks | **Enables:** production-grade semantic code search
 
 ### Purpose
 
-The current retrieval is entirely graph-based: FalkorDB traversal finds what is structurally
-connected to a query node. It cannot answer "find me code similar to X" or "where is this
-concept implemented?" Embedding method bodies enables semantic similarity search, which is
-the foundation for the AI agent's `search_code` tool and for cross-repo knowledge transfer
-(same query, different team's codebase).
+CIH already has the core retrieval building blocks: `cih-embed` for embedding storage/model
+plumbing, `cih-search` for BM25/RRF, and `cih-server` query tools. This phase is not about
+creating new crates from scratch. It is about making retrieval production-grade for large
+enterprise repos: better text preparation, incremental embedding, unified hybrid ranking,
+and measurable quality.
+
+Graph traversal finds what is structurally connected to a query node. Semantic search answers
+"find me code similar to X" or "where is this concept implemented?" Embedding method bodies
+enables similarity search, while BM25 catches exact symbol/file names that embeddings can rank
+poorly. RRF combines both into one predictable result list for AI tools and UI search.
 
 Embedding naively would embed ~133K methods from ocb-sp05, most of which are logging,
 null-guard boilerplate, or trivial accessors — high cost, low signal. AST-strip reduces this
@@ -171,7 +184,7 @@ removing noise before the encoder sees the text.
 
 ### Approach
 
-**3a — AST-Strip** (`crates/cih-embed/src/strip.rs` — new)
+**3a — AST-Strip / Noise Reduction** (`crates/cih-embed/src/strip.rs` — new)
 
 tree-sitter–based method body reduction:
 - Drop logging calls (`log.*`, `logger.*`, `LOG.*`), null-guard-throw blocks, trivial
@@ -180,20 +193,25 @@ tree-sitter–based method body reduction:
   `strip_profiles/typescript.toml` — externalised, not baked into Rust code.
 - Estimate: ~133K methods → ~60-70K after strip for ocb-sp05.
 
-**3b — Embedding Pipeline** (`crates/cih-embed` — new crate)
+**3b — Harden Existing Embedding Pipeline** (`crates/cih-embed`)
 
 - Input: node IDs + stripped method bodies from graph artifacts.
 - Model: configurable (default: voyage-code-2 or Gemini text-embedding-004).
-- Output: pgvector table `method_embeddings(node_id TEXT, embedding vector(1536))` with HNSW index.
+- Output: pgvector table keyed by stable `node_id`, with configurable embedding dimension and
+  HNSW index where appropriate.
 - Incremental: hash stripped body; skip if unchanged. Estimated: ~90 MB vectors + ~400 MB
   HNSW index for ocb-sp05.
+- Keep local/test paths deterministic and model-free where possible; integration tests that need
+  pgvector or external models must be opt-in.
 
-**3c — BM25 Lexical Index**
+**3c — Harden Existing BM25 Lexical Index** (`crates/cih-search`)
 
-PostgreSQL `tsvector` on method names + class names + file paths. Full-text fallback for
-exact symbol names that embedding may rank poorly.
+Use method names, class names, file paths, package/module names, route paths, and DB table names.
+Full-text fallback is required for exact symbol names that embedding may rank poorly. Keep the
+in-memory BM25 path for local artifacts and optionally add PostgreSQL `tsvector` later if large
+repos need server-side indexing.
 
-**3d — Hybrid Retrieval (RRF)** (`crates/cih-retrieval` — new crate)
+**3d — Hybrid Retrieval API** (`cih-search` + `cih-embed` + `cih-server`)
 
 Given a query string:
 1. pgvector ANN (top-K by cosine similarity)
@@ -201,9 +219,12 @@ Given a query string:
 3. BM25 full-text on method/class names
 4. Reciprocal Rank Fusion → final ranked list of `(node_id, score, snippet)`.
 
+Do not create a duplicate `cih-retrieval` crate unless the API outgrows `cih-search`. Prefer a
+single public retrieval facade exported from existing crates first.
+
 **3e — MCP Tool: search_code**
 
-`search_code(query: str, limit: int) → Vec<CodeMatch>` exposed as MCP tool.
+Expose or align the existing server query tool as `search_code(query: str, limit: int) → Vec<CodeMatch>`.
 `CodeMatch`: node_id, qualified_name, file, line, snippet, score.
 
 ### Success Criteria
@@ -239,12 +260,16 @@ source files.
 | `trace_impact(node_id, direction)` | Node ID + up/down | BFS impact list from FalkorDB |
 | `trace_call_chain(entry_point, depth)` | Route or process ID | Ordered call chain from entry point |
 
-**4b — Claude Agent SDK Integration**
+**4b — Provider-Neutral Agent Runtime**
 
-- Agent loop: Claude calls tools, reads results, calls again or returns a final answer.
+- Agent loop: an LLM calls tools, reads results, calls again or returns a final answer.
+- Define an internal `AgentLlmAdapter` first, reusing the provider strategy already used by
+  wiki enrichment where practical: Gemini, OpenAI-compatible, Anthropic/Claude, DeepSeek,
+  and `http-json`.
 - System prompt: describes the codebase (language, architecture_hint, key module names from repo-map).
 - Context injection on first turn: inject feature-level wiki PO/BA summary for the module
   most relevant to the query.
+- Claude-specific SDK support can be one adapter, not the architecture boundary.
 
 **4c — Multi-Turn State**
 
@@ -253,8 +278,11 @@ source files.
 
 **4d — MCP Server Interface**
 
-- `cih-agent start --repo /path/to/repo` — exposes agent as an MCP server endpoint.
-- Compatible with Claude Code CLI and IDE extensions (VS Code, JetBrains).
+- Prefer integrating the agent endpoint into `cih-server` first, because it already exposes
+  graph/search/impact tools and runtime configuration. Split into a separate `cih-agent` crate
+  only if the loop becomes large enough to justify its own crate boundary.
+- Compatible with Claude Code CLI and IDE extensions (VS Code, JetBrains), while preserving
+  Gemini/OpenAI-compatible provider support for teams that cannot use Claude.
 
 ### Success Criteria
 - Agent answers "What does `POST /orders` do end-to-end?" with specific method names and files.
@@ -281,7 +309,7 @@ for free.
 Four specific bottlenecks block multi-language adoption today:
 1. Entry-point detection is hard-coded to Spring annotation names.
 2. AST-strip rules are Java-specific (mitigated by externalising to profiles in Phase 3).
-3. `NodeKind` vocabulary is Java-centric (Class, Method, Field).
+3. Extractor output contracts are implicit rather than documented as a stable language-neutral API.
 4. Community detection resolution is graph-size-aware but not architecture-aware.
 
 ### Approach
@@ -294,7 +322,7 @@ Document the extraction output schema as a public spec. Rules any extractor must
 - Message destinations → `NodeKind::MessageDestination` with `destination_type` + `component`.
 - Internal integration links → `EdgeKind::IntegrationLink` (never `Uses`).
 - Entry points → node prop `"entry_point": true, "entry_point_kind": "http|event|scheduled|export"`.
-- Callables without classes (Go `func`, Python `def`) → new `NodeKind::Function`.
+- Callables without classes (Go `func`, Python `def`) → existing `NodeKind::Function`.
 
 **5b — Pluggable Entry-Point Registry**
 
@@ -330,12 +358,12 @@ Process tracing (BFS) reads the registry; zero Java-specific checks remain in th
 
 `architecture_hint` auto-detected from repo-map or user-supplied:
 
-| Hint | Heuristic | Leiden resolution |
+| Hint | Heuristic | Community defaults |
 |---|---|---|
-| `monolith` | >500 files + multi-module build | higher (finer communities) |
-| `microservice` | thin internal graph, few files per service | lower (coarser communities) |
-| `event_driven` | many message destinations, few HTTP routes | moderate |
-| `batch` | scheduled entry points dominate | moderate |
+| `monolith` | >500 files + multi-module build | conservative/default resolution + larger `min_community_size` |
+| `microservice` | thin internal graph, few files per service | lower/coarser resolution only when eval shows over-splitting |
+| `event_driven` | many message destinations, few HTTP routes | moderate resolution; prioritize message destinations as entry points |
+| `batch` | scheduled entry points dominate | moderate resolution; prioritize scheduled entry points |
 
 Prevents the 4,115-community over-fragmentation seen on ocb-sp05 from repeating on every
 onboarded monolith.
@@ -358,7 +386,7 @@ onboarded monolith.
 | Noise removal (AST-strip) | Java rules → `strip_profiles/java.toml` | `strip_profiles/<lang>.toml` per language |
 | Community resolution | Graph-size heuristic | + `architecture_hint` from repo-map |
 | Evidence items | R/P/T/S/B/I/M item kinds | Extensible `EvidenceKind` enum |
-| NodeKind vocabulary | Java-centric (Class, Method, Field) | + `Function`, `Module` for other languages |
+| NodeKind vocabulary | `Function` already exists; integration/message kinds missing | + `IntegrationRoute`, `MessageDestination`, optional `Module` if needed |
 
 ---
 
@@ -367,8 +395,8 @@ onboarded monolith.
 ```
 Phase 1: Enterprise Java Genericity
   └── Phase 2: ocb-sp05 Production Quality
-        └── Phase 3: Semantic Embedding
-              └── Phase 4: AI Agent
+        └── Phase 3: Retrieval Hardening
+              └── Phase 4: Provider-Neutral AI Agent
 
 Phase 1 also unblocks Phase 5 (Multi-Language):
   the framework-neutral contract pattern established in Phase 1
@@ -395,24 +423,27 @@ Phase 1 also unblocks Phase 5 (Multi-Language):
 | File | Change |
 |---|---|
 | `crates/cih-resolve/src/di_xml.rs` | **New** — Spring/Blueprint DI resolution |
-| `crates/cih-community/src/lib.rs` | Tunable resolution parameter + `--community-resolution` flag |
-| `crates/cih-engine/src/scan_cmd.rs` | `architecture_hint` field in repo-map |
+| `crates/cih-community/src/lib.rs` | Architecture-aware defaults for resolution/min-community-size/max-iterations |
+| `crates/cih-engine/src/main.rs` / `discover.rs` | Keep `--resolution`; add architecture-hint-aware defaults |
+| `crates/cih-engine/src/scan/` | `architecture_hint` field in repo-map |
 
 ### Phase 3
 
 | File | Change |
 |---|---|
-| `crates/cih-embed/` | **New crate** — AST-strip + embedding pipeline |
+| `crates/cih-embed/src/strip.rs` | **New** — AST-strip/noise-reduction before embedding |
+| `crates/cih-embed/` | Harden existing embedding pipeline, incremental hashes, pgvector benchmarking |
 | `strip_profiles/java.toml` | Java noise-removal rules |
-| `crates/cih-retrieval/` | **New crate** — RRF hybrid retrieval (pgvector + FalkorDB + BM25) |
-| `crates/cih-server/src/` | `search_code` MCP tool endpoint |
+| `crates/cih-search/` | Harden existing BM25/RRF ranking and public retrieval facade |
+| `crates/cih-server/src/` | Align existing query/search endpoint with `search_code` contract |
 
 ### Phase 4
 
 | File | Change |
 |---|---|
-| `crates/cih-agent/` | **New crate** — Claude Agent SDK loop |
-| `crates/cih-server/src/` | Agent MCP server endpoint |
+| `crates/cih-server/src/` | Provider-neutral agent MCP endpoint reusing existing graph/search tools |
+| `crates/cih-engine/src/llm/` or new shared crate | Reusable provider adapters for Gemini/OpenAI-compatible/Anthropic/DeepSeek/http-json |
+| `crates/cih-agent/` | Optional later split only if the agent loop outgrows `cih-server` |
 
 ### Phase 5
 
@@ -436,7 +467,7 @@ scripts/eval-enterprise-java.sh
 # Phase 2
 cih-engine analyze /path/to/ocb-sp05
 cih-engine discover /path/to/ocb-sp05
-cih-engine wiki /path/to/ocb-sp05 --wiki-mode llm-summary
+cih-engine wiki /path/to/ocb-sp05 --llm --wiki-mode llm-summary
 # Check: wiki has PO/BA content for all 55 modules; LLM citations are grounded
 
 # Phase 3
@@ -444,7 +475,7 @@ cih-engine embed /path/to/ocb-sp05
 # Via MCP: search_code("rate limiting") — inspect result quality
 
 # Phase 4
-cih-agent start --repo /path/to/ocb-sp05
+cih-server  # future agent endpoint enabled by config/flags
 # Ask: "What does POST /orders do?" — verify specific, grounded answer
 
 # Phase 5

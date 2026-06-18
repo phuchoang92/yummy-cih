@@ -4,6 +4,20 @@ use crate::{CommunityLlmFull, CommunityLlmSummary};
 use cih_core::{Node, NodeKind, RepoMap};
 use std::collections::BTreeMap;
 
+/// Strip a trailing `-N` numeric suffix from a slug, returning (base, suffix).
+/// E.g. `"admin-customer-service-2"` → `("admin-customer-service", Some(2))`.
+fn strip_numeric_suffix(slug: &str) -> (&str, Option<u32>) {
+    if let Some(pos) = slug.rfind('-') {
+        let tail = &slug[pos + 1..];
+        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(n) = tail.parse::<u32>() {
+                return (&slug[..pos], Some(n));
+            }
+        }
+    }
+    (slug, None)
+}
+
 fn method_signature(node: &Node) -> String {
     let params = node
         .props
@@ -116,6 +130,41 @@ pub fn render_dev_index(
     md
 }
 
+/// Build the sidebar/manifest title for a community dev page.
+/// Strips trailing numeric suffix and appends the primary stereotype from the community node.
+pub fn community_display_title(_graph: &WikiGraph, community: &Node, page_path: &str) -> String {
+    let slug = page_path.split('/').last().unwrap_or(&community.name);
+    let (base_slug, _) = strip_numeric_suffix(slug);
+    let base_name: String = base_slug
+        .split('-')
+        .map(|word| {
+            let mut c = word.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Read primary_stereotype from the community node's own props (set by discover).
+    let stereotype = community
+        .props
+        .as_ref()
+        .and_then(|p| p.get("primary_stereotype"))
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            let mut c = s.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        });
+    match stereotype {
+        Some(s) => format!("{} · {}", base_name, s),
+        None => base_name,
+    }
+}
+
 /// `page_path` is the full path without "pages/" prefix, e.g. `"payment/dev/payment-controller"`.
 pub fn render_dev_community(
     graph: &WikiGraph,
@@ -125,23 +174,7 @@ pub fn render_dev_community(
     llm_full: Option<&CommunityLlmFull>,
 ) -> String {
     let comm_id = community.id.as_str();
-    // Derive a unique title from the last path segment (e.g. "warehouse-service-2" → "Warehouse Service 2")
-    let page_title = page_path
-        .split('/')
-        .last()
-        .map(|s| {
-            s.split('-')
-                .map(|word| {
-                    let mut c = word.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_else(|| community.name.clone());
+    let page_title = community_display_title(graph, community, page_path);
 
     let mut md = String::new();
     md.push_str(&format!("---\ntitle: {}\nrole: dev\n---\n\n", page_title));

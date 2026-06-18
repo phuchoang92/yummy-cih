@@ -140,10 +140,11 @@ pub fn build_graph_module_tree(
                     .and_then(|p| p.rsplit('/').next())
                     .map(str::to_string)
                     .unwrap_or_else(|| slugify(&comm_name));
+                let display_title = title_from_slug(&page_slug);
                 WikiModuleNode {
                     id: format!("module:{}:{}", group.feature, slugify(comm_id)),
                     slug: page_slug,
-                    title: comm_name,
+                    title: display_title,
                     description: Some(format!("Community {}", comm_id)),
                     community_ids: vec![comm_id.clone()],
                     file_paths: sorted_member_files(graph, comm_id),

@@ -26,7 +26,7 @@ pub fn render_feature_po(
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\n---\n\n", title));
+    md.push_str(&format!("---\ntitle: {}\nsidebar_position: 1\n---\n\n", title));
     md.push_str(&format!("# {}\n\n", title));
 
     // Feature-level LLM overview (highest quality — one call across all communities).

@@ -24,7 +24,7 @@ pub fn render_feature_ba(
 ) -> String {
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\n---\n\n", title));
+    md.push_str(&format!("---\ntitle: {}\nsidebar_position: 2\n---\n\n", title));
     md.push_str(&format!("# {}\n\n", title));
 
     // Mermaid process flow diagram (business flows only)

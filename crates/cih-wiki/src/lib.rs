@@ -226,6 +226,10 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     std::fs::create_dir_all(out_dir.join("pages"))?;
     for group in &feature_groups {
         std::fs::create_dir_all(out_dir.join(format!("pages/{}/dev", group.feature)))?;
+        std::fs::write(
+            out_dir.join(format!("pages/{}/dev/_category_.json", group.feature)),
+            "{\"position\": 3, \"label\": \"Technical Reference\"}\n",
+        )?;
     }
 
     let mut page_count = 0usize;
@@ -404,22 +408,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 out_dir.join(format!("pages/{}.json", page_path)),
                 serde_json::to_string_pretty(&json_val)?,
             )?;
-            let dev_title = page_path
-                .split('/')
-                .last()
-                .map(|s| {
-                    s.split('-')
-                        .map(|w| {
-                            let mut c = w.chars();
-                            match c.next() {
-                                None => String::new(),
-                                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_else(|| comm.name.clone());
+            let dev_title = pages::dev::community_display_title(&graph, &comm, page_path);
             nav.entry(feature.clone()).or_default().push(NavEntry {
                 slug: page_path.to_string(),
                 title: dev_title.clone(),

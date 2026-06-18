@@ -19,7 +19,7 @@ pub fn render_feature_index(
 ) -> String {
     let title = format!("{} — Feature Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\n---\n\n", title));
+    md.push_str(&format!("---\ntitle: {}\nsidebar_position: 0\n---\n\n", title));
     md.push_str(&format!("# {}\n\n", title));
 
     let total_routes: usize = community_ids
