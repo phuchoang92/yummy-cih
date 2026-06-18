@@ -123,10 +123,31 @@ pub fn render_feature_po(
         .map(|cid| graph.processes_for_community(cid, true).len())
         .sum();
 
+    // Aggregate messaging topics across all communities
+    let mut publishes: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut consumes: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for cid in community_ids {
+        let (pub_topics, con_topics) = graph.community_messaging(cid);
+        for (name, kind) in pub_topics {
+            publishes.insert(name, kind);
+        }
+        for (name, kind) in con_topics {
+            consumes.insert(name, kind);
+        }
+    }
+    let total_topics = publishes.len() + consumes.len();
+
+    let topics_part = if total_topics > 0 {
+        format!(" · **Topics:** {}", total_topics)
+    } else {
+        String::new()
+    };
+
     md.push_str(&format!(
-        "**Modules:** {} · **Routes:** {} · **Processes:** {}\n\n",
+        "**Modules:** {} · **Routes:** {}{} · **Processes:** {}\n\n",
         community_ids.len(),
         total_routes,
+        topics_part,
         total_procs,
     ));
 
@@ -175,6 +196,20 @@ pub fn render_feature_po(
                 _ => "—",
             };
             md.push_str(&format!("| `{}` | {} |\n", name, access));
+        }
+        md.push('\n');
+    }
+
+    // Messaging topics
+    if !publishes.is_empty() || !consumes.is_empty() {
+        md.push_str("## Topics\n\n");
+        md.push_str("| Direction | Topic | Type |\n");
+        md.push_str("|---|---|---|\n");
+        for (name, kind) in &publishes {
+            md.push_str(&format!("| Publishes | `{}` | {} |\n", name, capitalize(kind)));
+        }
+        for (name, kind) in &consumes {
+            md.push_str(&format!("| Consumes | `{}` | {} |\n", name, capitalize(kind)));
         }
         md.push('\n');
     }

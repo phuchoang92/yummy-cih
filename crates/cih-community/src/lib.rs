@@ -104,7 +104,9 @@ pub fn detect_communities(
     let mut queries_by_method: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let mut read_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let mut write_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut topics_by_member: HashMap<NodeId, Vec<&Node>> = HashMap::new();
+    // publishes_by_member and consumes_by_member store (topic_node, topic_kind_str)
+    let mut publishes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
+    let mut consumes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
     for e in edges {
         match e.kind {
             EdgeKind::HandlesRoute => {
@@ -121,9 +123,16 @@ pub fn detect_communities(
             EdgeKind::WritesTable => {
                 write_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
             }
-            EdgeKind::PublishesEvent | EdgeKind::ListensTo => {
+            EdgeKind::PublishesEvent => {
                 if let Some(tn) = source_by_id.get(&e.dst) {
-                    topics_by_member.entry(e.src.clone()).or_default().push(tn);
+                    let kind_str = topic_kind_str(tn);
+                    publishes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
+                }
+            }
+            EdgeKind::ListensTo => {
+                if let Some(tn) = source_by_id.get(&e.dst) {
+                    let kind_str = topic_kind_str(tn);
+                    consumes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
                 }
             }
             _ => {}
@@ -220,19 +229,28 @@ pub fn detect_communities(
             }
         }
 
-        // Gather topic names
-        let mut topic_counts: BTreeMap<String, usize> = BTreeMap::new();
-        let mut all_topics: BTreeSet<String> = BTreeSet::new();
+        // Gather topic names: separate publish vs consume; infer type from node kind
+        let mut topic_domain_counts: BTreeMap<String, usize> = BTreeMap::new();
+        // (name, type_str) sorted sets for props
+        let mut all_publishes: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut all_consumes: BTreeSet<(String, String)> = BTreeSet::new();
         for mid in &member_ids {
-            for tn in topics_by_member.get(mid).into_iter().flatten() {
-                let name = tn.name.as_str();
-                let name = if name.is_empty() {
-                    tn.id.as_str().strip_prefix("KafkaTopic:").unwrap_or(tn.id.as_str())
-                } else { name };
-                all_topics.insert(name.to_string());
-                *topic_counts.entry(name.to_string()).or_insert(0) += 1;
+            for (tn, kind_str) in publishes_by_member.get(mid).into_iter().flatten() {
+                let name = topic_display_name(tn);
+                all_publishes.insert((name.clone(), kind_str.to_string()));
+                let domain = strip_event_suffix(strip_role_prefix(&name));
+                *topic_domain_counts.entry(domain.to_string()).or_insert(0) += 1;
+            }
+            for (tn, kind_str) in consumes_by_member.get(mid).into_iter().flatten() {
+                let name = topic_display_name(tn);
+                all_consumes.insert((name.clone(), kind_str.to_string()));
+                let domain = strip_event_suffix(strip_role_prefix(&name));
+                *topic_domain_counts.entry(domain.to_string()).or_insert(0) += 1;
             }
         }
+        // flat names list for the legacy topics prop
+        let all_topics: BTreeSet<String> = all_publishes.iter().chain(all_consumes.iter())
+            .map(|(n, _)| n.clone()).collect();
 
         // Apply naming waterfall
         let (display_name, naming_reason) = 'naming: {
@@ -252,11 +270,10 @@ pub fn detect_communities(
                     break 'naming (n, "db_table");
                 }
             }
-            // 4. Topic prefix
-            if let Some(tname) = best_by_count(&topic_counts) {
-                if let Some(tok) = first_non_generic_name_token(&tname, &['_', '.', '-', '/']) {
-                    let n = capitalize_first(&tok);
-                    break 'naming (n, "topic");
+            // 4. Topic — domain is already PascalCase e.g. "LowStock", "OrderCancelled"
+            if let Some(domain) = best_by_count(&topic_domain_counts) {
+                if !domain.is_empty() {
+                    break 'naming (domain, "topic");
                 }
             }
             // 5. Folder heuristic
@@ -294,6 +311,11 @@ pub fn detect_communities(
         let controllers_sorted: Vec<String> = all_controllers.into_iter().collect();
         let tables_sorted: Vec<String> = all_tables.into_iter().collect();
         let topics_sorted: Vec<String> = all_topics.into_iter().collect();
+        // [{"name": "OrderCreatedEvent", "type": "kafka"}, ...]
+        let publishes_topics: Vec<serde_json::Value> = all_publishes.into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect();
+        let consumes_topics: Vec<serde_json::Value> = all_consumes.into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect();
 
         out.nodes.push(Node {
             id: comm_id.clone(),
@@ -316,6 +338,8 @@ pub fn detect_communities(
                 "controllers": controllers_sorted,
                 "db_tables": tables_sorted,
                 "topics": topics_sorted,
+                "publishes_topics": publishes_topics,
+                "consumes_topics": consumes_topics,
                 "primary_stereotype": primary_stereotype,
             })),
         });
@@ -485,6 +509,43 @@ pub fn trace_processes(
     }
 
     out
+}
+
+fn topic_kind_str(node: &Node) -> &'static str {
+    match node.kind {
+        NodeKind::KafkaTopic => "kafka",
+        _ => {
+            if node.id.as_str().starts_with("KafkaTopic:") { "kafka" } else { "event" }
+        }
+    }
+}
+
+fn topic_display_name(node: &Node) -> String {
+    if !node.name.is_empty() {
+        node.name.clone()
+    } else {
+        node.id.as_str()
+            .strip_prefix("KafkaTopic:")
+            .unwrap_or(node.id.as_str())
+            .to_string()
+    }
+}
+
+/// Strip a trailing infrastructure suffix from a PascalCase name.
+/// "OrderStatusChangedEvent" → "OrderStatusChanged", "LowStockMessage" → "LowStock"
+fn strip_event_suffix(name: &str) -> &str {
+    const SUFFIXES: &[&str] = &[
+        "Event", "Events", "Message", "Messages",
+        "Notification", "Notifications", "Command", "Commands",
+    ];
+    for suffix in SUFFIXES {
+        if let Some(rest) = name.strip_suffix(suffix) {
+            if !rest.is_empty() {
+                return rest;
+            }
+        }
+    }
+    name
 }
 
 /// Strip a leading role prefix word (Admin, Pos, Public, Private, Internal) from a PascalCase name.

@@ -276,7 +276,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     });
 
     let out_dir = out.unwrap_or_else(|| repo.join(".cih").join("wiki"));
-    let repo_name = repo
+    let repo_name = std::fs::canonicalize(&repo)
+        .unwrap_or_else(|_| repo.to_path_buf())
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")

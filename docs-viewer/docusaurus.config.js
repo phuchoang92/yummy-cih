@@ -74,6 +74,7 @@ const config = {
   },
 
   markdown: {
+    mermaid: true,
     format: 'detect',
     hooks: {
       onBrokenMarkdownLinks: 'warn',
@@ -126,5 +127,7 @@ const config = {
       },
     }),
 };
+
+config.themes = ['@docusaurus/theme-mermaid'];
 
 module.exports = config;

@@ -420,6 +420,30 @@ impl WikiGraph {
             .unwrap_or(community_id)
     }
 
+    /// Returns (publishes, consumes) topic lists for a community.
+    /// Each entry is (topic_name, topic_type) e.g. ("OrderCreatedEvent", "kafka").
+    pub fn community_messaging(&self, community_id: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        let node = match self.nodes_by_id.get(community_id) {
+            Some(n) => n,
+            None => return (vec![], vec![]),
+        };
+        let props = match node.props.as_ref() {
+            Some(p) => p,
+            None => return (vec![], vec![]),
+        };
+        let parse = |key: &str| -> Vec<(String, String)> {
+            props.get(key)
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|item| {
+                    let name = item.get("name")?.as_str()?.to_string();
+                    let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("event").to_string();
+                    Some((name, kind))
+                }).collect())
+                .unwrap_or_default()
+        };
+        (parse("publishes_topics"), parse("consumes_topics"))
+    }
+
     pub fn community_display_name<'a>(&'a self, community_id: &'a str) -> &'a str {
         self.nodes_by_id
             .get(community_id)
