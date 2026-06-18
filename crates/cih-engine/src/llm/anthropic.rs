@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use super::{require_api_key, LlmAdapter, LlmRequest, LlmResponse};
 
@@ -27,23 +29,40 @@ impl LlmAdapter for AnthropicAdapter {
             body["system"] = serde_json::Value::String(req.system.clone());
         }
 
-        let response = ureq::post(&url)
-            .set("x-api-key", api_key)
-            .set("anthropic-version", "2023-06-01")
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(req.timeout_secs))
-            .send_json(body)
-            .context("Anthropic API request failed")?;
-
-        let resp: serde_json::Value = response
-            .into_json()
-            .context("failed to parse Anthropic API response")?;
-
-        let text = resp["content"][0]["text"]
-            .as_str()
-            .map(|s| s.to_string())
-            .with_context(|| format!("unexpected Anthropic response shape: {:?}", resp))?;
-
-        Ok(LlmResponse { text })
+        let key = api_key.to_string();
+        let timeout = Duration::from_secs(req.timeout_secs);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(do_call(url, key, body));
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!("LLM request timed out after {}s", timeout.as_secs())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("LLM request thread panicked before responding")
+            }
+        }
     }
+}
+
+fn do_call(url: String, api_key: String, body: serde_json::Value) -> Result<LlmResponse> {
+    let response = ureq::post(&url)
+        .set("x-api-key", &api_key)
+        .set("anthropic-version", "2023-06-01")
+        .set("Content-Type", "application/json")
+        .send_json(body)
+        .context("Anthropic API request failed")?;
+
+    let resp: serde_json::Value = response
+        .into_json()
+        .context("failed to parse Anthropic API response")?;
+
+    let text = resp["content"][0]["text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .with_context(|| format!("unexpected Anthropic response shape: {:?}", resp))?;
+
+    Ok(LlmResponse { text })
 }

@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use super::{require_api_key, LlmAdapter, LlmRequest, LlmResponse};
 
@@ -29,33 +31,50 @@ impl LlmAdapter for OpenAiAdapter {
             "messages": messages
         });
 
-        let response = match ureq::post(&url)
-            .set("Authorization", &format!("Bearer {}", api_key))
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(req.timeout_secs))
-            .send_json(body)
-        {
-            Ok(r) => r,
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                anyhow::bail!(
-                    "OpenAI-compatible API HTTP {}: {}",
-                    status,
-                    &body[..body.len().min(1000)]
-                );
+        let key = api_key.to_string();
+        let timeout = Duration::from_secs(req.timeout_secs);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(do_call(url, key, body));
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!("LLM request timed out after {}s", timeout.as_secs())
             }
-            Err(err) => return Err(anyhow::anyhow!(err).context("OpenAI-compatible API request failed")),
-        };
-
-        let resp: serde_json::Value = response
-            .into_json()
-            .context("failed to parse OpenAI-compatible API response")?;
-
-        let text = resp["choices"][0]["message"]["content"]
-            .as_str()
-            .map(|s| s.to_string())
-            .with_context(|| format!("unexpected OpenAI-compatible response shape: {:?}", resp))?;
-
-        Ok(LlmResponse { text })
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("LLM request thread panicked before responding")
+            }
+        }
     }
+}
+
+fn do_call(url: String, api_key: String, body: serde_json::Value) -> Result<LlmResponse> {
+    let response = match ureq::post(&url)
+        .set("Authorization", &format!("Bearer {}", api_key))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(status, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            anyhow::bail!(
+                "OpenAI-compatible API HTTP {}: {}",
+                status,
+                &body[..body.len().min(1000)]
+            );
+        }
+        Err(err) => return Err(anyhow::anyhow!(err).context("OpenAI-compatible API request failed")),
+    };
+
+    let resp: serde_json::Value = response
+        .into_json()
+        .context("failed to parse OpenAI-compatible API response")?;
+
+    let text = resp["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .with_context(|| format!("unexpected OpenAI-compatible response shape: {:?}", resp))?;
+
+    Ok(LlmResponse { text })
 }
