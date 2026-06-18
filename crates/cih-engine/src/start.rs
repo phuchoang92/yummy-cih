@@ -140,12 +140,14 @@ impl CommandRunner for RealCommandRunner {
 
 /// Test runner that records commands instead of executing them.
 #[cfg(test)]
+#[allow(dead_code)]
 pub struct TestCommandRunner {
     pub recorded: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 #[cfg(test)]
 impl TestCommandRunner {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             recorded: std::cell::RefCell::new(Vec::new()),

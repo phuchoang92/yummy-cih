@@ -467,6 +467,29 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
         "dry-run feature summaries should be cached after generate_wiki rewrites wiki_meta.json"
     );
 
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        run_llm: true,
+        llm_model: "dry-model".into(),
+        llm_api_key_env: Some(format!(
+            "CIH_TEST_MISSING_KEY_{}",
+            TEST_ID.load(Ordering::Relaxed)
+        )),
+        llm_dry_run: true,
+        wiki_language: "vi".into(),
+        wiki_mode: "llm-summary".into(),
+        incremental: true,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let meta_json = fs::read_to_string(root.join(".cih/wiki/wiki_meta.json")).unwrap();
+    let meta_after_incremental: WikiMeta = serde_json::from_str(&meta_json).unwrap();
+    assert_eq!(
+        meta.feature_cache, meta_after_incremental.feature_cache,
+        "incremental dry-run should preserve cached feature summaries after metadata rewrite"
+    );
+
     fs::remove_dir_all(&root).unwrap();
 }
 

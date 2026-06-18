@@ -117,7 +117,7 @@ pub fn score_entry_points(
 
     // Sort topic lists for determinism
     for topics in listens_edges.values_mut() {
-        let mut set: BTreeSet<String> = topics.drain(..).collect();
+        let set: BTreeSet<String> = topics.drain(..).collect();
         *topics = set.into_iter().collect();
     }
 

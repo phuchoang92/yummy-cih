@@ -90,11 +90,10 @@ pub fn render_ba_index(graph: &WikiGraph) -> String {
 pub fn render_ba_community(
     graph: &WikiGraph,
     community: &Node,
-    slug_map: &BTreeMap<String, String>,
+    _slug_map: &BTreeMap<String, String>,
     llm: Option<&CommunityLlmSummary>,
 ) -> String {
     let comm_id = community.id.as_str();
-    let slug = slug_map.get(comm_id).map(|s| s.as_str()).unwrap_or(comm_id);
 
     let mut md = String::new();
     md.push_str(&format!(

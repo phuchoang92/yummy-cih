@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 use cih_core::{file_id, folder_id, Edge, EdgeKind, Node, NodeId, ParsedFile, Range};
 use cih_lang::LanguageProvider;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 
 pub mod sql;
 

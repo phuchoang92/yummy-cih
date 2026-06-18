@@ -599,6 +599,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             if let Some(cached) =
                 cached_feature_summary(&group.feature, &ev_hash, prev_meta_for_features.as_ref())
             {
+                feature_cache_updates.push((group.feature.clone(), ev_hash, cached.clone()));
                 map.insert(group.feature.clone(), cached);
                 continue;
             }
@@ -691,43 +692,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "wiki generation complete"
     );
 
-    // Update wiki_meta.json with evidence hashes and cached LLM summaries.
-    if !summaries_for_cache.is_empty() || !feature_cache_updates.is_empty() {
-        if let Some(mut meta) = load_wiki_meta(&out_dir) {
-            for (id, hash, summary) in &summaries_for_cache {
-                let entry =
-                    meta.module_cache
-                        .entry(id.clone())
-                        .or_insert_with(|| WikiModuleCacheEntry {
-                            content_hash: String::new(),
-                            evidence_hash: String::new(),
-                            page_paths: Vec::new(),
-                            llm_po: None,
-                            llm_ba: None,
-                            llm_dev: None,
-                        });
-                entry.evidence_hash = hash.clone();
-                entry.llm_po = Some(summary.po.clone());
-                entry.llm_ba = Some(summary.ba.clone());
-                entry.llm_dev = Some(summary.dev.clone());
-            }
-            for (feature_name, hash, summary) in &feature_cache_updates {
-                meta.feature_cache.insert(
-                    feature_name.clone(),
-                    FeatureMetaEntry {
-                        ev_hash: hash.clone(),
-                        po_overview: summary.po_overview.clone(),
-                        po_capabilities: summary.po_capabilities.clone(),
-                        ba_process_overview: summary.ba_process_overview.clone(),
-                        ba_business_rules: summary.ba_business_rules.clone(),
-                    },
-                );
-            }
-            if let Ok(json) = serde_json::to_string_pretty(&meta) {
-                let _ = std::fs::write(out_dir.join("wiki_meta.json"), json);
-            }
-        }
-    }
+    persist_wiki_meta_caches(&out_dir, &summaries_for_cache, &feature_cache_updates)?;
 
     if json {
         println!(
@@ -1271,6 +1236,59 @@ fn is_circuit_open(consecutive: u32, threshold: u32) -> bool {
     consecutive >= threshold
 }
 
+fn persist_wiki_meta_caches(
+    out_dir: &Path,
+    community_updates: &[(String, String, CommunityLlmSummary)],
+    feature_updates: &[(String, String, FeatureLlmSummary)],
+) -> Result<()> {
+    if community_updates.is_empty() && feature_updates.is_empty() {
+        return Ok(());
+    }
+
+    let meta_path = out_dir.join("wiki_meta.json");
+    let text = std::fs::read_to_string(&meta_path)
+        .with_context(|| format!("failed to read {}", meta_path.display()))?;
+    let mut meta: WikiMeta = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse {}", meta_path.display()))?;
+
+    for (id, hash, summary) in community_updates {
+        let entry = meta
+            .module_cache
+            .entry(id.clone())
+            .or_insert_with(|| WikiModuleCacheEntry {
+                content_hash: String::new(),
+                evidence_hash: String::new(),
+                page_paths: Vec::new(),
+                llm_po: None,
+                llm_ba: None,
+                llm_dev: None,
+            });
+        entry.evidence_hash = hash.clone();
+        entry.llm_po = Some(summary.po.clone());
+        entry.llm_ba = Some(summary.ba.clone());
+        entry.llm_dev = Some(summary.dev.clone());
+    }
+
+    for (feature_name, hash, summary) in feature_updates {
+        meta.feature_cache.insert(
+            feature_name.clone(),
+            FeatureMetaEntry {
+                ev_hash: hash.clone(),
+                po_overview: summary.po_overview.clone(),
+                po_capabilities: summary.po_capabilities.clone(),
+                ba_process_overview: summary.ba_process_overview.clone(),
+                ba_business_rules: summary.ba_business_rules.clone(),
+            },
+        );
+    }
+
+    let json = serde_json::to_string_pretty(&meta).context("failed to serialize wiki metadata")?;
+    std::fs::write(&meta_path, json)
+        .with_context(|| format!("failed to write {}", meta_path.display()))?;
+
+    Ok(())
+}
+
 fn retain_matching_feature_groups(
     feature_groups: &mut Vec<FeatureGroup>,
     filter_feature: &[String],
@@ -1297,7 +1315,7 @@ fn build_feature_evidence(
     let mut seen_texts = std::collections::BTreeSet::new();
     let mut merged = String::new();
 
-    for comm_id in community_ids {
+    for (community_idx, comm_id) in community_ids.iter().enumerate() {
         let Some(comm_node) = graph.nodes_by_id.get(comm_id) else {
             continue;
         };
@@ -1305,14 +1323,20 @@ fn build_feature_evidence(
         if pack.items.is_empty() {
             continue;
         }
-        let section_header = format!("# Community: {}\n", comm_node.name);
+        let community_evidence_id = format!("C{}", community_idx + 1);
+        let section_header = format!("# {community_evidence_id} Community: {}\n", comm_node.name);
         let mut section = String::new();
         for item in &pack.items {
             if seen_texts.contains(&item.text) {
                 continue;
             }
             seen_texts.insert(item.text.clone());
-            section.push_str(&format!("[{}] {}\n", item.id, item.text.trim()));
+            section.push_str(&format!(
+                "[{}-{}] {}\n",
+                community_evidence_id,
+                item.id,
+                item.text.trim()
+            ));
         }
         if section.is_empty() {
             continue;
@@ -1383,7 +1407,7 @@ fn enrich_one_feature(
 
 fn build_feature_system_prompt() -> String {
     "You are a software architect writing business documentation from code evidence.\n\
-     Write only from the provided evidence. Cite evidence IDs like [R1],[P1],[B1] inline.\n\
+     Write only from the provided evidence. Cite evidence IDs exactly as shown, like [C1-R1],[C1-P1],[C2-B1].\n\
      Do not invent behavior not in the evidence."
         .to_string()
 }
@@ -1693,6 +1717,99 @@ mod tests {
         retain_matching_feature_groups(&mut groups, &["pay".to_string()]);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].feature, "payments");
+    }
+
+    #[test]
+    fn feature_evidence_prefixes_item_ids_by_community() {
+        use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
+
+        fn node(id: &str, kind: NodeKind, name: &str, props: Option<serde_json::Value>) -> Node {
+            Node {
+                id: NodeId::new(id.to_string()),
+                kind,
+                name: name.to_string(),
+                qualified_name: None,
+                file: "modules/orders/src/Controller.java".to_string(),
+                range: Range::default(),
+                props,
+            }
+        }
+
+        let comm_a = node("Community:0", NodeKind::Community, "Orders A", None);
+        let comm_b = node("Community:1", NodeKind::Community, "Orders B", None);
+        let handler_a = node(
+            "Method:com.example.OrderController#list/0",
+            NodeKind::Method,
+            "list",
+            None,
+        );
+        let handler_b = node(
+            "Method:com.example.OrderController#create/0",
+            NodeKind::Method,
+            "create",
+            None,
+        );
+        let route_a = node(
+            "Route:GET:/orders",
+            NodeKind::Route,
+            "GET /orders",
+            Some(serde_json::json!({"httpMethod": "GET", "path": "/orders"})),
+        );
+        let route_b = node(
+            "Route:POST:/orders",
+            NodeKind::Route,
+            "POST /orders",
+            Some(serde_json::json!({"httpMethod": "POST", "path": "/orders"})),
+        );
+        let nodes = vec![
+            handler_a.clone(),
+            handler_b.clone(),
+            route_a.clone(),
+            route_b.clone(),
+        ];
+        let edges = vec![
+            Edge {
+                src: handler_a.id.clone(),
+                dst: route_a.id.clone(),
+                kind: EdgeKind::HandlesRoute,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: handler_b.id.clone(),
+                dst: route_b.id.clone(),
+                kind: EdgeKind::HandlesRoute,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+        ];
+        let community_edges = vec![
+            Edge {
+                src: handler_a.id.clone(),
+                dst: comm_a.id.clone(),
+                kind: EdgeKind::MemberOf,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+            Edge {
+                src: handler_b.id.clone(),
+                dst: comm_b.id.clone(),
+                kind: EdgeKind::MemberOf,
+                confidence: 1.0,
+                reason: String::new(),
+            },
+        ];
+        let graph = WikiGraph::build(&nodes, &edges, &[comm_a, comm_b], &community_edges);
+        let evidence = build_feature_evidence(
+            &["Community:0".to_string(), "Community:1".to_string()],
+            &graph,
+            &std::env::temp_dir(),
+            &EvidenceCorpus::default(),
+        );
+
+        assert!(evidence.contains("[C1-R1] GET /orders"));
+        assert!(evidence.contains("[C2-R1] POST /orders"));
+        assert!(!evidence.contains("\n[R1]"));
     }
 
     #[test]
