@@ -9,6 +9,8 @@ mod llm;
 mod registry;
 mod scan;
 mod scope;
+mod start;
+mod start_env;
 #[cfg(test)]
 mod tests;
 mod versioning;
@@ -237,6 +239,24 @@ enum Command {
         /// Print outcome as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
+    },
+    /// Interactive guided setup wizard for CIH.
+    Start {
+        /// CIH workspace directory containing docker-compose.yml. Default: current directory.
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Target Java/Spring repository path. Required when --non-interactive.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Repository name for docs viewer URL prefix. Default: derived from repo path.
+        #[arg(long)]
+        repo_name: Option<String>,
+        /// Print plan without writing files or running commands.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip interactive prompts (requires --repo).
+        #[arg(long)]
+        non_interactive: bool,
     },
 }
 
@@ -469,6 +489,20 @@ fn main() -> Result<()> {
             max_communities,
             filter_feature,
             json,
+        }),
+        Command::Start {
+            workspace,
+            repo,
+            repo_name,
+            dry_run,
+            non_interactive,
+        } => start::run_start(start::StartConfig {
+            workspace,
+            repo,
+            repo_name,
+            dry_run,
+            non_interactive,
+            ..Default::default()
         }),
     }
 }

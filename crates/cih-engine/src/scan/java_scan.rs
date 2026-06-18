@@ -13,7 +13,10 @@ use super::{JavaFileInfo, ScannedFile};
 
 pub(super) fn collect_java_files(root: &Path, files: &[ScannedFile]) -> Vec<JavaFileInfo> {
     let java_count = files.iter().filter(|f| f.path.ends_with(".java")).count();
-    tracing::debug!(java_files = java_count, "java_scan: starting per-file LOC/package/Spring extraction");
+    tracing::debug!(
+        java_files = java_count,
+        "java_scan: starting per-file LOC/package/Spring extraction"
+    );
 
     let result: Vec<JavaFileInfo> = files
         .par_iter()
@@ -41,8 +44,13 @@ pub(super) fn collect_java_files(root: &Path, files: &[ScannedFile]) -> Vec<Java
     let spring_files = result
         .iter()
         .filter(|f| {
-            f.spring.controllers + f.spring.services + f.spring.repositories
-                + f.spring.components + f.spring.configs + f.spring.entities > 0
+            f.spring.controllers
+                + f.spring.services
+                + f.spring.repositories
+                + f.spring.components
+                + f.spring.configs
+                + f.spring.entities
+                > 0
         })
         .count();
     tracing::debug!(

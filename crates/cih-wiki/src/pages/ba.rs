@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use cih_core::{Node, NodeKind};
 use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::CommunityLlmSummary;
+use cih_core::{Node, NodeKind};
+use std::collections::BTreeMap;
 
 pub fn render_ba_index(graph: &WikiGraph) -> String {
     let mut md = String::new();
@@ -69,8 +69,16 @@ pub fn render_ba_index(graph: &WikiGraph) -> String {
             md.push_str(&format!(
                 "| `{}` | {} | {} |\n",
                 topic.name,
-                if pub_names.is_empty() { "—".to_string() } else { pub_names.join(", ") },
-                if sub_names.is_empty() { "—".to_string() } else { sub_names.join(", ") },
+                if pub_names.is_empty() {
+                    "—".to_string()
+                } else {
+                    pub_names.join(", ")
+                },
+                if sub_names.is_empty() {
+                    "—".to_string()
+                } else {
+                    sub_names.join(", ")
+                },
             ));
         }
         md.push('\n');
@@ -112,12 +120,10 @@ pub fn render_ba_community(
                 md.push_str(&format!("### {}\n\n", proc_node.name));
                 if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
                     for (i, step) in steps.iter().enumerate() {
-                        let loc = if !step.symbol.file.is_empty() && step.symbol.range.start_line > 0 {
-                            format!(
-                                " — `{}:{}`",
-                                step.symbol.file,
-                                step.symbol.range.start_line
-                            )
+                        let loc = if !step.symbol.file.is_empty()
+                            && step.symbol.range.start_line > 0
+                        {
+                            format!(" — `{}:{}`", step.symbol.file, step.symbol.range.start_line)
                         } else if !step.symbol.file.is_empty() {
                             format!(" — `{}`", step.symbol.file)
                         } else {
@@ -252,8 +258,10 @@ pub fn render_ba_community_json(graph: &WikiGraph, community: &Node) -> serde_js
         })
         .collect();
 
-    let member_ids: std::collections::HashSet<String> =
-        member_list.iter().map(|n| n.id.as_str().to_string()).collect();
+    let member_ids: std::collections::HashSet<String> = member_list
+        .iter()
+        .map(|n| n.id.as_str().to_string())
+        .collect();
 
     let links: Vec<serde_json::Value> = member_list
         .iter()
@@ -287,12 +295,7 @@ fn processes_for_community(graph: &WikiGraph, community_id: &str) -> Vec<String>
     for (proc_id, steps) in &graph.process_steps {
         if let Some(first) = steps.first() {
             let sym_id = first.symbol.id.as_str().to_string();
-            if graph
-                .community_by_member
-                .get(&sym_id)
-                .map(|c| c.as_str())
-                == Some(community_id)
-            {
+            if graph.community_by_member.get(&sym_id).map(|c| c.as_str()) == Some(community_id) {
                 result.push(proc_id.clone());
             }
         }
@@ -422,9 +425,17 @@ mod tests {
     #[test]
     fn render_ba_community_omits_data_access_when_none() {
         let g = two_community_graph();
-        let comm_a = g.community_nodes.iter().find(|n| n.name == "svc-a").unwrap().clone();
+        let comm_a = g
+            .community_nodes
+            .iter()
+            .find(|n| n.name == "svc-a")
+            .unwrap()
+            .clone();
         let md = render_ba_community(&g, &comm_a, &slug_map(), None);
-        assert!(!md.contains("## Data Access"), "no data access when no db tables");
+        assert!(
+            !md.contains("## Data Access"),
+            "no data access when no db tables"
+        );
     }
 
     #[test]
@@ -442,7 +453,10 @@ mod tests {
             dev: String::new(),
         };
         let md = render_ba_community(&g, &comm_a, &slug_map(), Some(&llm));
-        assert!(md.contains("## Workflow Summary"), "has workflow summary section");
+        assert!(
+            md.contains("## Workflow Summary"),
+            "has workflow summary section"
+        );
         assert!(
             md.contains("Orchestrates the order workflow"),
             "has llm text"

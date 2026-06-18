@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
 use cih_core::Node;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Convert an arbitrary name into a URL-safe slug.
 pub fn slugify(name: &str) -> String {

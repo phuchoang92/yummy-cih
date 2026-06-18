@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
     risk_from_fanout, BulkLoader, CommunityEdge, CommunityInfo, Direction, FlowNode, GraphStore,
-    GraphStoreError, Impact, ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
+    GraphStoreError, Impact, ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph,
+    SymbolContext,
 };
 use redis::Value;
 
@@ -248,7 +249,10 @@ impl GraphStore for FalkorStore {
             .map(|r| ImpactNode {
                 id: NodeId::new(r[0].clone()),
                 depth: r.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
-                parent_id: r.get(2).filter(|s| !s.is_empty()).map(|s| NodeId::new(s.clone())),
+                parent_id: r
+                    .get(2)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| NodeId::new(s.clone())),
                 name: r.get(3).cloned().unwrap_or_default(),
                 kind: r.get(4).cloned().unwrap_or_default(),
                 via: "CALLS".to_string(),
@@ -479,7 +483,10 @@ impl GraphStore for FalkorStore {
                 qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
                 file: r.get(4).cloned().unwrap_or_default(),
                 depth: r.get(5).and_then(|s| s.parse().ok()).unwrap_or(1),
-                parent_id: r.get(6).filter(|s| !s.is_empty()).map(|s| NodeId::new(s.clone())),
+                parent_id: r
+                    .get(6)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| NodeId::new(s.clone())),
             })
             .collect())
     }

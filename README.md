@@ -15,11 +15,30 @@ LLM enrichment.
 
 ---
 
-## Quick Start (Docker Compose)
+## Quick Start
 
-### 1. Configure your repo path
+### Step 1 — Interactive Setup (Recommended)
 
-Create a `.env` file next to `docker-compose.yml`:
+Run the interactive setup wizard:
+
+```bash
+cih-engine start
+```
+
+The wizard prompts for:
+- Target Java/Spring repository path
+- Repository name (auto-detected)
+- Indexing scope (all modules, specific modules, or scan-only)
+- Optional: LLM provider for AI-enriched wiki docs
+- Optional: community discovery, embeddings, wiki generation, docs viewer
+
+After your confirmations it writes `.env` and shows the Docker command plan.
+
+> **Note:** The wizard runs natively (build with `cargo build --release -p cih-engine` or use a pre-built binary). Docker Compose cannot run the wizard before `.env` exists because Compose evaluates `${REPO_PATH}` from `.env` at startup.
+
+### Manual Setup (Fallback)
+
+If you prefer to configure manually, create a `.env` file next to `docker-compose.yml`:
 
 ```bash
 REPO_PATH=/absolute/path/to/your/java-project
@@ -27,6 +46,8 @@ REPO_PATH=/absolute/path/to/your/java-project
 
 This is the only required variable. Both the `engine` and `cih-server` containers mount this
 path, so the indexer and the MCP server read from the same artifact files.
+
+---
 
 ### 2. Start FalkorDB + the MCP server
 

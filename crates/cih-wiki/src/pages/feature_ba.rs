@@ -12,7 +12,6 @@ fn capitalize(s: &str) -> String {
     out
 }
 
-
 /// Render the feature-level BA (business analysis) page.
 /// Aggregates workflows, cross-module calls, and LLM summaries.
 pub fn render_feature_ba(
@@ -24,10 +23,7 @@ pub fn render_feature_ba(
 ) -> String {
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\n---\n\n",
-        title
-    ));
+    md.push_str(&format!("---\ntitle: {}\n---\n\n", title));
     md.push_str(&format!("# {}\n\n", title));
 
     // Mermaid process flow diagram (business flows only)
@@ -85,11 +81,7 @@ pub fn render_feature_ba(
         // llm-summary mode fallback
         let ba_texts: Vec<String> = community_ids
             .iter()
-            .filter_map(|cid| {
-                llm_summaries
-                    .and_then(|m| m.get(cid))
-                    .map(|s| s.ba.clone())
-            })
+            .filter_map(|cid| llm_summaries.and_then(|m| m.get(cid)).map(|s| s.ba.clone()))
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -124,10 +116,7 @@ pub fn render_feature_ba(
                         let loc = if !step.symbol.file.is_empty()
                             && step.symbol.range.start_line > 0
                         {
-                            format!(
-                                " — `{}:{}`",
-                                step.symbol.file, step.symbol.range.start_line
-                            )
+                            format!(" — `{}:{}`", step.symbol.file, step.symbol.range.start_line)
                         } else if !step.symbol.file.is_empty() {
                             format!(" — `{}`", step.symbol.file)
                         } else {
@@ -147,9 +136,15 @@ pub fn render_feature_ba(
     let deps: Vec<(String, String, usize)> = graph
         .inter_community_calls
         .iter()
-        .filter(|(src, dst, _)| feature_set.contains(src.as_str()) || feature_set.contains(dst.as_str()))
+        .filter(|(src, dst, _)| {
+            feature_set.contains(src.as_str()) || feature_set.contains(dst.as_str())
+        })
         .map(|(src, dst, count)| {
-            (graph.community_name(src).to_string(), graph.community_name(dst).to_string(), *count)
+            (
+                graph.community_name(src).to_string(),
+                graph.community_name(dst).to_string(),
+                *count,
+            )
         })
         .collect();
 
@@ -180,10 +175,18 @@ pub fn render_feature_ba(
         md.push_str("| Direction | Topic | Type |\n");
         md.push_str("|---|---|---|\n");
         for (name, kind) in &publishes {
-            md.push_str(&format!("| Publishes | `{}` | {} |\n", name, capitalize(&kind)));
+            md.push_str(&format!(
+                "| Publishes | `{}` | {} |\n",
+                name,
+                capitalize(&kind)
+            ));
         }
         for (name, kind) in &consumes {
-            md.push_str(&format!("| Consumes | `{}` | {} |\n", name, capitalize(&kind)));
+            md.push_str(&format!(
+                "| Consumes | `{}` | {} |\n",
+                name,
+                capitalize(&kind)
+            ));
         }
         md.push('\n');
     }

@@ -11,6 +11,18 @@ Pull the pre-built image and build a code-intelligence graph for any Java/Spring
 
 ---
 
+## Interactive Setup (Recommended)
+
+If you have the `cih-engine` binary installed, run `cih-engine start` for an interactive guided setup. The wizard creates `.env`, checks prerequisites, and prints the exact Docker commands to run.
+
+> The wizard runs natively. Docker Compose cannot bootstrap before `.env` exists.
+
+## Manual Docker Setup
+
+Continue below if you're using Docker-only or prefer the manual path.
+
+---
+
 ## Step 1 — Create a workspace folder
 
 Create a new folder anywhere on your machine. All commands below are run from inside it.

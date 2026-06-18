@@ -30,7 +30,14 @@ pub fn emit_db_access(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
 
     for pf in parsed {
         for site in &pf.sql_execution_sites {
-            process_site(pf, site, &const_index, &mut nodes, &mut edges, &mut seen_nodes);
+            process_site(
+                pf,
+                site,
+                &const_index,
+                &mut nodes,
+                &mut edges,
+                &mut seen_nodes,
+            );
         }
     }
 
@@ -55,7 +62,12 @@ fn process_site(
             let lookup_key = (&pf.file as &str, cref.as_str());
             if let Some(c) = const_index.get(&lookup_key) {
                 let qid = db_query_const_id(&c.owner_fqcn, &c.const_name);
-                (qid, c.sql_text.clone(), c.dynamic, Some(c.const_name.clone()))
+                (
+                    qid,
+                    c.sql_text.clone(),
+                    c.dynamic,
+                    Some(c.const_name.clone()),
+                )
             } else {
                 // Cross-file or unknown constant: emit with dynamic=true, no tables.
                 let qid = db_query_const_id(owner_fqcn, cref);
@@ -63,11 +75,7 @@ fn process_site(
             }
         }
         (None, Some(inline)) => {
-            let qid = db_query_inline_id(
-                &pf.file,
-                site.range.start_line,
-                site.range.start_col,
-            );
+            let qid = db_query_inline_id(&pf.file, site.range.start_line, site.range.start_col);
             (qid, inline.clone(), false, None)
         }
         (None, None) => return,
@@ -84,7 +92,13 @@ fn process_site(
         .iter()
         .find(|t| t.op == TableOp::Write)
         .or_else(|| table_accesses.first())
-        .map(|t| if t.op == TableOp::Write { "WRITE" } else { "READ" })
+        .map(|t| {
+            if t.op == TableOp::Write {
+                "WRITE"
+            } else {
+                "READ"
+            }
+        })
         .unwrap_or("UNKNOWN");
 
     // Derive dialect-level operation hint from SQL text keywords.
@@ -102,7 +116,10 @@ fn process_site(
     });
     let props = if let Some(name) = &const_name_opt {
         let mut obj = props.as_object().cloned().unwrap_or_default();
-        obj.insert("constantName".to_string(), serde_json::Value::String(name.clone()));
+        obj.insert(
+            "constantName".to_string(),
+            serde_json::Value::String(name.clone()),
+        );
         serde_json::Value::Object(obj)
     } else {
         props
@@ -172,7 +189,10 @@ fn owner_fqcn_of(id: &NodeId) -> &str {
     // Strip the kind prefix (up to first `:`).
     let after_colon = s.find(':').map(|i| &s[i + 1..]).unwrap_or(s);
     // The FQCN is everything before the `#`.
-    after_colon.find('#').map(|i| &after_colon[..i]).unwrap_or(after_colon)
+    after_colon
+        .find('#')
+        .map(|i| &after_colon[..i])
+        .unwrap_or(after_colon)
 }
 
 /// Detect the top-level SQL operation keyword.
@@ -198,9 +218,7 @@ fn detect_sql_op(sql: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_core::{
-        method_id, NodeKind, ParsedFile, SqlConstant, SqlExecutionSite, Range,
-    };
+    use cih_core::{method_id, NodeKind, ParsedFile, Range, SqlConstant, SqlExecutionSite};
 
     fn make_parsed_file(
         file: &str,
@@ -253,7 +271,11 @@ mod tests {
                 fqcn,
                 "SELECT id, amount FROM CUSTOM_OVERDRAFT WHERE id = ?",
             )],
-            vec![make_site("executeQuery", Some("QUERY_FOO"), callable.clone())],
+            vec![make_site(
+                "executeQuery",
+                Some("QUERY_FOO"),
+                callable.clone(),
+            )],
         );
 
         let (nodes, edges) = emit_db_access(&[pf]);
@@ -261,10 +283,30 @@ mod tests {
         let query_id = db_query_const_id(fqcn, "QUERY_FOO");
         let table_id = db_table_id("CUSTOM_OVERDRAFT");
 
-        assert!(nodes.iter().any(|n| n.id == query_id && n.kind == NodeKind::DbQuery), "DbQuery node missing");
-        assert!(nodes.iter().any(|n| n.id == table_id && n.kind == NodeKind::DbTable), "DbTable node missing");
-        assert!(edges.iter().any(|e| e.src == callable && e.dst == query_id && e.kind == EdgeKind::ExecutesQuery), "EXECUTES_QUERY edge missing");
-        assert!(edges.iter().any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable), "READS_TABLE edge missing");
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.id == query_id && n.kind == NodeKind::DbQuery),
+            "DbQuery node missing"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.id == table_id && n.kind == NodeKind::DbTable),
+            "DbTable node missing"
+        );
+        assert!(
+            edges.iter().any(|e| e.src == callable
+                && e.dst == query_id
+                && e.kind == EdgeKind::ExecutesQuery),
+            "EXECUTES_QUERY edge missing"
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable),
+            "READS_TABLE edge missing"
+        );
     }
 
     #[test]
@@ -279,7 +321,11 @@ mod tests {
                 fqcn,
                 "INSERT INTO CUSTOM_OVERDRAFT (col1, col2) VALUES (?, ?)",
             )],
-            vec![make_site("executeUpdate", Some("QUERY_INSERT"), callable.clone())],
+            vec![make_site(
+                "executeUpdate",
+                Some("QUERY_INSERT"),
+                callable.clone(),
+            )],
         );
 
         let (nodes, edges) = emit_db_access(&[pf]);
@@ -287,8 +333,18 @@ mod tests {
         let query_id = db_query_const_id(fqcn, "QUERY_INSERT");
         let table_id = db_table_id("CUSTOM_OVERDRAFT");
 
-        assert!(edges.iter().any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::WritesTable), "WRITES_TABLE edge missing");
-        assert!(!edges.iter().any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable), "should not be READS_TABLE");
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::WritesTable),
+            "WRITES_TABLE edge missing"
+        );
+        assert!(
+            !edges
+                .iter()
+                .any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable),
+            "should not be READS_TABLE"
+        );
         let _ = nodes;
     }
 
@@ -301,8 +357,16 @@ mod tests {
             "src/main/java/OverdraftAdapterImpl.java",
             fqcn,
             vec![
-                make_constant("QUERY_BY_CODE", fqcn, "SELECT * FROM CUSTOM_OVERDRAFT WHERE code = ?"),
-                make_constant("QUERY_BY_NAME", fqcn, "SELECT * FROM CUSTOM_OVERDRAFT WHERE name = ?"),
+                make_constant(
+                    "QUERY_BY_CODE",
+                    fqcn,
+                    "SELECT * FROM CUSTOM_OVERDRAFT WHERE code = ?",
+                ),
+                make_constant(
+                    "QUERY_BY_NAME",
+                    fqcn,
+                    "SELECT * FROM CUSTOM_OVERDRAFT WHERE name = ?",
+                ),
             ],
             vec![
                 make_site("executeQuery", Some("QUERY_BY_CODE"), callable1),
@@ -312,8 +376,14 @@ mod tests {
 
         let (nodes, _edges) = emit_db_access(&[pf]);
 
-        let table_count = nodes.iter().filter(|n| n.id == db_table_id("CUSTOM_OVERDRAFT")).count();
-        assert_eq!(table_count, 1, "DbTable node must be deduplicated: found {table_count}");
+        let table_count = nodes
+            .iter()
+            .filter(|n| n.id == db_table_id("CUSTOM_OVERDRAFT"))
+            .count();
+        assert_eq!(
+            table_count, 1,
+            "DbTable node must be deduplicated: found {table_count}"
+        );
     }
 
     #[test]
@@ -325,18 +395,32 @@ mod tests {
             "src/main/java/AdapterImpl.java",
             fqcn,
             vec![], // no constants
-            vec![make_site("executeQuery", Some("QUERY_FROM_OTHER_CLASS"), callable)],
+            vec![make_site(
+                "executeQuery",
+                Some("QUERY_FROM_OTHER_CLASS"),
+                callable,
+            )],
         );
 
         let (nodes, edges) = emit_db_access(&[pf]);
 
         // Should emit a DbQuery (with dynamic=true) but no DbTable nodes or table edges.
-        let table_nodes: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::DbTable).collect();
-        assert!(table_nodes.is_empty(), "no DbTable should be emitted: {table_nodes:?}");
-        let table_edges: Vec<_> = edges.iter().filter(|e| {
-            e.kind == EdgeKind::ReadsTable || e.kind == EdgeKind::WritesTable
-        }).collect();
-        assert!(table_edges.is_empty(), "no table edges should be emitted: {table_edges:?}");
+        let table_nodes: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::DbTable)
+            .collect();
+        assert!(
+            table_nodes.is_empty(),
+            "no DbTable should be emitted: {table_nodes:?}"
+        );
+        let table_edges: Vec<_> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::ReadsTable || e.kind == EdgeKind::WritesTable)
+            .collect();
+        assert!(
+            table_edges.is_empty(),
+            "no table edges should be emitted: {table_edges:?}"
+        );
     }
 
     #[test]
@@ -355,8 +439,13 @@ mod tests {
         let (nodes, _) = emit_db_access(&[pf]);
 
         let query_id = db_query_const_id(fqcn, "QUERY_DYNAMIC");
-        let qnode = nodes.iter().find(|n| n.id == query_id).expect("DbQuery node missing");
-        let dynamic = qnode.props.as_ref()
+        let qnode = nodes
+            .iter()
+            .find(|n| n.id == query_id)
+            .expect("DbQuery node missing");
+        let dynamic = qnode
+            .props
+            .as_ref()
             .and_then(|p| p.get("dynamic"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);

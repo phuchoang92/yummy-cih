@@ -327,7 +327,11 @@ mod tests {
         graph.add_edge(nodes[0], nodes[1], 0.8); // parallel edge
 
         let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
-        assert_eq!(traces.len(), 1, "parallel edges must not produce duplicate traces");
+        assert_eq!(
+            traces.len(),
+            1,
+            "parallel edges must not produce duplicate traces"
+        );
     }
 
     #[test]
@@ -336,8 +340,8 @@ mod tests {
         // A trace ending at PayService must NOT be suppressed because "Pay" is
         // a substring of "PayService" in the raw encoded string.
         let (mut graph, nodes) = graph_with_nodes(&["Root", "Pay", "PayService"]);
-        graph.add_edge(nodes[0], nodes[1], 1.0);    // Root → Pay
-        graph.add_edge(nodes[0], nodes[2], 1.0);    // Root → PayService
+        graph.add_edge(nodes[0], nodes[1], 1.0); // Root → Pay
+        graph.add_edge(nodes[0], nodes[2], 1.0); // Root → PayService
 
         let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
         let encoded: Vec<_> = traces.iter().map(|t| encode_trace(t, &graph)).collect();
@@ -348,7 +352,9 @@ mod tests {
             "trace ending at Pay must not be incorrectly suppressed"
         );
         assert!(
-            encoded.iter().any(|s| s.ends_with("Method:PayService#payservice/0")),
+            encoded
+                .iter()
+                .any(|s| s.ends_with("Method:PayService#payservice/0")),
             "trace ending at PayService must not be incorrectly suppressed"
         );
     }

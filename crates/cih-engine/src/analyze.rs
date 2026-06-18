@@ -311,8 +311,14 @@ pub(crate) fn analyze_from_scope_with_options(
 
     let (db_nodes, db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
     tracing::info!(
-        db_query_nodes = db_nodes.iter().filter(|n| n.kind == cih_core::NodeKind::DbQuery).count(),
-        db_table_nodes = db_nodes.iter().filter(|n| n.kind == cih_core::NodeKind::DbTable).count(),
+        db_query_nodes = db_nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::DbQuery)
+            .count(),
+        db_table_nodes = db_nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::DbTable)
+            .count(),
         "DB access emit complete"
     );
 
@@ -439,7 +445,11 @@ fn parse_scope(
     files: &[String],
     cache: AnalyzeCacheOptions,
 ) -> Result<ParseScopeOutcome> {
-    tracing::info!(total_files = files.len(), cache_enabled = cache.use_cache, "hashing files");
+    tracing::info!(
+        total_files = files.len(),
+        cache_enabled = cache.use_cache,
+        "hashing files"
+    );
     let current_hashes = hash_all(repo_root, files);
     tracing::debug!(hashed = current_hashes.len(), "file hashing complete");
 
@@ -452,7 +462,11 @@ fn parse_scope(
             }
         }
         let reparsed_files = unit_output.units.len();
-        tracing::info!(reparsed = reparsed_files, skipped = unit_output.skipped.len(), "parse complete (no-cache)");
+        tracing::info!(
+            reparsed = reparsed_files,
+            skipped = unit_output.skipped.len(),
+            "parse complete (no-cache)"
+        );
         return Ok(ParseScopeOutcome::Parsed {
             parse_output: cih_parse::parse_output_from_units(
                 unit_output.units,

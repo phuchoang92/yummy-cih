@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
 use cih_core::{Edge, EdgeKind, Node, NodeKind};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct ProcessStep {
     pub process_id: String,
@@ -136,7 +136,8 @@ impl WikiGraph {
                 EdgeKind::StepInProcess => {
                     let symbol_id = e.src.as_str().to_string();
                     let proc_id = e.dst.as_str().to_string();
-                    let step_num = e.reason
+                    let step_num = e
+                        .reason
                         .strip_prefix("step:")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(usize::MAX);
@@ -157,9 +158,7 @@ impl WikiGraph {
 
         let mut process_steps: BTreeMap<String, Vec<ProcessStep>> = BTreeMap::new();
         for (proc_id, mut raw) in steps_raw {
-            raw.sort_by(|(n1, s1), (n2, s2)| {
-                n1.cmp(n2).then(s1.id.as_str().cmp(s2.id.as_str()))
-            });
+            raw.sort_by(|(n1, s1), (n2, s2)| n1.cmp(n2).then(s1.id.as_str().cmp(s2.id.as_str())));
             let steps = raw
                 .into_iter()
                 .map(|(step_number, symbol)| ProcessStep {
@@ -214,7 +213,10 @@ impl WikiGraph {
                 }
                 EdgeKind::HasMethod => {
                     if let Some(method_node) = nodes_by_id.get(&dst) {
-                        methods_by_class.entry(src).or_default().push(method_node.clone());
+                        methods_by_class
+                            .entry(src)
+                            .or_default()
+                            .push(method_node.clone());
                     }
                 }
                 EdgeKind::ExecutesQuery => {
@@ -330,10 +332,8 @@ impl WikiGraph {
             }
         }
 
-        let inter_community_calls: Vec<(String, String, usize)> = cross
-            .into_iter()
-            .map(|((a, b), c)| (a, b, c))
-            .collect();
+        let inter_community_calls: Vec<(String, String, usize)> =
+            cross.into_iter().map(|((a, b), c)| (a, b, c)).collect();
 
         let mut raw_db: BTreeMap<String, BTreeMap<String, (bool, bool)>> = BTreeMap::new();
         for (comm_id, members) in &members_by_community {
@@ -342,11 +342,21 @@ impl WikiGraph {
                     for qid in query_ids {
                         for tid in query_reads_table.get(qid.as_str()).into_iter().flatten() {
                             let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
-                            raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().0 = true;
+                            raw_db
+                                .entry(comm_id.clone())
+                                .or_default()
+                                .entry(name)
+                                .or_default()
+                                .0 = true;
                         }
                         for tid in query_writes_table.get(qid.as_str()).into_iter().flatten() {
                             let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
-                            raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().1 = true;
+                            raw_db
+                                .entry(comm_id.clone())
+                                .or_default()
+                                .entry(name)
+                                .or_default()
+                                .1 = true;
                         }
                     }
                 }
@@ -357,7 +367,11 @@ impl WikiGraph {
             .map(|(comm_id, tables)| {
                 let mut v: Vec<DbTableAccess> = tables
                     .into_iter()
-                    .map(|(name, (r, w))| DbTableAccess { table_name: name, reads: r, writes: w })
+                    .map(|(name, (r, w))| DbTableAccess {
+                        table_name: name,
+                        reads: r,
+                        writes: w,
+                    })
                     .collect();
                 v.sort_by(|a, b| a.table_name.cmp(&b.table_name));
                 (comm_id, v)
@@ -422,7 +436,10 @@ impl WikiGraph {
 
     /// Returns (publishes, consumes) topic lists for a community.
     /// Each entry is (topic_name, topic_type) e.g. ("OrderCreatedEvent", "kafka").
-    pub fn community_messaging(&self, community_id: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    pub fn community_messaging(
+        &self,
+        community_id: &str,
+    ) -> (Vec<(String, String)>, Vec<(String, String)>) {
         let node = match self.nodes_by_id.get(community_id) {
             Some(n) => n,
             None => return (vec![], vec![]),
@@ -432,13 +449,22 @@ impl WikiGraph {
             None => return (vec![], vec![]),
         };
         let parse = |key: &str| -> Vec<(String, String)> {
-            props.get(key)
+            props
+                .get(key)
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|item| {
-                    let name = item.get("name")?.as_str()?.to_string();
-                    let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("event").to_string();
-                    Some((name, kind))
-                }).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let name = item.get("name")?.as_str()?.to_string();
+                            let kind = item
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("event")
+                                .to_string();
+                            Some((name, kind))
+                        })
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         (parse("publishes_topics"), parse("consumes_topics"))
@@ -468,12 +494,7 @@ impl WikiGraph {
         for (proc_id, steps) in &self.process_steps {
             if let Some(first) = steps.first() {
                 let sym_id = first.symbol.id.as_str().to_string();
-                if self
-                    .community_by_member
-                    .get(&sym_id)
-                    .map(|c| c.as_str())
-                    == Some(community_id)
-                {
+                if self.community_by_member.get(&sym_id).map(|c| c.as_str()) == Some(community_id) {
                     if !business_only || self.is_business_process(proc_id) {
                         result.push(proc_id.clone());
                     }
@@ -600,12 +621,21 @@ mod tests {
     #[test]
     fn wiki_graph_indexes_db_table_access() {
         let method = node("Method:com.example.Foo#find/0", NodeKind::Method, "find");
-        let dbq = node("DbQuery:com.example.Foo#SQL_FIND", NodeKind::DbQuery, "SQL_FIND");
+        let dbq = node(
+            "DbQuery:com.example.Foo#SQL_FIND",
+            NodeKind::DbQuery,
+            "SQL_FIND",
+        );
         let tbl_orders = node("DbTable:ORDERS", NodeKind::DbTable, "ORDERS");
         let tbl_status = node("DbTable:ORDER_STATUS", NodeKind::DbTable, "ORDER_STATUS");
         let comm = node("Community:0", NodeKind::Community, "order-svc");
 
-        let nodes = [method.clone(), dbq.clone(), tbl_orders.clone(), tbl_status.clone()];
+        let nodes = [
+            method.clone(),
+            dbq.clone(),
+            tbl_orders.clone(),
+            tbl_status.clone(),
+        ];
         let edges = [
             Edge {
                 src: method.id.clone(),

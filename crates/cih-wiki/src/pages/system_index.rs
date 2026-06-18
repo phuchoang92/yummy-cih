@@ -85,8 +85,8 @@ pub fn render_system_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
     use crate::features::FeatureGroup;
+    use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 
     fn simple_setup() -> (WikiGraph, Vec<FeatureGroup>) {
         let m = Node {

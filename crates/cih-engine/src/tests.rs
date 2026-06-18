@@ -558,8 +558,14 @@ fn discover_preserves_analyze_artifacts_on_disk() {
 
     run_discover_core(&root).unwrap();
 
-    assert!(analyze_nodes.exists(), "analyze nodes.jsonl must survive discover");
-    assert!(analyze_edges.exists(), "analyze edges.jsonl must survive discover");
+    assert!(
+        analyze_nodes.exists(),
+        "analyze nodes.jsonl must survive discover"
+    );
+    assert!(
+        analyze_edges.exists(),
+        "analyze edges.jsonl must survive discover"
+    );
 
     let latest = crate::versioning::latest_graph_artifacts(&root).unwrap();
     assert_eq!(
@@ -588,26 +594,31 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
     let discover = run_discover_core(&root).unwrap();
 
     assert!(
-        discover.source_artifacts.nodes_path
+        discover
+            .source_artifacts
+            .nodes_path
             .to_string_lossy()
             .contains("artifacts/"),
         "source_artifacts must be under .cih/artifacts/"
     );
     assert!(
-        !discover.source_artifacts.nodes_path
+        !discover
+            .source_artifacts
+            .nodes_path
             .to_string_lossy()
             .contains("artifacts-community"),
         "source_artifacts must NOT be under .cih/artifacts-community/"
     );
     assert!(
-        discover.artifacts.nodes_path
+        discover
+            .artifacts
+            .nodes_path
             .to_string_lossy()
             .contains("artifacts-community"),
         "discover.artifacts must be under .cih/artifacts-community/"
     );
     assert_ne!(
-        discover.source_artifacts.version.0,
-        discover.artifacts.version.0,
+        discover.source_artifacts.version.0, discover.artifacts.version.0,
         "source and community versions must differ"
     );
 

@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
-use cih_core::{Node, NodeKind, RepoMap};
 use crate::graph::{node_stereotype, route_http_method, route_path, WikiGraph};
 use crate::mermaid;
 use crate::{CommunityLlmFull, CommunityLlmSummary};
+use cih_core::{Node, NodeKind, RepoMap};
+use std::collections::BTreeMap;
 
 fn method_signature(node: &Node) -> String {
     let params = node
@@ -55,10 +55,26 @@ pub fn render_dev_index(
 
     for comm in &graph.community_nodes {
         let comm_id = comm.id.as_str();
-        let classes = graph.community_class_counts.get(comm_id).copied().unwrap_or(0);
-        let methods = graph.community_method_counts.get(comm_id).copied().unwrap_or(0);
-        let routes = graph.community_routes.get(comm_id).map(|r| r.len()).unwrap_or(0);
-        let tests = graph.community_tests.get(comm_id).map(|t| t.len()).unwrap_or(0);
+        let classes = graph
+            .community_class_counts
+            .get(comm_id)
+            .copied()
+            .unwrap_or(0);
+        let methods = graph
+            .community_method_counts
+            .get(comm_id)
+            .copied()
+            .unwrap_or(0);
+        let routes = graph
+            .community_routes
+            .get(comm_id)
+            .map(|r| r.len())
+            .unwrap_or(0);
+        let tests = graph
+            .community_tests
+            .get(comm_id)
+            .map(|t| t.len())
+            .unwrap_or(0);
         md.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             comm.name, classes, methods, routes, tests,
@@ -128,10 +144,7 @@ pub fn render_dev_community(
         .unwrap_or_else(|| community.name.clone());
 
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\nrole: dev\n---\n\n",
-        page_title
-    ));
+    md.push_str(&format!("---\ntitle: {}\nrole: dev\n---\n\n", page_title));
     md.push_str("<div class=\"role-banner role-dev\"><span class=\"role-dot\"></span>Developer<span class=\"role-desc\">Technical structure, calls &amp; tests</span></div>\n\n");
     md.push_str(&format!("# {} — Technical Reference\n\n", page_title));
 
@@ -179,20 +192,22 @@ pub fn render_dev_community(
     // Method id format: "Method:fqcn#name/arity" → class id: "Class:fqcn"
     let mut class_to_methods: BTreeMap<String, Vec<&Node>> = BTreeMap::new();
     for m in member_list {
-        if !matches!(m.kind, NodeKind::Method | NodeKind::Function | NodeKind::Constructor) {
+        if !matches!(
+            m.kind,
+            NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+        ) {
             continue;
         }
-        let cls_id = m
-            .id
-            .as_str()
-            .split_once('#')
-            .map(|(prefix, _)| {
-                let fqcn = prefix
-                    .trim_start_matches("Method:")
-                    .trim_start_matches("Constructor:");
-                format!("Class:{}", fqcn)
-            })
-            .unwrap_or_default();
+        let cls_id =
+            m.id.as_str()
+                .split_once('#')
+                .map(|(prefix, _)| {
+                    let fqcn = prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:");
+                    format!("Class:{}", fqcn)
+                })
+                .unwrap_or_default();
         if !cls_id.is_empty() {
             class_to_methods.entry(cls_id).or_default().push(m);
         }
@@ -203,9 +218,13 @@ pub fn render_dev_community(
 
         for (cls_id, methods) in &class_to_methods {
             let cls = graph.nodes_by_id.get(cls_id);
-            let cls_name = cls
-                .map(|n| n.name.as_str())
-                .unwrap_or_else(|| cls_id.trim_start_matches("Class:").rsplit('.').next().unwrap_or(cls_id));
+            let cls_name = cls.map(|n| n.name.as_str()).unwrap_or_else(|| {
+                cls_id
+                    .trim_start_matches("Class:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(cls_id)
+            });
             let stereotype = cls.and_then(node_stereotype).unwrap_or("—");
 
             let test_names: Vec<&str> = cls
@@ -222,9 +241,9 @@ pub fn render_dev_community(
 
             md.push_str(&format!("### `{}` · {}\n\n", cls_name, stereotype));
 
-            let file = cls.map(|c| c.file.as_str()).unwrap_or_else(|| {
-                methods.first().map(|m| m.file.as_str()).unwrap_or("")
-            });
+            let file = cls
+                .map(|c| c.file.as_str())
+                .unwrap_or_else(|| methods.first().map(|m| m.file.as_str()).unwrap_or(""));
             if !file.is_empty() {
                 let line = cls.map(|c| c.range.start_line).unwrap_or(0);
                 if line > 0 {
@@ -526,8 +545,16 @@ mod tests {
             range: cih_core::Range::default(),
             props: Some(serde_json::json!({"stereotype": "service"})),
         };
-        let method = make_node("Method:com.example.OrderService#save/0", NodeKind::Method, "save");
-        let dbq = make_node("DbQuery:com.example.OrderService#SQL_SAVE", NodeKind::DbQuery, "SQL_SAVE");
+        let method = make_node(
+            "Method:com.example.OrderService#save/0",
+            NodeKind::Method,
+            "save",
+        );
+        let dbq = make_node(
+            "DbQuery:com.example.OrderService#SQL_SAVE",
+            NodeKind::DbQuery,
+            "SQL_SAVE",
+        );
         let tbl = make_node("DbTable:ORDERS", NodeKind::DbTable, "ORDERS");
         let comm = make_node("Community:0", NodeKind::Community, "order-service");
         let nodes = [cls.clone(), method.clone(), dbq.clone(), tbl.clone()];
@@ -576,7 +603,10 @@ mod tests {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
         let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None);
-        assert!(!md.contains("## DB Access"), "no db access section when no tables");
+        assert!(
+            !md.contains("## DB Access"),
+            "no db access section when no tables"
+        );
     }
 
     #[test]
@@ -590,9 +620,6 @@ mod tests {
         };
         let md = render_dev_community(&g, &comm, "shared/dev/order-service", Some(&llm), None);
         assert!(md.contains("## Summary"), "has summary section");
-        assert!(
-            md.contains("Service-repository pattern"),
-            "has llm text"
-        );
+        assert!(md.contains("Service-repository pattern"), "has llm text");
     }
 }

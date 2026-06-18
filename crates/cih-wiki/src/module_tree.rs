@@ -183,7 +183,13 @@ pub fn validate_module_tree(tree: &WikiModuleTree, graph: &WikiGraph) -> Result<
     // Top-level slugs must be globally unique (they map to URL prefixes).
     let mut top_level_slugs = BTreeSet::new();
     for module in &tree.modules {
-        validate_module_node(module, &valid_communities, &mut seen_ids, &mut top_level_slugs, true)?;
+        validate_module_node(
+            module,
+            &valid_communities,
+            &mut seen_ids,
+            &mut top_level_slugs,
+            true,
+        )?;
     }
     Ok(())
 }

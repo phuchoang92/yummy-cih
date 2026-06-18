@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use crate::graph::{route_decorator, route_http_method, route_path, WikiGraph};
+use std::collections::BTreeMap;
 
 pub fn render_routes_page(graph: &WikiGraph) -> String {
     let mut md = String::new();
@@ -63,9 +63,7 @@ pub fn render_routes_json(graph: &WikiGraph) -> serde_json::Value {
         .map(|(path, methods)| {
             (
                 path,
-                serde_json::Value::Object(
-                    methods.into_iter().collect::<serde_json::Map<_, _>>(),
-                ),
+                serde_json::Value::Object(methods.into_iter().collect::<serde_json::Map<_, _>>()),
             )
         })
         .collect::<serde_json::Map<_, _>>()
@@ -164,7 +162,11 @@ mod tests {
 
     #[test]
     fn render_routes_json_is_openapi() {
-        let (h, r) = route_pair("POST", "/api/orders", "com.example.OrderController#create/0");
+        let (h, r) = route_pair(
+            "POST",
+            "/api/orders",
+            "com.example.OrderController#create/0",
+        );
         let g = graph_with_routes(vec![(h, r)]);
         let val = render_routes_json(&g);
         assert_eq!(val["openapi"], "3.0.3");
@@ -176,7 +178,10 @@ mod tests {
         let (h, r) = route_pair("GET", "/api/health", "com.example.HealthController#check/0");
         let g = graph_with_routes(vec![(h, r)]);
         let md = render_routes_page(&g);
-        assert!(md.starts_with("---\n"), "page must start with frontmatter delimiter");
+        assert!(
+            md.starts_with("---\n"),
+            "page must start with frontmatter delimiter"
+        );
         assert!(md.contains("title:"), "frontmatter must contain title");
     }
 }

@@ -14,7 +14,6 @@ fn capitalize(s: &str) -> String {
     out
 }
 
-
 /// Render the feature-level PO (business overview) page.
 /// Aggregates routes, tables, and LLM summaries from all communities in the feature.
 pub fn render_feature_po(
@@ -26,10 +25,7 @@ pub fn render_feature_po(
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\n---\n\n",
-        title
-    ));
+    md.push_str(&format!("---\ntitle: {}\n---\n\n", title));
     md.push_str(&format!("# {}\n\n", title));
 
     // llm-full mode: richer sections per community
@@ -91,11 +87,7 @@ pub fn render_feature_po(
         // llm-summary mode fallback
         let po_texts: Vec<String> = community_ids
             .iter()
-            .filter_map(|cid| {
-                llm_summaries
-                    .and_then(|m| m.get(cid))
-                    .map(|s| s.po.clone())
-            })
+            .filter_map(|cid| llm_summaries.and_then(|m| m.get(cid)).map(|s| s.po.clone()))
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -124,8 +116,10 @@ pub fn render_feature_po(
         .sum();
 
     // Aggregate messaging topics across all communities
-    let mut publishes: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let mut consumes: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut publishes: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut consumes: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for cid in community_ids {
         let (pub_topics, con_topics) = graph.community_messaging(cid);
         for (name, kind) in pub_topics {
@@ -206,10 +200,18 @@ pub fn render_feature_po(
         md.push_str("| Direction | Topic | Type |\n");
         md.push_str("|---|---|---|\n");
         for (name, kind) in &publishes {
-            md.push_str(&format!("| Publishes | `{}` | {} |\n", name, capitalize(kind)));
+            md.push_str(&format!(
+                "| Publishes | `{}` | {} |\n",
+                name,
+                capitalize(kind)
+            ));
         }
         for (name, kind) in &consumes {
-            md.push_str(&format!("| Consumes | `{}` | {} |\n", name, capitalize(kind)));
+            md.push_str(&format!(
+                "| Consumes | `{}` | {} |\n",
+                name,
+                capitalize(kind)
+            ));
         }
         md.push('\n');
     }
@@ -255,7 +257,10 @@ pub fn render_controller_page(
 ) -> String {
     let route_count = routes.len();
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\nrole: po\n---\n\n", controller_name));
+    md.push_str(&format!(
+        "---\ntitle: {}\nrole: po\n---\n\n",
+        controller_name
+    ));
     md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
     md.push_str(&format!("# {}\n\n", controller_name));
     if let Some(desc) = description.filter(|s| !s.is_empty()) {
@@ -299,7 +304,14 @@ mod tests {
         Node {
             id: NodeId::new(id.to_string()),
             kind: NodeKind::Method,
-            name: id.split('#').nth(1).unwrap_or("m").split('/').next().unwrap_or("m").to_string(),
+            name: id
+                .split('#')
+                .nth(1)
+                .unwrap_or("m")
+                .split('/')
+                .next()
+                .unwrap_or("m")
+                .to_string(),
             qualified_name: None,
             file: String::new(),
             range: Range::default(),

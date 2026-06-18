@@ -60,7 +60,11 @@ fn validate_base_url(url: &str) -> Result<()> {
         let authority = rest.split('/').next().unwrap_or("");
         // IPv6 literal: http://[::1]:5000 → strip brackets to get ::1
         let host = if authority.starts_with('[') {
-            authority.trim_start_matches('[').split(']').next().unwrap_or("")
+            authority
+                .trim_start_matches('[')
+                .split(']')
+                .next()
+                .unwrap_or("")
         } else {
             authority.split(':').next().unwrap_or("")
         };
@@ -168,13 +172,17 @@ mod tests {
 
     #[test]
     fn validate_base_url_rejects_http_remote() {
-        let err = validate_base_url("http://example.com/v1").unwrap_err().to_string();
+        let err = validate_base_url("http://example.com/v1")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("HTTPS"), "expected HTTPS mention: {}", err);
     }
 
     #[test]
     fn validate_base_url_rejects_non_http_scheme() {
-        let err = validate_base_url("ftp://example.com").unwrap_err().to_string();
+        let err = validate_base_url("ftp://example.com")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("https://"), "expected scheme mention: {}", err);
     }
 

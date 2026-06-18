@@ -176,10 +176,7 @@ mod tests {
         assert!(json.contains("\"generation\""));
         assert!(json.contains("module_tree.json"));
         let decoded: WikiManifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            decoded.generation.as_ref().unwrap().mode,
-            "llm-full"
-        );
+        assert_eq!(decoded.generation.as_ref().unwrap().mode, "llm-full");
         assert_eq!(decoded.warnings, vec!["fallback used"]);
     }
 }

@@ -15,14 +15,24 @@ fn sanitize(s: &str) -> String {
 
 fn node_id(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
 /// Generate a `flowchart LR` process-step diagram for a feature's communities.
 /// When `business_only` is true, only includes processes with `business_flow == true`.
 /// Returns `None` if there are fewer than 2 connected steps.
-pub fn process_flow_diagram(graph: &WikiGraph, community_ids: &[String], business_only: bool) -> Option<String> {
+pub fn process_flow_diagram(
+    graph: &WikiGraph,
+    community_ids: &[String],
+    business_only: bool,
+) -> Option<String> {
     let mut steps: Vec<(String, String)> = Vec::new(); // (id, label)
     let mut arrows: Vec<(String, String)> = Vec::new(); // (from_id, to_id)
 
@@ -41,8 +51,10 @@ pub fn process_flow_diagram(graph: &WikiGraph, community_ids: &[String], busines
                         for pair in proc_steps.windows(2) {
                             let from_label = sanitize(&pair[0].symbol.name);
                             let to_label = sanitize(&pair[1].symbol.name);
-                            let from_nid = node_id(&pair[0].symbol.id.as_str().replace("Method:", ""));
-                            let to_nid = node_id(&pair[1].symbol.id.as_str().replace("Method:", ""));
+                            let from_nid =
+                                node_id(&pair[0].symbol.id.as_str().replace("Method:", ""));
+                            let to_nid =
+                                node_id(&pair[1].symbol.id.as_str().replace("Method:", ""));
                             if !steps.iter().any(|(id, _)| id == &from_nid) {
                                 steps.push((from_nid.clone(), from_label));
                             }
@@ -83,10 +95,7 @@ pub fn process_flow_diagram(graph: &WikiGraph, community_ids: &[String], busines
     Some(out)
 }
 
-fn find_processes_for_member<'a>(
-    graph: &'a WikiGraph,
-    member_id: &str,
-) -> Option<Vec<&'a String>> {
+fn find_processes_for_member<'a>(graph: &'a WikiGraph, member_id: &str) -> Option<Vec<&'a String>> {
     let result: Vec<&'a String> = graph
         .process_steps
         .iter()
@@ -98,7 +107,11 @@ fn find_processes_for_member<'a>(
             }
         })
         .collect();
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Generate a `flowchart LR` class-level call diagram for a community's dev page.
@@ -125,10 +138,16 @@ pub fn class_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String> {
     let mut all_class_ids: std::collections::HashSet<String> = home_class_ids.clone();
 
     for member in members {
-        let Some(caller_class) = class_id_of(member.id.as_str()) else { continue };
-        let Some(callees) = graph.calls_out.get(member.id.as_str()) else { continue };
+        let Some(caller_class) = class_id_of(member.id.as_str()) else {
+            continue;
+        };
+        let Some(callees) = graph.calls_out.get(member.id.as_str()) else {
+            continue;
+        };
         for callee in callees {
-            let Some(callee_class) = class_id_of(callee) else { continue };
+            let Some(callee_class) = class_id_of(callee) else {
+                continue;
+            };
             if callee_class == caller_class {
                 continue; // skip intra-class calls
             }
@@ -153,19 +172,28 @@ pub fn class_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String> {
     // Filter: only include nodes reachable through an edge
     let mut seen_nodes: Vec<String> = Vec::new();
     for (src, dst) in &edges {
-        if !seen_nodes.contains(src) { seen_nodes.push(src.clone()); }
-        if !seen_nodes.contains(dst) { seen_nodes.push(dst.clone()); }
-        if seen_nodes.len() >= MAX_NODES { break; }
+        if !seen_nodes.contains(src) {
+            seen_nodes.push(src.clone());
+        }
+        if !seen_nodes.contains(dst) {
+            seen_nodes.push(dst.clone());
+        }
+        if seen_nodes.len() >= MAX_NODES {
+            break;
+        }
     }
 
     let class_label = |cid: &str| -> String {
-        let simple = cid.trim_start_matches("Class:")
+        let simple = cid
+            .trim_start_matches("Class:")
             .rsplit('.')
             .next()
             .unwrap_or(cid)
             .to_string();
         // look up stereotype from the Class node
-        let stereo = graph.nodes_by_id.get(cid)
+        let stereo = graph
+            .nodes_by_id
+            .get(cid)
             .and_then(|n| n.props.as_ref())
             .and_then(|p| p.get("stereotype"))
             .and_then(|v| v.as_str())
@@ -200,7 +228,9 @@ fn class_id_of(method_id: &str) -> Option<String> {
         .trim_start_matches("Constructor:")
         .trim_start_matches("Function:");
     // "pkg.ClassName#methodName/arity" → "Class:pkg.ClassName"
-    stripped.split_once('#').map(|(fqcn, _)| format!("Class:{}", fqcn))
+    stripped
+        .split_once('#')
+        .map(|(fqcn, _)| format!("Class:{}", fqcn))
 }
 
 /// Generate a `flowchart LR` diagram showing how communities call each other,
@@ -248,7 +278,8 @@ pub fn community_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String
 
     // Merge communities that share the same base label into one canonical ID.
     // This collapses Louvain split-class artifacts (e.g. two "Cart (controller)" clusters).
-    let mut label_to_canonical: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    let mut label_to_canonical: std::collections::HashMap<String, &str> =
+        std::collections::HashMap::new();
     let mut canonical_for: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for &cid in &comm_ids {
         let lbl = base_label_of(cid);
@@ -281,8 +312,14 @@ pub fn community_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String
     // Emit edges using canonical IDs; drop self-loops produced by merging
     let mut seen_edges: Vec<(String, String)> = Vec::new();
     for (src, dst, count) in relevant.iter().take(MAX_EDGES) {
-        let csrc = canonical_for.get(src.as_str()).copied().unwrap_or(src.as_str());
-        let cdst = canonical_for.get(dst.as_str()).copied().unwrap_or(dst.as_str());
+        let csrc = canonical_for
+            .get(src.as_str())
+            .copied()
+            .unwrap_or(src.as_str());
+        let cdst = canonical_for
+            .get(dst.as_str())
+            .copied()
+            .unwrap_or(dst.as_str());
         if csrc == cdst {
             continue; // merged — intra-class call, skip
         }

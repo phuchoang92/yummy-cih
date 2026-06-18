@@ -19,15 +19,74 @@ pub struct TableAccess {
 
 /// SQL keywords we must not mistake for table names.
 static SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER",
-    "ON", "AND", "OR", "NOT", "IN", "IS", "NULL", "AS", "DISTINCT", "ALL",
-    "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "MERGE", "USING", "WHEN",
-    "MATCHED", "THEN", "ORDER", "GROUP", "BY", "HAVING", "UNION", "INTERSECT", "EXCEPT",
-    "CASE", "WHEN", "THEN", "ELSE", "END", "WITH", "RETURNING",
-    "BEGIN", "COMMIT", "ROLLBACK", "PIVOT", "UNPIVOT", "CONNECT",
-    "BETWEEN", "LIKE", "EXISTS", "ANY", "SOME", "LIMIT", "OFFSET", "FETCH", "NEXT",
-    "ROWS", "ONLY", "FOR", "OF", "AT", "WITHIN", "PARTITION",
-    "DUAL",   // Oracle pseudo-table — always skipped
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "CROSS",
+    "OUTER",
+    "ON",
+    "AND",
+    "OR",
+    "NOT",
+    "IN",
+    "IS",
+    "NULL",
+    "AS",
+    "DISTINCT",
+    "ALL",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "MERGE",
+    "USING",
+    "WHEN",
+    "MATCHED",
+    "THEN",
+    "ORDER",
+    "GROUP",
+    "BY",
+    "HAVING",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "WITH",
+    "RETURNING",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "PIVOT",
+    "UNPIVOT",
+    "CONNECT",
+    "BETWEEN",
+    "LIKE",
+    "EXISTS",
+    "ANY",
+    "SOME",
+    "LIMIT",
+    "OFFSET",
+    "FETCH",
+    "NEXT",
+    "ROWS",
+    "ONLY",
+    "FOR",
+    "OF",
+    "AT",
+    "WITHIN",
+    "PARTITION",
+    "DUAL", // Oracle pseudo-table — always skipped
 ];
 
 fn is_keyword(token: &str) -> bool {
@@ -133,7 +192,12 @@ fn is_table_candidate(token: &str) -> bool {
         return false;
     }
     // Numeric literals
-    if token.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if token
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         return false;
     }
     let bare = strip_schema(token);
@@ -381,7 +445,10 @@ mod tests {
         let w = writes("INSERT INTO CUSTOM_OVERDRAFT (col1, col2) VALUES (?, ?)");
         assert!(w.contains(&"CUSTOM_OVERDRAFT".to_string()), "got: {w:?}");
         let r = reads("INSERT INTO CUSTOM_OVERDRAFT (col1, col2) VALUES (?, ?)");
-        assert!(!r.contains(&"CUSTOM_OVERDRAFT".to_string()), "should not be a read");
+        assert!(
+            !r.contains(&"CUSTOM_OVERDRAFT".to_string()),
+            "should not be a read"
+        );
     }
 
     #[test]
@@ -403,7 +470,10 @@ mod tests {
         let r = reads(sql);
         assert!(w.contains(&"TARGET_TABLE".to_string()), "got writes: {w:?}");
         assert!(r.contains(&"SOURCE_TABLE".to_string()), "got reads: {r:?}");
-        assert!(!r.contains(&"TARGET_TABLE".to_string()), "target must not be a read");
+        assert!(
+            !r.contains(&"TARGET_TABLE".to_string()),
+            "target must not be a read"
+        );
     }
 
     #[test]

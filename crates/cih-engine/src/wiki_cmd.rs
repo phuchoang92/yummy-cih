@@ -4,12 +4,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{bail, Context, Result};
 use cih_core::{GraphArtifacts, Node, RepoMap, VersionId};
-use cih_wiki::{
-    generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary,
-    WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo, WikiMeta, WikiModuleCacheEntry,
-    WikiModuleTree,
-};
 use cih_wiki::graph::{route_http_method, route_path};
+use cih_wiki::{
+    generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, WikiGenerationInfo,
+    WikiGraph, WikiInput, WikiLlmInfo, WikiMeta, WikiModuleCacheEntry, WikiModuleTree,
+};
 use rayon::prelude::*;
 
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
@@ -170,42 +169,52 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "graph artifacts loaded"
     );
 
-    let (all_community_nodes, community_edges, community_version) =
-        match latest_community_artifacts(repo) {
-            Ok(a) => {
-                let nodes = a.read_nodes().with_context(|| {
-                    format!("failed to read community nodes from {}", a.nodes_path.display())
-                })?;
-                let edges = a.read_edges().with_context(|| {
-                    format!("failed to read community edges from {}", a.edges_path.display())
-                })?;
-                let ver = a.version.0.clone();
-                tracing::info!(
-                    community_version = %ver,
-                    communities = nodes.len(),
-                    "community artifacts loaded"
-                );
-                (nodes, edges, ver)
-            }
-            Err(_) => {
-                tracing::info!("no community artifacts found — generating wiki without feature grouping; run `discover` first for richer docs");
-                eprintln!(
-                    "info: no community artifacts found — generating wiki without feature grouping. \
+    let (all_community_nodes, community_edges, community_version) = match latest_community_artifacts(
+        repo,
+    ) {
+        Ok(a) => {
+            let nodes = a.read_nodes().with_context(|| {
+                format!(
+                    "failed to read community nodes from {}",
+                    a.nodes_path.display()
+                )
+            })?;
+            let edges = a.read_edges().with_context(|| {
+                format!(
+                    "failed to read community edges from {}",
+                    a.edges_path.display()
+                )
+            })?;
+            let ver = a.version.0.clone();
+            tracing::info!(
+                community_version = %ver,
+                communities = nodes.len(),
+                "community artifacts loaded"
+            );
+            (nodes, edges, ver)
+        }
+        Err(_) => {
+            tracing::info!("no community artifacts found — generating wiki without feature grouping; run `discover` first for richer docs");
+            eprintln!(
+                "info: no community artifacts found — generating wiki without feature grouping. \
                      Run `discover` first for richer docs."
-                );
-                (Vec::new(), Vec::new(), String::new())
-            }
-        };
+            );
+            (Vec::new(), Vec::new(), String::new())
+        }
+    };
 
     // Apply --filter-community and --max-communities before any LLM or wiki work.
     let community_nodes: Vec<Node> = {
         let before = all_community_nodes.len();
         let mut filtered = all_community_nodes;
         if !filter_community.is_empty() {
-            let filters_lower: Vec<String> = filter_community.iter().map(|f| f.to_lowercase()).collect();
+            let filters_lower: Vec<String> =
+                filter_community.iter().map(|f| f.to_lowercase()).collect();
             filtered.retain(|n| {
                 let name_lower = n.name.to_lowercase();
-                filters_lower.iter().any(|f| name_lower.contains(f.as_str()))
+                filters_lower
+                    .iter()
+                    .any(|f| name_lower.contains(f.as_str()))
             });
         }
         if let Some(max) = max_communities {
@@ -319,85 +328,109 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             provider = llm_provider,
             "starting LLM community enrichment"
         );
-        eprintln!("[cih-wiki] enriching {} communities (concurrency={}, model={})", total, concurrency, llm_model);
+        eprintln!(
+            "[cih-wiki] enriching {} communities (concurrency={}, model={})",
+            total, concurrency, llm_model
+        );
 
         // community enrichment (par) + controller enrichment (sequential) run concurrently
-        let (community_raw, ctrl): (Vec<(String, String, Result<CommunityLlmSummary>)>, Option<HashMap<String, ControllerLlmSummary>>) =
-            pool.as_ref().unwrap().install(|| {
-                rayon::join(
-                    || community_nodes
+        let (community_raw, ctrl): (
+            Vec<(String, String, Result<CommunityLlmSummary>)>,
+            Option<HashMap<String, ControllerLlmSummary>>,
+        ) = pool.as_ref().unwrap().install(|| {
+            rayon::join(
+                || {
+                    community_nodes
                         .par_iter()
                         .map(|comm| {
-                    let comm_id = comm.id.as_str().to_string();
-                    let pack = build_evidence_pack(Some(repo), &wiki_graph, comm, &evidence_corpus);
-                    let ev_hash = fnv64(&pack.render());
+                            let comm_id = comm.id.as_str().to_string();
+                            let pack = build_evidence_pack(
+                                Some(repo),
+                                &wiki_graph,
+                                comm,
+                                &evidence_corpus,
+                            );
+                            let ev_hash = fnv64(&pack.render());
 
-                    // Incremental: check evidence hash against previous run.
-                    if let Some(summary) = cached_summary(&comm_id, &ev_hash, prev_meta.as_ref()) {
-                        let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!("[{}/{}] {} — cached (skipped)", done, total, comm.name);
-                        return (comm_id, ev_hash, Ok(summary));
-                    }
+                            // Incremental: check evidence hash against previous run.
+                            if let Some(summary) =
+                                cached_summary(&comm_id, &ev_hash, prev_meta.as_ref())
+                            {
+                                let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                                eprintln!("[{}/{}] {} — cached (skipped)", done, total, comm.name);
+                                return (comm_id, ev_hash, Ok(summary));
+                            }
 
-                    if is_circuit_open(consecutive_failures.load(Ordering::Relaxed), CIRCUIT_BREAKER_THRESHOLD) {
-                        let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!("[{}/{}] {} — SKIPPED (circuit open)", done, total, comm.name);
-                        return (
-                            comm_id,
-                            ev_hash,
-                            Err(anyhow::anyhow!("CIRCUIT_OPEN: skipped after consecutive failures")),
-                        );
-                    }
+                            if is_circuit_open(
+                                consecutive_failures.load(Ordering::Relaxed),
+                                CIRCUIT_BREAKER_THRESHOLD,
+                            ) {
+                                let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                                eprintln!(
+                                    "[{}/{}] {} — SKIPPED (circuit open)",
+                                    done, total, comm.name
+                                );
+                                return (
+                                    comm_id,
+                                    ev_hash,
+                                    Err(anyhow::anyhow!(
+                                        "CIRCUIT_OPEN: skipped after consecutive failures"
+                                    )),
+                                );
+                            }
 
-                    eprintln!("[cih-wiki] calling LLM for: {}", comm.name);
-                    let r = enrich_one_community(
-                        comm,
+                            eprintln!("[cih-wiki] calling LLM for: {}", comm.name);
+                            let r = enrich_one_community(
+                                comm,
+                                &wiki_graph,
+                                repo,
+                                &evidence_corpus,
+                                adapter.as_ref().unwrap().as_ref(),
+                                api_key.as_deref(),
+                                llm_model,
+                                llm_max_tokens,
+                                llm_timeout_secs,
+                                llm_retries,
+                                wiki_language,
+                                llm_debug_evidence,
+                                llm_dry_run,
+                            );
+                            let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                            match &r {
+                                Ok(_) => eprintln!("[{}/{}] {} — ok", done, total, comm.name),
+                                Err(e) => {
+                                    eprintln!("[{}/{}] {} — FAILED: {}", done, total, comm.name, e)
+                                }
+                            }
+                            if r.is_err() {
+                                consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                consecutive_failures.store(0, Ordering::Relaxed);
+                            }
+                            (comm_id, ev_hash, r)
+                        })
+                        .collect::<Vec<_>>()
+                },
+                || {
+                    tracing::info!(
+                        controllers = wiki_graph.routes_by_controller.len(),
+                        "starting LLM controller enrichment"
+                    );
+                    let r = enrich_controllers(
                         &wiki_graph,
-                        repo,
-                        &evidence_corpus,
                         adapter.as_ref().unwrap().as_ref(),
                         api_key.as_deref(),
                         llm_model,
                         llm_max_tokens,
                         llm_timeout_secs,
-                        llm_retries,
                         wiki_language,
-                        llm_debug_evidence,
                         llm_dry_run,
                     );
-                    let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    match &r {
-                        Ok(_) => eprintln!("[{}/{}] {} — ok", done, total, comm.name),
-                        Err(e) => eprintln!("[{}/{}] {} — FAILED: {}", done, total, comm.name, e),
-                    }
-                    if r.is_err() {
-                        consecutive_failures.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        consecutive_failures.store(0, Ordering::Relaxed);
-                    }
-                    (comm_id, ev_hash, r)
-                        })
-                        .collect::<Vec<_>>(),
-                    || {
-                        tracing::info!(
-                            controllers = wiki_graph.routes_by_controller.len(),
-                            "starting LLM controller enrichment"
-                        );
-                        let r = enrich_controllers(
-                            &wiki_graph,
-                            adapter.as_ref().unwrap().as_ref(),
-                            api_key.as_deref(),
-                            llm_model,
-                            llm_max_tokens,
-                            llm_timeout_secs,
-                            wiki_language,
-                            llm_dry_run,
-                        );
-                        tracing::info!(enriched = r.len(), "LLM controller enrichment complete");
-                        Some(r)
-                    },
-                )
-            });
+                    tracing::info!(enriched = r.len(), "LLM controller enrichment complete");
+                    Some(r)
+                },
+            )
+        });
 
         let mut map: HashMap<String, CommunityLlmSummary> = HashMap::new();
         // evidence_hash_map: community_id -> hash (for cache write)
@@ -434,7 +467,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         // Stash summaries + hashes for post-generation wiki_meta update.
         summaries_for_cache = map
             .iter()
-            .filter_map(|(id, s)| ev_hash_map.get(id).map(|h| (id.clone(), h.clone(), s.clone())))
+            .filter_map(|(id, s)| {
+                ev_hash_map
+                    .get(id)
+                    .map(|h| (id.clone(), h.clone(), s.clone()))
+            })
             .collect();
         llm_info = Some(WikiLlmInfo {
             provider: llm_provider.to_string(),
@@ -454,21 +491,37 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let llm_full_map: Option<HashMap<String, CommunityLlmFull>> = if wiki_mode == "llm-full" {
         let total_full = community_nodes.len();
         tracing::info!(communities = total_full, "starting LLM full enrichment");
-        let results: Vec<(String, Result<CommunityLlmFull>)> = pool.as_ref().unwrap().install(|| {
-            community_nodes.par_iter().map(|comm| {
-                let r = enrich_one_community_full(
-                    comm, &wiki_graph, repo, &evidence_corpus,
-                    adapter.as_ref().unwrap().as_ref(), api_key.as_deref(),
-                    llm_model, llm_max_tokens, llm_timeout_secs, llm_retries, wiki_language,
-                );
-                (comm.id.as_str().to_string(), r)
-            }).collect()
-        });
+        let results: Vec<(String, Result<CommunityLlmFull>)> =
+            pool.as_ref().unwrap().install(|| {
+                community_nodes
+                    .par_iter()
+                    .map(|comm| {
+                        let r = enrich_one_community_full(
+                            comm,
+                            &wiki_graph,
+                            repo,
+                            &evidence_corpus,
+                            adapter.as_ref().unwrap().as_ref(),
+                            api_key.as_deref(),
+                            llm_model,
+                            llm_max_tokens,
+                            llm_timeout_secs,
+                            llm_retries,
+                            wiki_language,
+                        );
+                        (comm.id.as_str().to_string(), r)
+                    })
+                    .collect()
+            });
         let mut map = HashMap::new();
         for (id, result) in results {
             match result {
-                Ok(full) => { map.insert(id, full); }
-                Err(err) => tracing::warn!(community = %id, error = %err, "LLM full enrichment failed"),
+                Ok(full) => {
+                    map.insert(id, full);
+                }
+                Err(err) => {
+                    tracing::warn!(community = %id, error = %err, "LLM full enrichment failed")
+                }
             }
         }
         tracing::info!(enriched = map.len(), "LLM full enrichment complete");
@@ -490,7 +543,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             &community_version,
         ) {
             Ok(tree) => {
-                tracing::info!(modules = tree.modules.len(), "LLM grouping proposed {} modules", tree.modules.len());
+                tracing::info!(
+                    modules = tree.modules.len(),
+                    "LLM grouping proposed {} modules",
+                    tree.modules.len()
+                );
                 Some(tree)
             }
             Err(err) => {
@@ -561,14 +618,17 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     if !summaries_for_cache.is_empty() {
         if let Some(mut meta) = load_wiki_meta(&out_dir) {
             for (id, hash, summary) in &summaries_for_cache {
-                let entry = meta.module_cache.entry(id.clone()).or_insert_with(|| WikiModuleCacheEntry {
-                    content_hash: String::new(),
-                    evidence_hash: String::new(),
-                    page_paths: Vec::new(),
-                    llm_po: None,
-                    llm_ba: None,
-                    llm_dev: None,
-                });
+                let entry =
+                    meta.module_cache
+                        .entry(id.clone())
+                        .or_insert_with(|| WikiModuleCacheEntry {
+                            content_hash: String::new(),
+                            evidence_hash: String::new(),
+                            page_paths: Vec::new(),
+                            llm_po: None,
+                            llm_ba: None,
+                            llm_dev: None,
+                        });
                 entry.evidence_hash = hash.clone();
                 entry.llm_po = Some(summary.po.clone());
                 entry.llm_ba = Some(summary.ba.clone());
@@ -810,7 +870,11 @@ fn summary_from_value(val: &serde_json::Value) -> Option<CommunityLlmSummary> {
 }
 
 fn build_full_prompt(name: &str, evidence: &str) -> String {
-    let evidence = if evidence.trim().is_empty() { "none" } else { evidence };
+    let evidence = if evidence.trim().is_empty() {
+        "none"
+    } else {
+        evidence
+    };
     format!(
         r#"You are writing detailed documentation from a code analysis graph.
 Module: "{name}"
@@ -854,7 +918,11 @@ fn parse_llm_full(text: &str) -> Result<CommunityLlmFull> {
             && full.po_capabilities.is_empty()
             && full.ba_process_overview.is_empty()
             && full.dev_responsibility.is_empty();
-        if all_empty { None } else { Some(full) }
+        if all_empty {
+            None
+        } else {
+            Some(full)
+        }
     };
 
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
@@ -871,7 +939,10 @@ fn parse_llm_full(text: &str) -> Result<CommunityLlmFull> {
             }
         }
     }
-    bail!("failed to extract llm-full JSON from response: {:?}", &text[..text.len().min(200)])
+    bail!(
+        "failed to extract llm-full JSON from response: {:?}",
+        &text[..text.len().min(200)]
+    )
 }
 
 fn enrich_one_community_full(
@@ -898,7 +969,13 @@ fn enrich_one_community_full(
         system.push_str("\nWrite all documentation in Vietnamese.");
     }
     let user = build_full_prompt(&community.name, &evidence);
-    let request = LlmRequest { system, user, model: model.to_string(), max_tokens, timeout_secs };
+    let request = LlmRequest {
+        system,
+        user,
+        model: model.to_string(),
+        max_tokens,
+        timeout_secs,
+    };
     let jitter_seed: u64 = community
         .id
         .as_str()
@@ -906,7 +983,10 @@ fn enrich_one_community_full(
         .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
     let mut last_err = None;
     for attempt in 0..=(retries as usize) {
-        match adapter.call(api_key, &request).and_then(|r| parse_llm_full(&r.text)) {
+        match adapter
+            .call(api_key, &request)
+            .and_then(|r| parse_llm_full(&r.text))
+        {
             Ok(full) => return Ok(full),
             Err(err) => {
                 if attempt < retries as usize {
@@ -1084,7 +1164,13 @@ fn parse_controller_batch(text: &str) -> HashMap<String, ControllerLlmSummary> {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             if !description.is_empty() || feature.is_some() {
-                result.insert(ctrl_name.clone(), ControllerLlmSummary { description, feature });
+                result.insert(
+                    ctrl_name.clone(),
+                    ControllerLlmSummary {
+                        description,
+                        feature,
+                    },
+                );
             }
         }
     }
@@ -1168,8 +1254,19 @@ mod tests {
         let corpus = EvidenceCorpus::load(&[]).unwrap();
         let tmp = std::env::temp_dir();
         let result = enrich_one_community(
-            &community, &graph, &tmp, &corpus,
-            &adapter, None, "test-model", 100, 5, 2, "en", false, false,
+            &community,
+            &graph,
+            &tmp,
+            &corpus,
+            &adapter,
+            None,
+            "test-model",
+            100,
+            5,
+            2,
+            "en",
+            false,
+            false,
         );
         assert!(result.is_ok(), "expected Ok after retries: {:?}", result);
         assert_eq!(adapter.calls(), 3, "should have made exactly 3 calls");
@@ -1177,8 +1274,14 @@ mod tests {
 
     #[test]
     fn circuit_breaker_open_at_threshold() {
-        assert!(!is_circuit_open(4, 5), "4 failures should not open circuit (threshold=5)");
-        assert!(is_circuit_open(5, 5), "5 failures should open circuit (threshold=5)");
+        assert!(
+            !is_circuit_open(4, 5),
+            "4 failures should not open circuit (threshold=5)"
+        );
+        assert!(
+            is_circuit_open(5, 5),
+            "5 failures should open circuit (threshold=5)"
+        );
         assert!(is_circuit_open(6, 5), "6 failures should keep circuit open");
     }
 

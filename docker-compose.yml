@@ -12,6 +12,26 @@ services:
       timeout: 3s
       retries: 10
 
+  # Postgres + pgvector — embedding store for the `embed` command and the
+  # semantic-search half of the `query` MCP tool. Host port 5433 avoids
+  # conflicts with a Homebrew/local Postgres on 5432.
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: cih
+      POSTGRES_PASSWORD: cih
+      POSTGRES_DB: cih
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "cih"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   cih-server:
     image: phuchoang29/yummy-cih:latest
     ports:
@@ -22,6 +42,8 @@ services:
       CIH_BIND: 0.0.0.0:8080
       # Points at the same artifacts the engine writes — enables BM25 query tool.
       CIH_ARTIFACTS_DIR: /repo/.cih/artifacts
+      # pgvector connection for semantic search (see `embed` command).
+      CIH_PG_URL: postgres://cih:cih@postgres:5432/cih
       HF_HOME: /data/hf-cache
       RUST_LOG: info,cih_server=debug
     volumes:
@@ -29,6 +51,8 @@ services:
       - ${REPO_PATH}:/repo:ro
     depends_on:
       falkordb:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
@@ -47,10 +71,17 @@ services:
   # and mount one dir directly: - ${REPO_PATH}/.cih/wiki/pages:/wiki:ro
   docs-viewer:
     image: phuchoang29/yummy-cih-docs:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.docs-viewer
     ports:
       - "3001:3001"
     environment:
       CIH_WIKI_REPOS_DIR: /wiki
+      NODE_OPTIONS: --max-old-space-size=4096
+    # Build the static site at startup, then serve it — avoids the webpack dev
+    # server (docusaurus start) which holds ~2GB in memory and OOM-loops.
+    command: sh -c "node scripts/gen-index.js && ./node_modules/.bin/docusaurus build && ./node_modules/.bin/docusaurus serve --port 3001 --host 0.0.0.0"
     volumes:
       - ${REPO_PATH}/.cih/wiki/pages:/wiki/${REPO_NAME:-repo}:ro
       # - /path/to/other-repo/.cih/wiki/pages:/wiki/other-repo:ro
@@ -68,13 +99,18 @@ services:
     environment:
       FALKOR_URL: redis://falkordb:6379
       CIH_GRAPH_KEY: cih
+      # pgvector connection for the `embed` command.
+      CIH_PG_URL: postgres://cih:cih@postgres:5432/cih
     volumes:
       - ${REPO_PATH}:/repo
     depends_on:
       falkordb:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     profiles: ["tools"]
 
 volumes:
   falkordb-data:
   cih-data:
+  pg-data:

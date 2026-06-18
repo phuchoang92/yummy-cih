@@ -39,7 +39,15 @@ pub fn propose_module_tree(
         call_grouping_llm(adapter, api_key, model, max_tokens, timeout_secs, &evidence)?
     } else {
         // Batch by chunks of MAX_EVIDENCE_CHARS
-        batch_grouping_llm(graph, adapter, api_key, model, max_tokens, timeout_secs, &evidence)?
+        batch_grouping_llm(
+            graph,
+            adapter,
+            api_key,
+            model,
+            max_tokens,
+            timeout_secs,
+            &evidence,
+        )?
     };
 
     proposals_to_tree(proposals, graph, graph_version, community_version)
@@ -49,8 +57,16 @@ fn build_grouping_evidence(graph: &WikiGraph) -> String {
     let mut lines: Vec<String> = Vec::new();
     for comm in &graph.community_nodes {
         let comm_id = comm.id.as_str();
-        let route_count = graph.community_routes.get(comm_id).map(|r| r.len()).unwrap_or(0);
-        let class_count = graph.community_class_counts.get(comm_id).copied().unwrap_or(0);
+        let route_count = graph
+            .community_routes
+            .get(comm_id)
+            .map(|r| r.len())
+            .unwrap_or(0);
+        let class_count = graph
+            .community_class_counts
+            .get(comm_id)
+            .copied()
+            .unwrap_or(0);
         lines.push(format!(
             "- {} (id={}, routes={}, classes={})",
             comm.name, comm_id, route_count, class_count
@@ -92,7 +108,8 @@ fn batch_grouping_llm(
     let mut all: Vec<ModuleProposal> = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         tracing::info!(batch = i + 1, total = chunks.len(), "LLM grouping batch");
-        let mut proposals = call_grouping_llm(adapter, api_key, model, max_tokens, timeout_secs, chunk)?;
+        let mut proposals =
+            call_grouping_llm(adapter, api_key, model, max_tokens, timeout_secs, chunk)?;
         all.append(&mut proposals);
     }
     // Merge: combine communities assigned to the same slug
@@ -125,7 +142,11 @@ fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal> {
     let mut map: HashMap<String, ModuleProposal> = HashMap::new();
     for p in proposals.drain(..) {
         map.entry(p.slug.clone())
-            .and_modify(|existing| existing.community_ids.extend(p.community_ids.iter().cloned()))
+            .and_modify(|existing| {
+                existing
+                    .community_ids
+                    .extend(p.community_ids.iter().cloned())
+            })
             .or_insert(p);
     }
     let mut result: Vec<ModuleProposal> = map.into_values().collect();
@@ -136,7 +157,8 @@ fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal> {
 fn build_grouping_system() -> String {
     "You are a software architect grouping code communities into product modules.\n\
      Group related communities into cohesive modules. Each module should represent a \
-     distinct product capability or bounded context. Respond with a JSON object only.".to_string()
+     distinct product capability or bounded context. Respond with a JSON object only."
+        .to_string()
 }
 
 fn build_grouping_user(evidence: &str) -> String {
@@ -266,7 +288,10 @@ mod tests {
 
     #[test]
     fn split_into_chunks_respects_max() {
-        let lines = (0..100).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let lines = (0..100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let chunks = split_into_chunks(&lines, 200);
         assert!(chunks.len() > 1, "should produce multiple chunks");
         for chunk in &chunks {

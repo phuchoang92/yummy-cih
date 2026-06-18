@@ -9,8 +9,8 @@ use cih_core::{
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, QueryCursor, Tree};
 
-use crate::LanguageProvider;
 use super::JavaProvider;
+use crate::LanguageProvider;
 
 #[derive(Clone, Debug)]
 struct TypeContext {
@@ -212,17 +212,31 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let is_bean = is_bean_method(node, src);
     let props = {
         let mut obj = serde_json::Map::new();
-        if is_bean { obj.insert("isBean".into(), serde_json::Value::Bool(true)); }
-        if is_test_method { obj.insert("isTest".into(), serde_json::Value::Bool(true)); }
+        if is_bean {
+            obj.insert("isBean".into(), serde_json::Value::Bool(true));
+        }
+        if is_test_method {
+            obj.insert("isTest".into(), serde_json::Value::Bool(true));
+        }
         if let Some(ref rt) = return_type {
             obj.insert("returnType".into(), serde_json::Value::String(rt.clone()));
         }
         if !param_types.is_empty() {
-            obj.insert("paramTypes".into(), serde_json::Value::Array(
-                param_types.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
-            ));
+            obj.insert(
+                "paramTypes".into(),
+                serde_json::Value::Array(
+                    param_types
+                        .iter()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
         }
-        if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(obj))
+        }
     };
     builder.nodes.push(Node {
         id: id.clone(),
@@ -885,8 +899,11 @@ fn collect_sql_constants_in(
     owner_fqcn: Option<&str>,
 ) {
     match node.kind() {
-        "class_declaration" | "interface_declaration" | "enum_declaration"
-        | "record_declaration" | "annotation_type_declaration" => {
+        "class_declaration"
+        | "interface_declaration"
+        | "enum_declaration"
+        | "record_declaration"
+        | "annotation_type_declaration" => {
             let fqcn = type_context_at(node.start_byte() + 1, builder).map(|t| t.fqcn.clone());
             let effective = fqcn.as_deref().or(owner_fqcn);
             let mut cursor = node.walk();
@@ -910,11 +927,7 @@ fn collect_sql_constants_in(
     }
 }
 
-fn try_extract_sql_constant(
-    node: TsNode<'_>,
-    src: &str,
-    owner_fqcn: &str,
-) -> Option<SqlConstant> {
+fn try_extract_sql_constant(node: TsNode<'_>, src: &str, owner_fqcn: &str) -> Option<SqlConstant> {
     let mods = modifiers(node, src);
     if !mods.iter().any(|m| m == "static") || !mods.iter().any(|m| m == "final") {
         return None;
@@ -973,7 +986,10 @@ fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
             (unescaped, false)
         }
         "binary_expression" => {
-            if node.child_by_field_name("operator").map(|op| text(op, src)).as_deref()
+            if node
+                .child_by_field_name("operator")
+                .map(|op| text(op, src))
+                .as_deref()
                 != Some("+")
             {
                 return (String::new(), true);
@@ -986,10 +1002,7 @@ fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
                 .child_by_field_name("right")
                 .map(|n| fold_string_init(n, src))
                 .unwrap_or_default();
-            (
-                format!("{}{}", left.0, right.0),
-                left.1 || right.1,
-            )
+            (format!("{}{}", left.0, right.0), left.1 || right.1)
         }
         "parenthesized_expression" => {
             if let Some(inner) = node.named_child(0) {
@@ -1019,8 +1032,14 @@ fn collect_sql_execution_sites_in(node: TsNode<'_>, src: &str, builder: &mut Fil
 }
 
 const DBUTIL_METHODS: &[&str] = &["prepareStatement", "executeQuery", "executeUpdate"];
-const JDBC_TEMPLATE_METHODS: &[&str] =
-    &["query", "update", "queryForObject", "queryForList", "queryForMap", "batchUpdate"];
+const JDBC_TEMPLATE_METHODS: &[&str] = &[
+    "query",
+    "update",
+    "queryForObject",
+    "queryForList",
+    "queryForMap",
+    "batchUpdate",
+];
 
 fn try_extract_execution_site(
     node: TsNode<'_>,
@@ -1726,13 +1745,13 @@ fn class_stereotype(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<&'
     // Api (OpenAPI-generated), Handler (HTTP handlers), Facade/Service/Repository conventions.
     for (suffix, stereo) in [
         ("Controller", "controller"),
-        ("Endpoint",   "controller"),
-        ("Resource",   "resource"),
-        ("Api",        "controller"),
-        ("Handler",    "handler"),
-        ("Facade",     "service"),
+        ("Endpoint", "controller"),
+        ("Resource", "resource"),
+        ("Api", "controller"),
+        ("Handler", "handler"),
+        ("Facade", "service"),
         ("Repository", "repository"),
-        ("Service",    "service"),
+        ("Service", "service"),
     ] {
         if simple_name.ends_with(suffix) {
             return Some(stereo);
@@ -1760,7 +1779,11 @@ fn is_mock_or_injected_field(node: TsNode<'_>, src: &str) -> bool {
     annotations(node).into_iter().any(|ann| {
         matches!(
             annotation_name(ann, src).as_deref(),
-            Some("MockBean") | Some("SpyBean") | Some("Autowired") | Some("InjectMocks") | Some("Mock")
+            Some("MockBean")
+                | Some("SpyBean")
+                | Some("Autowired")
+                | Some("InjectMocks")
+                | Some("Mock")
         )
     })
 }
@@ -1835,7 +1858,9 @@ fn build_class_props(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<s
 
 fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     let mut cursor = node.walk();
-    let result = node.named_children(&mut cursor).find(|child| child.kind() == kind);
+    let result = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == kind);
     result
 }
 

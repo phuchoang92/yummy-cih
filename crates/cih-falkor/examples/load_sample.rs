@@ -41,9 +41,17 @@ async fn main() -> anyhow::Result<()> {
 
     // register -> save -> persist  (a 3-hop call chain)
     let nodes = vec![
-        method("Method:UserController#register", "register", "UserController.java"),
+        method(
+            "Method:UserController#register",
+            "register",
+            "UserController.java",
+        ),
         method("Method:UserService#save", "save", "UserService.java"),
-        method("Method:UserRepository#persist", "persist", "UserRepository.java"),
+        method(
+            "Method:UserRepository#persist",
+            "persist",
+            "UserRepository.java",
+        ),
     ];
     let edges = vec![
         calls("Method:UserController#register", "Method:UserService#save"),
@@ -58,7 +66,11 @@ async fn main() -> anyhow::Result<()> {
     println!("bulk_load → {} nodes, {} edges", stats.nodes, stats.edges);
 
     let imp = store
-        .impact(&NodeId::new("Method:UserRepository#persist"), Direction::Upstream, 4)
+        .impact(
+            &NodeId::new("Method:UserRepository#persist"),
+            Direction::Upstream,
+            4,
+        )
         .await?;
     println!(
         "impact(persist, upstream) risk={} affected={:?}",
@@ -74,8 +86,14 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     println!(
         "context(save): callers={:?} callees={:?}",
-        ctx.callers.iter().map(|n| n.id.to_string()).collect::<Vec<_>>(),
-        ctx.callees.iter().map(|n| n.id.to_string()).collect::<Vec<_>>(),
+        ctx.callers
+            .iter()
+            .map(|n| n.id.to_string())
+            .collect::<Vec<_>>(),
+        ctx.callees
+            .iter()
+            .map(|n| n.id.to_string())
+            .collect::<Vec<_>>(),
     );
 
     Ok(())

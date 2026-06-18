@@ -19,10 +19,7 @@ pub fn render_feature_index(
 ) -> String {
     let title = format!("{} — Feature Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\n---\n\n",
-        title
-    ));
+    md.push_str(&format!("---\ntitle: {}\n---\n\n", title));
     md.push_str(&format!("# {}\n\n", title));
 
     let total_routes: usize = community_ids
@@ -116,7 +113,10 @@ mod tests {
         let g = simple_graph();
         let ids = vec!["Community:0".to_string()];
         let mut dev_paths = HashMap::new();
-        dev_paths.insert("Community:0".to_string(), "order/dev/order-service".to_string());
+        dev_paths.insert(
+            "Community:0".to_string(),
+            "order/dev/order-service".to_string(),
+        );
         let md = render_feature_index("order", &ids, &dev_paths, &g);
         assert!(md.contains("---\ntitle: Order — Feature Overview"));
         assert!(md.contains("Order — Feature Overview"));

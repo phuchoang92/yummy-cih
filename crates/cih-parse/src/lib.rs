@@ -74,12 +74,20 @@ impl LanguageRegistry {
     }
 }
 
-pub fn parse_files(repo_root: &Path, files: &[String], registry: &LanguageRegistry) -> Result<ParseOutput> {
+pub fn parse_files(
+    repo_root: &Path,
+    files: &[String],
+    registry: &LanguageRegistry,
+) -> Result<ParseOutput> {
     let output = parse_file_units(repo_root, files, registry)?;
     Ok(parse_output_from_units(output.units, output.skipped))
 }
 
-pub fn parse_file_units(repo_root: &Path, files: &[String], registry: &LanguageRegistry) -> Result<ParseUnitsOutput> {
+pub fn parse_file_units(
+    repo_root: &Path,
+    files: &[String],
+    registry: &LanguageRegistry,
+) -> Result<ParseUnitsOutput> {
     // Per-file failures are collected, not propagated: one unreadable/garbage file
     // must not abort indexing of a 12k-file repo.
     let results = files
@@ -440,7 +448,12 @@ class OwnerController extends Base implements Handler {
         fs::write(&good_path, "package com.example;\nclass Ok {}\n").unwrap();
 
         let missing = "src/main/java/com/example/Missing.java"; // never created on disk
-        let output = parse_files(&root, &[good.to_string(), missing.to_string()], &java_registry()).unwrap();
+        let output = parse_files(
+            &root,
+            &[good.to_string(), missing.to_string()],
+            &java_registry(),
+        )
+        .unwrap();
         fs::remove_dir_all(&root).unwrap();
 
         // The good file parsed; the missing one was skipped, not fatal.
@@ -894,7 +907,11 @@ public class OrderServiceTest {
             .as_ref()
             .and_then(|p| p.get("stereotype"))
             .and_then(|v| v.as_str());
-        assert_eq!(stereotype, Some("test"), "SpringBootTest class must have stereotype=test");
+        assert_eq!(
+            stereotype,
+            Some("test"),
+            "SpringBootTest class must have stereotype=test"
+        );
     }
 
     #[test]
@@ -919,19 +936,51 @@ public class OrderServiceTest {
             .as_ref()
             .and_then(|p| p.get("stereotype"))
             .and_then(|v| v.as_str());
-        assert_eq!(stereotype, Some("test"), "*IT class must have stereotype=test");
+        assert_eq!(
+            stereotype,
+            Some("test"),
+            "*IT class must have stereotype=test"
+        );
     }
 
     #[test]
     fn name_suffix_fallback_stereotypes() {
         let cases: &[(&str, &str, &str)] = &[
-            ("CartEndpoint",   "package com.example;\npublic class CartEndpoint {}\n",   "controller"),
-            ("OrderResource",  "package com.example;\npublic class OrderResource {}\n",  "resource"),
-            ("PaymentApi",     "package com.example;\npublic class PaymentApi {}\n",     "controller"),
-            ("CheckoutHandler","package com.example;\npublic class CheckoutHandler {}\n","handler"),
-            ("PricingFacade",  "package com.example;\npublic class PricingFacade {}\n",  "service"),
-            ("ItemRepository", "package com.example;\npublic class ItemRepository {}\n", "repository"),
-            ("InventoryService","package com.example;\npublic class InventoryService {}\n","service"),
+            (
+                "CartEndpoint",
+                "package com.example;\npublic class CartEndpoint {}\n",
+                "controller",
+            ),
+            (
+                "OrderResource",
+                "package com.example;\npublic class OrderResource {}\n",
+                "resource",
+            ),
+            (
+                "PaymentApi",
+                "package com.example;\npublic class PaymentApi {}\n",
+                "controller",
+            ),
+            (
+                "CheckoutHandler",
+                "package com.example;\npublic class CheckoutHandler {}\n",
+                "handler",
+            ),
+            (
+                "PricingFacade",
+                "package com.example;\npublic class PricingFacade {}\n",
+                "service",
+            ),
+            (
+                "ItemRepository",
+                "package com.example;\npublic class ItemRepository {}\n",
+                "repository",
+            ),
+            (
+                "InventoryService",
+                "package com.example;\npublic class InventoryService {}\n",
+                "service",
+            ),
         ];
         for (class_name, src, expected) in cases {
             let root = temp_repo();
@@ -939,13 +988,21 @@ public class OrderServiceTest {
             write_file(&root, &rel, src);
             let output = parse_files(&root, &[rel.clone()], &java_registry()).unwrap();
             fs::remove_dir_all(&root).unwrap();
-            let node = output.nodes.iter().find(|n| &n.name == class_name)
+            let node = output
+                .nodes
+                .iter()
+                .find(|n| &n.name == class_name)
                 .unwrap_or_else(|| panic!("{class_name} node must exist"));
-            let stereotype = node.props.as_ref()
+            let stereotype = node
+                .props
+                .as_ref()
                 .and_then(|p| p.get("stereotype"))
                 .and_then(|v| v.as_str());
-            assert_eq!(stereotype, Some(*expected),
-                "{class_name} must have stereotype={expected}, got {stereotype:?}");
+            assert_eq!(
+                stereotype,
+                Some(*expected),
+                "{class_name} must have stereotype={expected}, got {stereotype:?}"
+            );
         }
     }
 
@@ -959,10 +1016,21 @@ public class OrderServiceTest {
         );
         let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
-        let node = output.nodes.iter().find(|n| n.name == "CartController").expect("node must exist");
-        let stereotype = node.props.as_ref()
-            .and_then(|p| p.get("stereotype")).and_then(|v| v.as_str());
-        assert_eq!(stereotype, Some("service"), "@Service must win over Controller suffix");
+        let node = output
+            .nodes
+            .iter()
+            .find(|n| n.name == "CartController")
+            .expect("node must exist");
+        let stereotype = node
+            .props
+            .as_ref()
+            .and_then(|p| p.get("stereotype"))
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            stereotype,
+            Some("service"),
+            "@Service must win over Controller suffix"
+        );
     }
 
     #[test]
@@ -1085,7 +1153,10 @@ public class OverdraftAdapterImpl {
         );
         // Non-static instance field must not appear (it lacks `static` + `final`).
         assert!(
-            !parsed.sql_constants.iter().any(|c| c.const_name == "nonStatic"),
+            !parsed
+                .sql_constants
+                .iter()
+                .any(|c| c.const_name == "nonStatic"),
             "non-static field must not be extracted"
         );
     }
@@ -1116,7 +1187,11 @@ public class Adapter {
             .iter()
             .find(|c| c.const_name == "QUERY_CONCAT")
             .expect("QUERY_CONCAT must be extracted");
-        assert!(c.sql_text.contains("CUSTOM_OVERDRAFT"), "folded text: {:?}", c.sql_text);
+        assert!(
+            c.sql_text.contains("CUSTOM_OVERDRAFT"),
+            "folded text: {:?}",
+            c.sql_text
+        );
         assert!(!c.dynamic, "pure literal concat must not be dynamic");
     }
 
@@ -1141,7 +1216,11 @@ public class Adapter {
         let parsed = output.parsed_files.first().unwrap();
         // TABLE_NAME is all caps but value is a short non-SQL string — may or may not be extracted.
         // QUERY_DYN references a variable, so must be dynamic.
-        if let Some(c) = parsed.sql_constants.iter().find(|c| c.const_name == "QUERY_DYN") {
+        if let Some(c) = parsed
+            .sql_constants
+            .iter()
+            .find(|c| c.const_name == "QUERY_DYN")
+        {
             assert!(c.dynamic, "concat with identifier must be dynamic");
         }
         // At minimum, the dynamic concat must not produce a fully resolved table list.
@@ -1172,8 +1251,7 @@ public class OverdraftAdapterImpl {
         let parsed = output.parsed_files.first().unwrap();
         assert!(
             parsed.sql_execution_sites.iter().any(|s| {
-                s.api_name == "executeQuery"
-                    && s.const_ref.as_deref() == Some("QUERY_GET")
+                s.api_name == "executeQuery" && s.const_ref.as_deref() == Some("QUERY_GET")
             }),
             "DBUtil.executeQuery site not extracted: {:?}",
             parsed.sql_execution_sites
@@ -1188,12 +1266,24 @@ public class OverdraftAdapterImpl {
         let mut r = LanguageRegistry::new();
         r.register(cih_lang::java::JavaProvider::new());
 
-        assert!(r.provider_for("Foo.java").is_some(), "Java provider should match .java");
-        assert!(r.provider_for("Foo.py").is_none(), "No provider registered for .py");
-        assert!(r.provider_for("Foo.txt").is_none(), "No provider registered for .txt");
+        assert!(
+            r.provider_for("Foo.java").is_some(),
+            "Java provider should match .java"
+        );
+        assert!(
+            r.provider_for("Foo.py").is_none(),
+            "No provider registered for .py"
+        );
+        assert!(
+            r.provider_for("Foo.txt").is_none(),
+            "No provider registered for .txt"
+        );
 
         let exts = r.all_extensions();
-        assert!(exts.contains(&".java"), "all_extensions should include .java");
+        assert!(
+            exts.contains(&".java"),
+            "all_extensions should include .java"
+        );
         assert!(!exts.contains(&".py"), ".py not registered");
     }
 
@@ -1205,17 +1295,21 @@ public class OverdraftAdapterImpl {
             return; // skip if not present in CI
         }
         let output = parse_files(repo, &[rel.to_string()], &java_registry()).unwrap();
-        let route_ids: Vec<String> = output.nodes.iter()
+        let route_ids: Vec<String> = output
+            .nodes
+            .iter()
             .filter(|n| n.id.as_str().starts_with("Route:"))
             .map(|n| n.id.as_str().to_string())
             .collect();
         assert!(
             route_ids.iter().any(|id| id == "Route:GET /api/v1/cart"),
-            "bare @GetMapping must produce Route:GET /api/v1/cart, got: {:?}", route_ids
+            "bare @GetMapping must produce Route:GET /api/v1/cart, got: {:?}",
+            route_ids
         );
         assert!(
             route_ids.iter().any(|id| id == "Route:DELETE /api/v1/cart"),
-            "bare @DeleteMapping must produce Route:DELETE /api/v1/cart, got: {:?}", route_ids
+            "bare @DeleteMapping must produce Route:DELETE /api/v1/cart, got: {:?}",
+            route_ids
         );
     }
 
@@ -1244,7 +1338,9 @@ class CartController {
         let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
-        let route_ids: Vec<String> = output.nodes.iter()
+        let route_ids: Vec<String> = output
+            .nodes
+            .iter()
             .filter(|n| n.id.as_str().starts_with("Route:"))
             .map(|n| n.id.as_str().to_string())
             .collect();
@@ -1260,8 +1356,11 @@ class CartController {
             route_ids
         );
         assert!(
-            route_ids.iter().any(|id| id == "Route:POST /api/v1/cart/items"),
-            "got: {:?}", route_ids
+            route_ids
+                .iter()
+                .any(|id| id == "Route:POST /api/v1/cart/items"),
+            "got: {:?}",
+            route_ids
         );
     }
 }

@@ -24,7 +24,10 @@ impl EntrypointKind {
     }
 
     pub(crate) fn business_flow(&self) -> bool {
-        matches!(self, EntrypointKind::HttpRoute | EntrypointKind::EventListener)
+        matches!(
+            self,
+            EntrypointKind::HttpRoute | EntrypointKind::EventListener
+        )
     }
 
     pub(crate) fn business_surface(&self) -> &'static str {
@@ -82,7 +85,11 @@ pub fn score_entry_points(
                         .and_then(|p| p.get("path"))
                         .and_then(|v| v.as_str())
                         .unwrap_or_else(|| {
-                            route_node.name.splitn(2, ' ').nth(1).unwrap_or(&route_node.name)
+                            route_node
+                                .name
+                                .splitn(2, ' ')
+                                .nth(1)
+                                .unwrap_or(&route_node.name)
                         })
                         .to_string();
                     route_edges.insert(e.src.clone(), RouteInfo { method, path });
@@ -99,7 +106,10 @@ pub fn score_entry_points(
                             .unwrap_or(e.dst.as_str())
                             .to_string()
                     });
-                listens_edges.entry(e.src.clone()).or_default().push(topic_name);
+                listens_edges
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(topic_name);
             }
             _ => {}
         }
@@ -212,19 +222,36 @@ fn is_test_method(node: &Node, by_id: &HashMap<&NodeId, &Node>) -> bool {
     }
     // Method name suffix
     let name = &node.name;
-    if name.ends_with("Test") || name.ends_with("Tests") || name.ends_with("IT") || name.ends_with("Spec") {
+    if name.ends_with("Test")
+        || name.ends_with("Tests")
+        || name.ends_with("IT")
+        || name.ends_with("Spec")
+    {
         return true;
     }
     // Enclosing class from ID
     let class_name = extract_class_name(node.id.as_str());
     if let Some(cn) = &class_name {
-        if cn.ends_with("Test") || cn.ends_with("Tests") || cn.ends_with("IT") || cn.ends_with("Spec") {
+        if cn.ends_with("Test")
+            || cn.ends_with("Tests")
+            || cn.ends_with("IT")
+            || cn.ends_with("Spec")
+        {
             return true;
         }
         // Check class node stereotype
         let class_id_candidates = [
             format!("Class:{}", cn),
-            format!("Class:{}", node.id.as_str().split('#').next().unwrap_or("").trim_start_matches("Method:").trim_start_matches("Constructor:")),
+            format!(
+                "Class:{}",
+                node.id
+                    .as_str()
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches("Method:")
+                    .trim_start_matches("Constructor:")
+            ),
         ];
         for cid in &class_id_candidates {
             let key = NodeId::new(cid.clone());
@@ -254,7 +281,9 @@ fn extract_class_name(id: &str) -> Option<String> {
 
 fn is_scheduled_name(name: &str) -> bool {
     const SCHEDULED_PREFIXES: &[&str] = &["run", "execute", "schedule", "batch"];
-    SCHEDULED_PREFIXES.iter().any(|p| starts_word_boundary(name, p))
+    SCHEDULED_PREFIXES
+        .iter()
+        .any(|p| starts_word_boundary(name, p))
 }
 
 fn starts_word_boundary(name: &str, prefix: &str) -> bool {

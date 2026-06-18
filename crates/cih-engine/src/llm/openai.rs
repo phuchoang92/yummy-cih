@@ -44,7 +44,9 @@ impl LlmAdapter for OpenAiAdapter {
                     &body[..body.len().min(1000)]
                 );
             }
-            Err(err) => return Err(anyhow::anyhow!(err).context("OpenAI-compatible API request failed")),
+            Err(err) => {
+                return Err(anyhow::anyhow!(err).context("OpenAI-compatible API request failed"))
+            }
         };
 
         let resp: serde_json::Value = response

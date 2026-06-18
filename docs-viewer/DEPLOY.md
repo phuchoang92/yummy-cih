@@ -42,6 +42,8 @@ docker buildx build \
 
 ## Generate docs for a repo
 
+> **New**: You can also use `cih-engine start` to interactively configure and generate docs. Run it first, then continue with the viewer commands below.
+
 Run these once per repo before starting the viewer:
 
 ```bash

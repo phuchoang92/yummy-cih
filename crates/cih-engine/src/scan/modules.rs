@@ -13,7 +13,10 @@ use super::paths::{join_rel, parent_rel, path_from_rel};
 use super::{JavaFileInfo, ModuleCandidate, ScannedFile};
 
 pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<ModuleCandidate>> {
-    tracing::debug!(total_files = files.len(), "modules: scanning for build files");
+    tracing::debug!(
+        total_files = files.len(),
+        "modules: scanning for build files"
+    );
     let mut modules = Vec::new();
 
     for file in files {
@@ -102,7 +105,10 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                     .with_context(|| format!("failed to read {}", file.path))?;
                 let base_rel = parent_rel(&file.path);
                 let includes = parse_gradle_includes(&content);
-                tracing::debug!(includes = includes.len(), "modules: Gradle settings includes");
+                tracing::debug!(
+                    includes = includes.len(),
+                    "modules: Gradle settings includes"
+                );
                 for include in includes {
                     let child_rel = join_rel(&base_rel, &include.replace(':', "/"));
                     let child_name = fallback_module_name(root, &child_rel);

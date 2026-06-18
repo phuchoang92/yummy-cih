@@ -379,8 +379,14 @@ mod tests {
             db_query_inline_id("src/main/java/Adapter.java", 42, 8).as_str(),
             "DbQuery:src/main/java/Adapter.java:42:8"
         );
-        assert_eq!(db_table_id("custom_overdraft_type").as_str(), "DbTable:CUSTOM_OVERDRAFT_TYPE");
-        assert_eq!(db_table_id("CUSTOM_OVERDRAFT").as_str(), "DbTable:CUSTOM_OVERDRAFT");
+        assert_eq!(
+            db_table_id("custom_overdraft_type").as_str(),
+            "DbTable:CUSTOM_OVERDRAFT_TYPE"
+        );
+        assert_eq!(
+            db_table_id("CUSTOM_OVERDRAFT").as_str(),
+            "DbTable:CUSTOM_OVERDRAFT"
+        );
     }
 
     #[test]

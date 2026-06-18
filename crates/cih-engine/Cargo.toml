@@ -34,3 +34,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zip.workspace = true
 ureq = { version = "2", features = ["json"] }
+dialoguer = "0.11"

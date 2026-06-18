@@ -111,28 +111,46 @@ pub fn detect_communities(
         match e.kind {
             EdgeKind::HandlesRoute => {
                 if let Some(rn) = source_by_id.get(&e.dst) {
-                    route_nodes_by_handler.entry(e.src.clone()).or_default().push(rn);
+                    route_nodes_by_handler
+                        .entry(e.src.clone())
+                        .or_default()
+                        .push(rn);
                 }
             }
             EdgeKind::ExecutesQuery => {
-                queries_by_method.entry(e.src.clone()).or_default().push(e.dst.clone());
+                queries_by_method
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(e.dst.clone());
             }
             EdgeKind::ReadsTable => {
-                read_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+                read_tables_by_query
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(e.dst.clone());
             }
             EdgeKind::WritesTable => {
-                write_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+                write_tables_by_query
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(e.dst.clone());
             }
             EdgeKind::PublishesEvent => {
                 if let Some(tn) = source_by_id.get(&e.dst) {
                     let kind_str = topic_kind_str(tn);
-                    publishes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
+                    publishes_by_member
+                        .entry(e.src.clone())
+                        .or_default()
+                        .push((tn, kind_str));
                 }
             }
             EdgeKind::ListensTo => {
                 if let Some(tn) = source_by_id.get(&e.dst) {
                     let kind_str = topic_kind_str(tn);
-                    consumes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
+                    consumes_by_member
+                        .entry(e.src.clone())
+                        .or_default()
+                        .push((tn, kind_str));
                 }
             }
             _ => {}
@@ -180,8 +198,11 @@ pub fn detect_communities(
         let mut all_route_prefixes: BTreeSet<String> = BTreeSet::new();
         for mid in &member_ids {
             for rn in route_nodes_by_handler.get(mid).into_iter().flatten() {
-                let path = rn.props.as_ref()
-                    .and_then(|p| p.get("path")).and_then(|v| v.as_str())
+                let path = rn
+                    .props
+                    .as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|v| v.as_str())
                     .unwrap_or_else(|| rn.name.splitn(2, ' ').nth(1).unwrap_or(&rn.name));
                 if let Some(seg) = first_non_generic_path_segment(path) {
                     *route_prefix_counts.entry(seg.clone()).or_insert(0) += 1;
@@ -195,14 +216,16 @@ pub fn detect_communities(
         let mut all_controllers: BTreeSet<String> = BTreeSet::new();
         for mid in &member_ids {
             let id_str = mid.as_str();
-            let without_kind = id_str.strip_prefix("Method:")
+            let without_kind = id_str
+                .strip_prefix("Method:")
                 .or_else(|| id_str.strip_prefix("Constructor:"))
                 .or_else(|| id_str.strip_prefix("Function:"))
                 .unwrap_or(id_str);
             if let Some(fqcn) = without_kind.split('#').next() {
                 if let Some(simple) = fqcn.rsplit('.').next() {
                     if simple.ends_with("Controller") || simple.ends_with("Resource") {
-                        let name = simple.strip_suffix("Controller")
+                        let name = simple
+                            .strip_suffix("Controller")
                             .or_else(|| simple.strip_suffix("Resource"))
                             .unwrap_or(simple);
                         // strip role prefix (Admin/Pos/Public) to get domain e.g. "ActivityLog"
@@ -219,10 +242,16 @@ pub fn detect_communities(
         let mut all_tables: BTreeSet<String> = BTreeSet::new();
         for mid in &member_ids {
             for qid in queries_by_method.get(mid).into_iter().flatten() {
-                for tid in read_tables_by_query.get(qid).into_iter().flatten()
+                for tid in read_tables_by_query
+                    .get(qid)
+                    .into_iter()
+                    .flatten()
                     .chain(write_tables_by_query.get(qid).into_iter().flatten())
                 {
-                    let tname = tid.as_str().strip_prefix("DbTable:").unwrap_or(tid.as_str());
+                    let tname = tid
+                        .as_str()
+                        .strip_prefix("DbTable:")
+                        .unwrap_or(tid.as_str());
                     all_tables.insert(tname.to_string());
                     *table_counts.entry(tname.to_string()).or_insert(0) += 1;
                 }
@@ -249,8 +278,11 @@ pub fn detect_communities(
             }
         }
         // flat names list for the legacy topics prop
-        let all_topics: BTreeSet<String> = all_publishes.iter().chain(all_consumes.iter())
-            .map(|(n, _)| n.clone()).collect();
+        let all_topics: BTreeSet<String> = all_publishes
+            .iter()
+            .chain(all_consumes.iter())
+            .map(|(n, _)| n.clone())
+            .collect();
 
         // Apply naming waterfall
         let (display_name, naming_reason) = 'naming: {
@@ -295,22 +327,22 @@ pub fn detect_communities(
             for mid in &member_ids {
                 // stereotypes are on Class nodes; derive class id from method id
                 // Method:pkg.ClassName#method/arity → Class:pkg.ClassName
-                let class_id = mid.as_str()
-                    .split_once('#')
-                    .map(|(prefix, _)| {
-                        let fqcn = prefix
-                            .trim_start_matches("Method:")
-                            .trim_start_matches("Constructor:")
-                            .trim_start_matches("Function:");
-                        format!("Class:{}", fqcn)
-                    });
+                let class_id = mid.as_str().split_once('#').map(|(prefix, _)| {
+                    let fqcn = prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:")
+                        .trim_start_matches("Function:");
+                    format!("Class:{}", fqcn)
+                });
                 let class_node_id = class_id.as_ref().map(|s| NodeId::new(s.clone()));
                 let node = class_node_id
                     .as_ref()
                     .and_then(|cid| source_by_id.get(cid))
                     .or_else(|| source_by_id.get(mid));
                 if let Some(n) = node {
-                    if let Some(s) = n.props.as_ref()
+                    if let Some(s) = n
+                        .props
+                        .as_ref()
                         .and_then(|p| p.get("stereotype"))
                         .and_then(|v| v.as_str())
                     {
@@ -318,7 +350,8 @@ pub fn detect_communities(
                     }
                 }
             }
-            stereo_counts.into_iter()
+            stereo_counts
+                .into_iter()
                 .max_by(|(a_k, a_v), (b_k, b_v)| a_v.cmp(b_v).then(b_k.cmp(a_k)))
                 .map(|(k, _)| k.to_string())
         };
@@ -328,10 +361,14 @@ pub fn detect_communities(
         let tables_sorted: Vec<String> = all_tables.into_iter().collect();
         let topics_sorted: Vec<String> = all_topics.into_iter().collect();
         // [{"name": "OrderCreatedEvent", "type": "kafka"}, ...]
-        let publishes_topics: Vec<serde_json::Value> = all_publishes.into_iter()
-            .map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect();
-        let consumes_topics: Vec<serde_json::Value> = all_consumes.into_iter()
-            .map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect();
+        let publishes_topics: Vec<serde_json::Value> = all_publishes
+            .into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+            .collect();
+        let consumes_topics: Vec<serde_json::Value> = all_consumes
+            .into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+            .collect();
 
         out.nodes.push(Node {
             id: comm_id.clone(),
@@ -399,7 +436,10 @@ pub fn trace_processes(
     let mut out = ProcessOutput::default();
     for trace in traces {
         let trace_ids: Vec<NodeId> = trace.iter().map(|idx| digraph[*idx].clone()).collect();
-        let entry = trace_ids.first().cloned().unwrap_or_else(|| NodeId::new(""));
+        let entry = trace_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| NodeId::new(""));
         // HttpRoute / EventListener bypass min_steps; others must meet it
         let is_semantic = ep_by_id
             .get(&entry)
@@ -433,19 +473,25 @@ pub fn trace_processes(
             .collect();
         let cross_community = communities.len() > 1;
 
-        let (ek_str, business_flow, business_surface, route_path_val, route_method_val, event_topics_val) =
-            if let Some(ep) = ep_by_id.get(&entry_id) {
-                (
-                    ep.kind.as_str(),
-                    ep.kind.business_flow(),
-                    ep.kind.business_surface(),
-                    ep.route_path.clone(),
-                    ep.route_method.clone(),
-                    ep.event_topics.clone(),
-                )
-            } else {
-                ("fanout", false, "internal", None, None, Vec::new())
-            };
+        let (
+            ek_str,
+            business_flow,
+            business_surface,
+            route_path_val,
+            route_method_val,
+            event_topics_val,
+        ) = if let Some(ep) = ep_by_id.get(&entry_id) {
+            (
+                ep.kind.as_str(),
+                ep.kind.business_flow(),
+                ep.kind.business_surface(),
+                ep.route_path.clone(),
+                ep.route_method.clone(),
+                ep.event_topics.clone(),
+            )
+        } else {
+            ("fanout", false, "internal", None, None, Vec::new())
+        };
 
         out.nodes.push(Node {
             id: proc_id.clone(),
@@ -531,7 +577,11 @@ fn topic_kind_str(node: &Node) -> &'static str {
     match node.kind {
         NodeKind::KafkaTopic => "kafka",
         _ => {
-            if node.id.as_str().starts_with("KafkaTopic:") { "kafka" } else { "event" }
+            if node.id.as_str().starts_with("KafkaTopic:") {
+                "kafka"
+            } else {
+                "event"
+            }
         }
     }
 }
@@ -540,7 +590,8 @@ fn topic_display_name(node: &Node) -> String {
     if !node.name.is_empty() {
         node.name.clone()
     } else {
-        node.id.as_str()
+        node.id
+            .as_str()
             .strip_prefix("KafkaTopic:")
             .unwrap_or(node.id.as_str())
             .to_string()
@@ -551,8 +602,14 @@ fn topic_display_name(node: &Node) -> String {
 /// "OrderStatusChangedEvent" → "OrderStatusChanged", "LowStockMessage" → "LowStock"
 fn strip_event_suffix(name: &str) -> &str {
     const SUFFIXES: &[&str] = &[
-        "Event", "Events", "Message", "Messages",
-        "Notification", "Notifications", "Command", "Commands",
+        "Event",
+        "Events",
+        "Message",
+        "Messages",
+        "Notification",
+        "Notifications",
+        "Command",
+        "Commands",
     ];
     for suffix in SUFFIXES {
         if let Some(rest) = name.strip_suffix(suffix) {
@@ -571,7 +628,12 @@ fn strip_role_prefix(name: &str) -> &str {
     for prefix in PREFIXES {
         if let Some(rest) = name.strip_prefix(prefix) {
             // Only strip if what follows starts with an uppercase letter (proper word boundary)
-            if rest.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+            if rest
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_uppercase())
+                .unwrap_or(false)
+            {
                 return rest;
             }
         }
@@ -589,14 +651,17 @@ fn pascal_to_kebab_slug(name: &str) -> String {
         }
         out.push(ch.to_ascii_lowercase());
     }
-    if out.is_empty() { "shared".to_string() } else { out }
+    if out.is_empty() {
+        "shared".to_string()
+    } else {
+        out
+    }
 }
 
 fn first_non_generic_path_segment(path: &str) -> Option<String> {
     const GENERIC: &[&str] = &[
-        "api", "apis", "rest", "internal", "external", "service", "services",
-        "common", "shared", "core", "app", "apps",
-        "admin", "pos", "public", "private",
+        "api", "apis", "rest", "internal", "external", "service", "services", "common", "shared",
+        "core", "app", "apps", "admin", "pos", "public", "private",
     ];
     for part in path.split('/') {
         let part = part.trim();
@@ -618,8 +683,8 @@ fn first_non_generic_path_segment(path: &str) -> Option<String> {
 
 fn first_non_generic_name_token(name: &str, seps: &[char]) -> Option<String> {
     const GENERIC: &[&str] = &[
-        "api", "apis", "rest", "internal", "external", "service", "services",
-        "common", "shared", "core", "app", "apps",
+        "api", "apis", "rest", "internal", "external", "service", "services", "common", "shared",
+        "core", "app", "apps",
     ];
     for part in name.split(seps) {
         let part = part.trim();
@@ -636,7 +701,8 @@ fn first_non_generic_name_token(name: &str, seps: &[char]) -> Option<String> {
 }
 
 fn best_by_count(counts: &BTreeMap<String, usize>) -> Option<String> {
-    counts.iter()
+    counts
+        .iter()
         .max_by(|(a_k, a_v), (b_k, b_v)| a_v.cmp(b_v).then(b_k.cmp(a_k).reverse()))
         .map(|(k, _)| k.clone())
 }

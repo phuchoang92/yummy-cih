@@ -10,9 +10,7 @@ pub mod slugify;
 pub use cih_core::RepoMap;
 pub use features::FeatureGroup;
 pub use graph::WikiGraph;
-pub use manifest::{
-    NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats,
-};
+pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
 pub use module_tree::{
     build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
     ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
@@ -154,13 +152,20 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         }
         feature_groups = features
             .into_iter()
-            .map(|feature| FeatureGroup { feature, community_ids: vec![] })
+            .map(|feature| FeatureGroup {
+                feature,
+                community_ids: vec![],
+            })
             .collect();
     }
 
     // Apply --filter-feature: keep only groups whose name contains a filter substring.
     if !input.filter_feature.is_empty() {
-        let filters: Vec<String> = input.filter_feature.iter().map(|f| f.to_lowercase()).collect();
+        let filters: Vec<String> = input
+            .filter_feature
+            .iter()
+            .map(|f| f.to_lowercase())
+            .collect();
         feature_groups.retain(|g| {
             let name = g.feature.to_lowercase();
             filters.iter().any(|f| name.contains(f.as_str()))
@@ -379,13 +384,18 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             let dev_title = page_path
                 .split('/')
                 .last()
-                .map(|s| s.split('-').map(|w| {
-                    let mut c = w.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                }).collect::<Vec<_>>().join(" "))
+                .map(|s| {
+                    s.split('-')
+                        .map(|w| {
+                            let mut c = w.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
                 .unwrap_or_else(|| comm.name.clone());
             nav.entry(feature.clone()).or_default().push(NavEntry {
                 slug: page_path.to_string(),
@@ -416,7 +426,9 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                     .unwrap_or("shared");
                 // Apply LLM feature override only when file-path heuristic gives "shared"
                 let effective_feature = if graph_feature == "shared" {
-                    input.controller_summaries.as_ref()
+                    input
+                        .controller_summaries
+                        .as_ref()
                         .and_then(|m| m.get(*ctrl))
                         .and_then(|s| s.feature.as_deref())
                         .unwrap_or("shared")
@@ -433,11 +445,14 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             std::fs::create_dir_all(out_dir.join(format!("pages/{}/controllers", feature)))?;
             for (ctrl_name, routes) in &feature_controllers {
                 let slug = slugify(ctrl_name);
-                let description = input.controller_summaries.as_ref()
+                let description = input
+                    .controller_summaries
+                    .as_ref()
                     .and_then(|m| m.get(*ctrl_name))
                     .map(|s| s.description.as_str())
                     .filter(|s| !s.is_empty());
-                let ctrl_md = pages::feature_po::render_controller_page(ctrl_name, routes, description);
+                let ctrl_md =
+                    pages::feature_po::render_controller_page(ctrl_name, routes, description);
                 let page_path = format!("{}/controllers/{}", feature, slug);
                 std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &ctrl_md)?;
                 nav.entry(feature.clone()).or_default().push(NavEntry {

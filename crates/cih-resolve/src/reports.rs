@@ -37,7 +37,10 @@ fn write_markdown(refs: &[UnresolvedRef], dir: &Path) -> io::Result<()> {
 
     writeln!(w, "# Unresolved References")?;
     writeln!(w)?;
-    writeln!(w, "**Total:** {total}  |  **External types missing:** {ext_count}")?;
+    writeln!(
+        w,
+        "**Total:** {total}  |  **External types missing:** {ext_count}"
+    )?;
     writeln!(w)?;
 
     // By reason

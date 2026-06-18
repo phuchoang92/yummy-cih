@@ -32,8 +32,11 @@ pub struct Registry {
 }
 
 fn registry_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".cih").join("registry.json"))
+    std::env::var_os("HOME").map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".cih")
+            .join("registry.json")
+    })
 }
 
 /// Current time as RFC-3339 UTC (no external dep required).

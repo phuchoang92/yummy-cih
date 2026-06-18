@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use cih_core::Node;
 use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::CommunityLlmSummary;
+use cih_core::Node;
+use std::collections::BTreeMap;
 
 pub fn render_po_index(
     graph: &WikiGraph,
@@ -150,8 +150,7 @@ pub fn render_po_community(
             if let Some(proc_node) = graph.nodes_by_id.get(&proc_id) {
                 md.push_str(&format!("### {}\n\n", proc_node.name));
                 if let Some(steps) = graph.process_steps.get(&proc_id) {
-                    let chain: Vec<&str> =
-                        steps.iter().map(|s| s.symbol.name.as_str()).collect();
+                    let chain: Vec<&str> = steps.iter().map(|s| s.symbol.name.as_str()).collect();
                     md.push_str(&chain.join(" → "));
                     md.push_str("\n\n");
                 }
@@ -175,12 +174,7 @@ fn processes_for_community(graph: &WikiGraph, community_id: &str) -> Vec<String>
     for (proc_id, steps) in &graph.process_steps {
         if let Some(first) = steps.first() {
             let sym_id = first.symbol.id.as_str().to_string();
-            if graph
-                .community_by_member
-                .get(&sym_id)
-                .map(|c| c.as_str())
-                == Some(community_id)
-            {
+            if graph.community_by_member.get(&sym_id).map(|c| c.as_str()) == Some(community_id) {
                 result.push(proc_id.clone());
             }
         }
@@ -252,7 +246,10 @@ mod tests {
     fn render_po_index_lists_communities() {
         let g = simple_graph();
         let md = render_po_index(&g, &slug_map(), false);
-        assert!(md.contains("---\ntitle: System Overview"), "has frontmatter");
+        assert!(
+            md.contains("---\ntitle: System Overview"),
+            "has frontmatter"
+        );
         assert!(md.contains("order-service"), "has community name");
         assert!(md.contains("Business Capabilities"), "has section header");
     }
@@ -288,7 +285,11 @@ mod tests {
             NodeKind::Method,
             "find",
         );
-        let dbq = make_node("DbQuery:com.example.OrderService#SQL", NodeKind::DbQuery, "SQL");
+        let dbq = make_node(
+            "DbQuery:com.example.OrderService#SQL",
+            NodeKind::DbQuery,
+            "SQL",
+        );
         let tbl = make_node("DbTable:ORDERS", NodeKind::DbTable, "ORDERS");
         let comm = make_node("Community:0", NodeKind::Community, "order-service");
         let nodes = [method.clone(), dbq.clone(), tbl.clone()];
@@ -328,7 +329,10 @@ mod tests {
         let g = simple_graph();
         let comm = g.community_nodes[0].clone();
         let md = render_po_community(&g, &comm, &slug_map(), None);
-        assert!(!md.contains("## Core Tables"), "no core tables section when empty");
+        assert!(
+            !md.contains("## Core Tables"),
+            "no core tables section when empty"
+        );
     }
 
     #[test]
@@ -336,6 +340,9 @@ mod tests {
         let g = simple_graph();
         let comm = g.community_nodes[0].clone();
         let md = render_po_community(&g, &comm, &slug_map(), None);
-        assert!(!md.contains("## Overview"), "overview section absent when no llm");
+        assert!(
+            !md.contains("## Overview"),
+            "overview section absent when no llm"
+        );
     }
 }

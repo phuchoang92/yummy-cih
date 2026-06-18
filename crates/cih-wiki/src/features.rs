@@ -41,7 +41,10 @@ pub fn infer_community_feature(community_id: &str, graph: &WikiGraph) -> String 
     }
 
     let empty = Vec::new();
-    let members = graph.members_by_community.get(community_id).unwrap_or(&empty);
+    let members = graph
+        .members_by_community
+        .get(community_id)
+        .unwrap_or(&empty);
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for m in members {
         if let Some(feat) = feature_from_path(&m.file) {
@@ -201,7 +204,10 @@ fn is_test_class(name: &str, file: &str) -> bool {
 /// Compute the base dev slug for a community (before collision deduplication).
 fn primary_class_slug_base(community_id: &str, graph: &WikiGraph, feature: &str) -> String {
     let empty = Vec::new();
-    let members = graph.members_by_community.get(community_id).unwrap_or(&empty);
+    let members = graph
+        .members_by_community
+        .get(community_id)
+        .unwrap_or(&empty);
 
     let mut classes: Vec<(String, bool)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -214,20 +220,16 @@ fn primary_class_slug_base(community_id: &str, graph: &WikiGraph, feature: &str)
             continue;
         }
         // Extract simple class name from method id: "Method:pkg.ClassName#method/arity"
-        let simple = m
-            .id
-            .as_str()
-            .split_once('#')
-            .map(|(prefix, _)| {
-                prefix
-                    .trim_start_matches("Method:")
-                    .trim_start_matches("Constructor:")
-                    .trim_start_matches("Function:")
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("Unknown")
-                    .to_string()
-            });
+        let simple = m.id.as_str().split_once('#').map(|(prefix, _)| {
+            prefix
+                .trim_start_matches("Method:")
+                .trim_start_matches("Constructor:")
+                .trim_start_matches("Function:")
+                .rsplit('.')
+                .next()
+                .unwrap_or("Unknown")
+                .to_string()
+        });
         if let Some(name) = simple {
             if seen.insert(name.clone()) {
                 let is_test = is_test_class(&name, &m.file);
@@ -284,10 +286,7 @@ pub fn build_dev_page_paths(
             } else {
                 format!("{}-{}", base, count)
             };
-            result.insert(
-                comm_id.clone(),
-                format!("{}/dev/{}", group.feature, slug),
-            );
+            result.insert(comm_id.clone(), format!("{}/dev/{}", group.feature, slug));
         }
     }
 

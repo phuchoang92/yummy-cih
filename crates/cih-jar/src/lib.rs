@@ -120,7 +120,12 @@ impl JarApiExtractor {
 
     /// Parse one `.class` and push its nodes/edges. Returns `Err(reason)` so the
     /// caller records a skip rather than aborting the whole JAR.
-    fn emit_class(&self, bytes: &[u8], jar_name: &str, out: &mut JarApiOutput) -> Result<(), String> {
+    fn emit_class(
+        &self,
+        bytes: &[u8],
+        jar_name: &str,
+        out: &mut JarApiOutput,
+    ) -> Result<(), String> {
         // Signatures only — no need to parse method bodies.
         let mut opts = cafebabe::ParseOptions::default();
         opts.parse_bytecode(false);
@@ -168,9 +173,9 @@ impl JarApiExtractor {
                 continue; // static initializer — not API
             }
             if !self.emit_synthetic
-                && method.access_flags.intersects(
-                    MethodAccessFlags::SYNTHETIC | MethodAccessFlags::BRIDGE,
-                )
+                && method
+                    .access_flags
+                    .intersects(MethodAccessFlags::SYNTHETIC | MethodAccessFlags::BRIDGE)
             {
                 continue;
             }
@@ -185,7 +190,11 @@ impl JarApiExtractor {
             let returns = render_return(&method.descriptor.return_type);
 
             let (member_id, member_kind, member_name) = if method.name == "<init>" {
-                (constructor_id(&fqcn, arity), NodeKind::Constructor, "<init>".to_string())
+                (
+                    constructor_id(&fqcn, arity),
+                    NodeKind::Constructor,
+                    "<init>".to_string(),
+                )
             } else {
                 (
                     method_id(&fqcn, &method.name, arity),
@@ -281,9 +290,10 @@ fn internal_to_fqcn(internal: &str) -> String {
 /// all ASCII digits, or starts with a digit (local class `Outer$1Local`).
 fn is_anonymous_or_local(internal: &str) -> bool {
     let simple = internal.rsplit('/').next().unwrap_or(internal);
-    simple.split('$').skip(1).any(|seg| {
-        seg.chars().next().is_some_and(|c| c.is_ascii_digit())
-    })
+    simple
+        .split('$')
+        .skip(1)
+        .any(|seg| seg.chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
 fn is_info_class(entry_name: &str) -> bool {
@@ -367,7 +377,10 @@ mod tests {
         assert!(has_node(&out, &method_id("com.acme.Sample", "greet", 1)));
         assert!(has_node(&out, &method_id("com.acme.Sample", "make", 0)));
         assert!(has_node(&out, &inner));
-        assert!(has_node(&out, &method_id("com.acme.Sample.Inner", "ping", 0)));
+        assert!(has_node(
+            &out,
+            &method_id("com.acme.Sample.Inner", "ping", 0)
+        ));
 
         // HAS_METHOD / HAS_FIELD wire members to their owning class.
         assert!(has_edge(
@@ -384,7 +397,10 @@ mod tests {
         ));
 
         // Anonymous Sample$1 is skipped by default (no `com.acme.Sample.1` type).
-        assert!(!has_node(&out, &type_id(NodeKind::Class, "com.acme.Sample.1")));
+        assert!(!has_node(
+            &out,
+            &type_id(NodeKind::Class, "com.acme.Sample.1")
+        ));
 
         // Nodes are tagged as external/from-jar; descriptor types are rendered.
         let greet = out
@@ -415,10 +431,19 @@ mod tests {
             .extract(&sample_jar())
             .unwrap();
 
-        assert!(has_node(&out, &type_id(NodeKind::Class, "com.acme.Sample.Inner")));
-        assert!(has_node(&out, &method_id("com.acme.Sample.Inner", "ping", 0)));
+        assert!(has_node(
+            &out,
+            &type_id(NodeKind::Class, "com.acme.Sample.Inner")
+        ));
+        assert!(has_node(
+            &out,
+            &method_id("com.acme.Sample.Inner", "ping", 0)
+        ));
         // The unreferenced top-level class is NOT emitted.
-        assert!(!has_node(&out, &type_id(NodeKind::Class, "com.acme.Sample")));
+        assert!(!has_node(
+            &out,
+            &type_id(NodeKind::Class, "com.acme.Sample")
+        ));
         assert_eq!(out.classes, 1);
     }
 }
