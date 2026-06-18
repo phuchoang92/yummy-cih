@@ -4,10 +4,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{bail, Context, Result};
 use cih_core::{GraphArtifacts, Node, RepoMap, VersionId};
+use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
-    generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, WikiGenerationInfo,
-    WikiGraph, WikiInput, WikiLlmInfo, WikiMeta, WikiModuleCacheEntry, WikiModuleTree,
+    generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary,
+    FeatureMetaEntry, WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo, WikiMeta,
+    WikiModuleCacheEntry, WikiModuleTree,
 };
 use rayon::prelude::*;
 
@@ -136,6 +138,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     if !["graph", "llm"].contains(&grouping) {
         bail!("--grouping must be one of: graph, llm");
     }
+    let llm_no_call = llm_dry_run || llm_debug_evidence;
 
     let span = tracing::info_span!("wiki", repo = %repo.display());
     let _enter = span.enter();
@@ -239,7 +242,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let (adapter, api_key): (Option<Box<dyn LlmAdapter>>, Option<String>) =
         if effective_run_llm || grouping == "llm" {
             let a = make_adapter(llm_provider, llm_base_url, llm_provider_config.as_deref())?;
-            let k = resolve_api_key(llm_api_key_env.as_deref())?;
+            let k = if llm_no_call {
+                None
+            } else {
+                resolve_api_key(llm_api_key_env.as_deref())?
+            };
             (Some(a), k)
         } else {
             (None, None)
@@ -424,7 +431,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                         llm_max_tokens,
                         llm_timeout_secs,
                         wiki_language,
-                        llm_dry_run,
+                        llm_dry_run || llm_debug_evidence,
                     );
                     tracing::info!(enriched = r.len(), "LLM controller enrichment complete");
                     Some(r)
@@ -488,50 +495,57 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     };
 
     // llm-full: additional richer per-community content for dev + BA pages.
-    let llm_full_map: Option<HashMap<String, CommunityLlmFull>> = if wiki_mode == "llm-full" {
-        let total_full = community_nodes.len();
-        tracing::info!(communities = total_full, "starting LLM full enrichment");
-        let results: Vec<(String, Result<CommunityLlmFull>)> =
-            pool.as_ref().unwrap().install(|| {
-                community_nodes
-                    .par_iter()
-                    .map(|comm| {
-                        let r = enrich_one_community_full(
-                            comm,
-                            &wiki_graph,
-                            repo,
-                            &evidence_corpus,
-                            adapter.as_ref().unwrap().as_ref(),
-                            api_key.as_deref(),
-                            llm_model,
-                            llm_max_tokens,
-                            llm_timeout_secs,
-                            llm_retries,
-                            wiki_language,
-                        );
-                        (comm.id.as_str().to_string(), r)
-                    })
-                    .collect()
-            });
-        let mut map = HashMap::new();
-        for (id, result) in results {
-            match result {
-                Ok(full) => {
-                    map.insert(id, full);
-                }
-                Err(err) => {
-                    tracing::warn!(community = %id, error = %err, "LLM full enrichment failed")
+    let llm_full_map: Option<HashMap<String, CommunityLlmFull>> =
+        if wiki_mode == "llm-full" && llm_no_call {
+            tracing::info!("skipping llm-full enrichment because dry-run/debug mode is enabled");
+            None
+        } else if wiki_mode == "llm-full" {
+            let total_full = community_nodes.len();
+            tracing::info!(communities = total_full, "starting LLM full enrichment");
+            let results: Vec<(String, Result<CommunityLlmFull>)> =
+                pool.as_ref().unwrap().install(|| {
+                    community_nodes
+                        .par_iter()
+                        .map(|comm| {
+                            let r = enrich_one_community_full(
+                                comm,
+                                &wiki_graph,
+                                repo,
+                                &evidence_corpus,
+                                adapter.as_ref().unwrap().as_ref(),
+                                api_key.as_deref(),
+                                llm_model,
+                                llm_max_tokens,
+                                llm_timeout_secs,
+                                llm_retries,
+                                wiki_language,
+                            );
+                            (comm.id.as_str().to_string(), r)
+                        })
+                        .collect()
+                });
+            let mut map = HashMap::new();
+            for (id, result) in results {
+                match result {
+                    Ok(full) => {
+                        map.insert(id, full);
+                    }
+                    Err(err) => {
+                        tracing::warn!(community = %id, error = %err, "LLM full enrichment failed")
+                    }
                 }
             }
-        }
-        tracing::info!(enriched = map.len(), "LLM full enrichment complete");
-        Some(map)
-    } else {
-        None
-    };
+            tracing::info!(enriched = map.len(), "LLM full enrichment complete");
+            Some(map)
+        } else {
+            None
+        };
 
     // LLM grouping: propose a module tree via LLM before page generation
-    let llm_module_tree: Option<WikiModuleTree> = if grouping == "llm" {
+    let llm_module_tree: Option<WikiModuleTree> = if grouping == "llm" && llm_no_call {
+        tracing::info!("skipping LLM grouping because dry-run/debug mode is enabled");
+        None
+    } else if grouping == "llm" {
         match crate::llm::grouping::propose_module_tree(
             &wiki_graph,
             adapter.as_ref().unwrap().as_ref(),
@@ -554,6 +568,68 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 tracing::warn!(error = %err, "LLM grouping failed; falling back to graph grouping");
                 None
             }
+        }
+    } else {
+        None
+    };
+
+    // Feature-level LLM enrichment: one call per wiki feature for PO/BA pages.
+    // Runs after community enrichment so community evidence is already computed.
+    let mut feature_cache_updates: Vec<(String, String, FeatureLlmSummary)> = Vec::new();
+    let feature_llm_map: Option<HashMap<String, FeatureLlmSummary>> = if effective_run_llm {
+        let mut feature_groups = group_communities_by_feature(&wiki_graph);
+        retain_matching_feature_groups(&mut feature_groups, &filter_feature);
+        let prev_meta_for_features: Option<WikiMeta> = if incremental {
+            load_wiki_meta(&out_dir)
+        } else {
+            None
+        };
+
+        let mut map: HashMap<String, FeatureLlmSummary> = HashMap::new();
+
+        for group in &feature_groups {
+            if group.community_ids.is_empty() {
+                continue;
+            }
+            let merged_ev =
+                build_feature_evidence(&group.community_ids, &wiki_graph, repo, &evidence_corpus);
+            let ev_hash = fnv64(&merged_ev);
+
+            // Cache hit?
+            if let Some(cached) =
+                cached_feature_summary(&group.feature, &ev_hash, prev_meta_for_features.as_ref())
+            {
+                map.insert(group.feature.clone(), cached);
+                continue;
+            }
+
+            tracing::info!(feature = %group.feature, "calling LLM for feature enrichment");
+            match enrich_one_feature(
+                &group.feature,
+                &merged_ev,
+                adapter.as_ref().unwrap().as_ref(),
+                api_key.as_deref(),
+                llm_model,
+                llm_max_tokens,
+                llm_timeout_secs,
+                llm_debug_evidence,
+                llm_dry_run,
+            ) {
+                Ok(summary) => {
+                    feature_cache_updates.push((group.feature.clone(), ev_hash, summary.clone()));
+                    map.insert(group.feature.clone(), summary);
+                }
+                Err(err) => {
+                    tracing::warn!(feature = %group.feature, error = %err, "feature LLM enrichment failed");
+                }
+            }
+        }
+
+        tracing::info!(features = map.len(), "feature LLM enrichment complete");
+        if map.is_empty() {
+            None
+        } else {
+            Some(map)
         }
     } else {
         None
@@ -599,6 +675,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         first_module_tree: None,
         save_evidence: save_evidence_map,
         controller_summaries,
+        feature_llm_summaries: feature_llm_map,
         filter_feature,
     };
 
@@ -615,7 +692,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     );
 
     // Update wiki_meta.json with evidence hashes and cached LLM summaries.
-    if !summaries_for_cache.is_empty() {
+    if !summaries_for_cache.is_empty() || !feature_cache_updates.is_empty() {
         if let Some(mut meta) = load_wiki_meta(&out_dir) {
             for (id, hash, summary) in &summaries_for_cache {
                 let entry =
@@ -633,6 +710,18 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 entry.llm_po = Some(summary.po.clone());
                 entry.llm_ba = Some(summary.ba.clone());
                 entry.llm_dev = Some(summary.dev.clone());
+            }
+            for (feature_name, hash, summary) in &feature_cache_updates {
+                meta.feature_cache.insert(
+                    feature_name.clone(),
+                    FeatureMetaEntry {
+                        ev_hash: hash.clone(),
+                        po_overview: summary.po_overview.clone(),
+                        po_capabilities: summary.po_capabilities.clone(),
+                        ba_process_overview: summary.ba_process_overview.clone(),
+                        ba_business_rules: summary.ba_business_rules.clone(),
+                    },
+                );
             }
             if let Ok(json) = serde_json::to_string_pretty(&meta) {
                 let _ = std::fs::write(out_dir.join("wiki_meta.json"), json);
@@ -805,7 +894,7 @@ fn build_system_prompt(language: &str) -> String {
     let mut prompt = String::from(
         "You are a code documentation assistant. Write only from the provided evidence.\n\
 Do not invent behavior, routes, tables, or class names not in the evidence.\n\
-Cite evidence IDs (R1, T1, S1, B1, ...) when they support a claim.",
+Cite evidence IDs (R1, P1, T1, S1, B1, ...) inline when they support a claim.",
     );
     if language == "vi" {
         prompt.push_str("\nWrite all documentation in Vietnamese.");
@@ -828,9 +917,9 @@ Evidence:
 
 Write exactly three JSON fields:
 {{
-  "po": "<2-3 sentences, plain business language, cite evidence IDs>",
-  "ba": "<2-3 sentences, workflows and contracts, cite evidence IDs>",
-  "dev": "<2-3 sentences, technical structure, cite evidence IDs>"
+  "po": "<2-3 sentences, plain business language, cite evidence IDs like [R1],[P1]>",
+  "ba": "<2-3 sentences, workflows and contracts, cite evidence IDs like [R1],[P1]>",
+  "dev": "<2-3 sentences, technical structure, cite evidence IDs like [R1],[P1]>"
 }}
 Only output the JSON object. Do not add commentary."#
     )
@@ -1182,6 +1271,192 @@ fn is_circuit_open(consecutive: u32, threshold: u32) -> bool {
     consecutive >= threshold
 }
 
+fn retain_matching_feature_groups(
+    feature_groups: &mut Vec<FeatureGroup>,
+    filter_feature: &[String],
+) {
+    if filter_feature.is_empty() {
+        return;
+    }
+    let filters_lower: Vec<String> = filter_feature.iter().map(|f| f.to_lowercase()).collect();
+    feature_groups.retain(|group| {
+        let name = group.feature.to_lowercase();
+        filters_lower.iter().any(|filter| name.contains(filter))
+    });
+}
+
+/// Build merged evidence text for a feature by concatenating evidence packs from all
+/// communities in the feature. Deduplicates route and table items; caps at 6 000 chars.
+fn build_feature_evidence(
+    community_ids: &[String],
+    graph: &WikiGraph,
+    repo: &Path,
+    corpus: &EvidenceCorpus,
+) -> String {
+    const MAX_FEATURE_EVIDENCE: usize = 6_000;
+    let mut seen_texts = std::collections::BTreeSet::new();
+    let mut merged = String::new();
+
+    for comm_id in community_ids {
+        let Some(comm_node) = graph.nodes_by_id.get(comm_id) else {
+            continue;
+        };
+        let pack = build_evidence_pack(Some(repo), graph, comm_node, corpus);
+        if pack.items.is_empty() {
+            continue;
+        }
+        let section_header = format!("# Community: {}\n", comm_node.name);
+        let mut section = String::new();
+        for item in &pack.items {
+            if seen_texts.contains(&item.text) {
+                continue;
+            }
+            seen_texts.insert(item.text.clone());
+            section.push_str(&format!("[{}] {}\n", item.id, item.text.trim()));
+        }
+        if section.is_empty() {
+            continue;
+        }
+        if merged.len() + section_header.len() + section.len() > MAX_FEATURE_EVIDENCE {
+            break;
+        }
+        merged.push_str(&section_header);
+        merged.push_str(&section);
+        merged.push('\n');
+    }
+    merged
+}
+
+/// Call the LLM once for a whole feature to get a cohesive PO/BA overview.
+fn enrich_one_feature(
+    feature: &str,
+    evidence: &str,
+    adapter: &dyn LlmAdapter,
+    api_key: Option<&str>,
+    model: &str,
+    max_tokens: u32,
+    timeout_secs: u64,
+    debug_evidence: bool,
+    dry_run: bool,
+) -> Result<FeatureLlmSummary> {
+    let evidence_str = if evidence.trim().is_empty() {
+        "none"
+    } else {
+        evidence
+    };
+    let system = build_feature_system_prompt();
+    let user = build_feature_user_prompt(feature, evidence_str);
+
+    if debug_evidence {
+        println!("--- [feature evidence] feature: {} ---", feature);
+        println!("{}", evidence_str);
+        return Ok(FeatureLlmSummary {
+            po_overview: format!("[debug-evidence] {}", feature),
+            po_capabilities: String::new(),
+            ba_process_overview: String::new(),
+            ba_business_rules: String::new(),
+        });
+    }
+
+    if dry_run {
+        println!("--- [dry-run] feature: {} ---", feature);
+        println!("System:\n{}\n", system);
+        println!("User:\n{}", user);
+        return Ok(FeatureLlmSummary {
+            po_overview: format!("[dry-run] {}", feature),
+            po_capabilities: String::new(),
+            ba_process_overview: String::new(),
+            ba_business_rules: String::new(),
+        });
+    }
+
+    let req = LlmRequest {
+        system,
+        user,
+        model: model.to_string(),
+        max_tokens,
+        timeout_secs,
+    };
+    let resp = adapter.call(api_key, &req)?;
+    parse_feature_summary(&resp.text)
+}
+
+fn build_feature_system_prompt() -> String {
+    "You are a software architect writing business documentation from code evidence.\n\
+     Write only from the provided evidence. Cite evidence IDs like [R1],[P1],[B1] inline.\n\
+     Do not invent behavior not in the evidence."
+        .to_string()
+}
+
+fn build_feature_user_prompt(feature: &str, evidence: &str) -> String {
+    format!(
+        r#"You are writing feature-level documentation for the "{feature}" module.
+
+Evidence (grouped by community):
+{evidence}
+
+Respond ONLY with a JSON object:
+{{
+  "po_overview": "<3-5 sentences of plain-language business overview>",
+  "po_capabilities": "<bullet list of business capabilities, one per line starting with ->",
+  "ba_process_overview": "<3-5 sentences describing business processes and flows>",
+  "ba_business_rules": "<key business rules or invariants, one per line starting with ->>"
+}}"#
+    )
+}
+
+fn parse_feature_summary(text: &str) -> Result<FeatureLlmSummary> {
+    let json_str = if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
+        if start <= end {
+            &text[start..=end]
+        } else {
+            text.trim()
+        }
+    } else {
+        text.trim()
+    };
+    let val: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse feature LLM response: {e}: {:?}",
+            &text[..text.len().min(200)]
+        )
+    })?;
+    let summary = FeatureLlmSummary {
+        po_overview: val["po_overview"].as_str().unwrap_or("").to_string(),
+        po_capabilities: val["po_capabilities"].as_str().unwrap_or("").to_string(),
+        ba_process_overview: val["ba_process_overview"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        ba_business_rules: val["ba_business_rules"].as_str().unwrap_or("").to_string(),
+    };
+    if summary.po_overview.is_empty()
+        && summary.po_capabilities.is_empty()
+        && summary.ba_process_overview.is_empty()
+        && summary.ba_business_rules.is_empty()
+    {
+        bail!("feature LLM response did not contain any expected fields");
+    }
+    Ok(summary)
+}
+
+fn cached_feature_summary(
+    feature: &str,
+    ev_hash: &str,
+    meta: Option<&WikiMeta>,
+) -> Option<FeatureLlmSummary> {
+    let entry = meta?.feature_cache.get(feature)?;
+    if entry.ev_hash != ev_hash {
+        return None;
+    }
+    Some(FeatureLlmSummary {
+        po_overview: entry.po_overview.clone(),
+        po_capabilities: entry.po_capabilities.clone(),
+        ba_process_overview: entry.ba_process_overview.clone(),
+        ba_business_rules: entry.ba_business_rules.clone(),
+    })
+}
+
 fn cached_summary(
     comm_id: &str,
     ev_hash: &str,
@@ -1309,6 +1584,7 @@ mod tests {
             language: None,
             prompt_version: "1".to_string(),
             module_cache: cache,
+            feature_cache: Default::default(),
         };
 
         let hit = cached_summary("comm::Payment", "abc123", Some(&meta));
@@ -1320,6 +1596,103 @@ mod tests {
 
         let miss_id = cached_summary("comm::Other", "abc123", Some(&meta));
         assert!(miss_id.is_none(), "unknown comm_id should return None");
+    }
+
+    #[test]
+    fn cached_feature_summary_returns_some_on_hash_match() {
+        use std::collections::BTreeMap;
+        let mut cache = BTreeMap::new();
+        cache.insert(
+            "payments".to_string(),
+            FeatureMetaEntry {
+                ev_hash: "ev1".to_string(),
+                po_overview: "Payments overview".to_string(),
+                po_capabilities: "-> Pay bills".to_string(),
+                ba_process_overview: "Payment process".to_string(),
+                ba_business_rules: "-> Must validate amount".to_string(),
+            },
+        );
+        let meta = WikiMeta {
+            schema_version: 1,
+            repo_commit: None,
+            graph_version: "v1".to_string(),
+            community_version: "v1".to_string(),
+            model: None,
+            language: None,
+            prompt_version: "1".to_string(),
+            module_cache: Default::default(),
+            feature_cache: cache,
+        };
+
+        let hit = cached_feature_summary("payments", "ev1", Some(&meta));
+        assert_eq!(hit.unwrap().po_overview, "Payments overview");
+        assert!(cached_feature_summary("payments", "other", Some(&meta)).is_none());
+        assert!(cached_feature_summary("orders", "ev1", Some(&meta)).is_none());
+    }
+
+    #[test]
+    fn feature_response_parser_handles_raw_and_fenced_json() {
+        let raw = r#"{
+            "po_overview": "Orders overview",
+            "po_capabilities": "-> Create order",
+            "ba_process_overview": "Order process",
+            "ba_business_rules": "-> Validate customer"
+        }"#;
+        let parsed = parse_feature_summary(raw).unwrap();
+        assert_eq!(parsed.po_overview, "Orders overview");
+
+        let fenced = format!("```json\n{raw}\n```");
+        let parsed = parse_feature_summary(&fenced).unwrap();
+        assert_eq!(parsed.ba_business_rules, "-> Validate customer");
+    }
+
+    #[test]
+    fn feature_response_parser_rejects_malformed_or_empty_output() {
+        assert!(parse_feature_summary("not json").is_err());
+        assert!(parse_feature_summary("{}").is_err());
+    }
+
+    #[test]
+    fn feature_prompt_json_example_is_well_formed_enough_for_models() {
+        let prompt = build_feature_user_prompt("orders", "[R1] GET /orders");
+        assert!(prompt.contains("\"po_capabilities\""));
+        assert!(!prompt.contains("->\">"));
+    }
+
+    #[test]
+    fn feature_dry_run_does_not_call_adapter() {
+        let adapter = MockAdapter::new(vec![]);
+        let summary = enrich_one_feature(
+            "orders",
+            "[R1] GET /orders",
+            &adapter,
+            None,
+            "model",
+            100,
+            5,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(adapter.calls(), 0);
+        assert_eq!(summary.po_overview, "[dry-run] orders");
+    }
+
+    #[test]
+    fn feature_filter_keeps_only_matching_groups() {
+        let mut groups = vec![
+            FeatureGroup {
+                feature: "payments".to_string(),
+                community_ids: vec!["Community:0".to_string()],
+            },
+            FeatureGroup {
+                feature: "orders".to_string(),
+                community_ids: vec!["Community:1".to_string()],
+            },
+        ];
+        retain_matching_feature_groups(&mut groups, &["pay".to_string()]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].feature, "payments");
     }
 
     #[test]

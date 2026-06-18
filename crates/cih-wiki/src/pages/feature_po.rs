@@ -4,7 +4,7 @@ use cih_core::Node;
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::slugify::slugify;
-use crate::{CommunityLlmFull, CommunityLlmSummary};
+use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary};
 
 fn capitalize(s: &str) -> String {
     let mut out = s.to_string();
@@ -22,83 +22,98 @@ pub fn render_feature_po(
     graph: &WikiGraph,
     llm_summaries: Option<&HashMap<String, CommunityLlmSummary>>,
     llm_full: Option<&HashMap<String, CommunityLlmFull>>,
+    feature_llm: Option<&FeatureLlmSummary>,
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
     md.push_str(&format!("---\ntitle: {}\n---\n\n", title));
     md.push_str(&format!("# {}\n\n", title));
 
-    // llm-full mode: richer sections per community
-    let full_entries: Vec<&CommunityLlmFull> = community_ids
-        .iter()
-        .filter_map(|cid| llm_full.and_then(|m| m.get(cid)))
-        .collect();
-
-    if !full_entries.is_empty() {
-        let summaries: Vec<&str> = full_entries
-            .iter()
-            .map(|f| f.po_summary.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !summaries.is_empty() {
+    // Feature-level LLM overview (highest quality — one call across all communities).
+    if let Some(flm) = feature_llm {
+        if !flm.po_overview.is_empty() {
             md.push_str("## Overview\n\n");
-            for s in &summaries {
-                md.push_str(s);
-                md.push_str("\n\n");
-            }
+            md.push_str(&flm.po_overview);
+            md.push_str("\n\n");
         }
-        let caps: Vec<&str> = full_entries
-            .iter()
-            .map(|f| f.po_capabilities.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !caps.is_empty() {
+        if !flm.po_capabilities.is_empty() {
             md.push_str("## Capabilities\n\n");
-            for s in &caps {
-                md.push_str(s);
-                md.push_str("\n\n");
-            }
-        }
-        let workflows: Vec<&str> = full_entries
-            .iter()
-            .map(|f| f.po_workflows.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !workflows.is_empty() {
-            md.push_str("## Workflows\n\n");
-            for s in &workflows {
-                md.push_str(s);
-                md.push_str("\n\n");
-            }
-        }
-        let questions: Vec<&str> = full_entries
-            .iter()
-            .map(|f| f.po_open_questions.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !questions.is_empty() {
-            md.push_str("## Open Questions\n\n");
-            for s in &questions {
-                md.push_str(s);
-                md.push_str("\n\n");
-            }
+            md.push_str(&flm.po_capabilities);
+            md.push_str("\n\n");
         }
     } else {
-        // llm-summary mode fallback
-        let po_texts: Vec<String> = community_ids
+        // llm-full mode: richer sections per community
+        let full_entries: Vec<&CommunityLlmFull> = community_ids
             .iter()
-            .filter_map(|cid| llm_summaries.and_then(|m| m.get(cid)).map(|s| s.po.clone()))
-            .filter(|s| !s.is_empty())
+            .filter_map(|cid| llm_full.and_then(|m| m.get(cid)))
             .collect();
 
-        if !po_texts.is_empty() {
-            md.push_str("## Overview\n\n");
-            for text in &po_texts {
-                md.push_str(text);
-                md.push_str("\n\n");
+        if !full_entries.is_empty() {
+            let summaries: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_summary.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !summaries.is_empty() {
+                md.push_str("## Overview\n\n");
+                for s in &summaries {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let caps: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_capabilities.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !caps.is_empty() {
+                md.push_str("## Capabilities\n\n");
+                for s in &caps {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let workflows: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_workflows.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !workflows.is_empty() {
+                md.push_str("## Workflows\n\n");
+                for s in &workflows {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let questions: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_open_questions.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !questions.is_empty() {
+                md.push_str("## Open Questions\n\n");
+                for s in &questions {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+        } else {
+            // llm-summary mode fallback
+            let po_texts: Vec<String> = community_ids
+                .iter()
+                .filter_map(|cid| llm_summaries.and_then(|m| m.get(cid)).map(|s| s.po.clone()))
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !po_texts.is_empty() {
+                md.push_str("## Overview\n\n");
+                for text in &po_texts {
+                    md.push_str(text);
+                    md.push_str("\n\n");
+                }
             }
         }
-    }
+    } // end feature_llm / community-level LLM
 
     let total_routes: usize = community_ids
         .iter()
@@ -365,22 +380,36 @@ mod tests {
                 dev: String::new(),
             },
         );
-        let md = render_feature_po("payment", &ids, &g, Some(&sums), None);
+        let md = render_feature_po("payment", &ids, &g, Some(&sums), None, None);
         assert!(md.contains("## Overview"));
         assert!(md.contains("Handles payment flows"));
     }
 
     #[test]
+    fn renders_feature_level_summary_when_present() {
+        let (g, ids) = simple_graph();
+        let feature = FeatureLlmSummary {
+            po_overview: "Feature-wide payment overview.".to_string(),
+            po_capabilities: "-> Submit payment".to_string(),
+            ba_process_overview: String::new(),
+            ba_business_rules: String::new(),
+        };
+        let md = render_feature_po("payment", &ids, &g, None, None, Some(&feature));
+        assert!(md.contains("Feature-wide payment overview"));
+        assert!(md.contains("-> Submit payment"));
+    }
+
+    #[test]
     fn omits_overview_when_no_llm() {
         let (g, ids) = simple_graph();
-        let md = render_feature_po("payment", &ids, &g, None, None);
+        let md = render_feature_po("payment", &ids, &g, None, None, None);
         assert!(!md.contains("## Overview"));
     }
 
     #[test]
     fn has_correct_frontmatter() {
         let (g, ids) = simple_graph();
-        let md = render_feature_po("payment", &ids, &g, None, None);
+        let md = render_feature_po("payment", &ids, &g, None, None, None);
         assert!(md.contains("---\ntitle: Payment — Business Overview"));
     }
 }

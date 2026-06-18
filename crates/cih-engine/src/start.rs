@@ -497,7 +497,11 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
         println!();
 
         // Step 4: Index mode
-        let index_options = &["analyze all modules", "scan only (no analyze)", "specific modules"];
+        let index_options = &[
+            "analyze all modules",
+            "scan only (no analyze)",
+            "specific modules",
+        ];
         let index_choice = Select::new()
             .with_prompt("Indexing scope")
             .items(index_options)
@@ -548,7 +552,13 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
         println!();
 
         // Step 6: LLM provider
-        let llm_options = &["None (no AI enrichment)", "DeepSeek", "Gemini", "Anthropic", "OpenAI"];
+        let llm_options = &[
+            "None (no AI enrichment)",
+            "DeepSeek",
+            "Gemini",
+            "Anthropic",
+            "OpenAI",
+        ];
         let llm_choice = Select::new()
             .with_prompt("LLM provider for wiki enrichment (optional)")
             .items(llm_options)
@@ -593,10 +603,22 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
                 IndexMode::Modules(m) => format!("modules: {}", m.join(", ")),
             }
         );
-        println!("  Discover:       {}", if cfg.do_discover { "yes" } else { "no" });
-        println!("  Embed:          {}", if cfg.do_embed { "yes" } else { "no" });
-        println!("  Wiki:           {}", if cfg.do_wiki { "yes" } else { "no" });
-        println!("  Docs viewer:    {}", if cfg.do_docs { "yes" } else { "no" });
+        println!(
+            "  Discover:       {}",
+            if cfg.do_discover { "yes" } else { "no" }
+        );
+        println!(
+            "  Embed:          {}",
+            if cfg.do_embed { "yes" } else { "no" }
+        );
+        println!(
+            "  Wiki:           {}",
+            if cfg.do_wiki { "yes" } else { "no" }
+        );
+        println!(
+            "  Docs viewer:    {}",
+            if cfg.do_docs { "yes" } else { "no" }
+        );
         println!(
             "  LLM provider:   {}",
             match cfg.llm {

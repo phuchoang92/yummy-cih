@@ -58,6 +58,20 @@ pub struct WikiMeta {
     pub prompt_version: String,
     #[serde(default)]
     pub module_cache: BTreeMap<String, WikiModuleCacheEntry>,
+    /// Cached feature-level LLM summaries (keyed by feature name). Added in schema v2;
+    /// `#[serde(default)]` makes existing wiki_meta.json files (without this field) still load.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub feature_cache: BTreeMap<String, FeatureMetaEntry>,
+}
+
+/// Cached feature-level LLM summary for one wiki feature.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FeatureMetaEntry {
+    pub ev_hash: String,
+    pub po_overview: String,
+    pub po_capabilities: String,
+    pub ba_process_overview: String,
+    pub ba_business_rules: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -254,6 +268,7 @@ pub fn build_wiki_meta(
         language,
         prompt_version: "phase10c-1".to_string(),
         module_cache: BTreeMap::new(),
+        feature_cache: BTreeMap::new(),
     }
 }
 

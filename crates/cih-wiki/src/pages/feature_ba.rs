@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::WikiGraph;
 use crate::mermaid;
-use crate::{CommunityLlmFull, CommunityLlmSummary};
+use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary};
 
 fn capitalize(s: &str) -> String {
     let mut out = s.to_string();
@@ -20,6 +20,7 @@ pub fn render_feature_ba(
     graph: &WikiGraph,
     llm_summaries: Option<&HashMap<String, CommunityLlmSummary>>,
     llm_full: Option<&HashMap<String, CommunityLlmFull>>,
+    feature_llm: Option<&FeatureLlmSummary>,
 ) -> String {
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
@@ -34,65 +35,79 @@ pub fn render_feature_ba(
         md.push_str("```\n\n");
     }
 
-    // llm-full mode: richer sections
-    let full_entries: Vec<&CommunityLlmFull> = community_ids
-        .iter()
-        .filter_map(|cid| llm_full.and_then(|m| m.get(cid)))
-        .collect();
-
-    if !full_entries.is_empty() {
-        let overviews: Vec<&str> = full_entries
-            .iter()
-            .map(|f| f.ba_process_overview.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !overviews.is_empty() {
+    // Feature-level LLM overview (highest quality — one call across all communities).
+    if let Some(flm) = feature_llm {
+        if !flm.ba_process_overview.is_empty() {
             md.push_str("## Process Overview\n\n");
-            for s in &overviews {
-                md.push_str(s);
-                md.push_str("\n\n");
-            }
+            md.push_str(&flm.ba_process_overview);
+            md.push_str("\n\n");
         }
-        let contracts: Vec<&str> = full_entries
-            .iter()
-            .map(|f| f.ba_contracts.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !contracts.is_empty() {
-            md.push_str("## Contracts\n\n");
-            for s in &contracts {
-                md.push_str(s);
-                md.push_str("\n\n");
-            }
-        }
-        let rules: Vec<&str> = full_entries
-            .iter()
-            .map(|f| f.ba_business_rules.as_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !rules.is_empty() {
+        if !flm.ba_business_rules.is_empty() {
             md.push_str("## Business Rules\n\n");
-            for s in &rules {
-                md.push_str(s);
-                md.push_str("\n\n");
-            }
+            md.push_str(&flm.ba_business_rules);
+            md.push_str("\n\n");
         }
     } else {
-        // llm-summary mode fallback
-        let ba_texts: Vec<String> = community_ids
+        // llm-full mode: richer sections per community
+        let full_entries: Vec<&CommunityLlmFull> = community_ids
             .iter()
-            .filter_map(|cid| llm_summaries.and_then(|m| m.get(cid)).map(|s| s.ba.clone()))
-            .filter(|s| !s.is_empty())
+            .filter_map(|cid| llm_full.and_then(|m| m.get(cid)))
             .collect();
 
-        if !ba_texts.is_empty() {
-            md.push_str("## Process Overview\n\n");
-            for text in &ba_texts {
-                md.push_str(text);
-                md.push_str("\n\n");
+        if !full_entries.is_empty() {
+            let overviews: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.ba_process_overview.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !overviews.is_empty() {
+                md.push_str("## Process Overview\n\n");
+                for s in &overviews {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let contracts: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.ba_contracts.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !contracts.is_empty() {
+                md.push_str("## Contracts\n\n");
+                for s in &contracts {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let rules: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.ba_business_rules.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !rules.is_empty() {
+                md.push_str("## Business Rules\n\n");
+                for s in &rules {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+        } else {
+            // llm-summary mode fallback
+            let ba_texts: Vec<String> = community_ids
+                .iter()
+                .filter_map(|cid| llm_summaries.and_then(|m| m.get(cid)).map(|s| s.ba.clone()))
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !ba_texts.is_empty() {
+                md.push_str("## Process Overview\n\n");
+                for text in &ba_texts {
+                    md.push_str(text);
+                    md.push_str("\n\n");
+                }
             }
         }
-    }
+    } // end feature_llm / community-level LLM
 
     // Per-community workflow sections (business flows only)
     let mut any_workflows = false;
@@ -270,7 +285,7 @@ mod tests {
     #[test]
     fn has_correct_frontmatter() {
         let (g, ids) = simple_graph();
-        let md = render_feature_ba("order", &ids, &g, None, None);
+        let md = render_feature_ba("order", &ids, &g, None, None, None);
         assert!(md.contains("---\ntitle: Order — Business Analysis"));
     }
 
@@ -286,8 +301,22 @@ mod tests {
                 dev: String::new(),
             },
         );
-        let md = render_feature_ba("order", &ids, &g, Some(&sums), None);
+        let md = render_feature_ba("order", &ids, &g, Some(&sums), None, None);
         assert!(md.contains("## Process Overview"));
         assert!(md.contains("Orchestrates the order workflow"));
+    }
+
+    #[test]
+    fn renders_feature_level_summary_when_present() {
+        let (g, ids) = simple_graph();
+        let feature = FeatureLlmSummary {
+            po_overview: String::new(),
+            po_capabilities: String::new(),
+            ba_process_overview: "Feature-wide order process.".to_string(),
+            ba_business_rules: "-> Validate order status".to_string(),
+        };
+        let md = render_feature_ba("order", &ids, &g, None, None, Some(&feature));
+        assert!(md.contains("Feature-wide order process"));
+        assert!(md.contains("-> Validate order status"));
     }
 }

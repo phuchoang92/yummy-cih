@@ -13,7 +13,8 @@ pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
 pub use module_tree::{
     build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
-    ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
+    FeatureMetaEntry, ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode,
+    WikiModuleTree,
 };
 
 use std::collections::{BTreeMap, HashMap};
@@ -46,6 +47,20 @@ pub struct ControllerLlmSummary {
     /// Business domain slug inferred by LLM (e.g. "payment"). Applied only when the
     /// file-path heuristic returns "shared", to move the controller to the right feature.
     pub feature: Option<String>,
+}
+
+/// LLM-generated feature-level overview for PO and BA pages.
+/// One per wiki feature (module); produced by the feature-enrichment pass in `cih-engine`.
+#[derive(Clone, Debug, Default)]
+pub struct FeatureLlmSummary {
+    /// 3-5 sentence plain-language business overview for the whole feature.
+    pub po_overview: String,
+    /// Bullet list of capabilities.
+    pub po_capabilities: String,
+    /// 3-5 sentence process overview for business analysts.
+    pub ba_process_overview: String,
+    /// Key business rules / invariants observed in the evidence.
+    pub ba_business_rules: String,
 }
 
 /// Richer per-community LLM content for `llm-full` mode.
@@ -94,6 +109,8 @@ pub struct WikiInput<'a> {
     pub save_evidence: Option<HashMap<String, String>>,
     /// Keyed by controller class name. Populated when LLM enrichment is active.
     pub controller_summaries: Option<HashMap<String, ControllerLlmSummary>>,
+    /// Keyed by feature name. One entry per wiki feature from the feature-enrichment LLM pass.
+    pub feature_llm_summaries: Option<HashMap<String, FeatureLlmSummary>>,
     /// Only generate pages for features whose name contains one of these substrings
     /// (case-insensitive). Empty = no filter.
     pub filter_feature: Vec<String>,
@@ -313,12 +330,17 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         page_count += 1;
 
         // Feature PO
+        let feature_llm = input
+            .feature_llm_summaries
+            .as_ref()
+            .and_then(|m| m.get(feature.as_str()));
         let po_md = pages::feature_po::render_feature_po(
             feature,
             cids,
             &graph,
             input.llm_summaries.as_ref(),
             input.llm_full.as_ref(),
+            feature_llm,
         );
         std::fs::write(out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -344,6 +366,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             &graph,
             input.llm_summaries.as_ref(),
             input.llm_full.as_ref(),
+            feature_llm,
         );
         std::fs::write(out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -593,6 +616,7 @@ mod tests {
             first_module_tree: None,
             save_evidence: None,
             controller_summaries: None,
+            feature_llm_summaries: None,
             filter_feature: vec![],
         }
     }
@@ -694,6 +718,7 @@ mod tests {
             first_module_tree: None,
             save_evidence: None,
             controller_summaries: None,
+            feature_llm_summaries: None,
             filter_feature: vec![],
         };
         let outcome = generate_wiki(input, &out).unwrap();

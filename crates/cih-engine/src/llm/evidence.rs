@@ -11,6 +11,7 @@ const MAX_EVIDENCE_CHARS: usize = 3_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum EvidenceKind {
     Route,
+    Process,
     CodeShape,
     Dependency,
     Table,
@@ -98,6 +99,7 @@ pub fn build_evidence_pack(
     let mut items = Vec::new();
 
     push_routes(&mut items, graph, comm_id);
+    push_processes(&mut items, graph, comm_id);
     push_stereotypes(&mut items, graph, comm_id);
     push_dependencies(&mut items, graph, comm_id);
     push_tables(&mut items, graph, comm_id);
@@ -126,6 +128,79 @@ fn push_routes(items: &mut Vec<EvidenceItem>, graph: &WikiGraph, comm_id: &str) 
                 text: format!("{} {}", route_http_method(route), route_path(route)),
             });
         }
+    }
+}
+
+fn push_processes(items: &mut Vec<EvidenceItem>, graph: &WikiGraph, comm_id: &str) {
+    let mut idx = 0usize;
+    for proc in &graph.process_nodes {
+        let props = proc.props.as_ref();
+        let business_flow = props
+            .and_then(|p| p.get("business_flow"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !business_flow {
+            continue;
+        }
+        let touches = proc
+            .props
+            .as_ref()
+            .and_then(|p| p.get("communities"))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|c| c.as_str() == Some(comm_id)))
+            .unwrap_or(false);
+        if !touches {
+            continue;
+        }
+        let label = proc
+            .props
+            .as_ref()
+            .and_then(|p| p.get("label"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(proc.name.as_str());
+        let ek = proc
+            .props
+            .as_ref()
+            .and_then(|p| p.get("entrypoint_kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let steps = proc
+            .props
+            .as_ref()
+            .and_then(|p| p.get("step_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let route = match (
+            props
+                .and_then(|p| p.get("route_method"))
+                .and_then(|v| v.as_str()),
+            props
+                .and_then(|p| p.get("route_path"))
+                .and_then(|v| v.as_str()),
+        ) {
+            (Some(method), Some(path)) if !method.is_empty() && !path.is_empty() => {
+                format!(", route {method} {path}")
+            }
+            _ => String::new(),
+        };
+        let topics = props
+            .and_then(|p| p.get("event_topics"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|topics| !topics.is_empty())
+            .map(|topics| format!(", topics {}", topics.join(", ")))
+            .unwrap_or_default();
+        idx += 1;
+        items.push(EvidenceItem {
+            id: format!("P{idx}"),
+            kind: EvidenceKind::Process,
+            text: format!("{label} ({ek}, {steps} steps{route}{topics})"),
+        });
     }
 }
 
@@ -626,6 +701,51 @@ mod tests {
         let rendered = pack.render();
         assert!(rendered.contains("[R1] GET /orders"));
         assert!(rendered.contains("[T1] ORDERS (read)"));
+    }
+
+    #[test]
+    fn evidence_pack_includes_only_business_processes() {
+        let community = node("Community:0", NodeKind::Community, "order-service", "", 0);
+        let business = Node {
+            props: Some(serde_json::json!({
+                "label": "Create order",
+                "communities": ["Community:0"],
+                "business_flow": true,
+                "entrypoint_kind": "http_route",
+                "step_count": 3,
+                "route_method": "POST",
+                "route_path": "/orders"
+            })),
+            ..node(
+                "Process:create-order",
+                NodeKind::Process,
+                "Create order",
+                "",
+                0,
+            )
+        };
+        let internal = Node {
+            props: Some(serde_json::json!({
+                "label": "Internal fanout",
+                "communities": ["Community:0"],
+                "business_flow": false,
+                "entrypoint_kind": "fanout",
+                "step_count": 4
+            })),
+            ..node(
+                "Process:internal-fanout",
+                NodeKind::Process,
+                "Internal fanout",
+                "",
+                0,
+            )
+        };
+        let graph = WikiGraph::build(&[], &[], &[community.clone(), business, internal], &[]);
+        let pack = build_evidence_pack(None, &graph, &community, &EvidenceCorpus::default());
+        let rendered = pack.render();
+        assert!(rendered.contains("[P1] Create order"));
+        assert!(rendered.contains("route POST /orders"));
+        assert!(!rendered.contains("Internal fanout"));
     }
 
     #[test]

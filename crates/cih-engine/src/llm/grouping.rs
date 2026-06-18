@@ -67,9 +67,38 @@ fn build_grouping_evidence(graph: &WikiGraph) -> String {
             .get(comm_id)
             .copied()
             .unwrap_or(0);
+        let stereotype = graph
+            .community_stereotypes
+            .get(comm_id)
+            .and_then(|m| m.iter().max_by_key(|(_, c)| *c))
+            .map(|(k, _)| k.as_str())
+            .unwrap_or("");
+        let proc_names: Vec<&str> = graph
+            .process_nodes
+            .iter()
+            .filter(|p| {
+                p.props
+                    .as_ref()
+                    .and_then(|v| v.get("communities"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().any(|c| c.as_str() == Some(comm_id)))
+                    .unwrap_or(false)
+            })
+            .filter_map(|p| {
+                p.props
+                    .as_ref()
+                    .and_then(|v| v.get("label"))
+                    .and_then(|v| v.as_str())
+            })
+            .collect();
+        let proc_str = if proc_names.is_empty() {
+            String::new()
+        } else {
+            format!(", flows=[{}]", proc_names.join(", "))
+        };
         lines.push(format!(
-            "- {} (id={}, routes={}, classes={})",
-            comm.name, comm_id, route_count, class_count
+            "- {} (id={}, routes={}, classes={}, stereotype={}{proc_str})",
+            comm.name, comm_id, route_count, class_count, stereotype
         ));
     }
     lines.join("\n")

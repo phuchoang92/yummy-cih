@@ -4,7 +4,7 @@ use crate::db::LoadOutcome;
 use crate::discover::run_discover_core;
 use crate::scope::{ScopeFile, ScopeRequest};
 use cih_core::JarInfo;
-use cih_wiki::WikiManifest;
+use cih_wiki::{WikiManifest, WikiMeta};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -385,7 +385,8 @@ fn discover_emits_community_and_process_artifacts() {
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
     assert!(analyze.resolved_edge_count >= 2);
 
-    let discover = run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
+    let discover =
+        run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
     assert!(discover.artifacts_dir.join("nodes.jsonl").exists());
     assert!(discover.artifacts_dir.join("edges.jsonl").exists());
     assert!(
@@ -440,6 +441,10 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
         repo: root.clone(),
         run_llm: true,
         llm_model: "dry-model".into(),
+        llm_api_key_env: Some(format!(
+            "CIH_TEST_MISSING_KEY_{}",
+            TEST_ID.load(Ordering::Relaxed)
+        )),
         llm_dry_run: true,
         wiki_language: "vi".into(),
         wiki_mode: "llm-summary".into(),
@@ -454,6 +459,13 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
     assert_eq!(llm.model, "dry-model");
     assert_eq!(llm.language, "vi");
     assert_eq!(llm.failed_community_count, 0);
+
+    let meta_json = fs::read_to_string(root.join(".cih/wiki/wiki_meta.json")).unwrap();
+    let meta: WikiMeta = serde_json::from_str(&meta_json).unwrap();
+    assert!(
+        !meta.feature_cache.is_empty(),
+        "dry-run feature summaries should be cached after generate_wiki rewrites wiki_meta.json"
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -591,7 +603,8 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
     let scan = scan::scan_repo(&root).unwrap();
     analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
+    let discover =
+        run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
         discover
@@ -636,7 +649,8 @@ fn discover_load_artifacts_are_analyze_then_community() {
     let scan = scan::scan_repo(&root).unwrap();
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
+    let discover =
+        run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
     let artifact_sets = discover.artifact_sets_for_load();
 
     // Canonicalize both sides: macOS temp_dir() symlinks may differ from canonicalized paths.

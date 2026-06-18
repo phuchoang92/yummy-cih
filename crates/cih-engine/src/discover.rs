@@ -73,7 +73,10 @@ pub(crate) fn run_discover(
     Ok(())
 }
 
-pub(crate) fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<DiscoverOutcome> {
+pub(crate) fn run_discover_core(
+    repo: &Path,
+    overrides: &DiscoverOverrides,
+) -> Result<DiscoverOutcome> {
     let source = latest_graph_artifacts(repo)?;
     let nodes = source
         .read_nodes()
@@ -105,8 +108,12 @@ pub(crate) fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> R
         community_cfg.min_community_size = 3;
     }
     // Apply CLI overrides on top of heuristics.
-    if let Some(v) = overrides.resolution         { community_cfg.resolution = v; }
-    if let Some(v) = overrides.min_community_size { community_cfg.min_community_size = v; }
+    if let Some(v) = overrides.resolution {
+        community_cfg.resolution = v;
+    }
+    if let Some(v) = overrides.min_community_size {
+        community_cfg.min_community_size = v;
+    }
 
     tracing::info!(
         resolution = community_cfg.resolution,
@@ -132,10 +139,18 @@ pub(crate) fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> R
     tracing::debug!(symbols = symbol_count, "symbol count for process config");
     let mut process_cfg = cih_community::ProcessConfig::for_symbol_count(symbol_count);
     // Apply CLI overrides on top of heuristics.
-    if let Some(v) = overrides.max_trace_depth     { process_cfg.max_trace_depth = v; }
-    if let Some(v) = overrides.max_processes        { process_cfg.max_processes = v; }
-    if let Some(v) = overrides.max_branching        { process_cfg.max_branching = v; }
-    if let Some(v) = overrides.min_trace_confidence { process_cfg.min_trace_confidence = v; }
+    if let Some(v) = overrides.max_trace_depth {
+        process_cfg.max_trace_depth = v;
+    }
+    if let Some(v) = overrides.max_processes {
+        process_cfg.max_processes = v;
+    }
+    if let Some(v) = overrides.max_branching {
+        process_cfg.max_branching = v;
+    }
+    if let Some(v) = overrides.min_trace_confidence {
+        process_cfg.min_trace_confidence = v;
+    }
 
     tracing::info!("tracing business processes");
     let process_output =

@@ -37,7 +37,11 @@ pub fn trace_process_paths(
             let mut traces_for_entry: Vec<Vec<NodeIndex>> = Vec::new();
             let mut states: Vec<TraceState> = Vec::new();
             let mut queue: VecDeque<usize> = VecDeque::new();
-            states.push(TraceState { node: entry_idx, parent: None, depth: 1 });
+            states.push(TraceState {
+                node: entry_idx,
+                parent: None,
+                depth: 1,
+            });
             queue.push_back(0usize);
             let max_states = cfg.max_states_per_entry.max(1);
 
@@ -69,7 +73,11 @@ pub fn trace_process_paths(
                     if states.len() >= max_states {
                         break;
                     }
-                    states.push(TraceState { node: next, parent: Some(state_idx), depth: state.depth + 1 });
+                    states.push(TraceState {
+                        node: next,
+                        parent: Some(state_idx),
+                        depth: state.depth + 1,
+                    });
                     queue.push_back(states.len() - 1);
                 }
             }

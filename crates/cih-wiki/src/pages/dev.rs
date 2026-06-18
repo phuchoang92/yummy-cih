@@ -485,8 +485,17 @@ mod tests {
             range: Range::default(),
             props: Some(serde_json::json!({"stereotype": "test"})),
         };
+        let method = Node {
+            id: NodeId::new("Method:com.example.OrderService#find/0".to_string()),
+            kind: NodeKind::Method,
+            name: "find".to_string(),
+            qualified_name: Some("com.example.OrderService#find/0".to_string()),
+            file: "OrderService.java".to_string(),
+            range: Range::default(),
+            props: Some(serde_json::json!({"returnType": "Order"})),
+        };
         let comm = make_node("Community:0", NodeKind::Community, "order-service");
-        let nodes = [cls.clone(), test_cls.clone()];
+        let nodes = [cls.clone(), test_cls.clone(), method.clone()];
         let edges = [Edge {
             src: test_cls.id.clone(),
             dst: cls.id.clone(),
@@ -509,6 +518,13 @@ mod tests {
                 confidence: 1.0,
                 reason: String::new(),
             },
+            Edge {
+                src: method.id.clone(),
+                dst: NodeId::new("Community:0".to_string()),
+                kind: EdgeKind::MemberOf,
+                confidence: 1.0,
+                reason: String::new(),
+            },
         ];
         WikiGraph::build(&nodes, &edges, &[comm], &comm_edges)
     }
@@ -518,7 +534,7 @@ mod tests {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
         let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None);
-        assert!(md.contains("---\ntitle: order-service"), "has frontmatter");
+        assert!(md.contains("---\ntitle: Order Service"), "has frontmatter");
         assert!(md.contains("OrderService"), "has class name");
         assert!(md.contains("service"), "has stereotype");
     }
