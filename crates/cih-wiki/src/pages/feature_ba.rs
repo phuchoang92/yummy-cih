@@ -12,24 +12,6 @@ fn capitalize(s: &str) -> String {
     out
 }
 
-fn processes_for_community(graph: &WikiGraph, community_id: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    for (proc_id, steps) in &graph.process_steps {
-        if let Some(first) = steps.first() {
-            let sym_id = first.symbol.id.as_str().to_string();
-            if graph
-                .community_by_member
-                .get(&sym_id)
-                .map(|c| c.as_str())
-                == Some(community_id)
-            {
-                result.push(proc_id.clone());
-            }
-        }
-    }
-    result.sort();
-    result
-}
 
 /// Render the feature-level BA (business analysis) page.
 /// Aggregates workflows, cross-module calls, and LLM summaries.
@@ -48,8 +30,8 @@ pub fn render_feature_ba(
     ));
     md.push_str(&format!("# {}\n\n", title));
 
-    // Mermaid process flow diagram
-    if let Some(diagram) = mermaid::process_flow_diagram(graph, community_ids) {
+    // Mermaid process flow diagram (business flows only)
+    if let Some(diagram) = mermaid::process_flow_diagram(graph, community_ids, true) {
         md.push_str("## Process Diagram\n\n");
         md.push_str("```mermaid\n");
         md.push_str(&diagram);
@@ -120,10 +102,10 @@ pub fn render_feature_ba(
         }
     }
 
-    // Per-community workflow sections
+    // Per-community workflow sections (business flows only)
     let mut any_workflows = false;
     for cid in community_ids {
-        let procs = processes_for_community(graph, cid);
+        let procs = graph.processes_for_community(cid, true);
         if procs.is_empty() {
             continue;
         }
@@ -131,7 +113,7 @@ pub fn render_feature_ba(
             md.push_str("## Workflows\n\n");
             any_workflows = true;
         }
-        let comm_name = graph.community_name(cid);
+        let comm_name = graph.community_display_name(cid);
         md.push_str(&format!("### {}\n\n", comm_name));
 
         for proc_id in &procs {

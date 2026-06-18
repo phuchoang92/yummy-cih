@@ -14,23 +14,6 @@ fn capitalize(s: &str) -> String {
     out
 }
 
-fn processes_for_community(graph: &WikiGraph, community_id: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    for (proc_id, steps) in &graph.process_steps {
-        if let Some(first) = steps.first() {
-            let sym_id = first.symbol.id.as_str().to_string();
-            if graph
-                .community_by_member
-                .get(&sym_id)
-                .map(|c| c.as_str())
-                == Some(community_id)
-            {
-                result.push(proc_id.clone());
-            }
-        }
-    }
-    result
-}
 
 /// Render the feature-level PO (business overview) page.
 /// Aggregates routes, tables, and LLM summaries from all communities in the feature.
@@ -137,7 +120,7 @@ pub fn render_feature_po(
         .sum();
     let total_procs: usize = community_ids
         .iter()
-        .map(|cid| processes_for_community(graph, cid).len())
+        .map(|cid| graph.processes_for_community(cid, true).len())
         .sum();
 
     md.push_str(&format!(

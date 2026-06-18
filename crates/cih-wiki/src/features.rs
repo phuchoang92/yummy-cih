@@ -28,6 +28,18 @@ fn feature_from_path(path: &str) -> Option<&str> {
 
 /// Infer the dominant feature for a community from its member node file paths.
 pub fn infer_community_feature(community_id: &str, graph: &WikiGraph) -> String {
+    // Fast-path: prefer enriched prop written by cih-community
+    if let Some(feature) = graph
+        .nodes_by_id
+        .get(community_id)
+        .and_then(|n| n.props.as_ref())
+        .and_then(|p| p.get("feature"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != "shared")
+    {
+        return feature.to_string();
+    }
+
     let empty = Vec::new();
     let members = graph.members_by_community.get(community_id).unwrap_or(&empty);
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();

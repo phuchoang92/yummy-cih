@@ -20,8 +20,9 @@ fn node_id(s: &str) -> String {
 }
 
 /// Generate a `flowchart LR` process-step diagram for a feature's communities.
+/// When `business_only` is true, only includes processes with `business_flow == true`.
 /// Returns `None` if there are fewer than 2 connected steps.
-pub fn process_flow_diagram(graph: &WikiGraph, community_ids: &[String]) -> Option<String> {
+pub fn process_flow_diagram(graph: &WikiGraph, community_ids: &[String], business_only: bool) -> Option<String> {
     let mut steps: Vec<(String, String)> = Vec::new(); // (id, label)
     let mut arrows: Vec<(String, String)> = Vec::new(); // (from_id, to_id)
 
@@ -33,6 +34,9 @@ pub fn process_flow_diagram(graph: &WikiGraph, community_ids: &[String]) -> Opti
             let mid = member.id.as_str();
             if let Some(proc_list) = find_processes_for_member(graph, mid) {
                 for proc_id in proc_list {
+                    if business_only && !graph.is_business_process(proc_id) {
+                        continue;
+                    }
                     if let Some(proc_steps) = graph.process_steps.get(proc_id.as_str()) {
                         for pair in proc_steps.windows(2) {
                             let from_label = sanitize(&pair[0].symbol.name);
@@ -219,6 +223,6 @@ mod tests {
     #[test]
     fn process_flow_diagram_returns_none_for_empty_graph() {
         let g = WikiGraph::build(&[], &[], &[], &[]);
-        assert!(process_flow_diagram(&g, &[]).is_none());
+        assert!(process_flow_diagram(&g, &[], false).is_none());
     }
 }

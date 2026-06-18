@@ -419,6 +419,46 @@ impl WikiGraph {
             .map(|n| n.name.as_str())
             .unwrap_or(community_id)
     }
+
+    pub fn community_display_name<'a>(&'a self, community_id: &'a str) -> &'a str {
+        self.nodes_by_id
+            .get(community_id)
+            .and_then(|n| n.props.as_ref())
+            .and_then(|p| p.get("display_name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.community_name(community_id))
+    }
+
+    pub fn is_business_process(&self, process_id: &str) -> bool {
+        self.nodes_by_id
+            .get(process_id)
+            .and_then(|n| n.props.as_ref())
+            .and_then(|p| p.get("business_flow"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    pub fn processes_for_community(&self, community_id: &str, business_only: bool) -> Vec<String> {
+        let mut result = Vec::new();
+        for (proc_id, steps) in &self.process_steps {
+            if let Some(first) = steps.first() {
+                let sym_id = first.symbol.id.as_str().to_string();
+                if self
+                    .community_by_member
+                    .get(&sym_id)
+                    .map(|c| c.as_str())
+                    == Some(community_id)
+                {
+                    if !business_only || self.is_business_process(proc_id) {
+                        result.push(proc_id.clone());
+                    }
+                }
+            }
+        }
+        result.sort();
+        result
+    }
 }
 
 pub fn node_stereotype(node: &Node) -> Option<&str> {

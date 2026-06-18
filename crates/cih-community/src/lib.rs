@@ -98,6 +98,38 @@ pub fn detect_communities(
     );
 
     let source_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+
+    // Edge lookups for community enrichment
+    let mut route_nodes_by_handler: HashMap<NodeId, Vec<&Node>> = HashMap::new();
+    let mut queries_by_method: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut read_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut write_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut topics_by_member: HashMap<NodeId, Vec<&Node>> = HashMap::new();
+    for e in edges {
+        match e.kind {
+            EdgeKind::HandlesRoute => {
+                if let Some(rn) = source_by_id.get(&e.dst) {
+                    route_nodes_by_handler.entry(e.src.clone()).or_default().push(rn);
+                }
+            }
+            EdgeKind::ExecutesQuery => {
+                queries_by_method.entry(e.src.clone()).or_default().push(e.dst.clone());
+            }
+            EdgeKind::ReadsTable => {
+                read_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+            }
+            EdgeKind::WritesTable => {
+                write_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+            }
+            EdgeKind::PublishesEvent | EdgeKind::ListensTo => {
+                if let Some(tn) = source_by_id.get(&e.dst) {
+                    topics_by_member.entry(e.src.clone()).or_default().push(tn);
+                }
+            }
+            _ => {}
+        }
+    }
+
     let mut groups: BTreeMap<usize, Vec<NodeIndex>> = BTreeMap::new();
     for idx in community_graph.node_indices() {
         let Some(comm) = assignments.get(idx.index()).copied() else {
@@ -133,11 +165,141 @@ pub fn detect_communities(
         let label = label::heuristic_label(&member_files, comm_idx);
         let cohesion = cohesion::cohesion_score(members, &community_graph, 50);
 
+        // --- semantic enrichment ---
+        // Gather route prefixes
+        let mut route_prefix_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_route_prefixes: BTreeSet<String> = BTreeSet::new();
+        for mid in &member_ids {
+            for rn in route_nodes_by_handler.get(mid).into_iter().flatten() {
+                let path = rn.props.as_ref()
+                    .and_then(|p| p.get("path")).and_then(|v| v.as_str())
+                    .unwrap_or_else(|| rn.name.splitn(2, ' ').nth(1).unwrap_or(&rn.name));
+                if let Some(seg) = first_non_generic_path_segment(path) {
+                    *route_prefix_counts.entry(seg.clone()).or_insert(0) += 1;
+                    all_route_prefixes.insert(seg);
+                }
+            }
+        }
+
+        // Gather controller class names
+        let mut controller_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_controllers: BTreeSet<String> = BTreeSet::new();
+        for mid in &member_ids {
+            let id_str = mid.as_str();
+            let without_kind = id_str.strip_prefix("Method:")
+                .or_else(|| id_str.strip_prefix("Constructor:"))
+                .or_else(|| id_str.strip_prefix("Function:"))
+                .unwrap_or(id_str);
+            if let Some(fqcn) = without_kind.split('#').next() {
+                if let Some(simple) = fqcn.rsplit('.').next() {
+                    if simple.ends_with("Controller") || simple.ends_with("Resource") {
+                        let name = simple.strip_suffix("Controller")
+                            .or_else(|| simple.strip_suffix("Resource"))
+                            .unwrap_or(simple);
+                        let name_lower = name.to_lowercase();
+                        *controller_counts.entry(name_lower.clone()).or_insert(0) += 1;
+                        all_controllers.insert(simple.to_string());
+                    }
+                }
+            }
+        }
+
+        // Gather DB table names
+        let mut table_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_tables: BTreeSet<String> = BTreeSet::new();
+        for mid in &member_ids {
+            for qid in queries_by_method.get(mid).into_iter().flatten() {
+                for tid in read_tables_by_query.get(qid).into_iter().flatten()
+                    .chain(write_tables_by_query.get(qid).into_iter().flatten())
+                {
+                    let tname = tid.as_str().strip_prefix("DbTable:").unwrap_or(tid.as_str());
+                    all_tables.insert(tname.to_string());
+                    *table_counts.entry(tname.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Gather topic names
+        let mut topic_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_topics: BTreeSet<String> = BTreeSet::new();
+        for mid in &member_ids {
+            for tn in topics_by_member.get(mid).into_iter().flatten() {
+                let name = tn.name.as_str();
+                let name = if name.is_empty() {
+                    tn.id.as_str().strip_prefix("KafkaTopic:").unwrap_or(tn.id.as_str())
+                } else { name };
+                all_topics.insert(name.to_string());
+                *topic_counts.entry(name.to_string()).or_insert(0) += 1;
+            }
+        }
+
+        // Apply naming waterfall
+        let (display_name, naming_reason) = 'naming: {
+            // 1. Route prefix
+            if let Some(seg) = best_by_count(&route_prefix_counts) {
+                let n = capitalize_first(&seg);
+                break 'naming (n, "route_prefix");
+            }
+            // 2. Controller
+            if let Some(seg) = best_by_count(&controller_counts) {
+                let n = capitalize_first(&seg);
+                break 'naming (n, "controller");
+            }
+            // 3. DB table prefix
+            if let Some(tname) = best_by_count(&table_counts) {
+                if let Some(tok) = first_non_generic_name_token(&tname, &['_', '.', '-', '/']) {
+                    let n = capitalize_first(&tok);
+                    break 'naming (n, "db_table");
+                }
+            }
+            // 4. Topic prefix
+            if let Some(tname) = best_by_count(&topic_counts) {
+                if let Some(tok) = first_non_generic_name_token(&tname, &['_', '.', '-', '/']) {
+                    let n = capitalize_first(&tok);
+                    break 'naming (n, "topic");
+                }
+            }
+            // 5. Folder heuristic
+            if !label.is_empty() && label != format!("Cluster_{}", comm_idx) {
+                break 'naming (label.clone(), "folder");
+            }
+            // 6. Fallback
+            (format!("Cluster_{}", comm_idx), "fallback")
+        };
+
+        let feature = if naming_reason == "fallback" {
+            String::new()
+        } else {
+            display_name.to_lowercase().replace(' ', "-")
+        };
+
+        let primary_stereotype = {
+            let mut stereo_counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for mid in &member_ids {
+                if let Some(n) = source_by_id.get(mid) {
+                    if let Some(s) = n.props.as_ref()
+                        .and_then(|p| p.get("stereotype"))
+                        .and_then(|v| v.as_str())
+                    {
+                        *stereo_counts.entry(s).or_insert(0) += 1;
+                    }
+                }
+            }
+            stereo_counts.into_iter()
+                .max_by(|(a_k, a_v), (b_k, b_v)| a_v.cmp(b_v).then(b_k.cmp(a_k)))
+                .map(|(k, _)| k.to_string())
+        };
+
+        let route_prefixes_sorted: Vec<String> = all_route_prefixes.into_iter().collect();
+        let controllers_sorted: Vec<String> = all_controllers.into_iter().collect();
+        let tables_sorted: Vec<String> = all_tables.into_iter().collect();
+        let topics_sorted: Vec<String> = all_topics.into_iter().collect();
+
         out.nodes.push(Node {
             id: comm_id.clone(),
             kind: NodeKind::Community,
-            name: label.clone(),
-            qualified_name: Some(label.clone()),
+            name: display_name.clone(),
+            qualified_name: Some(display_name.clone()),
             file: String::new(),
             range: Range::default(),
             props: Some(serde_json::json!({
@@ -147,6 +309,14 @@ pub fn detect_communities(
                 "symbol_count": member_ids.len(),
                 "symbolCount": member_ids.len(),
                 "color": COLOR_PALETTE[comm_idx % COLOR_PALETTE.len()],
+                "display_name": display_name,
+                "feature": feature,
+                "naming_reason": naming_reason,
+                "route_prefixes": route_prefixes_sorted,
+                "controllers": controllers_sorted,
+                "db_tables": tables_sorted,
+                "topics": topics_sorted,
+                "primary_stereotype": primary_stereotype,
             })),
         });
 
@@ -176,16 +346,29 @@ pub fn trace_processes(
     }
 
     let membership_map: HashMap<NodeId, NodeId> = memberships.iter().cloned().collect();
-    let entry_points = entry_points::score_entry_points(nodes, &digraph, &node_index);
-    let traces = bfs::trace_process_paths(&digraph, &entry_points, &membership_map, cfg);
+    let scored = entry_points::score_entry_points(nodes, edges, &digraph, &node_index);
+    let legacy_pairs = entry_points::to_legacy_pairs(&scored);
+    let ep_by_id: HashMap<NodeId, &entry_points::ScoredEntrypoint> =
+        scored.iter().map(|s| (s.id.clone(), s)).collect();
+    let traces = bfs::trace_process_paths(&digraph, &legacy_pairs, &membership_map, cfg);
     let node_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+
+    // Track which semantic entrypoints produced at least one accepted trace
+    let mut covered_entries: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let mut out = ProcessOutput::default();
     for trace in traces {
         let trace_ids: Vec<NodeId> = trace.iter().map(|idx| digraph[*idx].clone()).collect();
-        if trace_ids.len() < cfg.min_steps {
+        let entry = trace_ids.first().cloned().unwrap_or_else(|| NodeId::new(""));
+        // HttpRoute / EventListener bypass min_steps; others must meet it
+        let is_semantic = ep_by_id
+            .get(&entry)
+            .map(|ep| ep.kind.business_flow())
+            .unwrap_or(false);
+        if !is_semantic && trace_ids.len() < cfg.min_steps {
             continue;
         }
+        covered_entries.insert(entry.as_str().to_string());
         let entry_id = trace_ids
             .first()
             .cloned()
@@ -210,6 +393,20 @@ pub fn trace_processes(
             .collect();
         let cross_community = communities.len() > 1;
 
+        let (ek_str, business_flow, business_surface, route_path_val, route_method_val, event_topics_val) =
+            if let Some(ep) = ep_by_id.get(&entry_id) {
+                (
+                    ep.kind.as_str(),
+                    ep.kind.business_flow(),
+                    ep.kind.business_surface(),
+                    ep.route_path.clone(),
+                    ep.route_method.clone(),
+                    ep.event_topics.clone(),
+                )
+            } else {
+                ("fanout", false, "internal", None, None, Vec::new())
+            };
+
         out.nodes.push(Node {
             id: proc_id.clone(),
             kind: NodeKind::Process,
@@ -224,6 +421,12 @@ pub fn trace_processes(
                 "communities": communities,
                 "entry_point_id": entry_id.as_str(),
                 "terminal_id": terminal_id.as_str(),
+                "entrypoint_kind": ek_str,
+                "business_flow": business_flow,
+                "business_surface": business_surface,
+                "route_path": route_path_val,
+                "route_method": route_method_val,
+                "event_topics": event_topics_val,
             })),
         });
 
@@ -238,7 +441,106 @@ pub fn trace_processes(
         }
     }
 
+    // Shallow one-step processes for semantic entries that produced no accepted trace
+    for ep in scored.iter().filter(|ep| ep.kind.business_flow()) {
+        if covered_entries.contains(ep.id.as_str()) {
+            continue;
+        }
+        let entry_name = display_name(&ep.id, &node_by_id);
+        let trace_hash = blake3::hash(ep.id.as_str().as_bytes()).to_hex()[..6].to_string();
+        let proc_id = process_id(&slugify(&entry_name), &trace_hash);
+        let communities: Vec<String> = membership_map
+            .get(&ep.id)
+            .map(|cid| vec![cid.as_str().to_string()])
+            .unwrap_or_default();
+        out.nodes.push(Node {
+            id: proc_id.clone(),
+            kind: NodeKind::Process,
+            name: entry_name.clone(),
+            qualified_name: Some(entry_name.clone()),
+            file: String::new(),
+            range: Range::default(),
+            props: Some(serde_json::json!({
+                "label": entry_name,
+                "process_type": "intra_community",
+                "step_count": 1,
+                "communities": communities,
+                "entry_point_id": ep.id.as_str(),
+                "terminal_id": ep.id.as_str(),
+                "entrypoint_kind": ep.kind.as_str(),
+                "business_flow": ep.kind.business_flow(),
+                "business_surface": ep.kind.business_surface(),
+                "route_path": ep.route_path,
+                "route_method": ep.route_method,
+                "event_topics": ep.event_topics,
+            })),
+        });
+        out.edges.push(Edge {
+            src: ep.id.clone(),
+            dst: proc_id,
+            kind: EdgeKind::StepInProcess,
+            confidence: 1.0,
+            reason: "step:1".into(),
+        });
+    }
+
     out
+}
+
+fn first_non_generic_path_segment(path: &str) -> Option<String> {
+    const GENERIC: &[&str] = &[
+        "api", "apis", "rest", "internal", "external", "service", "services",
+        "common", "shared", "core", "app", "apps",
+    ];
+    for part in path.split('/') {
+        let part = part.trim();
+        if part.is_empty() || part.starts_with('{') || part.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let mut chars = part.chars();
+        if matches!(chars.next(), Some('v') | Some('V')) && chars.all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let lower = part.to_lowercase();
+        if GENERIC.contains(&lower.as_str()) {
+            continue;
+        }
+        return Some(lower);
+    }
+    None
+}
+
+fn first_non_generic_name_token(name: &str, seps: &[char]) -> Option<String> {
+    const GENERIC: &[&str] = &[
+        "api", "apis", "rest", "internal", "external", "service", "services",
+        "common", "shared", "core", "app", "apps",
+    ];
+    for part in name.split(seps) {
+        let part = part.trim();
+        if part.is_empty() || part.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let lower = part.to_lowercase();
+        if GENERIC.contains(&lower.as_str()) {
+            continue;
+        }
+        return Some(lower);
+    }
+    None
+}
+
+fn best_by_count(counts: &BTreeMap<String, usize>) -> Option<String> {
+    counts.iter()
+        .max_by(|(a_k, a_v), (b_k, b_v)| a_v.cmp(b_v).then(b_k.cmp(a_k).reverse()))
+        .map(|(k, _)| k.clone())
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
 }
 
 fn smallest_id(members: &[NodeIndex], graph: &petgraph::graph::UnGraph<NodeId, f32>) -> String {
