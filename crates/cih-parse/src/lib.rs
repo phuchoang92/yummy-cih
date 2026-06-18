@@ -1153,4 +1153,72 @@ public class OverdraftAdapterImpl {
         assert!(exts.contains(&".java"), "all_extensions should include .java");
         assert!(!exts.contains(&".py"), ".py not registered");
     }
+
+    #[test]
+    fn bare_mapping_real_cart_controller() {
+        let repo = std::path::Path::new("/Users/phuc/BigMoves/dienmaychiben/212ecom-be");
+        let rel = "src/main/java/org/phuc/commerce/modules/order/controller/CartController.java";
+        if !repo.join(rel).exists() {
+            return; // skip if not present in CI
+        }
+        let output = parse_files(repo, &[rel.to_string()], &java_registry()).unwrap();
+        let route_ids: Vec<String> = output.nodes.iter()
+            .filter(|n| n.id.as_str().starts_with("Route:"))
+            .map(|n| n.id.as_str().to_string())
+            .collect();
+        assert!(
+            route_ids.iter().any(|id| id == "Route:GET /api/v1/cart"),
+            "bare @GetMapping must produce Route:GET /api/v1/cart, got: {:?}", route_ids
+        );
+        assert!(
+            route_ids.iter().any(|id| id == "Route:DELETE /api/v1/cart"),
+            "bare @DeleteMapping must produce Route:DELETE /api/v1/cart, got: {:?}", route_ids
+        );
+    }
+
+    #[test]
+    fn bare_get_mapping_emits_route_at_class_prefix() {
+        let root = temp_repo();
+        let rel = "src/main/java/com/example/CartController.java";
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"
+package com.example;
+@RestController
+@RequestMapping("/api/v1/cart")
+class CartController {
+    @GetMapping
+    public Object getMyCart(@AuthenticationPrincipal UserDetails userDetails) { return null; }
+
+    @DeleteMapping
+    public Object clearMyCart(@AuthenticationPrincipal UserDetails userDetails) { return null; }
+
+    @PostMapping("/items")
+    public Object addItem(@AuthenticationPrincipal UserDetails userDetails, Object req) { return null; }
+}
+"#).unwrap();
+
+        let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let route_ids: Vec<String> = output.nodes.iter()
+            .filter(|n| n.id.as_str().starts_with("Route:"))
+            .map(|n| n.id.as_str().to_string())
+            .collect();
+
+        assert!(
+            route_ids.iter().any(|id| id == "Route:GET /api/v1/cart"),
+            "bare @GetMapping must produce Route:GET /api/v1/cart, got: {:?}",
+            route_ids
+        );
+        assert!(
+            route_ids.iter().any(|id| id == "Route:DELETE /api/v1/cart"),
+            "bare @DeleteMapping must produce Route:DELETE /api/v1/cart, got: {:?}",
+            route_ids
+        );
+        assert!(
+            route_ids.iter().any(|id| id == "Route:POST /api/v1/cart/items"),
+            "got: {:?}", route_ids
+        );
+    }
 }
