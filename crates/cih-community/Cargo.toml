@@ -11,4 +11,5 @@ serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
 petgraph.workspace = true
+rayon.workspace = true
 

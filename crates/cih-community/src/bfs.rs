@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use rayon::prelude::*;
+
 use cih_core::NodeId;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -24,71 +26,63 @@ pub fn trace_process_paths(
         .node_indices()
         .map(|idx| (digraph[idx].clone(), idx))
         .collect();
-    let mut all_traces = Vec::new();
 
-    for (entry_id, _) in entry_points {
-        let Some(&entry_idx) = index_by_id.get(entry_id) else {
-            continue;
-        };
-        let mut traces_for_entry = Vec::new();
-        let mut states = Vec::new();
-        let mut queue = VecDeque::new();
-        states.push(TraceState {
-            node: entry_idx,
-            parent: None,
-            depth: 1,
-        });
-        queue.push_back(0usize);
-        let max_states = cfg.max_states_per_entry.max(1);
+    // Each entry point's BFS is fully independent — parallelise across CPU cores.
+    let all_traces: Vec<Vec<NodeIndex>> = entry_points
+        .par_iter()
+        .flat_map(|(entry_id, _)| {
+            let Some(&entry_idx) = index_by_id.get(entry_id) else {
+                return vec![];
+            };
+            let mut traces_for_entry: Vec<Vec<NodeIndex>> = Vec::new();
+            let mut states: Vec<TraceState> = Vec::new();
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            states.push(TraceState { node: entry_idx, parent: None, depth: 1 });
+            queue.push_back(0usize);
+            let max_states = cfg.max_states_per_entry.max(1);
 
-        while let Some(state_idx) = queue.pop_front() {
-            let state = states[state_idx];
-            let mut callees: Vec<NodeIndex> = digraph
-                .edges_directed(state.node, Direction::Outgoing)
-                .filter(|edge| *edge.weight() >= cfg.min_trace_confidence)
-                .map(|edge| edge.target())
-                .filter(|next| !contains_ancestor(&states, state_idx, *next))
-                .collect();
-            callees.sort_by(|a, b| digraph[*a].as_str().cmp(digraph[*b].as_str()));
-            callees.dedup_by_key(|n| *n);
-            callees.truncate(cfg.max_branching);
+            while let Some(state_idx) = queue.pop_front() {
+                let state = states[state_idx];
+                let mut callees: Vec<NodeIndex> = digraph
+                    .edges_directed(state.node, Direction::Outgoing)
+                    .filter(|edge| *edge.weight() >= cfg.min_trace_confidence)
+                    .map(|edge| edge.target())
+                    .filter(|next| !contains_ancestor(&states, state_idx, *next))
+                    .collect();
+                callees.sort_by(|a, b| digraph[*a].as_str().cmp(digraph[*b].as_str()));
+                callees.dedup_by_key(|n| *n);
+                callees.truncate(cfg.max_branching);
 
-            if callees.is_empty() || state.depth >= cfg.max_trace_depth {
-                if state.depth >= cfg.min_steps {
-                    traces_for_entry.push(reconstruct_path(&states, state_idx));
+                if callees.is_empty() || state.depth >= cfg.max_trace_depth {
+                    if state.depth >= cfg.min_steps {
+                        traces_for_entry.push(reconstruct_path(&states, state_idx));
+                    }
+                    continue;
                 }
-                continue;
-            }
-
-            if states.len() >= max_states {
-                if state.depth >= cfg.min_steps {
-                    traces_for_entry.push(reconstruct_path(&states, state_idx));
-                }
-                continue;
-            }
-
-            for next in callees {
                 if states.len() >= max_states {
-                    break;
+                    if state.depth >= cfg.min_steps {
+                        traces_for_entry.push(reconstruct_path(&states, state_idx));
+                    }
+                    continue;
                 }
-                let next_state = TraceState {
-                    node: next,
-                    parent: Some(state_idx),
-                    depth: state.depth + 1,
-                };
-                states.push(next_state);
-                queue.push_back(states.len() - 1);
+                for next in callees {
+                    if states.len() >= max_states {
+                        break;
+                    }
+                    states.push(TraceState { node: next, parent: Some(state_idx), depth: state.depth + 1 });
+                    queue.push_back(states.len() - 1);
+                }
             }
-        }
 
-        traces_for_entry.sort_by(|a, b| {
-            b.len()
-                .cmp(&a.len())
-                .then_with(|| encode_trace(a, digraph).cmp(&encode_trace(b, digraph)))
-        });
-        traces_for_entry.truncate(cfg.max_branching * 3);
-        all_traces.extend(traces_for_entry);
-    }
+            traces_for_entry.sort_by(|a, b| {
+                b.len()
+                    .cmp(&a.len())
+                    .then_with(|| encode_trace(a, digraph).cmp(&encode_trace(b, digraph)))
+            });
+            traces_for_entry.truncate(cfg.max_branching * 3);
+            traces_for_entry
+        })
+        .collect();
 
     let mut traces = deduplicate_traces(all_traces, digraph);
     traces.sort_by(|a, b| {

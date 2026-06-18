@@ -472,6 +472,7 @@ dependencies = [
  "blake3",
  "cih-core",
  "petgraph",
+ "rayon",
  "serde",
  "serde_json",
 ]

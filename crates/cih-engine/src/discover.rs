@@ -78,14 +78,18 @@ pub(crate) fn run_discover_core(repo: &Path) -> Result<DiscoverOutcome> {
 
     let mut community_cfg = cih_community::CommunityConfig::default();
     if cih_community::is_large_graph(&nodes) {
+        // Large graphs are often sparsely connected (many unresolved external refs), so
+        // keeping resolution at 1.0 avoids over-splitting already-fragmented clusters.
+        // Raise min_community_size to 3 to drop 2-node fragments that aren't meaningful.
         tracing::info!(
             nodes = nodes.len(),
-            resolution = 2.0,
+            resolution = 1.0,
             max_iterations = 3,
-            "large graph detected — using higher resolution"
+            min_community_size = 3,
+            "large graph detected — using conservative resolution to reduce fragmentation"
         );
-        community_cfg.resolution = 2.0;
         community_cfg.max_iterations = 3;
+        community_cfg.min_community_size = 3;
     }
 
     tracing::info!("running community detection");
