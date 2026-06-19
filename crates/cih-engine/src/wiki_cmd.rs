@@ -172,6 +172,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "graph artifacts loaded"
     );
 
+    let bodies = cih_wiki::source_bodies(&nodes, repo);
+
     let (all_community_nodes, community_edges, community_version) = match latest_community_artifacts(
         repo,
     ) {
@@ -678,6 +680,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         controller_summaries,
         feature_llm_summaries: feature_llm_map,
         filter_feature,
+        bodies,
     };
 
     tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");

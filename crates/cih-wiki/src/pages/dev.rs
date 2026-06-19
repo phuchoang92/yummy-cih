@@ -1,8 +1,9 @@
+use crate::bodies::BodyEntry;
 use crate::graph::{node_stereotype, route_http_method, route_path, WikiGraph};
 use crate::mermaid;
 use crate::{CommunityLlmFull, CommunityLlmSummary};
 use cih_core::{Node, NodeKind, RepoMap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Strip a trailing `-N` numeric suffix from a slug, returning (base, suffix).
 /// E.g. `"admin-customer-service-2"` → `("admin-customer-service", Some(2))`.
@@ -165,6 +166,20 @@ pub fn community_display_title(_graph: &WikiGraph, community: &Node, page_path: 
     }
 }
 
+fn lang_tag(file: &str) -> &str {
+    match file.rfind('.').map(|i| &file[i + 1..]).unwrap_or("") {
+        "java" => "java",
+        "ts" | "tsx" => "typescript",
+        "py" => "python",
+        _ => "",
+    }
+}
+
+/// Encode `<` and `>` so MDX/JSX doesn't treat Java generics as JSX tags.
+fn html_encode_angles(s: &str) -> String {
+    s.replace('<', "&lt;").replace('>', "&gt;")
+}
+
 /// `page_path` is the full path without "pages/" prefix, e.g. `"payment/dev/payment-controller"`.
 pub fn render_dev_community(
     graph: &WikiGraph,
@@ -172,6 +187,7 @@ pub fn render_dev_community(
     page_path: &str,
     llm: Option<&CommunityLlmSummary>,
     llm_full: Option<&CommunityLlmFull>,
+    bodies: &HashMap<String, BodyEntry>,
 ) -> String {
     let comm_id = community.id.as_str();
     let page_title = community_display_title(graph, community, page_path);
@@ -246,8 +262,20 @@ pub fn render_dev_community(
         }
     }
 
+    // Separate test classes from production classes upfront so tests never appear
+    // as peer sections in ## Classes — they get their own ## Tests section.
+    let mut test_class_entries: Vec<(&str, &Vec<&Node>)> = Vec::new();
+
     if !class_to_methods.is_empty() {
-        md.push_str("## Classes\n\n");
+        let has_non_test = class_to_methods.iter().any(|(cls_id, _)| {
+            graph.nodes_by_id.get(cls_id)
+                .and_then(node_stereotype)
+                .map(|s| s != "test")
+                .unwrap_or(true)
+        });
+        if has_non_test {
+            md.push_str("## Classes\n\n");
+        }
 
         for (cls_id, methods) in &class_to_methods {
             let cls = graph.nodes_by_id.get(cls_id);
@@ -259,6 +287,11 @@ pub fn render_dev_community(
                     .unwrap_or(cls_id)
             });
             let stereotype = cls.and_then(node_stereotype).unwrap_or("—");
+
+            if stereotype == "test" {
+                test_class_entries.push((cls_name, methods));
+                continue;
+            }
 
             let test_names: Vec<&str> = cls
                 .map(|c| {
@@ -327,6 +360,71 @@ pub fn render_dev_community(
                 }
                 md.push('\n');
             }
+
+            // Collapsible body blocks — skip entirely for interface/abstract classes whose
+            // "bodies" are just the signature declaration line.
+            let is_interface = matches!(cls.map(|n| n.kind), Some(NodeKind::Interface));
+            for method in methods.iter() {
+                if is_interface {
+                    continue;
+                }
+                let Some(body) = bodies.get(method.id.as_str()) else {
+                    continue;
+                };
+                let sig = html_encode_angles(&method_signature(method));
+                let lang = lang_tag(&method.file);
+                let location = if method.range.start_line > 0 && method.range.end_line > 0 {
+                    format!(" — lines {}–{}", method.range.start_line, method.range.end_line)
+                } else {
+                    String::new()
+                };
+
+                if body.original_lines <= 80 {
+                    // Path A: short method — show stripped body, header only when lines removed
+                    let stripped_lines = body.stripped.trim().lines().count();
+                    let code_content = if stripped_lines < body.original_lines {
+                        let comment_prefix = if lang == "python" { "#" } else { "//" };
+                        format!(
+                            "{} stripped · {} of {} lines shown\n{}",
+                            comment_prefix, stripped_lines, body.original_lines, body.stripped.trim()
+                        )
+                    } else {
+                        body.stripped.trim().to_string()
+                    };
+                    md.push_str(&format!(
+                        "<details>\n<summary><code>{}</code>{}</summary>\n\n",
+                        sig, location
+                    ));
+                    if lang.is_empty() {
+                        md.push_str(&format!("```\n{}\n```\n\n", code_content));
+                    } else {
+                        md.push_str(&format!("```{}\n{}\n```\n\n", lang, code_content));
+                    }
+                    md.push_str("</details>\n\n");
+                } else {
+                    // Path B: god function — show first 30 stripped lines so the flow is visible
+                    let preview: Vec<&str> = body.stripped.lines().take(30).collect();
+                    if !preview.is_empty() {
+                        let comment_prefix = if lang == "python" { "#" } else { "//" };
+                        let code_content = format!(
+                            "{} god function · {} lines — first 30 stripped lines shown\n{}",
+                            comment_prefix,
+                            body.original_lines,
+                            preview.join("\n")
+                        );
+                        md.push_str(&format!(
+                            "<details>\n<summary><code>{}</code>{} ⚠ large method</summary>\n\n",
+                            sig, location
+                        ));
+                        if lang.is_empty() {
+                            md.push_str(&format!("```\n{}\n```\n\n", code_content));
+                        } else {
+                            md.push_str(&format!("```{}\n{}\n```\n\n", lang, code_content));
+                        }
+                        md.push_str("</details>\n\n");
+                    }
+                }
+            }
         }
     }
 
@@ -384,9 +482,25 @@ pub fn render_dev_community(
         md.push('\n');
     }
 
-    if let Some(test_ids) = graph.community_tests.get(comm_id) {
+    if !test_class_entries.is_empty() {
+        md.push_str("## Tests\n\n");
+        for (cls_name, test_methods) in &test_class_entries {
+            md.push_str(&format!("**`{}`**\n\n", cls_name));
+            let test_fns: Vec<&str> = test_methods
+                .iter()
+                .filter(|m| matches!(m.kind, NodeKind::Method))
+                .map(|m| m.name.as_str())
+                .collect();
+            if !test_fns.is_empty() {
+                for name in &test_fns {
+                    md.push_str(&format!("- `{}`\n", name));
+                }
+                md.push('\n');
+            }
+        }
+    } else if let Some(test_ids) = graph.community_tests.get(comm_id) {
         if !test_ids.is_empty() {
-            md.push_str("## Test Coverage\n\n");
+            md.push_str("## Tests\n\n");
             for tid in test_ids {
                 if let Some(test_node) = graph.nodes_by_id.get(tid) {
                     md.push_str(&format!("- `{}`\n", test_node.name));
@@ -566,7 +680,7 @@ mod tests {
     fn render_dev_community_shows_classes() {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None);
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None, &HashMap::new());
         assert!(md.contains("---\ntitle: Order Service"), "has frontmatter");
         assert!(md.contains("OrderService"), "has class name");
         assert!(md.contains("service"), "has stereotype");
@@ -641,7 +755,7 @@ mod tests {
         ];
         let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
         let comm_node = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm_node, "shared/dev/order-service", None, None);
+        let md = render_dev_community(&g, &comm_node, "shared/dev/order-service", None, None, &HashMap::new());
         assert!(md.contains("## DB Access"), "has db access section");
         assert!(md.contains("ORDERS"), "has table name");
         assert!(md.contains("✓"), "has check mark");
@@ -651,7 +765,7 @@ mod tests {
     fn render_dev_community_omits_db_access_when_none() {
         let g = simple_dev_graph();
         let comm = g.community_nodes[0].clone();
-        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None);
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None, &HashMap::new());
         assert!(
             !md.contains("## DB Access"),
             "no db access section when no tables"
@@ -667,7 +781,7 @@ mod tests {
             ba: String::new(),
             dev: "Service-repository pattern with 8 methods.".to_string(),
         };
-        let md = render_dev_community(&g, &comm, "shared/dev/order-service", Some(&llm), None);
+        let md = render_dev_community(&g, &comm, "shared/dev/order-service", Some(&llm), None, &HashMap::new());
         assert!(md.contains("## Summary"), "has summary section");
         assert!(md.contains("Service-repository pattern"), "has llm text");
     }

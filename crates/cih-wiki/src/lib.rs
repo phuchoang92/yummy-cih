@@ -1,3 +1,4 @@
+pub mod bodies;
 pub mod features;
 pub mod graph;
 pub mod html;
@@ -7,6 +8,7 @@ pub mod module_tree;
 pub mod pages;
 pub mod slugify;
 
+pub use bodies::{source_bodies, BodyEntry};
 pub use cih_core::RepoMap;
 pub use features::FeatureGroup;
 pub use graph::WikiGraph;
@@ -114,6 +116,8 @@ pub struct WikiInput<'a> {
     /// Only generate pages for features whose name contains one of these substrings
     /// (case-insensitive). Empty = no filter.
     pub filter_feature: Vec<String>,
+    /// Stripped source bodies keyed by node_id string. Empty map = no bodies shown.
+    pub bodies: HashMap<String, BodyEntry>,
 }
 
 #[derive(Debug)]
@@ -401,7 +405,14 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 .unwrap_or("shared/dev/community");
             let llm = input.llm_summaries.as_ref().and_then(|m| m.get(comm_id));
             let llm_full = input.llm_full.as_ref().and_then(|m| m.get(comm_id));
-            let md = pages::dev::render_dev_community(&graph, &comm, page_path, llm, llm_full);
+            let md = pages::dev::render_dev_community(
+                &graph,
+                &comm,
+                page_path,
+                llm,
+                llm_full,
+                &input.bodies,
+            );
             let json_val = pages::dev::render_dev_community_json(&graph, &comm);
             std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &md)?;
             std::fs::write(
@@ -607,6 +618,7 @@ mod tests {
             controller_summaries: None,
             feature_llm_summaries: None,
             filter_feature: vec![],
+            bodies: HashMap::new(),
         }
     }
 
@@ -709,6 +721,7 @@ mod tests {
             controller_summaries: None,
             feature_llm_summaries: None,
             filter_feature: vec![],
+            bodies: HashMap::new(),
         };
         let outcome = generate_wiki(input, &out).unwrap();
 
