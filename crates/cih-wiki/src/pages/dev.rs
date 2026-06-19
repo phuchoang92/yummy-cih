@@ -131,36 +131,125 @@ pub fn render_dev_index(
     md
 }
 
-/// Build the sidebar/manifest title for a community dev page.
-/// Strips trailing numeric suffix and appends the primary stereotype from the community node.
-pub fn community_display_title(_graph: &WikiGraph, community: &Node, page_path: &str) -> String {
-    let slug = page_path.split('/').last().unwrap_or(&community.name);
-    let (base_slug, _) = strip_numeric_suffix(slug);
-    let base_name: String = base_slug
-        .split('-')
-        .map(|word| {
-            let mut c = word.chars();
-            match c.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-            }
+fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
+fn slug_to_title(slug: &str) -> String {
+    slug.split('-').map(cap_first).collect::<Vec<_>>().join(" ")
+}
+
+/// Normalize a name or slug to alphanumeric-only lowercase for comparison.
+/// Handles both camelCase (`FineractFeignClient`) and kebab (`fineract-feign-client`).
+fn name_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// When a community page has a numeric suffix (e.g. `fineract-feign-client-2`),
+/// look at the community's members for a more distinctive class to use as the title.
+/// Returns None when all members belong to the same (shredded) base class.
+fn distinctive_class_name(graph: &WikiGraph, community: &Node, base_slug: &str) -> Option<String> {
+    let base_key = name_key(base_slug);
+    let comm_id = community.id.as_str();
+    let empty: Vec<Node> = Vec::new();
+    let members = graph.members_by_community.get(comm_id).unwrap_or(&empty);
+
+    let mut class_info: HashMap<String, (String, usize, bool)> = HashMap::new();
+    for m in members {
+        if !matches!(m.kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function) {
+            continue;
+        }
+        let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
+            let fqcn = prefix
+                .trim_start_matches("Method:")
+                .trim_start_matches("Constructor:");
+            format!("Class:{}", fqcn)
+        }) else {
+            continue;
+        };
+        let Some(cls_node) = graph.nodes_by_id.get(&cls_id) else {
+            continue;
+        };
+        // Normalize both sides: handles camelCase vs kebab mismatch
+        if name_key(&cls_node.name) == base_key {
+            continue;
+        }
+        let entry = class_info.entry(cls_id).or_insert_with(|| {
+            let stereo = node_stereotype(cls_node);
+            let is_test = stereo == Some("test");
+            let has_domain = !is_test && stereo.is_some();
+            (cls_node.name.clone(), 0usize, has_domain)
+        });
+        entry.1 += 1;
+    }
+
+    // Prefer domain-stereotyped classes (service/component/controller), then most methods.
+    class_info
+        .into_values()
+        .filter(|(name, _, _)| {
+            !name.ends_with("Test") && !name.ends_with("Tests") && !name.ends_with("Spec")
         })
-        .collect::<Vec<_>>()
-        .join(" ");
-    // Read primary_stereotype from the community node's own props (set by discover).
-    let stereotype = community
+        .max_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)))
+        .map(|(name, _, _)| name)
+}
+
+/// For a single-class shredded community, pick the method with the most outgoing calls
+/// as a hint to distinguish this fragment. E.g. `verifyDelinquencyAction`.
+fn lead_method_hint(graph: &WikiGraph, community: &Node) -> Option<String> {
+    let comm_id = community.id.as_str();
+    let empty: Vec<Node> = Vec::new();
+    let members = graph.members_by_community.get(comm_id).unwrap_or(&empty);
+
+    members
+        .iter()
+        .filter(|m| matches!(m.kind, NodeKind::Method))
+        .filter(|m| !m.name.starts_with("get") && !m.name.starts_with("set") && !m.name.starts_with("is"))
+        .max_by_key(|m| {
+            graph.calls_out.get(m.id.as_str()).map(|v| v.len()).unwrap_or(0)
+        })
+        .map(|m| m.name.clone())
+}
+
+/// Build the sidebar/manifest title for a community dev page.
+pub fn community_display_title(graph: &WikiGraph, community: &Node, page_path: &str) -> String {
+    let slug = page_path.split('/').last().unwrap_or(&community.name);
+    let (base_slug, suffix) = strip_numeric_suffix(slug);
+
+    let primary_stereotype = community
         .props
         .as_ref()
         .and_then(|p| p.get("primary_stereotype"))
         .and_then(|v| v.as_str())
-        .map(|s| {
-            let mut c = s.chars();
-            match c.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-            }
-        });
-    match stereotype {
+        .map(cap_first);
+
+    // Numbered duplicate page — try to find a more meaningful title from the community members.
+    if suffix.is_some() {
+        // Case A: multiple classes — use the non-shared distinctive class name.
+        if let Some(distinctive) = distinctive_class_name(graph, community, base_slug) {
+            return match primary_stereotype {
+                Some(s) => format!("{} · {}", distinctive, s),
+                None => distinctive,
+            };
+        }
+        // Case B: single class shredded across communities — append lead method as hint.
+        if let Some(hint) = lead_method_hint(graph, community) {
+            let base_name = slug_to_title(base_slug);
+            return match primary_stereotype {
+                Some(s) => format!("{} · {} · {}", base_name, hint, s),
+                None => format!("{} · {}", base_name, hint),
+            };
+        }
+    }
+
+    let base_name = slug_to_title(base_slug);
+    match primary_stereotype {
         Some(s) => format!("{} · {}", base_name, s),
         None => base_name,
     }
@@ -530,6 +619,402 @@ pub fn render_dev_community(
     }
 
     md
+}
+
+/// Render a full dev page for a single class (all methods, routes, DB access, tests).
+pub fn render_dev_class(
+    graph: &WikiGraph,
+    cls: &Node,
+    bodies: &HashMap<String, BodyEntry>,
+) -> String {
+    let cls_id = cls.id.as_str();
+    let cls_name = &cls.name;
+    let stereotype = node_stereotype(cls).unwrap_or("—");
+    let is_interface = matches!(cls.kind, NodeKind::Interface);
+
+    let empty_methods: Vec<Node> = Vec::new();
+    let all_methods = graph.methods_by_class.get(cls_id).unwrap_or(&empty_methods);
+
+    let mut md = String::new();
+    md.push_str(&format!("---\ntitle: {}\nrole: dev\n---\n\n", cls_name));
+    md.push_str("<div class=\"role-banner role-dev\"><span class=\"role-dot\"></span>Developer<span class=\"role-desc\">Technical structure, calls &amp; tests</span></div>\n\n");
+    md.push_str(&format!("# {} — Technical Reference\n\n", cls_name));
+
+    if let Some(diagram) = mermaid::class_call_diagram_for_class(graph, cls_id) {
+        md.push_str("## Class Interactions\n\n");
+        md.push_str("```mermaid\n");
+        md.push_str(&diagram);
+        md.push_str("```\n\n");
+    }
+
+    let visible: Vec<&Node> = all_methods
+        .iter()
+        .filter(|m| !matches!(m.kind, NodeKind::Constructor))
+        .collect();
+
+    if !visible.is_empty() {
+        md.push_str("## Methods\n\n");
+
+        // File reference for the class (one line, no subsection heading)
+        let file = if !cls.file.is_empty() {
+            cls.file.as_str()
+        } else {
+            visible.first().map(|m| m.file.as_str()).unwrap_or("")
+        };
+        if !file.is_empty() {
+            let stereo_part = if stereotype != "—" {
+                format!(" · _{}_", stereotype)
+            } else {
+                String::new()
+            };
+            if cls.range.start_line > 0 {
+                md.push_str(&format!("`{}` :{}{}  \n\n", file, cls.range.start_line, stereo_part));
+            } else {
+                md.push_str(&format!("`{}`{}  \n\n", file, stereo_part));
+            }
+        }
+
+        // Per-method sections: each method is an H3 so it appears in the right-nav TOC.
+        for (idx, method) in visible.iter().enumerate() {
+            let sig = method_signature(method);
+            let ret = format_return_type(method);
+            let lang = lang_tag(&method.file);
+
+            if idx > 0 {
+                md.push_str("---\n\n");
+            }
+
+            // H3 heading → Docusaurus right-nav TOC entry
+            md.push_str(&format!("### `{}`\n\n", sig));
+
+            // Return type + line number on one line
+            if method.range.start_line > 0 {
+                md.push_str(&format!(
+                    "**Returns** `{}` · **Line** :{}\n\n",
+                    ret, method.range.start_line
+                ));
+            } else {
+                md.push_str(&format!("**Returns** `{}`\n\n", ret));
+            }
+
+            // All outgoing calls as a bullet list (no truncation)
+            let empty_calls: Vec<String> = Vec::new();
+            let call_nodes: Vec<String> = graph
+                .calls_out
+                .get(method.id.as_str())
+                .unwrap_or(&empty_calls)
+                .iter()
+                .filter_map(|cid| graph.nodes_by_id.get(cid))
+                .map(callee_display)
+                .collect();
+            if !call_nodes.is_empty() {
+                md.push_str("**Calls**\n\n");
+                for call in &call_nodes {
+                    md.push_str(&format!("- `{}`\n", call));
+                }
+                md.push('\n');
+            }
+
+            // Source body block
+            if !is_interface {
+                if let Some(body) = bodies.get(method.id.as_str()) {
+                    let location = if method.range.start_line > 0 && method.range.end_line > 0 {
+                        format!("Lines {}–{}", method.range.start_line, method.range.end_line)
+                    } else {
+                        "Source".to_string()
+                    };
+
+                    if body.original_lines <= 80 {
+                        let stripped_lines = body.stripped.trim().lines().count();
+                        let code_content = if stripped_lines < body.original_lines {
+                            let comment_prefix = if lang == "python" { "#" } else { "//" };
+                            format!(
+                                "{} stripped · {} of {} lines shown\n{}",
+                                comment_prefix,
+                                stripped_lines,
+                                body.original_lines,
+                                body.stripped.trim()
+                            )
+                        } else {
+                            body.stripped.trim().to_string()
+                        };
+                        md.push_str(&format!(
+                            "<details>\n<summary>{}</summary>\n\n",
+                            location
+                        ));
+                        if lang.is_empty() {
+                            md.push_str(&format!("```\n{}\n```\n\n", code_content));
+                        } else {
+                            md.push_str(&format!("```{}\n{}\n```\n\n", lang, code_content));
+                        }
+                        md.push_str("</details>\n\n");
+                    } else {
+                        let preview: Vec<&str> = body.stripped.lines().take(30).collect();
+                        if !preview.is_empty() {
+                            let comment_prefix = if lang == "python" { "#" } else { "//" };
+                            let code_content = format!(
+                                "{} god function · {} lines — first 30 stripped lines shown\n{}",
+                                comment_prefix,
+                                body.original_lines,
+                                preview.join("\n")
+                            );
+                            md.push_str(&format!(
+                                "<details>\n<summary>{} ⚠ large method</summary>\n\n",
+                                location
+                            ));
+                            if lang.is_empty() {
+                                md.push_str(&format!("```\n{}\n```\n\n", code_content));
+                            } else {
+                                md.push_str(&format!("```{}\n{}\n```\n\n", lang, code_content));
+                            }
+                            md.push_str("</details>\n\n");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Routes handled by methods of this class
+    let class_routes: Vec<&(Node, Node)> = graph
+        .routes
+        .iter()
+        .filter(|(handler, _)| {
+            handler
+                .id
+                .as_str()
+                .split_once('#')
+                .map(|(prefix, _)| {
+                    let fqcn = prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:");
+                    format!("Class:{}", fqcn) == cls_id
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    if !class_routes.is_empty() {
+        md.push_str("## Routes\n\n");
+        md.push_str("| Method | Path | Handler |\n");
+        md.push_str("|---|---|---|\n");
+        for (handler, route) in &class_routes {
+            md.push_str(&format!(
+                "| `{}` | `{}` | `{}` |\n",
+                route_http_method(route),
+                route_path(route),
+                handler.name
+            ));
+        }
+        md.push('\n');
+    }
+
+    // DB access aggregated from all methods
+    let mut raw_db: std::collections::BTreeMap<String, (bool, bool)> =
+        std::collections::BTreeMap::new();
+    for method in all_methods {
+        if let Some(query_ids) = graph.executes_query.get(method.id.as_str()) {
+            for qid in query_ids {
+                for tid in graph
+                    .query_reads_table
+                    .get(qid.as_str())
+                    .into_iter()
+                    .flatten()
+                {
+                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                    raw_db.entry(name).or_default().0 = true;
+                }
+                for tid in graph
+                    .query_writes_table
+                    .get(qid.as_str())
+                    .into_iter()
+                    .flatten()
+                {
+                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                    raw_db.entry(name).or_default().1 = true;
+                }
+            }
+        }
+    }
+    if !raw_db.is_empty() {
+        md.push_str("## DB Access\n\n");
+        md.push_str("| Table | Read | Write |\n");
+        md.push_str("|---|---|---|\n");
+        for (table, (r, w)) in &raw_db {
+            md.push_str(&format!(
+                "| `{}` | {} | {} |\n",
+                table,
+                if *r { "✓" } else { "" },
+                if *w { "✓" } else { "" }
+            ));
+        }
+        md.push('\n');
+    }
+
+    // External calls
+    let mut ext_call_names: Vec<String> = Vec::new();
+    for method in all_methods {
+        if let Some(ext_ids) = graph.external_calls.get(method.id.as_str()) {
+            for eid in ext_ids {
+                if let Some(ext_node) = graph.nodes_by_id.get(eid) {
+                    if !ext_call_names.contains(&ext_node.name) {
+                        ext_call_names.push(ext_node.name.clone());
+                    }
+                }
+            }
+        }
+    }
+    if !ext_call_names.is_empty() {
+        md.push_str("## External Calls\n\n");
+        for name in &ext_call_names {
+            md.push_str(&format!("- `{}`\n", name));
+        }
+        md.push('\n');
+    }
+
+    // Tests: find test classes that test any method of this class via Tests edges
+    let mut test_class_names: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for method in all_methods {
+        if let Some(tester_ids) = graph.tests_in.get(method.id.as_str()) {
+            for tid in tester_ids {
+                if let Some(tcls_id) = tid.split_once('#').map(|(prefix, _)| {
+                    format!("Class:{}", prefix.trim_start_matches("Method:"))
+                }) {
+                    if let Some(tcls_node) = graph.nodes_by_id.get(&tcls_id) {
+                        test_class_names.insert(tcls_node.name.clone());
+                    }
+                }
+            }
+        }
+    }
+    // Also check tests_in at the class level
+    if let Some(tester_ids) = graph.tests_in.get(cls_id) {
+        for tid in tester_ids {
+            if let Some(tcls_node) = graph.nodes_by_id.get(tid) {
+                test_class_names.insert(tcls_node.name.clone());
+            }
+        }
+    }
+    if !test_class_names.is_empty() {
+        md.push_str("## Tests\n\n");
+        for name in &test_class_names {
+            md.push_str(&format!("- `{}`\n", name));
+        }
+        md.push('\n');
+    }
+
+    // Important files
+    let mut files: Vec<&str> = all_methods
+        .iter()
+        .filter(|n| !n.file.is_empty())
+        .map(|n| n.file.as_str())
+        .collect();
+    if !cls.file.is_empty() {
+        files.push(cls.file.as_str());
+    }
+    files.sort_unstable();
+    files.dedup();
+
+    if !files.is_empty() {
+        md.push_str("## Important Files\n\n");
+        for f in files.iter().take(10) {
+            md.push_str(&format!("- `{}`\n", f));
+        }
+        if files.len() > 10 {
+            md.push_str(&format!("- _…and {} more_\n", files.len() - 10));
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
+/// JSON representation of a class page for search/AI use.
+pub fn render_dev_class_json(graph: &WikiGraph, cls: &Node) -> serde_json::Value {
+    let cls_id = cls.id.as_str();
+
+    let empty_methods: Vec<Node> = Vec::new();
+    let methods = graph.methods_by_class.get(cls_id).unwrap_or(&empty_methods);
+
+    // Collect this class + all direct call neighbors
+    let mut neighbor_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    neighbor_ids.insert(cls_id.to_string());
+    let mut seen_edges: Vec<(String, String)> = Vec::new();
+
+    for method in methods {
+        if let Some(callees) = graph.calls_out.get(method.id.as_str()) {
+            for callee in callees {
+                if let Some(callee_class) = callee.split_once('#').map(|(prefix, _)| {
+                    format!(
+                        "Class:{}",
+                        prefix
+                            .trim_start_matches("Method:")
+                            .trim_start_matches("Constructor:")
+                    )
+                }) {
+                    if callee_class != cls_id {
+                        let edge = (cls_id.to_string(), callee_class.clone());
+                        if !seen_edges.contains(&edge) {
+                            seen_edges.push(edge);
+                            neighbor_ids.insert(callee_class);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(callers) = graph.calls_in.get(method.id.as_str()) {
+            for caller in callers {
+                if let Some(caller_class) = caller.split_once('#').map(|(prefix, _)| {
+                    format!(
+                        "Class:{}",
+                        prefix
+                            .trim_start_matches("Method:")
+                            .trim_start_matches("Constructor:")
+                    )
+                }) {
+                    if caller_class != cls_id {
+                        let edge = (caller_class.clone(), cls_id.to_string());
+                        if !seen_edges.contains(&edge) {
+                            seen_edges.push(edge);
+                            neighbor_ids.insert(caller_class);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let nodes: Vec<serde_json::Value> = neighbor_ids
+        .iter()
+        .filter_map(|cid| graph.nodes_by_id.get(cid))
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id.as_str(),
+                "label": n.name.as_str(),
+                "kind": n.kind.label(),
+                "stereotype": node_stereotype(n).unwrap_or(""),
+            })
+        })
+        .collect();
+
+    let links: Vec<serde_json::Value> = seen_edges
+        .into_iter()
+        .filter(|(src, dst)| neighbor_ids.contains(src.as_str()) && neighbor_ids.contains(dst.as_str()))
+        .map(|(src, dst)| {
+            serde_json::json!({
+                "source": src,
+                "target": dst,
+                "label": "CALLS",
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "format": "d3-force",
+        "class_id": cls_id,
+        "nodes": nodes,
+        "links": links,
+    })
 }
 
 pub fn render_dev_community_json(graph: &WikiGraph, community: &Node) -> serde_json::Value {

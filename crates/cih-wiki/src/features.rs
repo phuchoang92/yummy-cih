@@ -177,12 +177,22 @@ pub fn group_communities_by_feature(graph: &WikiGraph) -> Vec<FeatureGroup> {
 }
 
 /// Convert a PascalCase class name to a kebab-case slug.
-/// `PaymentOrchestrationService` → `payment-orchestration-service`
+/// Handles acronyms correctly: `ProgressiveEMICalculator` → `progressive-emi-calculator`,
+/// `PaymentOrchestrationService` → `payment-orchestration-service`.
+/// Rule: insert `-` before an uppercase letter when the previous char is lowercase,
+/// OR when the previous char is uppercase but the next char is lowercase (end of acronym).
 pub fn pascal_to_kebab(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
     let mut result = String::new();
-    for (i, ch) in name.char_indices() {
+    for (i, &ch) in chars.iter().enumerate() {
         if ch.is_uppercase() && i > 0 {
-            result.push('-');
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+            let prev_lower = prev.is_lowercase();
+            let next_lower = next.map(|c| c.is_lowercase()).unwrap_or(false);
+            if prev_lower || (prev.is_uppercase() && next_lower) {
+                result.push('-');
+            }
         }
         result.push(ch.to_ascii_lowercase());
     }
@@ -457,5 +467,12 @@ mod tests {
             "payment-orchestration-service"
         );
         assert_eq!(pascal_to_kebab("PosOrderService"), "pos-order-service");
+        // Acronyms must stay together
+        assert_eq!(
+            pascal_to_kebab("ProgressiveEMICalculator"),
+            "progressive-emi-calculator"
+        );
+        assert_eq!(pascal_to_kebab("URLParser"), "url-parser");
+        assert_eq!(pascal_to_kebab("LoanReadPlatformServiceImpl"), "loan-read-platform-service-impl");
     }
 }

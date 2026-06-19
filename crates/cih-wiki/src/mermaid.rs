@@ -222,6 +222,109 @@ pub fn class_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String> {
     Some(out)
 }
 
+/// Generate a `flowchart LR` class-level call diagram for a class's dev page.
+/// Shows the class with its callers (inbound) and callees (outbound).
+pub fn class_call_diagram_for_class(graph: &WikiGraph, class_id: &str) -> Option<String> {
+    let methods = graph.methods_by_class.get(class_id)?;
+
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut seen_nodes: Vec<String> = Vec::new();
+    seen_nodes.push(class_id.to_string());
+
+    // Outgoing: this class calls others
+    'outer_out: for method in methods {
+        if let Some(callees) = graph.calls_out.get(method.id.as_str()) {
+            for callee in callees {
+                if let Some(callee_class) = class_id_of(callee) {
+                    if callee_class == class_id {
+                        continue;
+                    }
+                    let edge = (class_id.to_string(), callee_class.clone());
+                    if !edges.contains(&edge) {
+                        edges.push(edge);
+                        if !seen_nodes.contains(&callee_class) {
+                            seen_nodes.push(callee_class);
+                        }
+                    }
+                    if edges.len() >= MAX_EDGES {
+                        break 'outer_out;
+                    }
+                }
+            }
+        }
+    }
+
+    // Incoming: other classes call into this class
+    'outer_in: for method in methods {
+        if let Some(callers) = graph.calls_in.get(method.id.as_str()) {
+            for caller in callers {
+                if let Some(caller_class) = class_id_of(caller) {
+                    if caller_class == class_id {
+                        continue;
+                    }
+                    let edge = (caller_class.clone(), class_id.to_string());
+                    if !edges.contains(&edge) {
+                        edges.push(edge);
+                        if !seen_nodes.contains(&caller_class) {
+                            seen_nodes.push(caller_class);
+                        }
+                    }
+                    if edges.len() >= MAX_EDGES {
+                        break 'outer_in;
+                    }
+                }
+                if seen_nodes.len() >= MAX_NODES {
+                    break 'outer_in;
+                }
+            }
+        }
+    }
+
+    if edges.is_empty() {
+        return None;
+    }
+
+    // Truncate seen_nodes to MAX_NODES
+    seen_nodes.truncate(MAX_NODES);
+
+    let class_label = |cid: &str| -> String {
+        let simple = cid
+            .trim_start_matches("Class:")
+            .rsplit('.')
+            .next()
+            .unwrap_or(cid)
+            .to_string();
+        let stereo = graph
+            .nodes_by_id
+            .get(cid)
+            .and_then(|n| n.props.as_ref())
+            .and_then(|p| p.get("stereotype"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        match stereo {
+            Some(s) => format!("{} ({})", simple, s),
+            None => simple,
+        }
+    };
+
+    let truncated = edges.len() >= MAX_EDGES || seen_nodes.len() >= MAX_NODES;
+    let mut out = String::from("flowchart LR\n");
+    for cid in &seen_nodes {
+        let label = sanitize(&class_label(cid));
+        let nid = node_id(cid);
+        out.push_str(&format!("  {}[\"{}\"]\n", nid, label));
+    }
+    for (src, dst) in &edges {
+        if seen_nodes.contains(src) && seen_nodes.contains(dst) {
+            out.push_str(&format!("  {} --> {}\n", node_id(src), node_id(dst)));
+        }
+    }
+    if truncated {
+        out.push_str("  %%diagram truncated\n");
+    }
+    Some(out)
+}
+
 fn class_id_of(method_id: &str) -> Option<String> {
     let stripped = method_id
         .trim_start_matches("Method:")

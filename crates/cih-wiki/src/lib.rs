@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use cih_core::{Node, NodeKind};
+use cih_core::{Node, NodeId, NodeKind, Range};
 use features::{build_dev_page_paths, group_communities_by_feature};
 use graph::node_stereotype;
 use slugify::slugify;
@@ -229,9 +229,23 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     )?;
     std::fs::create_dir_all(out_dir.join("pages"))?;
     for group in &feature_groups {
-        std::fs::create_dir_all(out_dir.join(format!("pages/{}/dev", group.feature)))?;
+        let dev_dir = out_dir.join(format!("pages/{}/dev", group.feature));
+        // Remove stale .md/.json files left over from a prior community-based run
+        if dev_dir.exists() {
+            for entry in std::fs::read_dir(&dev_dir)? {
+                let path = entry?.path();
+                if path
+                    .extension()
+                    .map(|e| e == "md" || e == "json")
+                    .unwrap_or(false)
+                {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        std::fs::create_dir_all(&dev_dir)?;
         std::fs::write(
-            out_dir.join(format!("pages/{}/dev/_category_.json", group.feature)),
+            dev_dir.join("_category_.json"),
             "{\"position\": 3, \"label\": \"Technical Reference\"}\n",
         )?;
     }
@@ -393,46 +407,132 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         });
         page_count += 1;
 
-        // Per-community dev pages
+        // Per-class dev pages (one page per class, replacing per-community pages)
+        // Collect distinct classes that have methods in any community of this feature.
+        let mut feature_class_set: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for comm_id in cids {
-            let comm = match graph.nodes_by_id.get(comm_id) {
-                Some(n) => n.clone(),
-                None => continue,
+            if let Some(members) = graph.members_by_community.get(comm_id) {
+                for m in members {
+                    if !matches!(
+                        m.kind,
+                        NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+                    ) {
+                        continue;
+                    }
+                    if let Some(cls_id) =
+                        m.id.as_str().split_once('#').map(|(prefix, _)| {
+                            let fqcn = prefix
+                                .trim_start_matches("Method:")
+                                .trim_start_matches("Constructor:")
+                                .trim_start_matches("Function:");
+                            // The class node may be Class:, Interface:, Enum:, or Record: —
+                            // resolve against the actual graph rather than always guessing Class:.
+                            ["Class:", "Interface:", "Enum:", "Record:"]
+                                .iter()
+                                .map(|pfx| format!("{}{}", pfx, fqcn))
+                                .find(|id| {
+                                    graph.nodes_by_id.contains_key(id.as_str())
+                                        || graph.methods_by_class.contains_key(id.as_str())
+                                })
+                                .unwrap_or_else(|| format!("Class:{}", fqcn))
+                        })
+                    {
+                        feature_class_set.insert(cls_id);
+                    }
+                }
+            }
+        }
+
+        // Assign slugs — pascal_to_kebab with collision counter
+        let mut slug_counts: BTreeMap<String, usize> = BTreeMap::new();
+        for class_id in &feature_class_set {
+            let cls_node = graph.nodes_by_id.get(class_id.as_str());
+            let cls_name = cls_node.map(|n| n.name.as_str()).unwrap_or_else(|| {
+                class_id
+                    .trim_start_matches("Class:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("Unknown")
+            });
+            let base_slug = features::pascal_to_kebab(cls_name);
+            let count = slug_counts.entry(base_slug).or_insert(0);
+            *count += 1;
+        }
+
+        // Second pass: assign final slugs in sorted order (BTreeSet is already sorted)
+        let mut slug_assign: BTreeMap<String, usize> = BTreeMap::new();
+        for class_id in &feature_class_set {
+            let cls_node = graph.nodes_by_id.get(class_id.as_str());
+            let cls_name = cls_node.map(|n| n.name.as_str()).unwrap_or_else(|| {
+                class_id
+                    .trim_start_matches("Class:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("Unknown")
+            });
+            let base_slug = features::pascal_to_kebab(cls_name);
+            let n = slug_counts.get(&base_slug).copied().unwrap_or(1);
+            let idx = slug_assign.entry(base_slug.clone()).or_insert(0);
+            *idx += 1;
+            let slug = if n == 1 {
+                base_slug
+            } else {
+                format!("{}-{}", base_slug, idx)
             };
-            let page_path = dev_paths
-                .get(comm_id)
-                .map(|s| s.as_str())
-                .unwrap_or("shared/dev/community");
-            let llm = input.llm_summaries.as_ref().and_then(|m| m.get(comm_id));
-            let llm_full = input.llm_full.as_ref().and_then(|m| m.get(comm_id));
-            let md = pages::dev::render_dev_community(
-                &graph,
-                &comm,
-                page_path,
-                llm,
-                llm_full,
-                &input.bodies,
-            );
-            let json_val = pages::dev::render_dev_community_json(&graph, &comm);
+            let page_path = format!("{}/dev/{}", feature, slug);
+
+            // Build or synthesize the class node (class nodes may be absent when only
+            // method nodes are present in the raw graph — synthesize a stub in that case)
+            let synthesized;
+            let cls_node: &Node = match graph.nodes_by_id.get(class_id.as_str()) {
+                Some(n) => n,
+                None => {
+                    let simple_name = class_id
+                        .trim_start_matches("Class:")
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    let file = graph
+                        .methods_by_class
+                        .get(class_id.as_str())
+                        .and_then(|ms| ms.first())
+                        .map(|m| m.file.clone())
+                        .unwrap_or_default();
+                    synthesized = Node {
+                        id: NodeId::new(class_id.clone()),
+                        kind: NodeKind::Class,
+                        name: simple_name,
+                        qualified_name: None,
+                        file,
+                        range: Range::default(),
+                        props: None,
+                    };
+                    &synthesized
+                }
+            };
+            let md = pages::dev::render_dev_class(&graph, cls_node, &input.bodies);
+            let json_val = pages::dev::render_dev_class_json(&graph, cls_node);
             std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &md)?;
             std::fs::write(
                 out_dir.join(format!("pages/{}.json", page_path)),
                 serde_json::to_string_pretty(&json_val)?,
             )?;
-            let dev_title = pages::dev::community_display_title(&graph, &comm, page_path);
+            let dev_title = cls_node.name.clone();
             nav.entry(feature.clone()).or_default().push(NavEntry {
-                slug: page_path.to_string(),
+                slug: page_path.clone(),
                 title: dev_title.clone(),
                 kind: "dev".into(),
             });
             all_pages.push(PageEntry {
-                slug: page_path.to_string(),
+                slug: page_path.clone(),
                 role: feature.clone(),
-                title: dev_title.clone(),
+                title: dev_title,
                 kind: "dev".into(),
                 path: format!("pages/{}.md", page_path),
                 json_path: Some(format!("pages/{}.json", page_path)),
-                community_id: Some(comm_id.clone()),
+                community_id: None,
             });
             page_count += 1;
         }
