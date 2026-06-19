@@ -10,6 +10,7 @@
 //! docs.rs for the version you resolve — the tool BODIES (the `self.store.*`
 //! calls) are SDK-agnostic and stay as-is.
 
+mod agent;
 mod browser;
 mod config;
 mod resources;
@@ -53,6 +54,7 @@ struct CihServer {
     search: SearchState,
     graph_key: String,
     tool_router: ToolRouter<CihServer>,
+    agent: Option<agent::AgentRunner>,
 }
 
 // ---- tool argument schemas ----
@@ -197,6 +199,15 @@ struct CodeMatch {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct AskCodebaseArgs {
+    /// Natural language question about the codebase (e.g. "What does POST /orders do end-to-end?").
+    question: String,
+    /// Optional one-sentence description of the codebase to prime the agent (e.g. "Java/Spring e-commerce backend").
+    #[serde(default)]
+    codebase_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct TestCoverageArgs {
     /// Symbol to look up test coverage for — full NodeId or short name.
     name: String,
@@ -263,12 +274,14 @@ impl CihServer {
         artifacts_dir: Option<PathBuf>,
         embed_store: Option<Arc<EmbedStore>>,
         graph_key: String,
+        agent: Option<agent::AgentRunner>,
     ) -> Self {
         Self {
             store,
             search: SearchState::new(artifacts_dir, embed_store),
             graph_key,
             tool_router: Self::tool_router(),
+            agent,
         }
     }
 
@@ -417,6 +430,33 @@ impl CihServer {
             })
             .collect();
         json_result(&matches)
+    }
+
+    #[tool(
+        description = "Ask a natural language question about the codebase and get a grounded answer. \
+            The agent calls search_code, get_context, and trace_impact autonomously to build its answer. \
+            Requires CIH_AGENT_API_KEY or a supported LLM API key env var (GEMINI_API_KEY, OPENAI_API_KEY). \
+            Example: ask_codebase(question='What does POST /orders do end-to-end?')"
+    )]
+    async fn ask_codebase(
+        &self,
+        Parameters(args): Parameters<AskCodebaseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let runner = self.agent.as_ref().ok_or_else(|| {
+            McpError::internal_error(
+                "agent not configured — set CIH_AGENT_API_KEY (or GEMINI_API_KEY / OPENAI_API_KEY)",
+                None,
+            )
+        })?;
+        let description = args
+            .codebase_description
+            .as_deref()
+            .unwrap_or("a Java/Spring enterprise codebase");
+        let answer = runner
+            .ask(&args.question, description)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+        json_result(&answer)
     }
 
     #[tool(
@@ -1397,7 +1437,16 @@ async fn main() -> Result<()> {
         None
     };
     let graph_key = cfg.graph_key.clone();
-    let server = CihServer::new(store, cfg.artifacts_dir.clone(), embed_store, graph_key);
+    let agent = cfg.agent_api_key.as_deref().map(|key| {
+        agent::AgentRunner::new(
+            SearchState::new(cfg.artifacts_dir.clone(), None),
+            store.clone(),
+            cfg.agent_llm_base_url.clone(),
+            key.to_string(),
+            cfg.agent_llm_model.clone(),
+        )
+    });
+    let server = CihServer::new(store, cfg.artifacts_dir.clone(), embed_store, graph_key, agent);
     let browser_state = browser::BrowserState::new(server.store.clone(), server.search.clone());
 
     // Streamable HTTP MCP endpoint mounted at /mcp.

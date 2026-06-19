@@ -18,6 +18,12 @@ pub struct Config {
     pub graph_key: String,
     pub artifacts_dir: Option<PathBuf>,
     pub pg_url: Option<String>,
+    /// Agent LLM: OpenAI-compatible base URL (default: Gemini compat endpoint).
+    pub agent_llm_base_url: String,
+    /// Agent LLM: model name.
+    pub agent_llm_model: String,
+    /// Agent LLM: API key env var (default: auto-resolved from GEMINI/OPENAI/ANTHROPIC_API_KEY).
+    pub agent_api_key: Option<String>,
 }
 
 impl Config {
@@ -29,6 +35,16 @@ impl Config {
             graph_key: env("CIH_GRAPH_KEY", "cih"),
             artifacts_dir: std::env::var("CIH_ARTIFACTS_DIR").ok().map(PathBuf::from),
             pg_url: std::env::var("CIH_PG_URL").ok(),
+            agent_llm_base_url: env(
+                "CIH_AGENT_LLM_BASE_URL",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+            ),
+            agent_llm_model: env("CIH_AGENT_LLM_MODEL", "gemini-2.0-flash"),
+            agent_api_key: std::env::var("CIH_AGENT_API_KEY")
+                .or_else(|_| std::env::var("GEMINI_API_KEY"))
+                .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                .ok(),
         }
     }
 }

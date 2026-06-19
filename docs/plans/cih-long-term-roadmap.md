@@ -21,25 +21,34 @@ must make it easy — not expensive — to onboard the next team.
 
 ---
 
-## Current State (Completed as of 2026-06-18)
+## Current State (Completed as of 2026-06-19)
 
 | Component | Status | Notes |
 |---|---|---|
-| `cih-engine scan` | ✅ | File discovery, RepoMap, module detection |
+| `cih-engine scan` | ✅ | File discovery, RepoMap, module detection, `architecture_hint` field |
 | Java parsing (tree-sitter) | ✅ | Methods, classes, fields, interfaces |
 | Spring MVC route extraction | ✅ | @GetMapping, @PostMapping, @RequestMapping, etc. |
+| JAX-RS route extraction | ✅ Phase 1 | @Path + @GET/@POST/@PUT/@DELETE/@PATCH — merges with Spring routes via `method_routes()` |
+| XML integration extraction | ✅ Phase 1 | Camel/Blueprint/Spring/CXF XML; `IntegrationRoute`, `MessageDestination`, `IntegrationLink` nodes/edges |
 | DB access extraction | ✅ | JPA, named queries |
-| `cih-engine analyze` | ✅ | Graph artifacts (`nodes.jsonl`, `edges.jsonl`) |
-| `cih-engine discover` | ✅ | Community detection (Leiden), process tracing (BFS), stereotyping — CLI may display "Louvain" in some help text; the algorithm is Leiden (see `leiden.rs`); terminology should be normalised when next touching discover docs |
+| `cih-engine analyze` | ✅ | Graph artifacts (`nodes.jsonl`, `edges.jsonl`); `--skip-xml-integration` flag |
+| `cih-engine discover` | ✅ | Community detection (Leiden — not Louvain; algorithm is in `leiden.rs`); process tracing (BFS); architecture-hint-aware `min_community_size` |
+| Spring/Blueprint DI resolution | ✅ Phase 2 | `di_xml.rs` resolves XML bean wiring to CALLS edges |
 | `cih-wiki` render | ✅ | PO/BA/Dev pages per feature and community |
 | LLM wiki enrichment | ✅ | Per-community and feature-level summaries (llm-summary mode) |
 | Process evidence (P-items) | ✅ | Process nodes wired into LLM evidence packs |
+| Integration evidence (I/M-items) | ✅ Phase 1 | `I1`/`M1` evidence items for IntegrationRoute and MessageDestination |
 | Feature-level LLM caching | ✅ | FeatureMetaEntry in wiki_meta.json |
 | FalkorDB graph storage | ✅ | Nodes/edges persisted; MCP tools running |
-| `cih-embed` | ✅ partial | Chunking, text extraction, embedding model/store plumbing exist; AST-strip and production benchmarking remain |
-| `cih-search` | ✅ partial | BM25, tokenization, and RRF exist; unified production retrieval API still needs hardening |
+| `cih-embed` AST-strip | ✅ Phase 3 | `strip.rs` strips log/null-guard/trivial-getter boilerplate before embedding |
+| `cih-embed` enriched text | ✅ Phase 3 | Route `httpMethod+path` and IntegrationRoute `uri+source` added to embedding text |
+| `cih-search` BM25 enrichment | ✅ Phase 3 | Route path segments, IntegrationRoute uri/source in BM25 index |
+| `search_code` MCP tool | ✅ Phase 3 | Hybrid BM25 search exposed as MCP tool; `limit` 1–50 |
+| `AgentRunner` (Phase 4) | ✅ Phase 4 | Multi-turn OpenAI-compatible tool-use loop in `cih-server/src/agent.rs` |
+| `ask_codebase` MCP tool | ✅ Phase 4 | Wired to `AgentRunner`; activated when `CIH_AGENT_API_KEY` / `GEMINI_API_KEY` is set |
+| Agent LLM config | ✅ Phase 4 | `CIH_AGENT_LLM_BASE_URL`, `CIH_AGENT_LLM_MODEL`, `CIH_AGENT_API_KEY` env vars |
 | Built-in graph browser | ✅ | Local `/graph` UI and bounded graph APIs exist in `cih-server` |
-| Multi-language core vocabulary | ✅ partial | `NodeKind::Function` exists; integration/message node kinds and extractor contracts remain |
+| Multi-language core vocabulary | ✅ | `RouteSource`, `IntegrationSource`, `IntegrationRoute`, `MessageDestination`, `IntegrationLink` all in `cih-core` |
 
 ---
 
