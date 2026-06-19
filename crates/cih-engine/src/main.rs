@@ -80,6 +80,9 @@ enum Command {
         /// Disable incremental parse cache and re-parse all files.
         #[arg(long)]
         no_cache: bool,
+        /// Skip integration and DI XML extraction (faster on large repos).
+        #[arg(long)]
+        skip_xml_integration: bool,
     },
     /// Re-run the resolve pass using the saved scope (.cih/scope.json), without re-scanning.
     /// Useful when the resolver changes but the source files have not.
@@ -347,6 +350,7 @@ fn main() -> Result<()> {
             graph_key,
             no_load,
             no_cache,
+            skip_xml_integration,
         } => analyze::run_analyze(
             repo,
             AnalyzeFlags {
@@ -361,6 +365,7 @@ fn main() -> Result<()> {
                 graph_key,
                 no_load,
                 no_cache,
+                skip_xml_integration,
             },
         ),
         Command::Resolve {

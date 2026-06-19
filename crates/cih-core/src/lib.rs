@@ -22,7 +22,10 @@ pub use ir::{
     ReferenceSite, SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
 };
 pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
-pub use repo_map::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
+pub use repo_map::{
+    auto_detect_architecture, ArchitectureHint, BuildSystem, JarInfo, ModuleInfo, RepoMap,
+    SpringSignal,
+};
 
 /// Stable, unique node identifier (e.g. `Method:com.acme.UserService#save`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -454,6 +457,7 @@ mod tests {
                 classes: 12,
             }],
             decompiled_dirs: vec![".workspace-dependencies".into()],
+            architecture_hint: ArchitectureHint::Unknown,
         };
 
         let encoded = serde_json::to_string(&repo_map).unwrap();

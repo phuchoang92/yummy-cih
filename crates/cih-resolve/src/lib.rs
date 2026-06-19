@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 mod contracts;
 pub mod db_access;
+pub mod di_xml;
 mod emit;
 mod index;
 pub mod integration_xml;
@@ -19,6 +20,7 @@ mod types;
 
 pub use contracts::resolve_contract_edges;
 pub use db_access::emit_db_access;
+pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
 pub use reports::write_unresolved_reports;
 

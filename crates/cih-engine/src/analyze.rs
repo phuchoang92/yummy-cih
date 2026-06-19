@@ -29,6 +29,8 @@ pub(crate) struct AnalyzeFlags {
     pub(crate) graph_key: Option<String>,
     pub(crate) no_load: bool,
     pub(crate) no_cache: bool,
+    /// Skip the integration + DI XML walk (faster on large repos).
+    pub(crate) skip_xml_integration: bool,
 }
 
 pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -61,6 +63,7 @@ pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         AnalyzeCacheOptions {
             use_cache: !flags.no_cache,
             allow_noop: !flags.no_cache,
+            skip_xml_integration: flags.skip_xml_integration,
         },
     )?;
 
@@ -137,6 +140,7 @@ pub(crate) fn run_resolve(
         AnalyzeCacheOptions {
             use_cache: true,
             allow_noop: false,
+            skip_xml_integration: false,
         },
     )?;
 
@@ -184,6 +188,7 @@ pub(crate) fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Re
         AnalyzeCacheOptions {
             use_cache: true,
             allow_noop: true,
+            skip_xml_integration: false,
         },
     )
 }
@@ -214,6 +219,7 @@ pub(crate) fn analyze_from_scope(
         AnalyzeCacheOptions {
             use_cache: true,
             allow_noop: true,
+            skip_xml_integration: false,
         },
     )
 }
@@ -322,19 +328,36 @@ pub(crate) fn analyze_from_scope_with_options(
         "DB access emit complete"
     );
 
-    let (xml_nodes, xml_edges) = extract_integration_xml_in_repo(&repo_root);
-    tracing::info!(
-        integration_route_nodes = xml_nodes
-            .iter()
-            .filter(|n| n.kind == cih_core::NodeKind::IntegrationRoute)
-            .count(),
-        message_destination_nodes = xml_nodes
-            .iter()
-            .filter(|n| n.kind == cih_core::NodeKind::MessageDestination)
-            .count(),
-        integration_edges = xml_edges.len(),
-        "integration XML extraction complete"
-    );
+    let (xml_nodes, xml_edges) = if cache.skip_xml_integration {
+        tracing::info!("Skipping XML integration + DI extraction (--skip-xml-integration)");
+        (Vec::new(), Vec::new())
+    } else {
+        let (mut xml_nodes, mut xml_edges) = extract_integration_xml_in_repo(&repo_root);
+        tracing::info!(
+            integration_route_nodes = xml_nodes
+                .iter()
+                .filter(|n| n.kind == cih_core::NodeKind::IntegrationRoute)
+                .count(),
+            message_destination_nodes = xml_nodes
+                .iter()
+                .filter(|n| n.kind == cih_core::NodeKind::MessageDestination)
+                .count(),
+            integration_edges = xml_edges.len(),
+            "integration XML extraction complete"
+        );
+
+        // Phase 2a — Spring/Blueprint DI resolution. Runs after the Java parse so
+        // it can match injected field types against XML bean classes.
+        let di = cih_resolve::extract_di_xml(&repo_root, &parse_output.parsed_files);
+        tracing::info!(
+            di_bean_nodes = di.nodes.len(),
+            di_calls_edges = di.edges.len(),
+            "DI XML extraction complete"
+        );
+        xml_nodes.extend(di.nodes);
+        xml_edges.extend(di.edges);
+        (xml_nodes, xml_edges)
+    };
 
     let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
     edges.extend(jar_edges);
@@ -412,6 +435,8 @@ pub(crate) fn analyze_from_scope_with_options(
 pub(crate) struct AnalyzeCacheOptions {
     pub(crate) use_cache: bool,
     pub(crate) allow_noop: bool,
+    /// Skip the integration + DI XML walk (faster on large repos).
+    pub(crate) skip_xml_integration: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -602,8 +602,10 @@ version = "0.1.0"
 dependencies = [
  "cih-core",
  "cih-parse",
+ "ignore",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

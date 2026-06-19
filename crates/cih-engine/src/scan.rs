@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cih_core::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
+use cih_core::{auto_detect_architecture, BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
 
 mod build_files;
 mod ignore_rules;
@@ -186,7 +186,7 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
     tracing::info!(jars = discovered_jars.len(), "JAR discovery complete");
 
     let total_loc: u64 = java_files.iter().map(|f| f.loc).sum();
-    let repo_map = RepoMap {
+    let mut repo_map = RepoMap {
         root: normalize_path(root),
         build_system: detect_build_system(&modules),
         total_java_files: java_files.len() as u64,
@@ -194,7 +194,9 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
         modules,
         jars: discovered_jars,
         decompiled_dirs,
+        architecture_hint: cih_core::ArchitectureHint::Unknown,
     };
+    repo_map.architecture_hint = auto_detect_architecture(&repo_map);
 
     tracing::info!(
         java_files = java_files.len(),

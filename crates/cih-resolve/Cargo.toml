@@ -9,3 +9,5 @@ cih-core.workspace = true
 cih-parse.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ignore.workspace = true
+tracing.workspace = true

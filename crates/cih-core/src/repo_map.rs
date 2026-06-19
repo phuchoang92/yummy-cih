@@ -4,6 +4,35 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Coarse structural hint about how a repo is organised.
+/// Auto-detected during `scan` from module count and file size; can be
+/// overridden by writing it manually into `repo-map.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchitectureHint {
+    #[default]
+    Unknown,
+    Monolith,
+    Microservice,
+    EventDriven,
+    Batch,
+}
+
+/// Detect a coarse architecture hint from repo metrics.
+/// Rules:
+/// - >500 files + >3 build modules → `Monolith`
+/// - <100 files → `Microservice`
+/// - Otherwise `Unknown`
+pub fn auto_detect_architecture(repo_map: &RepoMap) -> ArchitectureHint {
+    if repo_map.total_java_files > 500 && repo_map.modules.len() > 3 {
+        return ArchitectureHint::Monolith;
+    }
+    if repo_map.total_java_files < 100 {
+        return ArchitectureHint::Microservice;
+    }
+    ArchitectureHint::Unknown
+}
+
 /// A repository's module/JAR breakdown produced by the scan (no tree-sitter).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoMap {
@@ -18,6 +47,9 @@ pub struct RepoMap {
     pub jars: Vec<JarInfo>,
     /// Dirs holding already-decompiled sources (e.g. `.workspace-dependencies/`).
     pub decompiled_dirs: Vec<String>,
+    /// Coarse structural hint — auto-detected during scan or manually set.
+    #[serde(default)]
+    pub architecture_hint: ArchitectureHint,
 }
 
 /// Detected build system for the repo.

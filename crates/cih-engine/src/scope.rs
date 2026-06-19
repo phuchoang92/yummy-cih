@@ -227,6 +227,7 @@ mod tests {
             ],
             jars: Vec::new(),
             decompiled_dirs: vec![".workspace-dependencies".into()],
+            architecture_hint: cih_core::ArchitectureHint::Unknown,
         }
     }
 
@@ -375,6 +376,7 @@ include_decompiled = true
             ],
             jars: Vec::new(),
             decompiled_dirs: Vec::new(),
+            architecture_hint: cih_core::ArchitectureHint::Unknown,
         };
         let files = vec![
             owned("payments/api/src/main/java/Api.java", Some("payments/api")),
@@ -418,6 +420,7 @@ include_decompiled = true
             ],
             jars: Vec::new(),
             decompiled_dirs: Vec::new(),
+            architecture_hint: cih_core::ArchitectureHint::Unknown,
         };
         let files = vec![
             owned("services/billing/src/A.java", Some("services/billing")),

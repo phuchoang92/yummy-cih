@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{EdgeKind, GraphArtifacts, NodeKind, VersionId};
+use cih_core::{ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind, RepoMap, VersionId};
 use serde::Serialize;
 
 use crate::db::{load_many_to_falkor, LoadOutcome};
@@ -92,6 +92,13 @@ pub(crate) fn run_discover_core(
         "source graph loaded"
     );
 
+    // Load architecture hint from repo-map.json (written during scan/analyze).
+    let arch_hint = read_architecture_hint(repo);
+    tracing::info!(
+        architecture_hint = ?arch_hint,
+        "architecture hint loaded"
+    );
+
     let mut community_cfg = cih_community::CommunityConfig::default();
     if cih_community::is_large_graph(&nodes) {
         // Large graphs are often sparsely connected (many unresolved external refs), so
@@ -106,6 +113,16 @@ pub(crate) fn run_discover_core(
         );
         community_cfg.max_iterations = 3;
         community_cfg.min_community_size = 3;
+    }
+    // Monolith hint: increase min_community_size further to fight over-fragmentation.
+    // A 55-module monolith emitting 4000+ Leiden communities is over-split; raising the
+    // minimum to 5 drops isolated 2-4 node fragments that have no meaningful business story.
+    if arch_hint == ArchitectureHint::Monolith && community_cfg.min_community_size < 5 {
+        tracing::info!(
+            min_community_size = 5,
+            "monolith detected — raising min_community_size to reduce over-fragmentation"
+        );
+        community_cfg.min_community_size = 5;
     }
     // Apply CLI overrides on top of heuristics.
     if let Some(v) = overrides.resolution {
@@ -316,4 +333,14 @@ struct DiscoverSummary<'a> {
     falkor_edges: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     falkor_error: Option<&'a str>,
+}
+
+fn read_architecture_hint(repo: &Path) -> ArchitectureHint {
+    let path = repo.join(".cih").join("repo-map.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return ArchitectureHint::Unknown;
+    };
+    serde_json::from_str::<RepoMap>(&raw)
+        .map(|rm| rm.architecture_hint)
+        .unwrap_or(ArchitectureHint::Unknown)
 }
