@@ -154,5 +154,39 @@ fn node_text(node: &Node) -> String {
     }
     parts.push(node.id.as_str().to_string());
     parts.push(node.file.clone());
+    // Enrich with props for higher-signal node kinds.
+    if let Some(props) = &node.props {
+        // Route: include HTTP method and path segments so "GET /orders" matches.
+        if matches!(node.kind, NodeKind::Route) {
+            if let Some(m) = props.get("httpMethod").and_then(|v| v.as_str()) {
+                parts.push(m.to_string());
+            }
+            if let Some(p) = props.get("path").and_then(|v| v.as_str()) {
+                // add both the raw path and its slash-split segments
+                parts.push(p.to_string());
+                for seg in p.split('/').filter(|s| !s.is_empty() && !s.starts_with('{')) {
+                    parts.push(seg.to_string());
+                }
+            }
+            if let Some(handler) = props.get("handler").and_then(|v| v.as_str()) {
+                parts.push(handler.to_string());
+            }
+        }
+        // IntegrationRoute: include uri and source for searchability.
+        if matches!(node.kind, NodeKind::IntegrationRoute) {
+            if let Some(uri) = props.get("uri").and_then(|v| v.as_str()) {
+                parts.push(uri.to_string());
+            }
+            if let Some(source) = props.get("source").and_then(|v| v.as_str()) {
+                parts.push(source.to_string());
+            }
+        }
+        // MessageDestination: include destination_type and component.
+        if matches!(node.kind, NodeKind::MessageDestination) {
+            if let Some(dt) = props.get("destination_type").and_then(|v| v.as_str()) {
+                parts.push(dt.to_string());
+            }
+        }
+    }
     parts.join(" ")
 }

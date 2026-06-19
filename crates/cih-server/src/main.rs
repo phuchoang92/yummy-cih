@@ -41,7 +41,7 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
 use crate::config::{build_store, Config};
@@ -173,6 +173,27 @@ struct FeatureMapArgs {
     /// Max symbols to search for before clustering (default 50, max 200).
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchCodeArgs {
+    /// Natural language or keyword query (e.g. "rate limiting", "payment settlement timeout").
+    query: String,
+    /// Maximum number of results to return (default 10, max 50).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct CodeMatch {
+    node_id: String,
+    kind: String,
+    name: String,
+    qualified_name: Option<String>,
+    file: String,
+    line: u32,
+    score: f32,
+    rank: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -364,6 +385,38 @@ impl CihServer {
         };
 
         json_result(&QueryResult { hits, subgraph })
+    }
+
+    #[tool(
+        description = "Search for code by natural language or keywords. Returns ranked code matches \
+            with node ID, kind, name, file, and line number. Uses BM25 + semantic (RRF fusion). \
+            Use this when you need to find where a concept, feature, or business capability is \
+            implemented. Example: search_code(query='rate limiting', limit=10)"
+    )]
+    async fn search_code(
+        &self,
+        Parameters(args): Parameters<SearchCodeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = args.limit.unwrap_or(10).clamp(1, 50);
+        let hits = self
+            .search
+            .query_hits(&args.query, limit)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+        let matches: Vec<CodeMatch> = hits
+            .into_iter()
+            .map(|h| CodeMatch {
+                node_id: h.node_id.to_string(),
+                kind: h.kind.label().to_string(),
+                name: h.name,
+                qualified_name: h.qualified_name,
+                file: h.file,
+                line: h.range.start_line,
+                score: h.score,
+                rank: h.rank as u32,
+            })
+            .collect();
+        json_result(&matches)
     }
 
     #[tool(

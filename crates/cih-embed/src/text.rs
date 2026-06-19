@@ -18,6 +18,8 @@ pub fn is_embeddable_kind(kind: NodeKind) -> bool {
             | NodeKind::Method
             | NodeKind::Constructor
             | NodeKind::Field
+            | NodeKind::Route
+            | NodeKind::IntegrationRoute
     )
 }
 
@@ -34,6 +36,25 @@ pub fn embedding_text(node: &Node) -> String {
             "lines: {}-{}",
             node.range.start_line, node.range.end_line
         ));
+    }
+    // Enrich route nodes with HTTP method and path for better semantic matching.
+    if let Some(props) = &node.props {
+        if matches!(node.kind, NodeKind::Route) {
+            if let Some(method) = props.get("httpMethod").and_then(|v| v.as_str()) {
+                parts.push(format!("http_method: {method}"));
+            }
+            if let Some(path) = props.get("path").and_then(|v| v.as_str()) {
+                parts.push(format!("path: {path}"));
+            }
+        }
+        if matches!(node.kind, NodeKind::IntegrationRoute) {
+            if let Some(uri) = props.get("uri").and_then(|v| v.as_str()) {
+                parts.push(format!("uri: {uri}"));
+            }
+            if let Some(source) = props.get("source").and_then(|v| v.as_str()) {
+                parts.push(format!("source: {source}"));
+            }
+        }
     }
     parts.join("\n")
 }
