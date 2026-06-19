@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 pub fn render_routes_page(graph: &WikiGraph) -> String {
     let mut md = String::new();
-    md.push_str("---\ntitle: API Routes\n---\n\n");
+    md.push_str("---\ntitle: API Routes\nsidebar_position: 2\n---\n\n");
     md.push_str("# API Routes\n\n");
 
     if graph.routes.is_empty() {

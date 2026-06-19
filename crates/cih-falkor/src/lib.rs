@@ -184,7 +184,7 @@ impl GraphStore for FalkorStore {
         let q = format!(
             "CYPHER id={id} \
              MATCH (n:Symbol {{id:$id}}) \
-             RETURN n.id, labels(n)[0], n.name, n.qualifiedName, n.file LIMIT 1",
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file LIMIT 1",
             id = cstr(id.as_str())
         );
         let rows = self.rows(&q).await?;
@@ -238,7 +238,7 @@ impl GraphStore for FalkorStore {
              WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode \
              ORDER BY m.id, len \
              WITH m, collect(pnode)[0] AS parent, min(len) AS depth \
-             RETURN m.id, depth, parent.id, m.name, labels(m)[0] \
+             RETURN m.id, depth, parent.id, m.name, m.kind \
              LIMIT 200",
             id = cstr(id.as_str())
         );
@@ -302,7 +302,7 @@ impl GraphStore for FalkorStore {
             let q = format!(
                 "CYPHER id={id} \
                  MATCH (n:Symbol {{id:$id}})-[*1..{r}]-(m:Symbol) \
-                 RETURN DISTINCT m.id, labels(m)[0], m.name, m.qualifiedName, m.file LIMIT 200",
+                 RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file LIMIT 200",
                 id = cstr(seed.as_str())
             );
             for row in self.rows(&q).await? {
@@ -675,7 +675,7 @@ async fn neighbor_nodes(store: &FalkorStore, id: &NodeId, dir: Direction) -> Res
     let q = format!(
         "CYPHER id={id} \
          MATCH (n:Symbol {{id:$id}}){arrow}(m:Symbol) \
-         RETURN DISTINCT m.id, labels(m)[0], m.name, m.qualifiedName, m.file LIMIT 100",
+         RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file LIMIT 100",
         id = cstr(id.as_str())
     );
     Ok(store

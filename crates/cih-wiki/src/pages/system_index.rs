@@ -19,7 +19,7 @@ pub fn render_system_index(
     repo_name: &str,
 ) -> String {
     let mut md = String::new();
-    md.push_str(&format!("---\nslug: /\ntitle: {}\n---\n\n", repo_name));
+    md.push_str(&format!("---\nslug: /\ntitle: {}\nsidebar_position: 1\n---\n\n", repo_name));
     md.push_str(&format!("# {}\n\n", repo_name));
     md.push_str(&format!(
         "**Features:** {} · **Modules:** {} · **Routes:** {}\n\n",

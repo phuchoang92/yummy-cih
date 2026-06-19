@@ -244,6 +244,15 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             }
         }
         std::fs::create_dir_all(&dev_dir)?;
+        // Feature folder root: position 10 so it sorts after index (1) and routes (2).
+        let feature_dir = out_dir.join(format!("pages/{}", group.feature));
+        std::fs::write(
+            feature_dir.join("_category_.json"),
+            format!(
+                "{{\"position\": 10, \"label\": \"{}\"}}\n",
+                capitalize(&group.feature)
+            ),
+        )?;
         std::fs::write(
             dev_dir.join("_category_.json"),
             "{\"position\": 3, \"label\": \"Technical Reference\"}\n",
@@ -326,6 +335,62 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         community_id: None,
     });
     page_count += 1;
+
+    // Pre-pass: for each class, determine its primary feature (the one with the most methods).
+    // This prevents a class from appearing as a page in multiple features when its methods are
+    // spread across communities that belong to different features (e.g. CouponController having
+    // a cart-calling method landing it in the cart community).
+    let class_primary_feature: std::collections::HashMap<String, String> = {
+        let mut votes: std::collections::HashMap<String, std::collections::BTreeMap<String, usize>> =
+            std::collections::HashMap::new();
+        for group in &feature_groups {
+            for comm_id in &group.community_ids {
+                if let Some(members) = graph.members_by_community.get(comm_id) {
+                    for m in members {
+                        if !matches!(
+                            m.kind,
+                            NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+                        ) {
+                            continue;
+                        }
+                        if let Some(cls_id) =
+                            m.id.as_str().split_once('#').map(|(prefix, _)| {
+                                let fqcn = prefix
+                                    .trim_start_matches("Method:")
+                                    .trim_start_matches("Constructor:")
+                                    .trim_start_matches("Function:");
+                                ["Class:", "Interface:", "Enum:", "Record:"]
+                                    .iter()
+                                    .map(|pfx| format!("{}{}", pfx, fqcn))
+                                    .find(|id| {
+                                        graph.nodes_by_id.contains_key(id.as_str())
+                                            || graph.methods_by_class.contains_key(id.as_str())
+                                    })
+                                    .unwrap_or_else(|| format!("Class:{}", fqcn))
+                            })
+                        {
+                            *votes
+                                .entry(cls_id)
+                                .or_default()
+                                .entry(group.feature.clone())
+                                .or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+        votes
+            .into_iter()
+            .map(|(cls_id, feature_votes)| {
+                let best = feature_votes
+                    .into_iter()
+                    .max_by_key(|(_, v)| *v)
+                    .map(|(f, _)| f)
+                    .unwrap_or_default();
+                (cls_id, best)
+            })
+            .collect()
+    };
 
     // Per-feature pages
     for group in &feature_groups {
@@ -438,7 +503,14 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                                 .unwrap_or_else(|| format!("Class:{}", fqcn))
                         })
                     {
-                        feature_class_set.insert(cls_id);
+                        // Only include this class if this feature is its primary owner.
+                        if class_primary_feature
+                            .get(&cls_id)
+                            .map(|f| f == feature)
+                            .unwrap_or(true)
+                        {
+                            feature_class_set.insert(cls_id);
+                        }
                     }
                 }
             }
