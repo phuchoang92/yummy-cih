@@ -4,6 +4,8 @@ use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
 
+use crate::registry::EntrypointRegistry;
+
 pub(crate) enum EntrypointKind {
     HttpRoute,
     EventListener,
@@ -60,6 +62,7 @@ pub fn score_entry_points(
     edges: &[Edge],
     digraph: &DiGraph<NodeId, f32>,
     node_index: &HashMap<NodeId, NodeIndex>,
+    registry: &EntrypointRegistry,
 ) -> Vec<ScoredEntrypoint> {
     let by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
@@ -125,7 +128,7 @@ pub fn score_entry_points(
 
     for node in nodes
         .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Method | NodeKind::Constructor))
+        .filter(|n| matches!(n.kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function))
     {
         if is_test_method(node, &by_id) {
             continue;
@@ -143,7 +146,7 @@ pub fn score_entry_points(
         let callees = digraph.neighbors_directed(idx, Direction::Outgoing).count() as f64;
         let callers = digraph.neighbors_directed(idx, Direction::Incoming).count() as f64;
 
-        // Classify by edge evidence first
+        // Classify: edge evidence > annotation props > name heuristics
         let (kind, route_method, route_path, event_topics) =
             if let Some(ri) = route_edges.get(&node.id) {
                 (
@@ -154,10 +157,20 @@ pub fn score_entry_points(
                 )
             } else if let Some(topics) = listens_edges.get(&node.id) {
                 (EntrypointKind::EventListener, None, None, topics.clone())
+            } else if node_annotation_matches(node, registry.http_annotations()) {
+                let method = prop_str(node, "httpMethod").unwrap_or("GET").to_string();
+                let path = prop_str(node, "path")
+                    .unwrap_or_else(|| node.name.splitn(2, ' ').nth(1).unwrap_or(""))
+                    .to_string();
+                (EntrypointKind::HttpRoute, Some(method), Some(path), Vec::new())
+            } else if node_annotation_matches(node, registry.event_annotations()) {
+                (EntrypointKind::EventListener, None, None, Vec::new())
+            } else if node_annotation_matches(node, registry.scheduled_annotations())
+                || is_scheduled_name(name)
+            {
+                (EntrypointKind::Scheduled, None, None, Vec::new())
             } else if name == "main" {
                 (EntrypointKind::Main, None, None, Vec::new())
-            } else if is_scheduled_name(name) {
-                (EntrypointKind::Scheduled, None, None, Vec::new())
             } else {
                 (EntrypointKind::Fanout, None, None, Vec::new())
             };
@@ -321,4 +334,18 @@ fn is_utility_name(name: &str) -> bool {
 
 pub(crate) fn to_legacy_pairs(scored: &[ScoredEntrypoint]) -> Vec<(NodeId, f64)> {
     scored.iter().map(|s| (s.id.clone(), s.score)).collect()
+}
+
+fn node_annotation_matches(node: &Node, set: &BTreeSet<String>) -> bool {
+    let Some(props) = node.props.as_ref() else {
+        return false;
+    };
+    let Some(anns) = props.get("route_annotations").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    anns.iter().filter_map(|v| v.as_str()).any(|a| set.contains(a))
+}
+
+fn prop_str<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
+    node.props.as_ref()?.get(key)?.as_str()
 }

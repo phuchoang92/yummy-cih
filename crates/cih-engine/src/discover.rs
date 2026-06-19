@@ -169,9 +169,20 @@ pub(crate) fn run_discover_core(
         process_cfg.min_trace_confidence = v;
     }
 
+    let entry_registry = cih_community::EntrypointRegistry::load(repo);
+    tracing::info!(
+        patterns = entry_registry.total_patterns(),
+        "entry-point registry loaded"
+    );
+
     tracing::info!("tracing business processes");
-    let process_output =
-        cih_community::trace_processes(&nodes, &edges, &community_output.memberships, &process_cfg);
+    let process_output = cih_community::trace_processes(
+        &nodes,
+        &edges,
+        &community_output.memberships,
+        &process_cfg,
+        &entry_registry,
+    );
     tracing::info!(
         processes = process_output.nodes.len(),
         edges = process_output.edges.len(),

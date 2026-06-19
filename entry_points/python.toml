@@ -1,9 +1,15 @@
-# Flask HTTP entry points
-flask_route = ["@app.route", "@blueprint.route"]
-flask_methods = ["@app.get", "@app.post", "@app.put", "@app.delete", "@app.patch"]
+# Python entry-point annotation/decorator patterns consumed by the discover pass.
+# Names match the `route_annotations` prop emitted by the Python extractor (without @).
 
-# FastAPI entry points
-fastapi_methods = ["@router.get", "@router.post", "@router.put", "@router.delete", "@router.patch"]
+[http]
+annotations = [
+  "app.route", "app.get", "app.post", "app.put", "app.delete", "app.patch",
+  "router.get", "router.post", "router.put", "router.delete", "router.patch",
+  "blueprint.route",
+]
 
-# Django URL patterns (discovery via urls.py)
-django_url_patterns = ["path", "re_path", "include"]
+[event]
+annotations = ["task", "app.task", "shared_task", "celery.task"]
+
+[scheduled]
+annotations = ["periodic_task", "app.on_after_finalize"]

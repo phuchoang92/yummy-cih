@@ -1,10 +1,18 @@
-# Java HTTP entry points
-spring_mvc = ["@GetMapping", "@PostMapping", "@PutMapping", "@DeleteMapping", "@PatchMapping", "@RequestMapping"]
-jax_rs = ["@GET", "@POST", "@PUT", "@DELETE", "@PATCH", "@HEAD", "@OPTIONS"]
+# Java entry-point annotation patterns consumed by the discover pass.
+# Annotation names match the `route_annotations` prop emitted by the Java extractor.
 
-# Spring message-driven
-kafka_listener = ["@KafkaListener"]
-event_listener = ["@EventListener"]
+[http]
+annotations = [
+  "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping",
+  "RequestMapping",
+  "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+]
 
-# Feign clients
-feign_client = ["@FeignClient"]
+[event]
+annotations = [
+  "KafkaListener", "EventListener", "RabbitListener",
+  "JmsListener", "SqsListener", "StreamListener",
+]
+
+[scheduled]
+annotations = ["Scheduled", "Cron"]

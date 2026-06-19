@@ -1,7 +1,13 @@
-# NestJS HTTP entry points
-nestjs_http = ["@Get", "@Post", "@Put", "@Delete", "@Patch", "@Head", "@Options", "@All"]
-# NestJS message patterns
-nestjs_message = ["@MessagePattern", "@EventPattern"]
-# Express-style routes (pattern matching)
-express_methods = ["get", "post", "put", "delete", "patch"]
-express_objects = ["app", "router", "express"]
+# TypeScript entry-point annotation/decorator patterns consumed by the discover pass.
+# Names match the `route_annotations` prop emitted by the TypeScript extractor (without @).
+
+[http]
+annotations = [
+  "Get", "Post", "Put", "Delete", "Patch", "Head", "Options", "All",
+]
+
+[event]
+annotations = ["MessagePattern", "EventPattern"]
+
+[scheduled]
+annotations = ["Cron", "Interval", "Timeout"]

@@ -5,6 +5,7 @@ pub mod graph;
 mod label;
 mod leiden;
 mod prng;
+pub mod registry;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -12,6 +13,7 @@ use cih_core::{community_id, process_id, Edge, EdgeKind, Node, NodeId, NodeKind,
 use petgraph::graph::NodeIndex;
 
 pub use graph::{build_calls_digraph, build_community_graph, is_large_graph};
+pub use registry::EntrypointRegistry;
 
 const COLOR_PALETTE: [&str; 12] = [
     "#ef4444", "#f97316", "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#8b5cf6", "#d946ef",
@@ -416,6 +418,7 @@ pub fn trace_processes(
     edges: &[Edge],
     memberships: &[(NodeId, NodeId)],
     cfg: &ProcessConfig,
+    registry: &EntrypointRegistry,
 ) -> ProcessOutput {
     let (digraph, node_index) = graph::build_calls_digraph(nodes, edges, cfg.min_trace_confidence);
     if digraph.node_count() == 0 {
@@ -423,7 +426,7 @@ pub fn trace_processes(
     }
 
     let membership_map: HashMap<NodeId, NodeId> = memberships.iter().cloned().collect();
-    let scored = entry_points::score_entry_points(nodes, edges, &digraph, &node_index);
+    let scored = entry_points::score_entry_points(nodes, edges, &digraph, &node_index, registry);
     let legacy_pairs = entry_points::to_legacy_pairs(&scored);
     let ep_by_id: HashMap<NodeId, &entry_points::ScoredEntrypoint> =
         scored.iter().map(|s| (s.id.clone(), s)).collect();
@@ -869,6 +872,7 @@ mod tests {
             &[call(&a, &b)],
             &[],
             &ProcessConfig::for_symbol_count(2),
+            &EntrypointRegistry::default(),
         );
         assert!(short.nodes.is_empty());
 
@@ -877,6 +881,7 @@ mod tests {
             &[call(&a, &b), call(&b, &c)],
             &[],
             &ProcessConfig::for_symbol_count(3),
+            &EntrypointRegistry::default(),
         );
         assert_eq!(long.nodes.len(), 1);
         assert_eq!(long.edges.len(), 3);
@@ -892,6 +897,7 @@ mod tests {
             &[call(&a, &b), call(&b, &c), call(&c, &a)],
             &[],
             &ProcessConfig::for_symbol_count(3),
+            &EntrypointRegistry::default(),
         );
         assert!(!out.nodes.is_empty());
         assert!(out.nodes.len() < 10);
@@ -912,6 +918,7 @@ mod tests {
             &[call(&a, &b), call(&b, &c)],
             &memberships,
             &ProcessConfig::for_symbol_count(3),
+            &EntrypointRegistry::default(),
         );
         let process_type = out.nodes[0]
             .props
