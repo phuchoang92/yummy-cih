@@ -132,6 +132,15 @@ impl NodeKind {
 pub enum RouteSource {
     SpringMvc,
     JaxRs,
+    Express,
+    NestJs,
+    Flask,
+    FastApi,
+    Django,
+}
+
+pub fn function_id(fqn: &str, name: &str, arity: u16) -> NodeId {
+    NodeId::new(format!("Function:{fqn}#{name}/{arity}"))
 }
 
 /// Origin XML dialect for an integration route / message destination.

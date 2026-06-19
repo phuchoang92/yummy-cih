@@ -1,4 +1,6 @@
 pub mod java;
+pub mod python;
+pub mod typescript;
 
 pub trait LanguageProvider: Send + Sync {
     fn language(&self) -> tree_sitter::Language;
@@ -13,4 +15,7 @@ pub trait LanguageProvider: Send + Sync {
 pub enum Stereotype {
     Spring,
     JaxRs,
+    NestJs,
+    Flask,
+    FastApi,
 }

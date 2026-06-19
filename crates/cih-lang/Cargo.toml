@@ -12,3 +12,5 @@ once_cell.workspace = true
 streaming-iterator.workspace = true
 tree-sitter.workspace = true
 tree-sitter-java.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-python.workspace = true

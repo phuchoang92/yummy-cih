@@ -1,0 +1,10 @@
+# Java HTTP entry points
+spring_mvc = ["@GetMapping", "@PostMapping", "@PutMapping", "@DeleteMapping", "@PatchMapping", "@RequestMapping"]
+jax_rs = ["@GET", "@POST", "@PUT", "@DELETE", "@PATCH", "@HEAD", "@OPTIONS"]
+
+# Spring message-driven
+kafka_listener = ["@KafkaListener"]
+event_listener = ["@EventListener"]
+
+# Feign clients
+feign_client = ["@FeignClient"]

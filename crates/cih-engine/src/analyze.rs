@@ -477,6 +477,8 @@ enum ParseScopeOutcome {
 fn default_registry() -> cih_parse::LanguageRegistry {
     let mut r = cih_parse::LanguageRegistry::new();
     r.register(cih_lang::java::JavaProvider::new());
+    r.register(cih_lang::typescript::TypescriptProvider::new());
+    r.register(cih_lang::python::PythonProvider::new());
     r
 }
 

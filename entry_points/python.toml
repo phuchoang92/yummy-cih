@@ -1,0 +1,9 @@
+# Flask HTTP entry points
+flask_route = ["@app.route", "@blueprint.route"]
+flask_methods = ["@app.get", "@app.post", "@app.put", "@app.delete", "@app.patch"]
+
+# FastAPI entry points
+fastapi_methods = ["@router.get", "@router.post", "@router.put", "@router.delete", "@router.patch"]
+
+# Django URL patterns (discovery via urls.py)
+django_url_patterns = ["path", "re_path", "include"]

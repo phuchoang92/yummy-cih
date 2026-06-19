@@ -1,0 +1,7 @@
+# NestJS HTTP entry points
+nestjs_http = ["@Get", "@Post", "@Put", "@Delete", "@Patch", "@Head", "@Options", "@All"]
+# NestJS message patterns
+nestjs_message = ["@MessagePattern", "@EventPattern"]
+# Express-style routes (pattern matching)
+express_methods = ["get", "post", "put", "delete", "patch"]
+express_objects = ["app", "router", "express"]

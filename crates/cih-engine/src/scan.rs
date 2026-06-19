@@ -179,7 +179,10 @@ pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
 
     let (all_deps, own_group_prefix, artifact_to_name) = jar_discovery_inputs(&candidates);
     let (aggregates, mut owned_source_files) = collect_java_aggregates(&candidates, &java_files);
-    let modules = build_modules_from_aggregates(candidates, aggregates, &artifact_to_name);
+    let modules = build_modules_from_aggregates(candidates.clone(), aggregates, &artifact_to_name);
+
+    let extra = collect_extra_source_files(&candidates, &files, &[".ts", ".tsx", ".py"]);
+    owned_source_files.extend(extra);
     owned_source_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let discovered_jars = discover_and_link_jars(&root, &all_deps, &own_group_prefix);
@@ -310,6 +313,21 @@ fn discover_and_link_jars(
     own_group_prefix: &str,
 ) -> Vec<JarInfo> {
     jars::discover_jars(root, all_deps, own_group_prefix)
+}
+
+fn collect_extra_source_files(
+    candidates: &[ModuleCandidate],
+    files: &[ScannedFile],
+    extensions: &[&str],
+) -> Vec<OwnedSourceFile> {
+    files
+        .iter()
+        .filter(|f| extensions.iter().any(|ext| f.path.ends_with(ext)))
+        .map(|f| OwnedSourceFile {
+            rel: f.path.clone(),
+            module_rel: find_owner_module(candidates, &f.path).map(str::to_string),
+        })
+        .collect()
 }
 
 #[cfg(test)]

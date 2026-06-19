@@ -707,6 +707,7 @@ fn emit_method_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut File
                 route.annotations.first().map(String::as_str).unwrap_or("")
             ),
             RouteSource::JaxRs => format!("jaxrs-{}", route.http_method),
+            _ => format!("{:?}-{}", route.source, route.http_method),
         };
         builder.nodes.push(Node {
             id: route_id.clone(),
