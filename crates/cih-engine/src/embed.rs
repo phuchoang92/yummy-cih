@@ -28,7 +28,7 @@ pub(crate) fn run_embed(
     let embed = rt.block_on(async {
         let store = cih_embed::EmbedStore::connect(&pg_url, model_kind).await?;
         store.ensure_schema().await?;
-        store.embed_nodes(&nodes).await
+        store.embed_nodes(&nodes, &repo).await
     })?;
 
     let artifacts_path = source

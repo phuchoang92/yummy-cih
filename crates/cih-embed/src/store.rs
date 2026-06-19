@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use cih_core::{Node, NodeId, NodeKind, Range};
@@ -8,7 +9,7 @@ use tokio_postgres::{Client, NoTls};
 
 use crate::chunk_text;
 use crate::model::{EmbedModel, EmbedModelKind};
-use crate::text::{content_hash, embeddable_nodes, embedding_text};
+use crate::text::{content_hash, embeddable_nodes, embedding_text, source_bodies};
 
 const CHUNK_BYTES: usize = 4_000;
 const OVERLAP_BYTES: usize = 500;
@@ -95,7 +96,8 @@ impl EmbedStore {
         Ok(())
     }
 
-    pub async fn embed_nodes(&self, nodes: &[Node]) -> Result<EmbedSummary> {
+    pub async fn embed_nodes(&self, nodes: &[Node], repo: &Path) -> Result<EmbedSummary> {
+        let bodies = source_bodies(nodes, repo);
         let embeddable = embeddable_nodes(nodes);
         let node_ids: Vec<String> = embeddable
             .iter()
@@ -110,7 +112,8 @@ impl EmbedStore {
         let mut pending = Vec::new();
 
         for node in embeddable {
-            let text = embedding_text(node);
+            let body = bodies.get(node.id.as_str()).map(|s| s.as_str());
+            let text = embedding_text(node, body);
             for chunk in chunk_text(&text, CHUNK_BYTES, OVERLAP_BYTES) {
                 summary.chunks_total += 1;
                 let hash = content_hash(node.id.as_str(), &chunk.text);
@@ -119,14 +122,16 @@ impl EmbedStore {
                     summary.chunks_skipped += 1;
                     continue;
                 }
+                // Use the node's actual source file lines, not the chunk's line
+                // position within the embedding text string.
                 pending.push(PendingChunk {
                     node_id: node.id.as_str().to_string(),
                     kind: node.kind,
                     name: node.name.clone(),
                     file: node.file.clone(),
                     chunk_idx: chunk.chunk_idx as i32,
-                    start_line: chunk.start_line as i32,
-                    end_line: chunk.end_line as i32,
+                    start_line: node.range.start_line as i32,
+                    end_line: node.range.end_line as i32,
                     text: chunk.text,
                     hash,
                 });
@@ -137,11 +142,13 @@ impl EmbedStore {
             return Ok(summary);
         }
 
-        let texts: Vec<String> = pending.iter().map(|chunk| chunk.text.clone()).collect();
-        let embeddings = self.model.embed(&texts)?;
-        for (chunk, embedding) in pending.iter().zip(embeddings) {
-            self.upsert_chunk(chunk, embedding).await?;
-            summary.chunks_embedded += 1;
+        for batch in pending.chunks(64) {
+            let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
+            let embeddings = self.model.embed(&texts)?;
+            for (chunk, embedding) in batch.iter().zip(embeddings) {
+                self.upsert_chunk(chunk, embedding).await?;
+                summary.chunks_embedded += 1;
+            }
         }
         Ok(summary)
     }

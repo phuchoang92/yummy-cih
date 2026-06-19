@@ -1,4 +1,9 @@
+use std::collections::HashMap;
+use std::path::Path;
+
 use cih_core::{Node, NodeKind};
+
+use crate::strip::strip_java_body;
 
 pub fn embeddable_nodes(nodes: &[Node]) -> Vec<&Node> {
     nodes
@@ -23,7 +28,63 @@ pub fn is_embeddable_kind(kind: NodeKind) -> bool {
     )
 }
 
-pub fn embedding_text(node: &Node) -> String {
+/// Kinds for which we extract and strip source body text.
+fn is_body_kind(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function)
+}
+
+fn file_ext(file: &str) -> &str {
+    file.rfind('.').map(|i| &file[i + 1..]).unwrap_or("")
+}
+
+/// Build a node_id → stripped body map by reading source files from `repo`.
+/// Only Method/Constructor/Function nodes with valid line ranges get a body entry.
+pub fn source_bodies(nodes: &[Node], repo: &Path) -> HashMap<String, String> {
+    let mut file_lines: HashMap<String, Vec<String>> = HashMap::new();
+    let mut bodies: HashMap<String, String> = HashMap::new();
+
+    for node in nodes {
+        if !is_body_kind(node.kind) {
+            continue;
+        }
+        let start = node.range.start_line as usize;
+        let end = node.range.end_line as usize;
+        if start == 0 && end == 0 {
+            continue;
+        }
+
+        let lines = file_lines.entry(node.file.clone()).or_insert_with(|| {
+            std::fs::read_to_string(repo.join(&node.file))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.to_string())
+                .collect()
+        });
+        if lines.is_empty() {
+            continue;
+        }
+
+        let from = start.saturating_sub(1);
+        let to = end.min(lines.len());
+        if from >= to {
+            continue;
+        }
+
+        let raw = lines[from..to].join("\n");
+        let stripped = match file_ext(&node.file) {
+            "java" => strip_java_body(&raw),
+            _ => raw,
+        };
+
+        if !stripped.trim().is_empty() {
+            bodies.insert(node.id.as_str().to_string(), stripped);
+        }
+    }
+
+    bodies
+}
+
+pub fn embedding_text(node: &Node, body: Option<&str>) -> String {
     let mut parts = Vec::new();
     parts.push(format!("kind: {}", node.kind.label()));
     parts.push(format!("name: {}", node.name));
@@ -54,6 +115,12 @@ pub fn embedding_text(node: &Node) -> String {
             if let Some(source) = props.get("source").and_then(|v| v.as_str()) {
                 parts.push(format!("source: {source}"));
             }
+        }
+    }
+    if let Some(b) = body {
+        let trimmed = b.trim();
+        if !trimmed.is_empty() {
+            parts.push(format!("---\n{trimmed}"));
         }
     }
     parts.join("\n")

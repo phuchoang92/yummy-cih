@@ -27,3 +27,5 @@ tmp/
 # CIH analysis artifacts
 .cih/
 .gitnexus
+
+.fastembed_cache/
