@@ -24,6 +24,8 @@ pub struct Config {
     pub agent_llm_model: String,
     /// Agent LLM: API key env var (default: auto-resolved from GEMINI/OPENAI/ANTHROPIC_API_KEY).
     pub agent_api_key: Option<String>,
+    /// Optional static bearer token to protect /mcp and /graph. Unset = open (dev mode).
+    pub api_token: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -40,6 +42,10 @@ impl std::fmt::Debug for Config {
             .field(
                 "agent_api_key",
                 &self.agent_api_key.as_deref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "api_token",
+                &self.api_token.as_deref().map(|_| "[REDACTED]"),
             )
             .finish()
     }
@@ -64,6 +70,7 @@ impl Config {
                 .or_else(|_| std::env::var("OPENAI_API_KEY"))
                 .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
                 .ok(),
+            api_token: std::env::var("CIH_API_TOKEN").ok(),
         }
     }
 }
@@ -78,7 +85,20 @@ pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
     match cfg.backend.as_str() {
         "falkor" => {
             let store = cih_falkor::FalkorStore::connect(&cfg.falkor_url, &cfg.graph_key)?;
-            store.ensure_schema().await?;
+            let mut last_err = None;
+            for attempt in 1u32..=5 {
+                match store.ensure_schema().await {
+                    Ok(_) => { last_err = None; break; }
+                    Err(e) => {
+                        tracing::warn!(attempt, error = %e, "FalkorDB not ready, retrying in 2s");
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            }
+            if let Some(e) = last_err {
+                return Err(anyhow::anyhow!("FalkorDB schema init failed: {e}"));
+            }
             Ok(Arc::new(store))
         }
         "neptune" => Err(anyhow!(

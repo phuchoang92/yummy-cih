@@ -53,6 +53,12 @@ ENV RUST_LOG=info,cih_server=debug
 
 EXPOSE 8080
 
+# Run as a non-root user.
+RUN useradd -m -u 1001 cih && \
+    mkdir -p /data /repo && \
+    chown cih:cih /data /repo
+USER cih
+
 # Default entrypoint: run the MCP server.
 # Override with `cih-engine` for indexing.
 CMD ["cih-server"]

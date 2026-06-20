@@ -18,9 +18,9 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: cih
-      POSTGRES_PASSWORD: cih
-      POSTGRES_DB: cih
+      POSTGRES_USER: ${POSTGRES_USER:-cih}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-cih}
     ports:
       - "5433:5432"
     volumes:
@@ -43,7 +43,11 @@ services:
       # Points at the same artifacts the engine writes — enables BM25 query tool.
       CIH_ARTIFACTS_DIR: /repo/.cih/artifacts
       # pgvector connection for semantic search (see `embed` command).
-      CIH_PG_URL: postgres://cih:cih@postgres:5432/cih
+      CIH_PG_URL: postgres://${POSTGRES_USER:-cih}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cih}
+      # Optional: set to protect /mcp and /graph with a bearer token
+      # CIH_API_TOKEN: ${CIH_API_TOKEN}
+      # Optional: enable ask_codebase tool
+      # CIH_AGENT_API_KEY: ${CIH_AGENT_API_KEY}
       HF_HOME: /data/hf-cache
       RUST_LOG: info,cih_server=debug
     volumes:
@@ -100,7 +104,7 @@ services:
       FALKOR_URL: redis://falkordb:6379
       CIH_GRAPH_KEY: cih
       # pgvector connection for the `embed` command.
-      CIH_PG_URL: postgres://cih:cih@postgres:5432/cih
+      CIH_PG_URL: postgres://${POSTGRES_USER:-cih}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cih}
     volumes:
       - ${REPO_PATH}:/repo
     depends_on:

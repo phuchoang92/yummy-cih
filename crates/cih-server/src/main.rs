@@ -21,6 +21,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::{
+    extract::State,
+    http::{header::AUTHORIZATION, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
+    routing::get,
+};
 use cih_core::{
     ContractMatch, ContractMatchKind, Edge, EdgeKind, GraphArtifacts, Node, NodeId, NodeKind,
     Registry, VersionId,
@@ -44,6 +51,8 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
+
+use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 
 use crate::config::{build_store, Config};
 use crate::search::{QueryArgs, QueryResult, SearchState};
@@ -226,6 +235,23 @@ struct UntestedPathsArgs {
     /// Max symbols to return (default 50, max 500).
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReadFileArgs {
+    /// Repo-relative file path as returned by search_code or context (e.g.
+    /// "src/main/java/com/acme/OrderService.java").
+    path: String,
+    /// Repo name or absolute path (from registry). Defaults to the repo
+    /// registered under the server's active graph key.
+    #[serde(default)]
+    repo: Option<String>,
+    /// First line to return, 1-based inclusive (default: 1).
+    #[serde(default)]
+    start_line: Option<u32>,
+    /// Last line to return, 1-based inclusive (default: entire file).
+    #[serde(default)]
+    end_line: Option<u32>,
 }
 
 // ---- ambiguous-symbol helpers ----
@@ -1110,6 +1136,69 @@ impl CihServer {
             })).collect::<Vec<_>>(),
         }))
     }
+
+    #[tool(
+        description = "Read the source of a file in the repo. Use the `file` field from \
+            search_code or context results as the `path`. Optionally slice with start_line / \
+            end_line (1-based, inclusive) to fetch only the relevant section."
+    )]
+    async fn read_file(
+        &self,
+        Parameters(args): Parameters<ReadFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let repo_root = find_repo_path(args.repo.as_deref(), &self.graph_key)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        // Reject paths with traversal components.
+        let clean = std::path::Path::new(&args.path);
+        if clean.components().any(|c| c == std::path::Component::ParentDir) {
+            return Err(McpError::invalid_params(
+                "path must not contain '..' components",
+                None,
+            ));
+        }
+
+        let full_path = std::path::Path::new(&repo_root).join(clean);
+        let content = std::fs::read_to_string(&full_path).map_err(|e| {
+            McpError::invalid_params(
+                format!("cannot read '{}': {e}", args.path),
+                None,
+            )
+        })?;
+
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len() as u32;
+        let start = args.start_line.unwrap_or(1).max(1);
+        let end = args.end_line.unwrap_or(total).min(total);
+
+        let slice = if start > 1 || end < total {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    let ln = *i as u32 + 1;
+                    ln >= start && ln <= end
+                })
+                .map(|(i, line)| format!("{:>4} {}", i as u32 + 1, line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            lines
+                .iter()
+                .enumerate()
+                .map(|(i, line)| format!("{:>4} {}", i as u32 + 1, line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        json_result(&serde_json::json!({
+            "path": args.path,
+            "total_lines": total,
+            "start_line": start,
+            "end_line": end.min(total),
+            "content": slice,
+        }))
+    }
 }
 
 #[tool_handler]
@@ -1418,6 +1507,57 @@ mod tests {
     }
 }
 
+/// Bearer token auth middleware. Skipped when `CIH_API_TOKEN` is not set (dev mode).
+async fn auth_middleware(
+    State(token): State<Option<String>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Some(expected) = &token {
+        let provided = request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        if provided != Some(expected.as_str()) {
+            return (StatusCode::UNAUTHORIZED, "Unauthorized\n").into_response();
+        }
+    }
+    next.run(request).await
+}
+
+async fn health_handler() -> impl IntoResponse {
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+async fn ready_handler(
+    State((store, artifacts_dir)): State<(Arc<dyn GraphStore>, Option<PathBuf>)>,
+) -> impl IntoResponse {
+    let mut issues: Vec<&str> = Vec::new();
+
+    // Check FalkorDB by running a lightweight communities query.
+    if store.communities().await.is_err() {
+        issues.push("graph store unreachable");
+    }
+
+    // Check artifacts dir is present when configured.
+    if let Some(dir) = &artifacts_dir {
+        if !dir.exists() {
+            issues.push("artifacts dir not found");
+        }
+    }
+
+    if issues.is_empty() {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "degraded", "issues": issues})),
+        )
+            .into_response()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -1429,6 +1569,14 @@ async fn main() -> Result<()> {
 
     let cfg = Config::from_env();
     tracing::info!(?cfg, "starting CIH MCP server");
+
+    if cfg.api_token.is_none() {
+        tracing::warn!("CIH_API_TOKEN is not set — server is open to unauthenticated requests");
+    }
+    if cfg.agent_api_key.is_none() {
+        tracing::info!("no agent API key set — ask_codebase tool will be disabled");
+    }
+
     let store = build_store(&cfg).await?;
     let embed_store = if let Some(pg_url) = &cfg.pg_url {
         let store = EmbedStore::connect(pg_url, EmbedModelKind::MiniLm).await?;
@@ -1447,7 +1595,7 @@ async fn main() -> Result<()> {
             cfg.agent_llm_model.clone(),
         )
     });
-    let server = CihServer::new(store, cfg.artifacts_dir.clone(), embed_store, graph_key, agent);
+    let server = CihServer::new(store.clone(), cfg.artifacts_dir.clone(), embed_store, graph_key, agent);
     let browser_state = browser::BrowserState::new(server.store.clone(), server.search.clone());
 
     // Streamable HTTP MCP endpoint mounted at /mcp.
@@ -1456,13 +1604,57 @@ async fn main() -> Result<()> {
         Arc::new(LocalSessionManager::default()),
         Default::default(),
     );
-    let app = axum::Router::new()
+
+    // Protected routes: /mcp + /graph — require bearer token if CIH_API_TOKEN is set.
+    let protected = axum::Router::new()
         .nest_service("/mcp", service)
-        .merge(browser::router(browser_state));
+        .merge(browser::router(browser_state))
+        .layer(middleware::from_fn_with_state(
+            cfg.api_token.clone(),
+            auth_middleware,
+        ));
+
+    // Public routes: /health (liveness) and /ready (readiness) — never require auth.
+    let ready_state = (store, cfg.artifacts_dir.clone());
+    let public = axum::Router::new()
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler).with_state(ready_state));
+
+    let app = public
+        .merge(protected)
+        .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(120)));
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     tracing::info!("MCP (Streamable HTTP) listening on http://{}/mcp", cfg.bind);
     tracing::info!("CIH graph browser listening on http://{}/graph", cfg.bind);
-    axum::serve(listener, app).await?;
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    tracing::info!("server shut down cleanly");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.ok();
+    };
+
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
+
+    tracing::info!("shutdown signal received, draining connections");
 }
