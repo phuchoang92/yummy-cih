@@ -1,0 +1,147 @@
+use std::collections::BTreeSet;
+
+use streaming_iterator::StreamingIterator;
+use tree_sitter::QueryCursor;
+
+use super::*;
+
+const SAMPLE: &str = r#"
+package com.example;
+
+import java.util.List;
+
+@RestController
+class OwnerController {
+private OwnerService service;
+
+public Owner findOwner(Long id) {
+    return service.findOwner(id);
+}
+}
+"#;
+
+#[test]
+fn parses_java_and_extracts_package() {
+    let provider = JavaProvider::new();
+    let tree = provider.parse(SAMPLE).expect("sample Java should parse");
+    assert!(!tree.root_node().has_error());
+    assert_eq!(
+        provider.package_of(tree.root_node(), SAMPLE).as_deref(),
+        Some("com.example")
+    );
+}
+
+#[test]
+fn scope_query_captures_declarations_and_references() {
+    let provider = JavaProvider::new();
+    let tree = provider.parse(SAMPLE).expect("sample Java should parse");
+    let query = provider.scope_query();
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut found = BTreeSet::new();
+
+    let mut matches = cursor.matches(query, tree.root_node(), SAMPLE.as_bytes());
+    while let Some(query_match) = matches.next() {
+        for capture in query_match.captures {
+            found.insert(capture_names[capture.index as usize].to_string());
+        }
+    }
+
+    assert!(found.contains("declaration.class"));
+    assert!(found.contains("declaration.method"));
+    assert!(found.iter().any(|name| name.starts_with("reference.call.")));
+    // Captures the parse driver (cih-parse) actually consumes — guard against
+    // a grammar/query drift silently dropping them.
+    assert!(found.contains("import.statement"));
+    assert!(found.contains("declaration.variable")); // `private OwnerService service;`
+    assert!(found.contains("type-binding.type")); // field type binding
+}
+
+const SPRING_ROUTES: &str = r#"
+package com.example;
+
+@RestController
+@RequestMapping("/owners")
+class OwnerController {
+@GetMapping("/{id}")
+public Owner findOwner(Long id) { return null; }
+}
+"#;
+
+const JAXRS_ROUTES: &str = r#"
+package com.example;
+
+import javax.ws.rs.GET;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+
+@Path("/accounts")
+class AccountResource {
+@GET
+@Path("/{id}")
+public Account get(Long id) { return null; }
+
+@POST
+public void create(Account a) {}
+}
+"#;
+
+fn route_nodes(src: &str) -> Vec<cih_core::Node> {
+    let provider = JavaProvider::new();
+    let unit = provider
+        .parse_file("Sample.java", src)
+        .expect("sample should parse");
+    unit.nodes
+        .into_iter()
+        .filter(|n| n.kind == cih_core::NodeKind::Route)
+        .collect()
+}
+
+#[test]
+fn spring_mvc_routes_emit_route_annotations_and_source() {
+    let routes = route_nodes(SPRING_ROUTES);
+    let route = routes
+        .iter()
+        .find(|n| n.name == "GET /owners/{id}")
+        .expect("spring route present");
+    let props = route.props.as_ref().unwrap();
+    assert_eq!(props["source"], "spring_mvc");
+    assert_eq!(
+        props["route_annotations"],
+        serde_json::json!(["GetMapping"])
+    );
+    assert_eq!(props["path"], "/owners/{id}");
+}
+
+#[test]
+fn jaxrs_routes_extracted_with_path_prefix() {
+    let routes = route_nodes(JAXRS_ROUTES);
+    let names: BTreeSet<String> = routes.iter().map(|n| n.name.clone()).collect();
+    assert!(names.contains("GET /accounts/{id}"), "names={names:?}");
+    assert!(names.contains("POST /accounts"), "names={names:?}");
+
+    let get = routes
+        .iter()
+        .find(|n| n.name == "GET /accounts/{id}")
+        .unwrap();
+    let props = get.props.as_ref().unwrap();
+    assert_eq!(props["source"], "jax_rs");
+    assert_eq!(props["route_annotations"], serde_json::json!(["GET", "Path"]));
+
+    let post = routes.iter().find(|n| n.name == "POST /accounts").unwrap();
+    assert_eq!(post.props.as_ref().unwrap()["route_annotations"], serde_json::json!(["POST"]));
+}
+
+#[test]
+fn stereotype_detects_java_framework_annotations() {
+    let provider = JavaProvider::new();
+    assert_eq!(
+        provider.stereotype("@RestController class OwnerController {}"),
+        Some(Stereotype::Spring)
+    );
+    assert_eq!(
+        provider.stereotype("@Path(\"/owners\") class OwnerResource {}"),
+        Some(Stereotype::JaxRs)
+    );
+    assert_eq!(provider.stereotype("class Plain {}"), None);
+}

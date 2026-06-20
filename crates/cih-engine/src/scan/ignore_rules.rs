@@ -285,15 +285,5 @@ fn compound_extension_like(file_name: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn ignore_rules_cover_directories_files_and_extensions() {
-        assert!(should_ignore_path("target/generated/App.java"));
-        assert!(should_ignore_path("lib/example.jar"));
-        assert!(should_ignore_path("src/main/App.generated.java"));
-        assert!(should_ignore_path("Cargo.lock"));
-        assert!(!should_ignore_path("src/main/java/com/acme/App.java"));
-    }
-}
