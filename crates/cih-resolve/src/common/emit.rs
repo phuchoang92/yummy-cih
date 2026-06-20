@@ -350,15 +350,20 @@ impl<'a> EdgeEmitter<'a> {
             return None;
         }
 
-        // Language-aware self-receiver handling
-        let lang_resolver = self.registry.for_language(&pf.language);
-        if lang_resolver.is_self_receiver(receiver) {
-            if let Some(owner) =
-                lang_resolver.resolve_self_receiver(receiver, &site.in_fqcn, &self.index)
-            {
+        // Language-aware self-receiver handling (scoped to avoid borrow overlap).
+        let lang = effective_lang(pf);
+        let self_recv = {
+            let r = self.registry.for_language(lang);
+            if r.is_self_receiver(receiver) {
+                Some(r.resolve_self_receiver(receiver, &site.in_fqcn, &self.index))
+            } else {
+                None
+            }
+        };
+        if let Some(owner_opt) = self_recv {
+            if let Some(owner) = owner_opt {
                 if let Some(dst) =
-                    self.index
-                        .find_member_in_hierarchy(&owner, &site.name, site.arity)
+                    self.index.find_member_in_hierarchy(&owner, &site.name, site.arity)
                 {
                     return Some((dst, 0.8, "self-receiver".to_string()));
                 }
@@ -369,7 +374,7 @@ impl<'a> EdgeEmitter<'a> {
         if let Some(owner) = self.resolve_receiver_expr_type(pf, site, receiver) {
             // DI redirect: interface receiver with exactly one @Service impl → use the impl.
             let effective_owner = if self.index.is_interface_type(&owner) {
-                lang_resolver
+                self.registry.for_language(lang)
                     .di_redirect(&owner, &self.index)
                     .unwrap_or_else(|| owner.clone())
             } else {
@@ -399,11 +404,12 @@ impl<'a> EdgeEmitter<'a> {
 
     fn resolve_constructor(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<NodeId> {
         let fqcn = self.index.resolve_type(&site.name, &pf.file)?;
-        let lang_resolver = self.registry.for_language(&pf.language);
-        let result = if let Some(ctor_name) = lang_resolver.constructor_name() {
+        // constructor_name() returns Option<&'static str>, so no lifetime ties to self.
+        let ctor_name = self.registry.for_language(effective_lang(pf)).constructor_name();
+        let result = if let Some(ctor_name) = ctor_name {
             self.index.find_member(&fqcn, ctor_name, site.arity)
         } else {
-            // Language has no dedicated constructors (e.g. Go); try direct function lookup
+            // Language has no dedicated constructors (e.g. Go); try direct function lookup.
             self.index.find_member(&fqcn, &site.name, site.arity)
         };
         if result.is_none() {
@@ -484,8 +490,7 @@ impl<'a> EdgeEmitter<'a> {
 
         if is_simple_ident(receiver) {
             // Language-aware self-receiver (this/super/self/cls)
-            let lang_resolver = self.registry.for_language(&pf.language);
-            if lang_resolver.is_self_receiver(receiver) {
+            if self.registry.for_language(effective_lang(pf)).is_self_receiver(receiver) {
                 return self.index.receiver_type(&site.in_fqcn, receiver);
             }
             if starts_uppercase(receiver) {
@@ -585,5 +590,20 @@ impl<'a> EdgeEmitter<'a> {
             unresolved_external_fqcns: self.unresolved_external_fqcns.into_iter().collect(),
             unresolved_refs: self.unresolved_refs,
         }
+    }
+}
+
+/// Infer the effective language for a file, falling back to extension-based detection
+/// when `ParsedFile::language` is empty (old parse-cache artifacts).
+fn effective_lang(pf: &ParsedFile) -> &str {
+    if !pf.language.is_empty() {
+        return &pf.language;
+    }
+    let ext = pf.file.rsplit('.').next().unwrap_or("");
+    match ext {
+        "java" => "java",
+        "ts" | "tsx" => "typescript",
+        "py" => "python",
+        _ => "",
     }
 }

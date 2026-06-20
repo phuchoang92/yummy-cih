@@ -57,11 +57,24 @@ use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use crate::config::{build_store, Config};
 use crate::search::{QueryArgs, QueryResult, SearchState};
 
+/// State for a background repo-indexing job.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum JobState {
+    Running { started_at_secs: u64 },
+    Done { started_at_secs: u64, finished_at_secs: u64, output: String },
+    Failed { started_at_secs: u64, finished_at_secs: u64, error: String },
+}
+
+type Jobs = Arc<tokio::sync::RwLock<std::collections::HashMap<String, JobState>>>;
+
 #[derive(Clone)]
 struct CihServer {
     store: Arc<dyn GraphStore>,
     search: SearchState,
     graph_key: String,
+    falkor_url: String,
+    jobs: Jobs,
     tool_router: ToolRouter<CihServer>,
     agent: Option<agent::AgentRunner>,
 }
@@ -238,6 +251,21 @@ struct UntestedPathsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct IndexRepoArgs {
+    /// Absolute path to the repository to index (e.g. "/home/user/my-service").
+    repo_path: String,
+    /// Languages to index, comma-separated (e.g. "java,typescript"). Default: all detected.
+    #[serde(default)]
+    languages: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IndexStatusArgs {
+    /// Job ID returned by `index_repo`.
+    job_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ReadFileArgs {
     /// Repo-relative file path as returned by search_code or context (e.g.
     /// "src/main/java/com/acme/OrderService.java").
@@ -300,12 +328,15 @@ impl CihServer {
         artifacts_dir: Option<PathBuf>,
         embed_store: Option<Arc<EmbedStore>>,
         graph_key: String,
+        falkor_url: String,
         agent: Option<agent::AgentRunner>,
     ) -> Self {
         Self {
             store,
             search: SearchState::new(artifacts_dir, embed_store),
             graph_key,
+            falkor_url,
+            jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             tool_router: Self::tool_router(),
             agent,
         }
@@ -1138,6 +1169,123 @@ impl CihServer {
     }
 
     #[tool(
+        description = "Index a repository so its code graph becomes queryable by the other tools. \
+            Runs scan → parse → resolve → load into the live FalkorDB graph. \
+            Returns immediately with a `job_id`; use index_status(job_id=...) to poll for completion. \
+            Typical time: 5–120 seconds depending on repo size. \
+            Example: index_repo(repo_path='/home/user/my-service')"
+    )]
+    async fn index_repo(
+        &self,
+        Parameters(args): Parameters<IndexRepoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let repo = std::path::Path::new(&args.repo_path);
+        if !repo.is_dir() {
+            return Err(McpError::invalid_params(
+                format!("'{}' does not exist or is not a directory", args.repo_path),
+                None,
+            ));
+        }
+        let canonical = repo.canonicalize().map_err(|e| {
+            McpError::invalid_params(format!("cannot canonicalize repo_path: {e}"), None)
+        })?;
+        let repo_str = canonical.display().to_string();
+
+        let job_id = new_job_id();
+        let started_at_secs = unix_now_secs();
+        {
+            let mut jobs = self.jobs.write().await;
+            jobs.insert(job_id.clone(), JobState::Running { started_at_secs });
+        }
+
+        let engine = find_engine_binary();
+        let falkor_url = self.falkor_url.clone();
+        let graph_key = self.graph_key.clone();
+        let jobs = self.jobs.clone();
+        let job_id2 = job_id.clone();
+        let languages = args.languages.clone();
+
+        tokio::spawn(async move {
+            let mut cmd = tokio::process::Command::new(&engine);
+            cmd.arg("analyze")
+                .arg(&repo_str)
+                .arg("--all")
+                .env("FALKOR_URL", &falkor_url)
+                .env("CIH_GRAPH_KEY", &graph_key)
+                .env("NO_COLOR", "1")
+                .env("RUST_LOG", "warn,cih_engine=info")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            if let Some(langs) = &languages {
+                for lang in langs.split(',') {
+                    let l = lang.trim();
+                    if !l.is_empty() {
+                        cmd.arg("--language").arg(l);
+                    }
+                }
+            }
+
+            let result = cmd.output().await;
+            let finished_at_secs = unix_now_secs();
+            let mut jobs = jobs.write().await;
+            match result {
+                Ok(out) if out.status.success() => {
+                    let output = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    jobs.insert(job_id2, JobState::Done { started_at_secs, finished_at_secs, output });
+                }
+                Ok(out) => {
+                    let stderr: String = String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .filter(|l| !l.contains('\x1b'))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    let error = format!(
+                        "cih-engine exited {}: {}\n{}",
+                        out.status.code().unwrap_or(-1),
+                        stderr.trim(),
+                        stdout,
+                    );
+                    jobs.insert(job_id2, JobState::Failed { started_at_secs, finished_at_secs, error });
+                }
+                Err(e) => {
+                    jobs.insert(job_id2, JobState::Failed {
+                        started_at_secs,
+                        finished_at_secs,
+                        error: format!("failed to launch {}: {e}", engine.display()),
+                    });
+                }
+            }
+        });
+
+        let repo_display = canonical.display().to_string();
+        json_result(&serde_json::json!({
+            "job_id": job_id,
+            "status": "running",
+            "repo": repo_display,
+            "message": format!("Indexing started. Poll with index_status(job_id=\"{job_id}\")."),
+        }))
+    }
+
+    #[tool(
+        description = "Poll the status of a repo-indexing job started by index_repo. \
+            Returns status (running/done/failed), timing, and output or error message."
+    )]
+    async fn index_status(
+        &self,
+        Parameters(args): Parameters<IndexStatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let jobs = self.jobs.read().await;
+        match jobs.get(&args.job_id) {
+            Some(state) => json_result(state),
+            None => Err(McpError::invalid_params(
+                format!("unknown job_id '{}' — use index_repo to start a job", args.job_id),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
         description = "Read the source of a file in the repo. Use the `file` field from \
             search_code or context results as the `path`. Optionally slice with start_line / \
             end_line (1-based, inclusive) to fetch only the relevant section."
@@ -1216,17 +1364,18 @@ impl ServerHandler for CihServer {
                 ..Default::default()
             },
             instructions: Some(
-                "Code Intelligence Hub — query the call graph: `query`, `context`, `impact`, \
-                 `communities`, `route_map`, `trace_flow`, `feature_map`, \
-                 `group_contracts`, `api_impact`, `shape_check`, \
-                 `list_repos`, `detect_changes`, \
-                 `test_coverage`, `regression_scope`, `untested_paths`. \
+                "Code Intelligence Hub — index and query the call graph of any repository. \
+                 Indexing: `index_repo` (start), `index_status` (poll). \
+                 Graph queries: `context`, `impact`, `trace_flow`, `route_map`, `communities`, \
+                 `feature_map`, `search_code`, `query`, `ask_codebase`. \
+                 Multi-repo: `group_contracts`, `api_impact`, `shape_check`. \
+                 Registry: `list_repos`, `status`. \
+                 Change analysis: `detect_changes`. \
+                 Test coverage: `test_coverage`, `regression_scope`, `untested_paths`. \
+                 Source: `read_file`. \
                  Short symbol names trigger disambiguation; full NodeIds (Kind:fqn) skip it. \
-                 Read repo data via cih://repo/{name}/context|communities|processes|schema. \
-                 Visualization formats: `impact(format=\"diagram\")` → D3-JSON blast-radius graph; \
-                 `trace_flow(format=\"mermaid\")` → Mermaid flowchart; \
-                 `communities(format=\"diagram\")` → D3-JSON service map; \
-                 `route_map(format=\"openapi\")` → OpenAPI 3.0.3 JSON."
+                 Viz: impact(format=\"diagram\"), trace_flow(format=\"mermaid\"), \
+                 communities(format=\"diagram\"), route_map(format=\"openapi\")."
                     .into(),
             ),
         }
@@ -1255,6 +1404,37 @@ impl ServerHandler for CihServer {
     ) -> Result<ReadResourceResult, McpError> {
         resources::read_resource(request)
     }
+}
+
+// ---- index_repo helpers ----
+
+fn new_job_id() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("idx-{ms}")
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Locate the `cih-engine` binary: check alongside this binary first, then fall back to PATH.
+fn find_engine_binary() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        let candidate = exe
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("cih-engine");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from("cih-engine")
 }
 
 // ---- detect_changes helpers ----
@@ -1595,7 +1775,7 @@ async fn main() -> Result<()> {
             cfg.agent_llm_model.clone(),
         )
     });
-    let server = CihServer::new(store.clone(), cfg.artifacts_dir.clone(), embed_store, graph_key, agent);
+    let server = CihServer::new(store.clone(), cfg.artifacts_dir.clone(), embed_store, graph_key, cfg.falkor_url.clone(), agent);
     let browser_state = browser::BrowserState::new(server.store.clone(), server.search.clone());
 
     // Streamable HTTP MCP endpoint mounted at /mcp.

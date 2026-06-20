@@ -55,14 +55,20 @@ impl CommonIndex {
                     imports: pf.imports.clone(),
                 },
             );
-            let lang = &pf.language;
+            let inferred;
+            let lang: &str = if pf.language.is_empty() {
+                inferred = infer_language_from_path(&pf.file);
+                inferred
+            } else {
+                &pf.language
+            };
             let resolver = registry.for_language(lang);
             for def in &pf.defs {
                 if is_type_kind(def.kind) {
                     if let Some(meta) = resolver.type_metadata(def) {
                         idx.type_metadata.insert(def.fqcn.clone(), meta);
                     }
-                    idx.language_of_type.insert(def.fqcn.clone(), lang.clone());
+                    idx.language_of_type.insert(def.fqcn.clone(), lang.to_string());
                     idx.types_by_fqcn.insert(def.fqcn.clone(), def.clone());
                     idx.simple_to_fqcns
                         .entry(simple_of(&def.fqcn))
@@ -436,3 +442,17 @@ impl CommonIndex {
 
 // Keep the old name for backward compat in tests
 pub(crate) type ResolveIndex = CommonIndex;
+
+/// Infer language from file extension for ParsedFiles with empty `language` field
+/// (parse-cache artifacts produced before language tracking was added).
+fn infer_language_from_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "java" => "java",
+        "ts" | "tsx" => "typescript",
+        "py" => "python",
+        "go" => "go",
+        "kt" | "kts" => "kotlin",
+        _ => "",
+    }
+}

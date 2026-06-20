@@ -117,7 +117,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
         import_bindings,
         parsed_file: ParsedFile {
             file: builder.file,
-            language: String::new(),
+            language: "java".to_string(),
             package: builder.package,
             defs: builder.defs,
             imports: builder.imports,
