@@ -56,6 +56,7 @@ Each covers when to use the workflow, step-by-step tool calls, and output shape.
 | [plans/cih-resolve-split.md](plans/cih-resolve-split.md) | Splitting cih-resolve into finer-grained passes |
 | [plans/pluggable-language-support.md](plans/pluggable-language-support.md) | Language-provider plugin design |
 | [plans/resolve-language-agnostic.md](plans/resolve-language-agnostic.md) | Making the resolver fully language-agnostic |
+| [plans/full-leiden-community-agent-plan.md](plans/full-leiden-community-agent-plan.md) | Full Leiden clustering, agent retrieval, and a separate community documentation tree |
 | [plans/smarter-method-body-plan.md](plans/smarter-method-body-plan.md) | Wiki: original-line cap + god-function fallback for method body display |
 
 ---
