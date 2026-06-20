@@ -85,6 +85,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
         edges: builder.edges,
         parsed_file: ParsedFile {
             file: builder.file,
+            language: String::new(),
             package: builder.package,
             defs: builder.defs,
             imports: builder.imports,

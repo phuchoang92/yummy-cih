@@ -333,11 +333,17 @@ impl GraphStore for FalkorStore {
             .into_iter()
             .filter_map(|row| row.first().cloned())
             .collect();
+        let community = self
+            .symbol_communities(&[id.clone()])
+            .await?
+            .into_iter()
+            .find_map(|(nid, info)| if &nid == id { Some(info) } else { None });
         Ok(SymbolContext {
             node,
             callers,
             callees,
             processes,
+            community,
         })
     }
 

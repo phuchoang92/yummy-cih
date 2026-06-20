@@ -83,6 +83,10 @@ enum Command {
         /// Skip integration and DI XML extraction (faster on large repos).
         #[arg(long)]
         skip_xml_integration: bool,
+        /// Limit analysis to these languages (comma-delimited or repeated). Default: all.
+        /// Example: --language java,typescript
+        #[arg(long = "language", value_delimiter = ',')]
+        languages: Vec<String>,
     },
     /// Re-run the resolve pass using the saved scope (.cih/scope.json), without re-scanning.
     /// Useful when the resolver changes but the source files have not.
@@ -351,6 +355,7 @@ fn main() -> Result<()> {
             no_load,
             no_cache,
             skip_xml_integration,
+            languages,
         } => analyze::run_analyze(
             repo,
             AnalyzeFlags {
@@ -366,6 +371,7 @@ fn main() -> Result<()> {
                 no_load,
                 no_cache,
                 skip_xml_integration,
+                languages,
             },
         ),
         Command::Resolve {

@@ -622,6 +622,7 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
                 edges: Vec::new(),
                 parsed_file: ParsedFile {
                     file: rel.to_string(),
+                    language: String::new(),
                     package: None,
                     defs: Vec::new(),
                     imports: Vec::new(),
@@ -650,6 +651,7 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
         edges: builder.edges,
         parsed_file: ParsedFile {
             file: rel.to_string(),
+            language: String::new(),
             package: None,
             defs: builder.defs,
             imports: builder.imports,

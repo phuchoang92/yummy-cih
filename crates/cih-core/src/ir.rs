@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 pub struct ParsedFile {
     /// Repo-relative path of the source file.
     pub file: String,
-    /// Declared Java package (`None` = default package).
+    /// Language identifier: `"java"`, `"typescript"`, `"python"`, etc.
+    #[serde(default)]
+    pub language: String,
+    /// Declared package/module (`None` = default/unknown).
     pub package: Option<String>,
     /// Type / method / constructor / field definitions declared in this file.
     pub defs: Vec<SymbolDef>,

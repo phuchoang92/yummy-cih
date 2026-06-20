@@ -228,6 +228,7 @@ mod tests {
     ) -> ParsedFile {
         ParsedFile {
             file: file.to_string(),
+            language: String::new(),
             package: None,
             defs: vec![],
             imports: vec![],

@@ -271,6 +271,7 @@ mod tests {
         let fqcn = format!("{package}.{class_name}");
         ParsedFile {
             file: file.to_string(),
+            language: String::new(),
             package: Some(package.to_string()),
             defs: vec![SymbolDef {
                 id: type_id(NodeKind::Class, &fqcn),

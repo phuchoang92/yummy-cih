@@ -17,6 +17,9 @@ pub(crate) struct ScopeRequest {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub include_decompiled: bool,
+    /// Language filter: only include files belonging to these languages.
+    /// Empty = all registered languages (default behavior unchanged).
+    pub languages: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +77,9 @@ pub(crate) fn resolve(
             .as_ref()
             .is_some_and(|globs| globs.is_match(&file.rel))
         {
+            continue;
+        }
+        if !matches_language_filter(&file.rel, &request.languages) {
             continue;
         }
         files.push(file.rel.clone());
@@ -191,6 +197,24 @@ fn build_globs(patterns: &[String]) -> Result<Option<GlobSet>> {
     Ok(Some(builder.build()?))
 }
 
+/// Returns `true` when the file should be included given the languages filter.
+/// Empty filter = all languages included.
+fn matches_language_filter(rel: &str, languages: &[String]) -> bool {
+    if languages.is_empty() {
+        return true;
+    }
+    let lang = if rel.ends_with(".java") {
+        "java"
+    } else if rel.ends_with(".ts") || rel.ends_with(".tsx") {
+        "typescript"
+    } else if rel.ends_with(".py") {
+        "python"
+    } else {
+        return false;
+    };
+    languages.iter().any(|l| l == lang)
+}
+
 fn is_decompiled(path: &str, decompiled_dirs: &[String]) -> bool {
     decompiled_dirs.iter().any(|dir| {
         let dir = dir.trim_end_matches('/');
@@ -228,6 +252,8 @@ mod tests {
             jars: Vec::new(),
             decompiled_dirs: vec![".workspace-dependencies".into()],
             architecture_hint: cih_core::ArchitectureHint::Unknown,
+            total_source_files: 0,
+            per_language: Default::default(),
         }
     }
 
@@ -241,6 +267,7 @@ mod tests {
             packages: Vec::new(),
             spring: SpringSignal::default(),
             depends_on: Vec::new(),
+            frameworks: Vec::new(),
         }
     }
 
@@ -377,6 +404,8 @@ include_decompiled = true
             jars: Vec::new(),
             decompiled_dirs: Vec::new(),
             architecture_hint: cih_core::ArchitectureHint::Unknown,
+            total_source_files: 0,
+            per_language: Default::default(),
         };
         let files = vec![
             owned("payments/api/src/main/java/Api.java", Some("payments/api")),
@@ -421,6 +450,8 @@ include_decompiled = true
             jars: Vec::new(),
             decompiled_dirs: Vec::new(),
             architecture_hint: cih_core::ArchitectureHint::Unknown,
+            total_source_files: 0,
+            per_language: Default::default(),
         };
         let files = vec![
             owned("services/billing/src/A.java", Some("services/billing")),

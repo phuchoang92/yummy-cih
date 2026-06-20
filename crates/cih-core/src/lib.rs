@@ -457,6 +457,7 @@ mod tests {
                     ..SpringSignal::default()
                 },
                 depends_on: vec!["core".into()],
+                frameworks: Vec::new(),
             }],
             jars: vec![JarInfo {
                 path: "lib/example.jar".into(),
@@ -467,6 +468,8 @@ mod tests {
             }],
             decompiled_dirs: vec![".workspace-dependencies".into()],
             architecture_hint: ArchitectureHint::Unknown,
+            total_source_files: 0,
+            per_language: Default::default(),
         };
 
         let encoded = serde_json::to_string(&repo_map).unwrap();
@@ -478,6 +481,7 @@ mod tests {
     fn parsed_file_round_trips_json() {
         let parsed = ParsedFile {
             file: "src/main/java/com/acme/UserService.java".into(),
+            language: "java".into(),
             package: Some("com.acme".into()),
             defs: vec![SymbolDef {
                 id: method_id("com.acme.UserService", "save", 1),

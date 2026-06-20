@@ -99,6 +99,7 @@ fn contract_sites_emit_nodes_and_edges() {
     let listener = method_id("com.acme.Client", "listen", 1);
     let file = ParsedFile {
         file: "com/acme/Client.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![],
         imports: vec![],
@@ -193,6 +194,7 @@ fn ref_site(
 fn workspace() -> Vec<ParsedFile> {
     let repo = ParsedFile {
         file: "com/acme/Repo.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Interface, "com.acme.Repo"),
@@ -207,6 +209,7 @@ fn workspace() -> Vec<ParsedFile> {
     };
     let service = ParsedFile {
         file: "com/acme/OwnerService.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.OwnerService"),
@@ -226,6 +229,7 @@ fn workspace() -> Vec<ParsedFile> {
     };
     let controller = ParsedFile {
         file: "com/acme/OwnerController.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.OwnerController"),
@@ -254,6 +258,7 @@ fn workspace() -> Vec<ParsedFile> {
     };
     let thing = ParsedFile {
         file: "com/other/Thing.java".into(),
+        language: String::new(),
         package: Some("com.other".into()),
         defs: vec![type_def(NodeKind::Class, "com.other.Thing")],
         imports: vec![],
@@ -480,6 +485,7 @@ fn phase_4_2_unresolved_external_receiver_is_reported() {
 fn mro_workspace() -> Vec<ParsedFile> {
     let animal = ParsedFile {
         file: "com/acme/Animal.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Interface, "com.acme.Animal"),
@@ -494,6 +500,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
     };
     let mammal = ParsedFile {
         file: "com/acme/Mammal.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.Mammal"),
@@ -509,6 +516,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
     };
     let dog = ParsedFile {
         file: "com/acme/Dog.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.Dog"),
@@ -591,6 +599,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
     // both have the same method, so METHOD_OVERRIDES fires before METHOD_IMPLEMENTS.
     let base = ParsedFile {
         file: "com/acme/Base.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.Base"),
@@ -605,6 +614,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
     };
     let marker = ParsedFile {
         file: "com/acme/Marker.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Interface, "com.acme.Marker"),
@@ -619,6 +629,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
     };
     let child = ParsedFile {
         file: "com/acme/Child.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.Child"),
@@ -668,6 +679,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
     // Interface: UserService with save(User)
     let iface = ParsedFile {
         file: "com/acme/UserService.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             SymbolDef {
@@ -709,6 +721,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
     };
     let impl_file = ParsedFile {
         file: "com/acme/UserServiceImpl.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             impl_def.clone(),
@@ -729,6 +742,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
     // Caller: OrderController with field `userService: UserService` and call userService.save(u)
     let caller = ParsedFile {
         file: "com/acme/OrderController.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             SymbolDef {
@@ -826,6 +840,7 @@ fn di_falls_back_when_multiple_service_impls() {
     // Two @Service impls — ambiguous, must not guess
     let iface = ParsedFile {
         file: "com/acme/UserService.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             SymbolDef {
@@ -854,6 +869,7 @@ fn di_falls_back_when_multiple_service_impls() {
         let fqcn = format!("com.acme.{name}");
         ParsedFile {
             file: format!("com/acme/{name}.java"),
+            language: String::new(),
             package: Some("com.acme".into()),
             defs: vec![
                 SymbolDef {
@@ -881,6 +897,7 @@ fn di_falls_back_when_multiple_service_impls() {
     };
     let caller = ParsedFile {
         file: "com/acme/OrderController.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             SymbolDef {
@@ -950,6 +967,7 @@ fn di_not_applied_to_concrete_class_receiver() {
     let files = {
         let concrete = ParsedFile {
             file: "com/acme/UserServiceImpl.java".into(),
+            language: String::new(),
             package: Some("com.acme".into()),
             defs: vec![
                 SymbolDef {
@@ -976,6 +994,7 @@ fn di_not_applied_to_concrete_class_receiver() {
         };
         let caller = ParsedFile {
             file: "com/acme/OrderController.java".into(),
+            language: String::new(),
             package: Some("com.acme".into()),
             defs: vec![
                 SymbolDef {
@@ -1064,6 +1083,7 @@ fn unresolved_ref_receiver_type_unknown() {
     // Ref site with a receiver name that has no binding → receiver_type_unknown
     let file = ParsedFile {
         file: "com/acme/Foo.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.Foo"),
@@ -1098,6 +1118,7 @@ fn unresolved_ref_member_not_found() {
     // Receiver type resolves (field binding) but method absent → member_not_found
     let service = ParsedFile {
         file: "com/acme/MyService.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.MyService"),
@@ -1112,6 +1133,7 @@ fn unresolved_ref_member_not_found() {
     };
     let caller = ParsedFile {
         file: "com/acme/Caller.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.Caller"),
@@ -1153,6 +1175,7 @@ fn unresolved_ref_heritage_type_unknown() {
     // Class extends a type not in the parsed scope → heritage_type_unknown
     let child = ParsedFile {
         file: "com/acme/Child.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![type_def(NodeKind::Class, "com.acme.Child")],
         imports: vec![],
@@ -1179,6 +1202,7 @@ fn callresult_factory_pattern_resolved() {
     // factory field typed OrderFactory → create() returns Order → process() resolves
     let order_factory = ParsedFile {
         file: "com/acme/OrderFactory.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.OrderFactory"),
@@ -1193,6 +1217,7 @@ fn callresult_factory_pattern_resolved() {
     };
     let order = ParsedFile {
         file: "com/acme/Order.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.Order"),
@@ -1207,6 +1232,7 @@ fn callresult_factory_pattern_resolved() {
     };
     let service = ParsedFile {
         file: "com/acme/OrderService.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.OrderService"),
@@ -1267,6 +1293,7 @@ fn callresult_factory_pattern_unresolved_when_return_type_absent() {
     // var order = create(); — but create() has no return_type → unresolvable
     let service = ParsedFile {
         file: "com/acme/OrderService.java".into(),
+        language: String::new(),
         package: Some("com.acme".into()),
         defs: vec![
             type_def(NodeKind::Class, "com.acme.OrderService"),

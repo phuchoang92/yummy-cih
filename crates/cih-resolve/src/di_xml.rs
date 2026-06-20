@@ -470,6 +470,7 @@ mod tests {
         let consumer_fqcn = "com.acme.OrderController";
         let parsed = vec![ParsedFile {
             file: "OrderController.java".into(),
+            language: String::new(),
             package: Some("com.acme".into()),
             defs: vec![SymbolDef {
                 id: type_id(NodeKind::Class, consumer_fqcn),

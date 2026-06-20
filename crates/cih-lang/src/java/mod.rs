@@ -47,6 +47,10 @@ impl LanguageProvider for JavaProvider {
         language()
     }
 
+    fn language_id(&self) -> &'static str {
+        "java"
+    }
+
     fn extensions(&self) -> &'static [&'static str] {
         &[".java"]
     }

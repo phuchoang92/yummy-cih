@@ -29,6 +29,10 @@ impl LanguageProvider for PythonProvider {
         language()
     }
 
+    fn language_id(&self) -> &'static str {
+        "python"
+    }
+
     fn extensions(&self) -> &'static [&'static str] {
         &[".py"]
     }

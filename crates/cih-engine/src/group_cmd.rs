@@ -1,7 +1,24 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use cih_core::{now_rfc3339, GroupEntry, GroupRegistry, Registry};
 
+fn validate_group_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("group name cannot be empty");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "invalid group name '{}': only alphanumeric, '-', and '_' are allowed",
+            name
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn run_group_create(name: &str) -> Result<()> {
+    validate_group_name(name)?;
     let mut registry = GroupRegistry::load();
     if registry.find(name).is_some() {
         println!("Group '{name}' already exists.");
@@ -80,6 +97,7 @@ pub(crate) fn run_group_list(json: bool) -> Result<()> {
 }
 
 pub(crate) fn run_group_sync(name: &str, json: bool) -> Result<()> {
+    validate_group_name(name)?;
     let summary = crate::group::sync_group(name)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);

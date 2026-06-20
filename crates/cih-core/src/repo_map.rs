@@ -2,6 +2,8 @@
 //! Deterministic, parse-free: a module/JAR breakdown the user reviews before
 //! choosing what to index.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Coarse structural hint about how a repo is organised.
@@ -24,10 +26,15 @@ pub enum ArchitectureHint {
 /// - <100 files → `Microservice`
 /// - Otherwise `Unknown`
 pub fn auto_detect_architecture(repo_map: &RepoMap) -> ArchitectureHint {
-    if repo_map.total_java_files > 500 && repo_map.modules.len() > 3 {
+    let total = if repo_map.total_source_files > 0 {
+        repo_map.total_source_files
+    } else {
+        repo_map.total_java_files
+    };
+    if total > 500 && repo_map.modules.len() > 3 {
         return ArchitectureHint::Monolith;
     }
-    if repo_map.total_java_files < 100 {
+    if total < 100 {
         return ArchitectureHint::Microservice;
     }
     ArchitectureHint::Unknown
@@ -50,6 +57,12 @@ pub struct RepoMap {
     /// Coarse structural hint — auto-detected during scan or manually set.
     #[serde(default)]
     pub architecture_hint: ArchitectureHint,
+    /// Total source files across all registered languages (Java + TypeScript + Python + …).
+    #[serde(default)]
+    pub total_source_files: u64,
+    /// Per-language source file counts, e.g. `{"java": 120, "typescript": 45, "python": 12}`.
+    #[serde(default)]
+    pub per_language: BTreeMap<String, u64>,
 }
 
 /// Detected build system for the repo.
@@ -58,6 +71,9 @@ pub enum BuildSystem {
     Maven,
     Gradle,
     None,
+    Node,
+    Python,
+    Mixed,
 }
 
 /// One build unit (Maven/Gradle module, or a pseudo-module fallback).
@@ -76,6 +92,9 @@ pub struct ModuleInfo {
     pub spring: SpringSignal,
     /// Sibling modules this one depends on (best-effort from pom/gradle).
     pub depends_on: Vec<String>,
+    /// Detected framework/runtime identifiers, e.g. `["spring", "nestjs"]`.
+    #[serde(default)]
+    pub frameworks: Vec<String>,
 }
 
 /// Cheap Spring footprint per module — substring counts over `.java`, no AST.

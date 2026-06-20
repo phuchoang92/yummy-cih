@@ -183,10 +183,12 @@ fn parse_one(registry: &LanguageRegistry, repo_root: &Path, rel: &str) -> Result
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     // The File node + its Folder ancestry + CONTAINS edges are emitted centrally by
     // `add_structure_path` during merge, so the parse unit only carries declarations.
-    registry
+    let provider = registry
         .provider_for(rel)
-        .ok_or_else(|| anyhow::anyhow!("no language provider for {rel}"))?
-        .parse_file(rel, &src)
+        .ok_or_else(|| anyhow::anyhow!("no language provider for {rel}"))?;
+    let mut unit = provider.parse_file(rel, &src)?;
+    unit.parsed_file.language = provider.language_id().to_string();
+    Ok(unit)
 }
 
 fn add_structure_path(

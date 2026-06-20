@@ -30,8 +30,14 @@ pub(crate) struct QueryResult {
 }
 
 #[derive(Clone)]
+struct CachedIndex {
+    index: SearchIndex,
+    version: String,
+}
+
+#[derive(Clone)]
 pub(crate) struct SearchState {
-    bm25: Arc<RwLock<Option<SearchIndex>>>,
+    bm25: Arc<RwLock<Option<CachedIndex>>>,
     embed_store: Option<Arc<EmbedStore>>,
     artifacts_dir: Option<PathBuf>,
 }
@@ -78,18 +84,26 @@ impl SearchState {
         let Some(artifacts_dir) = &self.artifacts_dir else {
             return Ok(None);
         };
+
+        let artifacts = latest_graph_artifacts_in_dir(artifacts_dir)?;
+        let latest_version = artifacts.version.0.clone();
+
         {
             let guard = self.bm25.read().await;
-            if let Some(index) = guard.as_ref() {
-                return Ok(Some(index.clone()));
+            if let Some(cached) = guard.as_ref() {
+                if cached.version == latest_version {
+                    return Ok(Some(cached.index.clone()));
+                }
             }
         }
 
-        let artifacts = latest_graph_artifacts_in_dir(artifacts_dir)?;
         let nodes = artifacts.read_nodes()?;
         let index = SearchIndex::build(&nodes);
         let mut guard = self.bm25.write().await;
-        *guard = Some(index.clone());
+        *guard = Some(CachedIndex {
+            index: index.clone(),
+            version: latest_version,
+        });
         Ok(Some(index))
     }
 }

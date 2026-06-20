@@ -79,6 +79,8 @@ pub struct SymbolContext {
     pub callers: Vec<Node>,
     pub callees: Vec<Node>,
     pub processes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community: Option<CommunityInfo>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

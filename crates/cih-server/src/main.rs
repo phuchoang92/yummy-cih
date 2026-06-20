@@ -451,7 +451,7 @@ impl CihServer {
         let description = args
             .codebase_description
             .as_deref()
-            .unwrap_or("a Java/Spring enterprise codebase");
+            .unwrap_or("a backend codebase");
         let answer = runner
             .ask(&args.question, description)
             .await
@@ -460,7 +460,8 @@ impl CihServer {
     }
 
     #[tool(
-        description = "List Spring REST endpoints: HTTP method + path + handler method. \
+        description = "List HTTP/REST endpoints (Spring, NestJS, Flask, FastAPI, etc.): \
+        HTTP method + path + handler method. \
         Use prefix to filter by path prefix (e.g. prefix=\"/api/users\")."
     )]
     async fn route_map(

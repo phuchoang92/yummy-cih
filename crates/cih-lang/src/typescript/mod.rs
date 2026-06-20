@@ -29,6 +29,10 @@ impl LanguageProvider for TypescriptProvider {
         language()
     }
 
+    fn language_id(&self) -> &'static str {
+        "typescript"
+    }
+
     fn extensions(&self) -> &'static [&'static str] {
         &[".ts", ".tsx"]
     }

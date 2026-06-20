@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use cih_graph_store::GraphStore;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub backend: String,
     pub bind: String,
@@ -24,6 +24,25 @@ pub struct Config {
     pub agent_llm_model: String,
     /// Agent LLM: API key env var (default: auto-resolved from GEMINI/OPENAI/ANTHROPIC_API_KEY).
     pub agent_api_key: Option<String>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("backend", &self.backend)
+            .field("bind", &self.bind)
+            .field("falkor_url", &self.falkor_url)
+            .field("graph_key", &self.graph_key)
+            .field("artifacts_dir", &self.artifacts_dir)
+            .field("pg_url", &self.pg_url.as_deref().map(|_| "[set]"))
+            .field("agent_llm_base_url", &self.agent_llm_base_url)
+            .field("agent_llm_model", &self.agent_llm_model)
+            .field(
+                "agent_api_key",
+                &self.agent_api_key.as_deref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl Config {

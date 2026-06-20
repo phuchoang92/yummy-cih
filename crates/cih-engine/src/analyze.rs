@@ -31,6 +31,8 @@ pub(crate) struct AnalyzeFlags {
     pub(crate) no_cache: bool,
     /// Skip the integration + DI XML walk (faster on large repos).
     pub(crate) skip_xml_integration: bool,
+    /// Language filter: only include files for these languages (empty = all).
+    pub(crate) languages: Vec<String>,
 }
 
 pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -328,8 +330,13 @@ pub(crate) fn analyze_from_scope_with_options(
         "DB access emit complete"
     );
 
-    let (xml_nodes, xml_edges) = if cache.skip_xml_integration {
-        tracing::info!("Skipping XML integration + DI extraction (--skip-xml-integration)");
+    let has_java = scope_file.files.iter().any(|f| f.ends_with(".java"));
+    let (xml_nodes, xml_edges) = if cache.skip_xml_integration || !has_java {
+        if !has_java {
+            tracing::info!("Skipping XML integration + DI extraction (no Java files in scope)");
+        } else {
+            tracing::info!("Skipping XML integration + DI extraction (--skip-xml-integration)");
+        }
         (Vec::new(), Vec::new())
     } else {
         let (mut xml_nodes, mut xml_edges) = extract_integration_xml_in_repo(&repo_root);
@@ -1012,6 +1019,9 @@ fn build_scope_request(repo: &std::path::Path, flags: &AnalyzeFlags) -> Result<S
     }
     if flags.include_decompiled {
         request.include_decompiled = true;
+    }
+    if !flags.languages.is_empty() {
+        request.languages = flags.languages.clone();
     }
 
     Ok(request)

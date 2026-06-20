@@ -4,6 +4,8 @@ pub mod typescript;
 
 pub trait LanguageProvider: Send + Sync {
     fn language(&self) -> tree_sitter::Language;
+    /// Short lowercase identifier for this language, e.g. `"java"`, `"typescript"`, `"python"`.
+    fn language_id(&self) -> &'static str;
     fn extensions(&self) -> &'static [&'static str];
     fn scope_query(&self) -> &tree_sitter::Query;
     fn package_of(&self, root: tree_sitter::Node<'_>, src: &str) -> Option<String>;
