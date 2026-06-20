@@ -1,4 +1,5 @@
 pub mod ba;
+pub mod community;
 pub mod dev;
 pub mod feature_ba;
 pub mod feature_index;

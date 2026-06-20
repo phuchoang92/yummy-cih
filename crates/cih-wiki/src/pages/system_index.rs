@@ -79,6 +79,14 @@ pub fn render_system_index(
         md.push('\n');
     }
 
+    if !graph.community_nodes.is_empty() {
+        md.push_str("## Communities\n\n");
+        md.push_str(&format!(
+            "**{}** communities discovered by Leiden community detection. [Browse all communities](communities/index.md)\n\n",
+            graph.community_nodes.len(),
+        ));
+    }
+
     md
 }
 

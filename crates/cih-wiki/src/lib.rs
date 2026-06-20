@@ -669,6 +669,106 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         }
     }
 
+    // ── Community pages ──────────────────────────────────────────────────────
+    {
+        let comm_slug_map = slugify::build_slug_map(&graph.community_nodes);
+        std::fs::create_dir_all(out_dir.join("pages/communities"))?;
+
+        let comm_idx = pages::community::render_community_index(
+            &graph.community_nodes,
+            &comm_slug_map,
+            &graph,
+        );
+        std::fs::write(out_dir.join("pages/communities/index.md"), &comm_idx)?;
+        all_pages.push(PageEntry {
+            slug: "communities/index".into(),
+            role: "communities".into(),
+            title: "Communities".into(),
+            kind: "index".into(),
+            path: "pages/communities/index.md".into(),
+            json_path: None,
+            community_id: None,
+        });
+        page_count += 1;
+
+        for comm in &graph.community_nodes {
+            let comm_id = comm.id.as_str().to_string();
+            let dir_name = comm_slug_map
+                .get(&comm_id)
+                .cloned()
+                .unwrap_or_else(|| slugify(comm.id.as_str()));
+            let dir = out_dir.join(format!("pages/communities/{dir_name}"));
+            std::fs::create_dir_all(&dir)?;
+
+            let processes_here: Vec<&Node> = graph
+                .process_nodes
+                .iter()
+                .filter(|p| {
+                    p.props
+                        .as_ref()
+                        .and_then(|props| props.get("communities"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().any(|x| x.as_str() == Some(comm_id.as_str())))
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let llm = input.llm_summaries.as_ref().and_then(|m| m.get(&comm_id));
+            let llm_full = input.llm_full.as_ref().and_then(|m| m.get(&comm_id));
+
+            let detail_md = pages::community::render_community_detail(
+                comm,
+                &graph,
+                &processes_here,
+                llm,
+            );
+            std::fs::write(dir.join("index.md"), &detail_md)?;
+            all_pages.push(PageEntry {
+                slug: format!("communities/{dir_name}/index"),
+                role: "communities".into(),
+                title: comm.name.clone(),
+                kind: "index".into(),
+                path: format!("pages/communities/{dir_name}/index.md"),
+                json_path: None,
+                community_id: Some(comm_id.clone()),
+            });
+            page_count += 1;
+
+            if let Some(full) = llm_full {
+                let po_md = pages::community::render_community_po(comm, &graph, full);
+                std::fs::write(dir.join("po.md"), &po_md)?;
+                all_pages.push(PageEntry {
+                    slug: format!("communities/{dir_name}/po"),
+                    role: "communities".into(),
+                    title: format!("{} — Business Overview", comm.name),
+                    kind: "po".into(),
+                    path: format!("pages/communities/{dir_name}/po.md"),
+                    json_path: None,
+                    community_id: Some(comm_id.clone()),
+                });
+                page_count += 1;
+
+                let ba_md = pages::community::render_community_ba(
+                    comm,
+                    &graph,
+                    &processes_here,
+                    full,
+                );
+                std::fs::write(dir.join("ba.md"), &ba_md)?;
+                all_pages.push(PageEntry {
+                    slug: format!("communities/{dir_name}/ba"),
+                    role: "communities".into(),
+                    title: format!("{} — Business Analysis", comm.name),
+                    kind: "ba".into(),
+                    path: format!("pages/communities/{dir_name}/ba.md"),
+                    json_path: None,
+                    community_id: Some(comm_id.clone()),
+                });
+                page_count += 1;
+            }
+        }
+    }
+
     let manifest = WikiManifest {
         schema_version: 1,
         generated_at: cih_core::now_rfc3339(),
@@ -676,7 +776,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         graph_version: input.graph_version,
         community_version: input.community_version,
         stats,
-        roles: vec!["po".into(), "ba".into(), "dev".into()],
+        roles: vec!["po".into(), "ba".into(), "dev".into(), "communities".into()],
         nav,
         pages: all_pages,
         llm: input.llm_info,
