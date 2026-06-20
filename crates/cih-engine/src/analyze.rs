@@ -294,7 +294,18 @@ pub(crate) fn analyze_from_scope_with_options(
     );
 
     tracing::info!("starting resolve phase");
-    let resolve_output = cih_resolve::resolve_edges(&parse_output.parsed_files);
+    let mut resolvers = cih_resolve::ResolverRegistry::new();
+    resolvers.register(cih_resolve::JavaResolver);
+    resolvers.register(cih_resolve::TypeScriptResolver);
+    resolvers.register(cih_resolve::PythonResolver);
+    let resolve_output = cih_resolve::resolve_with_registry(
+        &parse_output.parsed_files,
+        &resolvers,
+        cih_resolve::ResolveOptions {
+            repo_root: Some(&repo_root),
+            enable_xml_integrations: !cache.skip_xml_integration,
+        },
+    );
     tracing::info!(
         resolved_edges = resolve_output.edges.len(),
         skipped_refs = resolve_output.skipped,
@@ -353,16 +364,15 @@ pub(crate) fn analyze_from_scope_with_options(
             "integration XML extraction complete"
         );
 
-        // Phase 2a — Spring/Blueprint DI resolution. Runs after the Java parse so
-        // it can match injected field types against XML bean classes.
-        let di = cih_resolve::extract_di_xml(&repo_root, &parse_output.parsed_files);
+        // Phase 2a — Spring/Blueprint DI resolution via registry (JavaResolver::extra_edges).
+        let (di_nodes, di_edges) = resolvers.extra_edges(Some(&repo_root), &parse_output.parsed_files);
         tracing::info!(
-            di_bean_nodes = di.nodes.len(),
-            di_calls_edges = di.edges.len(),
+            di_bean_nodes = di_nodes.len(),
+            di_calls_edges = di_edges.len(),
             "DI XML extraction complete"
         );
-        xml_nodes.extend(di.nodes);
-        xml_edges.extend(di.edges);
+        xml_nodes.extend(di_nodes);
+        xml_edges.extend(di_edges);
         (xml_nodes, xml_edges)
     };
 

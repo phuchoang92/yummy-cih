@@ -79,10 +79,42 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
     collect_sql_execution_sites(root, src, &mut builder);
     normalize_builder(&mut builder);
 
+    // Convert RawImports to ImportBindings
+    let import_bindings = builder.imports.iter().map(|imp| {
+        use cih_core::{ImportBinding, ImportBindingKind};
+        let kind = if imp.is_wildcard {
+            ImportBindingKind::Wildcard
+        } else if imp.is_static {
+            ImportBindingKind::StaticMember
+        } else {
+            ImportBindingKind::Named
+        };
+        let (module, imported) = if imp.is_static && !imp.is_wildcard {
+            // "com.example.Util.helper" -> module="com.example.Util", imported="helper"
+            if let Some((m, i)) = imp.raw.rsplit_once('.') {
+                (m.to_string(), Some(i.to_string()))
+            } else {
+                (imp.raw.clone(), None)
+            }
+        } else if !imp.is_wildcard {
+            // "com.example.Class" -> module="com.example", imported="Class"
+            if let Some((m, i)) = imp.raw.rsplit_once('.') {
+                (m.to_string(), Some(i.to_string()))
+            } else {
+                (imp.raw.clone(), None)
+            }
+        } else {
+            // wildcard: module="com.example" (trim the .*)
+            (imp.raw.trim_end_matches(".*").to_string(), None)
+        };
+        ImportBinding { module, imported, local: None, kind, range: imp.range }
+    }).collect::<Vec<_>>();
+
     Ok(ParsedUnit {
         rel: rel.to_string(),
         nodes: builder.nodes,
         edges: builder.edges,
+        import_bindings,
         parsed_file: ParsedFile {
             file: builder.file,
             language: String::new(),

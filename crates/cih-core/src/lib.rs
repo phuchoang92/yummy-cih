@@ -18,8 +18,9 @@ pub use group::{
     GroupEntry, GroupRegistry,
 };
 pub use ir::{
-    BindingKind, ContractKind, ContractSite, ParsedFile, ParsedUnit, RawImport, RefKind,
-    ReferenceSite, SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
+    BindingKind, ContractKind, ContractSite, ImportBinding, ImportBindingKind, ParsedFile,
+    ParsedUnit, RawImport, RefKind, ReferenceSite, SqlConstant, SqlExecutionSite, SymbolDef,
+    TypeBinding,
 };
 pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
 pub use repo_map::{

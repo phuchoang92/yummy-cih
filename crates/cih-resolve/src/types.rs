@@ -23,9 +23,15 @@ pub(crate) fn simple_of(fqcn: &str) -> String {
     fqcn.rsplit('.').next().unwrap_or(fqcn).to_string()
 }
 
-/// Enclosing class FQCN of a callable signature (`fqcn#name/arity` → `fqcn`).
-pub(crate) fn class_of(in_fqcn: &str) -> &str {
+/// Enclosing container (class/module/package) of a callable signature.
+/// (`fqcn#name/arity` → `fqcn`)
+pub(crate) fn container_of_callable(in_fqcn: &str) -> &str {
     in_fqcn.split('#').next().unwrap_or(in_fqcn)
+}
+
+/// Alias for backward compat within this crate.
+pub(crate) fn class_of(in_fqcn: &str) -> &str {
+    container_of_callable(in_fqcn)
 }
 
 /// Strip generics and array brackets to the base type name.

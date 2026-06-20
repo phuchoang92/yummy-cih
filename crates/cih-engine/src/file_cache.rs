@@ -308,6 +308,7 @@ mod tests {
             rel: parsed_file.file.clone(),
             nodes: Vec::new(),
             edges: Vec::new(),
+            import_bindings: Vec::new(),
             parsed_file,
         }
     }

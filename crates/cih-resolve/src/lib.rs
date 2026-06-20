@@ -9,6 +9,9 @@
 use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};
 
+pub mod common;
+pub mod lang;
+
 mod contracts;
 pub mod db_access;
 pub mod di_xml;
@@ -18,10 +21,15 @@ pub mod integration_xml;
 pub mod reports;
 mod types;
 
+pub use common::emit::EdgeEmitter;
+pub use common::index::CommonIndex;
 pub use contracts::resolve_contract_edges;
 pub use db_access::emit_db_access;
 pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
+pub use lang::{
+    java::JavaResolver, python::PythonResolver, typescript::TypeScriptResolver, ResolverRegistry,
+};
 pub use reports::write_unresolved_reports;
 
 /// Per-site diagnostic record for a reference that could not be resolved.
@@ -42,6 +50,7 @@ pub struct UnresolvedRef {
     pub resolved_receiver_type: Option<String>,
     pub external_fqcn: Option<String>,
 }
+
 /// Result of turning unresolved reference sites into graph edges.
 #[derive(Clone, Debug, Default)]
 pub struct ResolveOutput {
@@ -54,11 +63,39 @@ pub struct ResolveOutput {
     /// Per-site diagnostic records for all unresolved references.
     pub unresolved_refs: Vec<UnresolvedRef>,
 }
+
+/// Options for the configurable resolve entrypoint.
+pub struct ResolveOptions<'a> {
+    pub repo_root: Option<&'a std::path::Path>,
+    pub enable_xml_integrations: bool,
+}
+
+/// Build the default registry with Java, TypeScript, and Python resolvers.
+pub fn default_registry() -> ResolverRegistry {
+    let mut r = ResolverRegistry::new();
+    r.register(JavaResolver);
+    r.register(TypeScriptResolver);
+    r.register(PythonResolver);
+    r
+}
+
+/// Backward-compatible entrypoint (uses old ResolveIndex for tests).
 /// Run Phase 4.2 over all parsed files: receiver-bound calls, free calls,
 /// remaining references, import edges, then heritage edges.
 pub fn resolve_edges(parsed: &[ParsedFile]) -> ResolveOutput {
     let index = index::ResolveIndex::build(parsed);
     emit::EdgeEmitter::new(parsed, index).run()
 }
+
+/// Configurable entrypoint used by the engine.
+pub fn resolve_with_registry(
+    parsed: &[ParsedFile],
+    registry: &ResolverRegistry,
+    _options: ResolveOptions<'_>,
+) -> ResolveOutput {
+    let index = CommonIndex::build(parsed, registry);
+    EdgeEmitter::new(parsed, index, registry).run()
+}
+
 #[cfg(test)]
 mod tests;

@@ -4,15 +4,16 @@ use cih_core::{
     BindingKind, NodeId, NodeKind, ParsedFile, RawImport, RefKind, SymbolDef, TypeBinding,
 };
 
+use crate::lang::ResolverRegistry;
 use crate::types::{base_type_name, class_of, is_type_kind, pick_binding, simple_of, stable_dedup};
 
 /// Cross-file resolution index over a parsed scope.
 #[derive(Debug, Default)]
-pub(crate) struct ResolveIndex {
+pub struct CommonIndex {
     /// type FQCN → its def.
     types_by_fqcn: HashMap<String, SymbolDef>,
     /// simple type name → all FQCNs that share it (for unique-name fallback).
-    simple_to_fqcns: HashMap<String, Vec<String>>,
+    pub(crate) simple_to_fqcns: HashMap<String, Vec<String>>,
     /// type FQCN → the file it was declared in (for raw→FQCN via that file's imports).
     file_of_type: HashMap<String, String>,
     /// `(owner_fqcn, method/ctor name)` → overloads.
@@ -28,8 +29,10 @@ pub(crate) struct ResolveIndex {
     supertypes: HashMap<String, Vec<String>>,
     /// interface/super FQCN → types that extend/implement it.
     implementors: HashMap<String, Vec<String>>,
-    /// type FQCN → Spring stereotype ("service", "repository", "component", …).
-    type_stereotypes: HashMap<String, String>,
+    /// type FQCN → per-language opaque metadata (Spring stereotype etc.).
+    type_metadata: HashMap<String, String>,
+    /// type FQCN → language it was declared in.
+    pub(crate) language_of_type: HashMap<String, String>,
 }
 
 #[derive(Debug, Default)]
@@ -38,10 +41,10 @@ struct FileContext {
     imports: Vec<RawImport>,
 }
 
-impl ResolveIndex {
+impl CommonIndex {
     /// Build the index from all `ParsedFile`s in the scope.
-    pub(crate) fn build(parsed: &[ParsedFile]) -> Self {
-        let mut idx = ResolveIndex::default();
+    pub fn build(parsed: &[ParsedFile], registry: &ResolverRegistry) -> Self {
+        let mut idx = CommonIndex::default();
 
         // Pass 1: defs, members, files, bindings.
         for pf in parsed {
@@ -52,11 +55,14 @@ impl ResolveIndex {
                     imports: pf.imports.clone(),
                 },
             );
+            let lang = &pf.language;
+            let resolver = registry.for_language(lang);
             for def in &pf.defs {
                 if is_type_kind(def.kind) {
-                    if let Some(s) = def.stereotype.as_deref() {
-                        idx.type_stereotypes.insert(def.fqcn.clone(), s.to_string());
+                    if let Some(meta) = resolver.type_metadata(def) {
+                        idx.type_metadata.insert(def.fqcn.clone(), meta);
                     }
+                    idx.language_of_type.insert(def.fqcn.clone(), lang.clone());
                     idx.types_by_fqcn.insert(def.fqcn.clone(), def.clone());
                     idx.simple_to_fqcns
                         .entry(simple_of(&def.fqcn))
@@ -111,7 +117,7 @@ impl ResolveIndex {
     /// Resolve a raw (as-written) type name to a FQCN, using the imports +
     /// package of `file`: explicit import → same package → wildcard import →
     /// workspace-unique simple name. Already-qualified names pass through.
-    pub(crate) fn resolve_type(&self, raw: &str, file: &str) -> Option<String> {
+    pub fn resolve_type(&self, raw: &str, file: &str) -> Option<String> {
         let base = base_type_name(raw);
         if base.is_empty() {
             return None;
@@ -146,11 +152,26 @@ impl ResolveIndex {
         }
     }
 
+    /// Resolve a simple name to a qualified name, scoped to a specific language.
+    /// Only returns a match if there is exactly one type with that simple name in the language.
+    pub fn resolve_type_in_language(&self, simple: &str, _file: &str, language: &str) -> Option<String> {
+        let candidates: Vec<&String> = self.simple_to_fqcns
+            .get(simple)?
+            .iter()
+            .filter(|fqcn| self.language_of_type.get(*fqcn).map(String::as_str) == Some(language))
+            .collect();
+        if candidates.len() == 1 {
+            Some(candidates[0].clone())
+        } else {
+            None
+        }
+    }
+
     // --- member lookup cascade -------------------------------------------
 
     /// Find a member's node id on `owner_fqcn` directly (no hierarchy walk):
     /// exact-arity overload → any overload → field.
-    pub(crate) fn find_member(
+    pub fn find_member(
         &self,
         owner_fqcn: &str,
         name: &str,
@@ -168,13 +189,13 @@ impl ResolveIndex {
         self.fields.get(&key).map(|d| d.id.clone())
     }
 
-    pub(crate) fn find_constructor(&self, owner_fqcn: &str, arity: Option<u16>) -> Option<NodeId> {
+    pub fn find_constructor(&self, owner_fqcn: &str, arity: Option<u16>) -> Option<NodeId> {
         self.find_member(owner_fqcn, "<init>", arity)
     }
 
     /// Like [`find_member`], but walks `owner_fqcn` + its supertypes (BFS) — the
     /// inheritance/MRO-ish member resolution the receiver-bound pass needs.
-    pub(crate) fn find_member_in_hierarchy(
+    pub fn find_member_in_hierarchy(
         &self,
         owner_fqcn: &str,
         name: &str,
@@ -196,7 +217,7 @@ impl ResolveIndex {
         None
     }
 
-    pub(crate) fn find_field_in_hierarchy(&self, owner_fqcn: &str, name: &str) -> Option<NodeId> {
+    pub fn find_field_in_hierarchy(&self, owner_fqcn: &str, name: &str) -> Option<NodeId> {
         let mut seen = HashSet::new();
         let mut queue = vec![owner_fqcn.to_string()];
         while let Some(cur) = queue.pop() {
@@ -213,7 +234,7 @@ impl ResolveIndex {
         None
     }
 
-    pub(crate) fn member_return_type_in_hierarchy(
+    pub fn member_return_type_in_hierarchy(
         &self,
         owner_fqcn: &str,
         name: &str,
@@ -249,7 +270,7 @@ impl ResolveIndex {
     /// Resolve a receiver name used inside callable `in_fqcn` to a type FQCN.
     /// Precedence: nearest param/local (then alias/call-result chains) → enclosing
     /// class field (incl. inherited) → `this`/`super`.
-    pub(crate) fn receiver_type(&self, in_fqcn: &str, receiver: &str) -> Option<String> {
+    pub fn receiver_type(&self, in_fqcn: &str, receiver: &str) -> Option<String> {
         self.receiver_type_inner(in_fqcn, receiver, 0)
     }
 
@@ -296,12 +317,12 @@ impl ResolveIndex {
             // 2. Scan fields of the enclosing class for the method when step 1 fails
             //    (factory pattern: `var x = this.factory.create()`).
             BindingKind::CallResult => self
-                .method_return_type_in_hierarchy(owner_class, &tb.raw_type)
+                .member_return_type_in_hierarchy(owner_class, &tb.raw_type, None)
                 .or_else(|| self.callresult_via_field_types(owner_class, &tb.raw_type)),
         }
     }
 
-    pub(crate) fn field_type_in_hierarchy(&self, owner_class: &str, name: &str) -> Option<String> {
+    pub fn field_type_in_hierarchy(&self, owner_class: &str, name: &str) -> Option<String> {
         let mut seen = HashSet::new();
         let mut queue = vec![owner_class.to_string()];
         while let Some(cur) = queue.pop() {
@@ -311,25 +332,6 @@ impl ResolveIndex {
             if let Some(field) = self.fields.get(&(cur.clone(), name.to_string())) {
                 if let Some(raw) = &field.declared_type {
                     return self.resolve_in_type(raw, &cur);
-                }
-            }
-            if let Some(supers) = self.supertypes.get(&cur) {
-                queue.extend(supers.iter().cloned());
-            }
-        }
-        None
-    }
-
-    fn method_return_type_in_hierarchy(&self, owner_class: &str, name: &str) -> Option<String> {
-        let mut seen = HashSet::new();
-        let mut queue = vec![owner_class.to_string()];
-        while let Some(cur) = queue.pop() {
-            if !seen.insert(cur.clone()) {
-                continue;
-            }
-            if let Some(overloads) = self.methods.get(&(cur.clone(), name.to_string())) {
-                if let Some(ret) = overloads.iter().find_map(|d| d.return_type.as_ref()) {
-                    return self.resolve_in_type(ret, &cur);
                 }
             }
             if let Some(supers) = self.supertypes.get(&cur) {
@@ -350,7 +352,7 @@ impl ResolveIndex {
             .filter_map(|(_, def)| {
                 let raw = def.declared_type.as_ref()?;
                 let field_type = self.resolve_in_type(raw, owner_class)?;
-                self.method_return_type_in_hierarchy(&field_type, method_name)
+                self.member_return_type_in_hierarchy(&field_type, method_name, None)
             })
             .collect();
         if candidates.len() == 1 {
@@ -368,34 +370,51 @@ impl ResolveIndex {
         }
     }
 
-    // --- accessors (for 4.2 / 4.3) ---------------------------------------
+    // --- accessors (for emit passes) -------------------------------------
 
-    pub(crate) fn supertypes(&self, fqcn: &str) -> &[String] {
+    pub fn supertypes(&self, fqcn: &str) -> &[String] {
         self.supertypes.get(fqcn).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub(crate) fn implementors(&self, fqcn: &str) -> &[String] {
+    pub fn implementors(&self, fqcn: &str) -> &[String] {
         self.implementors
             .get(fqcn)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub(crate) fn is_known_type(&self, fqcn: &str) -> bool {
+    pub fn is_known_type(&self, fqcn: &str) -> bool {
         self.types_by_fqcn.contains_key(fqcn)
     }
 
-    pub(crate) fn type_node_id(&self, fqcn: &str) -> Option<NodeId> {
+    pub fn type_node_id(&self, fqcn: &str) -> Option<NodeId> {
         self.types_by_fqcn.get(fqcn).map(|def| def.id.clone())
     }
 
     /// Every type FQCN in the scope (for MRO / whole-graph passes).
-    pub(crate) fn type_fqcns(&self) -> impl Iterator<Item = &str> {
+    pub fn type_fqcns(&self) -> impl Iterator<Item = &str> {
         self.types_by_fqcn.keys().map(String::as_str)
     }
 
-    pub(crate) fn all_methods(&self) -> &HashMap<(String, String), Vec<SymbolDef>> {
+    pub fn all_methods(&self) -> &HashMap<(String, String), Vec<SymbolDef>> {
         &self.methods
+    }
+
+    pub fn is_interface_type(&self, fqcn: &str) -> bool {
+        self.types_by_fqcn
+            .get(fqcn)
+            .map(|def| matches!(def.kind, NodeKind::Interface | NodeKind::Annotation))
+            .unwrap_or(false)
+    }
+
+    /// Get per-language metadata for a type.
+    pub fn type_metadata_for(&self, qname: &str) -> Option<&str> {
+        self.type_metadata.get(qname).map(String::as_str)
+    }
+
+    /// Get language of a type FQCN.
+    pub fn language_of(&self, qname: &str) -> Option<&str> {
+        self.language_of_type.get(qname).map(String::as_str)
     }
 
     fn dedup(&mut self) {
@@ -413,30 +432,7 @@ impl ResolveIndex {
             v.dedup();
         }
     }
-
-    pub(crate) fn is_interface_type(&self, fqcn: &str) -> bool {
-        self.types_by_fqcn
-            .get(fqcn)
-            .map(|def| matches!(def.kind, NodeKind::Interface | NodeKind::Annotation))
-            .unwrap_or(false)
-    }
-
-    fn is_spring_bean(&self, fqcn: &str) -> bool {
-        matches!(
-            self.type_stereotypes.get(fqcn).map(String::as_str),
-            Some("service" | "repository" | "component" | "controller" | "configuration")
-        )
-    }
-
-    /// Returns the single `@Service`/`@Component`/`@Repository` implementor for an
-    /// interface, or `None` when there are zero or multiple (ambiguous).
-    pub(crate) fn di_impl(&self, interface_fqcn: &str) -> Option<String> {
-        let impls = self.implementors.get(interface_fqcn)?;
-        let beans: Vec<&String> = impls.iter().filter(|f| self.is_spring_bean(f)).collect();
-        if beans.len() == 1 {
-            Some(beans[0].clone())
-        } else {
-            None
-        }
-    }
 }
+
+// Keep the old name for backward compat in tests
+pub(crate) type ResolveIndex = CommonIndex;
