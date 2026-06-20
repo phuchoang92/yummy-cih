@@ -2,6 +2,7 @@ use cih_core::{
     file_id, function_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
     Range, RawImport, RefKind, ReferenceSite, RouteSource, SymbolDef,
 };
+use std::collections::HashMap;
 use tree_sitter::Node as TsNode;
 
 fn range_of(node: TsNode<'_>) -> Range {
@@ -174,6 +175,38 @@ fn methods_kwarg_in_call(call_node: TsNode<'_>, src: &str) -> Vec<String> {
     out
 }
 
+fn kwarg_string_value<'a>(call_node: TsNode<'_>, key: &str, src: &'a str) -> Option<String> {
+    let args = call_node.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    for child in args.named_children(&mut cursor) {
+        if child.kind() != "keyword_argument" {
+            continue;
+        }
+        let k = child.child_by_field_name("name").map(|n| text(n, src));
+        if k.as_deref() != Some(key) {
+            continue;
+        }
+        if let Some(v) = child.child_by_field_name("value") {
+            if v.kind() == "string" {
+                return Some(unquote(&text(v, src)));
+            }
+        }
+    }
+    None
+}
+
+fn normalize_route_path(prefix: &str, path: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    let path = path.trim_start_matches('/');
+    if prefix.is_empty() {
+        format!("/{path}")
+    } else if path.is_empty() {
+        format!("/{prefix}")
+    } else {
+        format!("/{prefix}/{path}")
+    }
+}
+
 fn flask_http_method(attr: &str) -> Option<&'static str> {
     match attr {
         "get" => Some("GET"),
@@ -208,6 +241,10 @@ struct Builder {
     defs: Vec<SymbolDef>,
     imports: Vec<RawImport>,
     reference_sites: Vec<ReferenceSite>,
+    /// variable_name → url_prefix for FastAPI APIRouter instances
+    fastapi_prefixes: HashMap<String, String>,
+    /// variable_name → url_prefix for Flask Blueprint instances
+    flask_prefixes: HashMap<String, String>,
 }
 
 impl Builder {
@@ -466,6 +503,46 @@ fn process_function_decorators(
         let obj = dec.obj.as_deref().unwrap_or("");
         let attr = dec.attr.as_deref().unwrap_or("");
 
+        // Clone prefix strings to avoid borrow conflict with mutable emit calls below.
+        let fastapi_prefix = builder.fastapi_prefixes.get(obj).cloned();
+        let flask_prefix = builder.flask_prefixes.get(obj).cloned();
+
+        // Tracked FastAPI APIRouter with prefix
+        if let Some(prefix) = fastapi_prefix {
+            if let Some(http_method) = fastapi_http_method(attr) {
+                if let Some(ref path) = dec.path_arg {
+                    let full_path = normalize_route_path(&prefix, path);
+                    builder.emit_fastapi_route(fn_node, fn_id, http_method, &full_path);
+                }
+                continue;
+            }
+        }
+
+        // Tracked Flask Blueprint with prefix
+        if let Some(prefix) = flask_prefix {
+            if attr == "route" {
+                if let Some(ref path) = dec.path_arg {
+                    let methods = if dec.methods.is_empty() {
+                        vec!["GET".to_string()]
+                    } else {
+                        dec.methods.clone()
+                    };
+                    let full_path = normalize_route_path(&prefix, path);
+                    for method in methods {
+                        builder.emit_flask_route(fn_node, fn_id, &method, &full_path);
+                    }
+                }
+                continue;
+            }
+            if let Some(http_method) = flask_http_method(attr) {
+                if let Some(ref path) = dec.path_arg {
+                    let full_path = normalize_route_path(&prefix, path);
+                    builder.emit_flask_route(fn_node, fn_id, http_method, &full_path);
+                }
+                continue;
+            }
+        }
+
         // Flask: @app.route('/path', methods=['GET', 'POST'])
         if attr == "route" && (obj == "app" || obj == "blueprint") {
             if let Some(ref path) = dec.path_arg {
@@ -499,6 +576,36 @@ fn process_function_decorators(
                 }
             }
         }
+    }
+}
+
+fn detect_and_store_router_prefix(node: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let Some(left) = node.child_by_field_name("left") else { return };
+    if left.kind() != "identifier" {
+        return;
+    }
+    let var_name = text(left, src);
+
+    let Some(right) = node.child_by_field_name("right") else { return };
+    if right.kind() != "call" {
+        return;
+    }
+
+    let Some(func) = right.child_by_field_name("function") else { return };
+    let func_name = text(func, src);
+
+    match func_name.as_str() {
+        "APIRouter" => {
+            if let Some(prefix) = kwarg_string_value(right, "prefix", src) {
+                builder.fastapi_prefixes.insert(var_name, prefix);
+            }
+        }
+        "Blueprint" => {
+            if let Some(prefix) = kwarg_string_value(right, "url_prefix", src) {
+                builder.flask_prefixes.insert(var_name, prefix);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -587,6 +694,13 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
                 }
             }
         }
+        "assignment" => {
+            detect_and_store_router_prefix(node, src, builder);
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                walk(child, src, builder, class_fqn);
+            }
+        }
         "import_statement" | "import_from_statement" => {
             builder.emit_import(node, src);
         }
@@ -605,6 +719,17 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
             }
         }
     }
+}
+
+/// Returns all Route node names emitted for `src`.
+#[cfg(test)]
+fn route_names_for(src: &str) -> Vec<String> {
+    let unit = parse_python_file("test.py", src).unwrap();
+    unit.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Route)
+        .map(|n| n.name.clone())
+        .collect()
 }
 
 pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
@@ -676,4 +801,59 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
             sql_execution_sites: Vec::new(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fastapi_router_prefix_is_composed() {
+        let src = r#"
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/orders")
+
+@router.get("/list")
+def list_orders():
+    pass
+
+@router.post("/create")
+def create_order():
+    pass
+"#;
+        let mut names = route_names_for(src);
+        names.sort();
+        assert_eq!(names, vec!["GET /orders/list", "POST /orders/create"]);
+    }
+
+    #[test]
+    fn flask_blueprint_prefix_is_composed() {
+        let src = r#"
+from flask import Blueprint
+
+orders_bp = Blueprint("orders", __name__, url_prefix="/api/orders")
+
+@orders_bp.route("/list", methods=["GET", "POST"])
+def list_orders():
+    pass
+"#;
+        let mut names = route_names_for(src);
+        names.sort();
+        assert_eq!(names, vec!["GET /api/orders/list", "POST /api/orders/list"]);
+    }
+
+    #[test]
+    fn plain_app_routes_unaffected() {
+        let src = r#"
+from flask import Flask
+app = Flask(__name__)
+
+@app.route("/health")
+def health():
+    pass
+"#;
+        let names = route_names_for(src);
+        assert_eq!(names, vec!["GET /health"]);
+    }
 }

@@ -517,8 +517,12 @@ impl CihServer {
     }
 
     #[tool(
-        description = "List HTTP/REST endpoints (Spring, NestJS, Flask, FastAPI, etc.): \
-        HTTP method + path + handler method. \
+        description = "List HTTP/REST endpoints discovered in the indexed repo. \
+        Supported frameworks: Spring MVC/Boot (@GetMapping etc.), NestJS (@Get/@Controller), \
+        Flask (@app.route, @bp.route, Blueprint shorthand), FastAPI (@router.get etc. with APIRouter prefix), \
+        Express (router.get/post/put/delete/patch). \
+        V1 limitation: cross-file router mounts (include_router/register_blueprint with prefix in the \
+        app entry-point) are not resolved — routes show their per-file prefix only. \
         Use prefix to filter by path prefix (e.g. prefix=\"/api/users\")."
     )]
     async fn route_map(
