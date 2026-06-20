@@ -1,0 +1,74 @@
+%% CIH — Code Intelligence Hub — High-Level Architecture (re-architected)
+%% Stack: Rust engine+MCP (rmcp+axum, Streamable HTTP) · Claude Agent SDK orchestration (TS)
+%%        · pluggable GraphStore (FalkorDB now / Amazon Neptune live) · pgvector (vectors)
+flowchart TB
+    classDef app fill:#e0f7fa,stroke:#00acc1,stroke-width:2px,color:#006064;
+    classDef compute fill:#ede7f6,stroke:#5e35b1,stroke-width:2px,color:#311b92;
+    classDef storage fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#e65100;
+    classDef database fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20;
+    classDef vector fill:#fce4ec,stroke:#d81b60,stroke-width:2px,color:#880e4f;
+
+    subgraph AppLayer ["1. App & Orchestration (Yummy App)"]
+        FE["Next.js Frontend<br/>(Chat + Docusaurus Wiki viewer)"]
+        BFF["Node/Next.js BFF<br/><b>Claude Agent SDK</b> — agentic GraphRAG loop"]
+        LLM["Claude API<br/>(Opus 4.8 deep reasoning / Sonnet 4.x chat)"]
+        FE <-->|internal API / SSE stream| BFF
+        BFF <-->|tool-use + completion| LLM
+    end
+
+    subgraph Engine ["2. CIH Engine + MCP — Rust service (rmcp + axum, Streamable HTTP)"]
+        MCP["MCP Server (Streamable HTTP / JSON-RPC)<br/>tools: query · context · impact · detect_changes · rename"]
+        subgraph Core ["In-process engine (cih-* crates · rayon, no FFI)"]
+            PARSE["parse (tree-sitter-rs)"]
+            SPRING["Spring pre-phase<br/>beans · routes · JPA"]
+            RESOLVE["scope-res + MRO"]
+            GRAPH["graph build<br/>(columnar + CSR)"]
+            ALGO["Leiden · processes · BM25"]
+            PARSE --> SPRING --> RESOLVE --> GRAPH --> ALGO
+        end
+        FF["JetBrains Fernflower<br/>(Java bytecode decompiler)"]
+        GS["GraphStore port + BulkLoader<br/>(pluggable adapters)"]
+        MCP --> Core
+        MCP -->|spawn async| FF
+        Core --> GS
+    end
+
+    subgraph Embed ["3. Embeddings (opt-in)"]
+        EMB["Rust fastembed/ort<br/>or TS/Python sidecar<br/>MiniLM-L6-v2 / bge-m3"]
+    end
+
+    subgraph Storage ["4. File & artifact storage (AWS EFS + S3)"]
+        EFS_Repo["Decompiled .java<br/>.workspace-dependencies/"]
+        EFS_Wiki["Docusaurus wiki<br/>docs/*.meta.md"]
+        S3["S3: bulk-load artifacts<br/>nodes/edges parquet + csv"]
+    end
+
+    subgraph Data ["5. Data stores (banking-grade)"]
+        PV[("Vector DB: pgvector on RDS Postgres<br/>HNSW — code embeddings")]:::vector
+        subgraph GraphDB ["Graph DB — pluggable via GraphStore (openCypher)"]
+            FALKOR[("FalkorDB<br/>open-source — NOW / dev")]
+            NEPTUNE[("Amazon Neptune<br/>managed — LIVE / prod")]
+        end
+    end
+
+    %% ---- Query-time (chat / GraphRAG) ----
+    BFF <==>|Streamable HTTP (MCP tool calls)| MCP
+    MCP <-->|embed query| EMB
+    MCP <-->|hybrid search: vector top-K| PV
+    GS <-->|openCypher traversal (impact / subgraph)| GraphDB
+
+    %% ---- Index-time (ingestion) ----
+    FF -->|decompiled source| EFS_Repo
+    Core -->|read source I/O| EFS_Repo
+    Core -->|chunk-specs| EMB
+    EMB -->|vectors| PV
+    GS -->|bulk-load artifacts| S3
+    S3 -->|COPY / bulk loader| GraphDB
+    MCP -->|sync & rebuild wiki| EFS_Wiki
+    FE <-->|read markdown| EFS_Wiki
+
+    class FE,BFF,LLM app;
+    class MCP,PARSE,SPRING,RESOLVE,GRAPH,ALGO,FF,GS,EMB compute;
+    class EFS_Repo,EFS_Wiki,S3 storage;
+    class PV vector;
+    class FALKOR,NEPTUNE database;

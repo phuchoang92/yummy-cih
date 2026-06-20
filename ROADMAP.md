@@ -1,8 +1,8 @@
 # yummy-cih — Implementation Roadmap
 
 Phased build plan for **CIH (Code Intelligence Hub)**. Architecture rationale lives in
-`../cih-plan.md`; Rust engine internals in `../codegraph-rust-plan.md`; the system diagram in
-`../high-architecture`.
+`docs/cih-plan.md`; Rust engine internals in `docs/codegraph-rust-plan.md`; the system diagram in
+`docs/high-architecture.mmd`.
 
 **Guiding principle:** ship a *thin vertical slice* first (index a Java repo → query it over MCP),
 then make the call graph *accurate*, then add *product*, then *scale to go-live*. Depth before

@@ -1,21 +1,41 @@
 # CIH — Code Intelligence Hub (Rust engine + MCP service)
-# Milestone 1 scaffold: rmcp+axum MCP server with a pluggable GraphStore (FalkorDB adapter).
+#
+# Crate layers (each layer may only depend on layers above it):
+#
+#  Foundation   cih-core          IR, artifacts, group/registry types
+#
+#  Language     cih-lang          LanguageProvider trait + Java/Python/TS impls
+#               cih-parse         tree-sitter parse → IR  (uses cih-lang)
+#               cih-jar           JAR/class bytecode → API-surface nodes
+#
+#  Analysis     cih-resolve       edge resolution, DI-wiring, Spring/XML/SQL passes
+#               cih-community     Leiden communities, entry-points, process detection
+#               cih-search        BM25, RRF, tokenizer
+#               cih-embed         fastembed/ort embeddings + pgvector store
+#
+#  Storage      cih-graph-store   GraphStore + BulkLoader ports  (traits only — no impl)
+#               cih-falkor        FalkorDB adapter  (openCypher over redis protocol)
+#
+#  Product      cih-engine        CLI orchestrator: scan/analyze/discover/embed/wiki/group
+#               cih-wiki          wiki page generation library
+#               cih-server        rmcp+axum MCP server; exposes all tools over Streamable HTTP
+
 [workspace]
 resolver = "2"
 members = [
   "crates/cih-core",
-  "crates/cih-engine",
   "crates/cih-lang",
   "crates/cih-parse",
-  "crates/cih-resolve",
   "crates/cih-jar",
+  "crates/cih-resolve",
   "crates/cih-community",
   "crates/cih-search",
   "crates/cih-embed",
   "crates/cih-graph-store",
   "crates/cih-falkor",
-  "crates/cih-server",
+  "crates/cih-engine",
   "crates/cih-wiki",
+  "crates/cih-server",
 ]
 
 [workspace.package]
