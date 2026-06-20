@@ -490,9 +490,12 @@ dependencies = [
  "blake3",
  "cih-core",
  "petgraph",
+ "rand 0.9.4",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "toml",
  "tracing",
 ]

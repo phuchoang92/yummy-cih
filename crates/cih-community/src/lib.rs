@@ -4,7 +4,7 @@ mod entry_points;
 pub mod graph;
 mod label;
 mod leiden;
-mod prng;
+mod leiden_impl;
 pub mod registry;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -91,12 +91,11 @@ pub fn detect_communities(
         return CommunityOutput::default();
     }
 
-    let mut rng = prng::Mulberry32::new(cfg.seed);
-    let assignments = leiden::louvain(
+    let assignments = leiden::leiden(
         &community_graph,
         cfg.resolution,
-        cfg.max_iterations,
-        &mut rng,
+        cfg.max_iterations as usize,
+        cfg.seed as u64,
     );
 
     let source_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
