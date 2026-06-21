@@ -18,9 +18,9 @@ pub use group::{
     GroupEntry, GroupRegistry,
 };
 pub use ir::{
-    BindingKind, ContractKind, ContractSite, ImportBinding, ImportBindingKind, ParsedFile,
-    ParsedUnit, RawImport, RefKind, ReferenceSite, SqlConstant, SqlExecutionSite, SymbolDef,
-    TypeBinding,
+    BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind, ContractSite,
+    ImportBinding, ImportBindingKind, ParsedFile, ParsedUnit, RawImport, RefKind, ReferenceSite,
+    SqlConstant, SqlExecutionSite, StringConstant, SymbolDef, TypeBinding,
 };
 pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
 pub use repo_map::{
@@ -251,6 +251,7 @@ pub enum EdgeKind {
     ReadsTable,
     WritesTable,
     IntegrationLink,
+    SimilarTo,
     Other,
 }
 
@@ -280,6 +281,7 @@ impl EdgeKind {
             EdgeKind::ReadsTable => "READS_TABLE",
             EdgeKind::WritesTable => "WRITES_TABLE",
             EdgeKind::IntegrationLink => "INTEGRATION_LINK",
+            EdgeKind::SimilarTo => "SIMILAR_TO",
             EdgeKind::Other => "REL",
         }
     }
@@ -317,6 +319,29 @@ pub struct Edge {
     pub confidence: f32,
     #[serde(default)]
     pub reason: String,
+    /// Optional edge properties. CALLS edges use: `{"call_sites": [{range, args}]}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub props: Option<serde_json::Value>,
+}
+
+impl Edge {
+    /// Constructor that fills in the new optional `props` field with None.
+    pub fn new(
+        src: NodeId,
+        dst: NodeId,
+        kind: EdgeKind,
+        confidence: f32,
+        reason: String,
+    ) -> Self {
+        Self {
+            src,
+            dst,
+            kind,
+            confidence,
+            reason,
+            props: None,
+        }
+    }
 }
 
 fn default_confidence() -> f32 {
@@ -334,6 +359,27 @@ pub struct GraphArtifacts {
     pub nodes_path: PathBuf,
     pub edges_path: PathBuf,
     pub version: VersionId,
+}
+
+/// Manifest written at the head of a `.cih` bundle archive (Gap 5).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CihBundleManifest {
+    /// Bundle format version; always 1 for this implementation.
+    pub bundle_version: u8,
+    /// CIH engine semver string (e.g. `"0.1.0"`).
+    pub cih_version: String,
+    /// Short repo name (last path component of root).
+    pub repo_name: String,
+    /// Absolute root path at export time.
+    pub root_path: String,
+    /// ISO 8601 timestamp of export.
+    pub indexed_at: String,
+    /// Graph artifact version hash.
+    pub artifact_version: String,
+    /// Whether community nodes/edges are included.
+    pub has_community: bool,
+    /// Number of indexed source files.
+    pub file_count: usize,
 }
 
 /// Incremental change set for a re-index of a few files.

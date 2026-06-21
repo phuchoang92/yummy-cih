@@ -202,6 +202,7 @@ impl Builder {
             kind: EdgeKind::Contains,
             confidence: 1.0,
             reason: "file-type".into(),
+            props: None,
         });
         self.defs.push(SymbolDef {
             id,
@@ -215,6 +216,8 @@ impl Builder {
             return_type: None,
             declared_type: None,
             stereotype: stereotype.map(|s| s.to_string()),
+            complexity: None,
+            body_fingerprint: None,
         });
         fqn
     }
@@ -238,6 +241,7 @@ impl Builder {
             kind: EdgeKind::Contains,
             confidence: 1.0,
             reason: "file-type".into(),
+            props: None,
         });
         self.defs.push(SymbolDef {
             id,
@@ -251,6 +255,8 @@ impl Builder {
             return_type: None,
             declared_type: None,
             stereotype: None,
+            complexity: None,
+            body_fingerprint: None,
         });
     }
 
@@ -284,6 +290,7 @@ impl Builder {
                 kind: EdgeKind::HasMethod,
                 confidence: 1.0,
                 reason: "member".into(),
+            props: None,
             });
         } else {
             self.edges.push(Edge {
@@ -292,6 +299,7 @@ impl Builder {
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
                 reason: "file-fn".into(),
+            props: None,
             });
         }
 
@@ -307,6 +315,8 @@ impl Builder {
             return_type: None,
             declared_type: None,
             stereotype: None,
+            complexity: None,
+            body_fingerprint: None,
         });
         id
     }
@@ -342,6 +352,7 @@ impl Builder {
             kind: EdgeKind::HandlesRoute,
             confidence: 1.0,
             reason: format!("nestjs-{}", http_method.to_ascii_lowercase()),
+            props: None,
         });
     }
 
@@ -418,6 +429,7 @@ impl Builder {
             range: range_of(func),
             in_fqcn: self.module.clone(),
             in_callable: file_id(&self.rel),
+            arg_texts: Vec::new(),
         });
     }
 }
@@ -629,6 +641,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
                     contract_sites: Vec::new(),
                     sql_constants: Vec::new(),
                     sql_execution_sites: Vec::new(),
+                    string_constants: Vec::new(),
                 },
             });
         }
@@ -671,6 +684,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
             contract_sites: Vec::new(),
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
+            string_constants: Vec::new(),
         },
     })
 }

@@ -1,6 +1,9 @@
+pub mod constant_resolver;
 pub mod java;
 pub mod python;
 pub mod typescript;
+
+pub use constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 
 pub trait LanguageProvider: Send + Sync {
     fn language(&self) -> tree_sitter::Language;

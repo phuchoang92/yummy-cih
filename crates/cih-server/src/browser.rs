@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
 };
 use cih_core::{Node, NodeId};
-use cih_graph_store::{Direction, FlowNode, GraphStore, GraphStoreError};
+use cih_graph_store::{Direction, FlowHop, GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -259,11 +259,11 @@ async fn graph_routes(
 fn render_flow_graph(
     entry_id: &NodeId,
     entry_node: Option<&Node>,
-    steps: &[FlowNode],
+    hops: &[FlowHop],
     depth_limit: u32,
 ) -> serde_json::Value {
-    let mut nodes = Vec::with_capacity(steps.len() + 1);
-    let mut links = Vec::with_capacity(steps.len());
+    let mut nodes = Vec::with_capacity(hops.len() + 1);
+    let mut links = Vec::with_capacity(hops.len());
 
     nodes.push(json!({
         "id": entry_id.as_str(),
@@ -275,7 +275,8 @@ fn render_flow_graph(
         "file": entry_node.map(|node| node.file.as_str()).unwrap_or(""),
     }));
 
-    for step in steps {
+    for hop in hops.iter().skip(1) {
+        let step = &hop.node;
         nodes.push(json!({
             "id": step.id.as_str(),
             "label": node_label(&step.name, step.qualified_name.as_deref(), step.id.as_str()),
@@ -291,7 +292,7 @@ fn render_flow_graph(
                 .map(|id| id.as_str())
                 .unwrap_or_else(|| entry_id.as_str()),
             "target": step.id.as_str(),
-            "label": "flow",
+            "label": hop.via.as_ref().map(|v| v.kind.as_str()).unwrap_or("flow"),
         }));
     }
 
@@ -301,7 +302,7 @@ fn render_flow_graph(
         "depth_limit": depth_limit,
         "nodes": nodes,
         "links": links,
-        "mermaid": render_mermaid_flow(entry_id, steps),
+        "mermaid": render_mermaid_flow(entry_id, hops),
     })
 }
 

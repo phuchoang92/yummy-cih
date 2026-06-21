@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use cih_core::{
-    constructor_id, field_id, file_id, method_id, type_id, BindingKind, ContractKind, ContractSite,
-    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind,
-    ReferenceSite, RouteSource, SqlConstant, SqlExecutionSite, SymbolDef, TypeBinding,
+    constructor_id, field_id, file_id, method_id, type_id, BindingKind, BodyFingerprint,
+    ComplexityRecord, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId, NodeKind,
+    ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource, SqlConstant,
+    SqlExecutionSite, StringConstant, SymbolDef, TypeBinding,
 };
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, QueryCursor, Tree};
@@ -53,6 +54,7 @@ struct FileBuilder {
     contract_sites: Vec<ContractSite>,
     sql_constants: Vec<SqlConstant>,
     sql_execution_sites: Vec<SqlExecutionSite>,
+    string_constants: Vec<StringConstant>,
     type_contexts: Vec<TypeContext>,
     callable_contexts: Vec<CallableContext>,
 }
@@ -77,6 +79,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
     collect_contract_sites(root, src, &mut builder);
     collect_sql_constants(root, src, &mut builder);
     collect_sql_execution_sites(root, src, &mut builder);
+    collect_static_string_constants(root, src, &mut builder);
     normalize_builder(&mut builder);
 
     // Convert RawImports to ImportBindings
@@ -126,6 +129,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
             contract_sites: builder.contract_sites,
             sql_constants: builder.sql_constants,
             sql_execution_sites: builder.sql_execution_sites,
+            string_constants: builder.string_constants,
         },
     })
 }
@@ -171,6 +175,8 @@ fn collect_declarations(
             return_type: None,
             declared_type: None,
             stereotype: stereotype.clone(),
+            complexity: None,
+            body_fingerprint: None,
         });
 
         if let Some(parent_id) = owner_id {
@@ -180,6 +186,7 @@ fn collect_declarations(
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
                 reason: "nested-type".into(),
+            props: None,
             });
         } else {
             builder.edges.push(Edge {
@@ -188,6 +195,7 @@ fn collect_declarations(
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
                 reason: "file-type".into(),
+            props: None,
             });
         }
 
@@ -244,6 +252,17 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let param_types = param_type_names(node, src);
     let is_test_method = owner.is_test && is_test_method(node, src);
     let is_bean = is_bean_method(node, src);
+
+    // Gap 1: Complexity metrics
+    let complexity = node
+        .child_by_field_name("body")
+        .map(|body| compute_complexity(body));
+
+    // Gap 2: Body fingerprint
+    let body_fingerprint = node
+        .child_by_field_name("body")
+        .and_then(|body| compute_body_fingerprint(body, src));
+
     let props = {
         let mut obj = serde_json::Map::new();
         if is_bean {
@@ -266,6 +285,12 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
                 ),
             );
         }
+        // Gap 1: Write complexity into Node.props
+        if let Some(ref cx) = complexity {
+            obj.insert("cyclomatic".into(), serde_json::Value::Number(cx.cyclomatic.into()));
+            obj.insert("cognitive".into(), serde_json::Value::Number(cx.cognitive.into()));
+            obj.insert("loopDepth".into(), serde_json::Value::Number(cx.loop_depth.into()));
+        }
         if obj.is_empty() {
             None
         } else {
@@ -287,6 +312,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         kind: EdgeKind::HasMethod,
         confidence: 1.0,
         reason: "member".into(),
+            props: None,
     });
     if is_test_method {
         builder.edges.push(Edge {
@@ -295,6 +321,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             kind: EdgeKind::Tests,
             confidence: 0.8,
             reason: "test-method".into(),
+            props: None,
         });
     }
     builder.defs.push(SymbolDef {
@@ -309,6 +336,8 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         return_type,
         declared_type: None,
         stereotype: None,
+        complexity,
+        body_fingerprint,
     });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -327,6 +356,27 @@ fn collect_constructor(
     let arity = parameter_count(node);
     let id = constructor_id(&owner.fqcn, arity);
     let range = range_of(node);
+
+    // Gap 1: Complexity metrics
+    let complexity = node
+        .child_by_field_name("body")
+        .map(|body| compute_complexity(body));
+
+    // Gap 2: Body fingerprint
+    let body_fingerprint = node
+        .child_by_field_name("body")
+        .and_then(|body| compute_body_fingerprint(body, src));
+
+    let props = {
+        let mut obj = serde_json::Map::new();
+        if let Some(ref cx) = complexity {
+            obj.insert("cyclomatic".into(), serde_json::Value::Number(cx.cyclomatic.into()));
+            obj.insert("cognitive".into(), serde_json::Value::Number(cx.cognitive.into()));
+            obj.insert("loopDepth".into(), serde_json::Value::Number(cx.loop_depth.into()));
+        }
+        if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
+    };
+
     builder.nodes.push(Node {
         id: id.clone(),
         kind: NodeKind::Constructor,
@@ -334,7 +384,7 @@ fn collect_constructor(
         qualified_name: Some(format!("{}#<init>/{arity}", owner.fqcn)),
         file: builder.file.clone(),
         range,
-        props: None,
+        props,
     });
     builder.edges.push(Edge {
         src: owner.id.clone(),
@@ -342,6 +392,7 @@ fn collect_constructor(
         kind: EdgeKind::HasMethod,
         confidence: 1.0,
         reason: "member".into(),
+            props: None,
     });
     builder.defs.push(SymbolDef {
         id: id.clone(),
@@ -355,6 +406,8 @@ fn collect_constructor(
         return_type: None,
         declared_type: None,
         stereotype: None,
+        complexity,
+        body_fingerprint,
     });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -396,6 +449,7 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             kind: EdgeKind::HasField,
             confidence: 1.0,
             reason: "member".into(),
+            props: None,
         });
         if is_mock_field {
             if let Some(raw_ty) = declared_type.as_deref() {
@@ -407,6 +461,7 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
                         kind: EdgeKind::Tests,
                         confidence: 0.7,
                         reason: "mock-bean".into(),
+            props: None,
                     });
                 }
             }
@@ -423,6 +478,8 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             return_type: None,
             declared_type: declared_type.clone(),
             stereotype: None,
+            complexity: None,
+            body_fingerprint: None,
         });
     }
 }
@@ -496,6 +553,13 @@ fn reference_site(
     let in_fqcn = context_for(anchor.node.start_byte(), builder).unwrap_or_default();
     let in_callable = callable_id_for(anchor.node.start_byte(), builder);
 
+    // Capture arg texts for Call sites (Gap 3)
+    let arg_texts = if anchor.kind == RefKind::Call {
+        capture_arg_texts(anchor.node, src)
+    } else {
+        Vec::new()
+    };
+
     Some(ReferenceSite {
         name,
         receiver,
@@ -504,6 +568,7 @@ fn reference_site(
         range: range_of(name_node),
         in_fqcn,
         in_callable,
+        arg_texts,
     })
 }
 
@@ -701,6 +766,7 @@ fn emit_heritage_reference(
         range: range_of(name_node),
         in_fqcn: in_fqcn.to_string(),
         in_callable: owner_id.clone(),
+        arg_texts: Vec::new(),
     });
 }
 
@@ -763,6 +829,7 @@ fn emit_method_routes_for_method(node: TsNode<'_>, src: &str, builder: &mut File
             kind: EdgeKind::HandlesRoute,
             confidence: 1.0,
             reason,
+            props: None,
         });
     }
 }
@@ -932,8 +999,307 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
     }
 }
 
+// ── Gap 1: Complexity metrics ────────────────────────────────────────────────
+
+/// Compute cyclomatic, cognitive, and loop depth for a method/constructor body.
+fn compute_complexity(body: TsNode<'_>) -> ComplexityRecord {
+    let mut cyclomatic: u16 = 1; // base
+    let mut cognitive: u16 = 0;
+    let mut loop_depth: u8 = 0;
+    compute_complexity_inner(body, 0, 0, &mut cyclomatic, &mut cognitive, &mut loop_depth);
+    ComplexityRecord {
+        provider: "java".to_string(),
+        cyclomatic,
+        cognitive,
+        loop_depth,
+        is_recursive: false, // set later in propagation pass
+    }
+}
+
+fn compute_complexity_inner(
+    node: TsNode<'_>,
+    nesting: u16,
+    loop_nesting: u8,
+    cyclomatic: &mut u16,
+    cognitive: &mut u16,
+    max_loop_depth: &mut u8,
+) {
+    let kind = node.kind();
+
+    let (new_nesting, new_loop_nesting) = match kind {
+        "if_statement" => {
+            *cyclomatic = cyclomatic.saturating_add(1);
+            *cognitive = cognitive.saturating_add(1 + nesting);
+            (nesting + 1, loop_nesting)
+        }
+        "while_statement" | "do_statement" => {
+            *cyclomatic = cyclomatic.saturating_add(1);
+            *cognitive = cognitive.saturating_add(1 + nesting);
+            let new_ld = loop_nesting + 1;
+            if new_ld > *max_loop_depth {
+                *max_loop_depth = new_ld;
+            }
+            (nesting + 1, new_ld)
+        }
+        "for_statement" | "enhanced_for_statement" => {
+            *cyclomatic = cyclomatic.saturating_add(1);
+            *cognitive = cognitive.saturating_add(1 + nesting);
+            let new_ld = loop_nesting + 1;
+            if new_ld > *max_loop_depth {
+                *max_loop_depth = new_ld;
+            }
+            (nesting + 1, new_ld)
+        }
+        "switch_expression" | "switch_statement" => {
+            *cognitive = cognitive.saturating_add(1 + nesting);
+            (nesting + 1, loop_nesting)
+        }
+        "switch_label" => {
+            // count each case
+            *cyclomatic = cyclomatic.saturating_add(1);
+            (nesting, loop_nesting)
+        }
+        "catch_clause" => {
+            *cyclomatic = cyclomatic.saturating_add(1);
+            *cognitive = cognitive.saturating_add(1 + nesting);
+            (nesting + 1, loop_nesting)
+        }
+        "try_statement" => {
+            *cognitive = cognitive.saturating_add(1 + nesting);
+            (nesting + 1, loop_nesting)
+        }
+        "conditional_expression" => {
+            // ternary
+            *cyclomatic = cyclomatic.saturating_add(1);
+            *cognitive = cognitive.saturating_add(1 + nesting);
+            (nesting, loop_nesting)
+        }
+        "binary_expression" => {
+            // && and || logical operators
+            (nesting, loop_nesting)
+        }
+        "else" => {
+            *cognitive = cognitive.saturating_add(1);
+            (nesting, loop_nesting)
+        }
+        "break_statement" | "continue_statement" => {
+            // labelled break/continue
+            if node.child_by_field_name("label").is_some() {
+                *cognitive = cognitive.saturating_add(1);
+            }
+            (nesting, loop_nesting)
+        }
+        "lambda_expression" => {
+            // lambdas reset nesting for cognitive
+            (0, loop_nesting)
+        }
+        _ => (nesting, loop_nesting),
+    };
+
+    // Count && and || in binary_expression
+    if kind == "binary_expression" {
+        if let Some(op) = node.child_by_field_name("operator") {
+            let op_text = op.kind();
+            if op_text == "&&" || op_text == "||" {
+                *cyclomatic = cyclomatic.saturating_add(1);
+                *cognitive = cognitive.saturating_add(1);
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        compute_complexity_inner(
+            child,
+            new_nesting,
+            new_loop_nesting,
+            cyclomatic,
+            cognitive,
+            max_loop_depth,
+        );
+    }
+}
+
+// ── Gap 2: Body fingerprint (MinHash) ────────────────────────────────────────
+
+const MINHASH_K: usize = 64;
+const MINHASH_MIN_TOKENS: u32 = 30;
+
+// Compile-time fixed seeds for K=64 MinHash (deterministic).
+const MINHASH_SEEDS: [u64; 64] = [
+    0x9e3779b97f4a7c15, 0x6c62272e07bb0142, 0x94d049bb133111eb, 0xbf58476d1ce4e5b9,
+    0x517cc1b727220a95, 0x4be98134a5976fd3, 0xa8c2fda8d01bcc3d, 0x0bc150392e34b12b,
+    0x3917bfda55c5b0a3, 0x7465fca80eceed01, 0xf17b2e68e95b4b63, 0x2e52d1d0c50a8471,
+    0xd97390e8e9cbb87b, 0x2abe1a8a8c8a1e2b, 0x6d2ee4a3c3cfb9c5, 0x84f8e5a9c8c7f5a1,
+    0x3c7f5d1b8e6a2f4c, 0xa1b2c3d4e5f60718, 0x192a3b4c5d6e7f80, 0x8f7e6d5c4b3a2918,
+    0xdeadbeefcafebabe, 0x0102030405060708, 0xf0e0d0c0b0a09080, 0x123456789abcdef0,
+    0xfedcba9876543210, 0xa5a5a5a5a5a5a5a5, 0x5a5a5a5a5a5a5a5a, 0xc3c3c3c3c3c3c3c3,
+    0x3c3c3c3c3c3c3c3c, 0xe7e7e7e7e7e7e7e7, 0x1818181818181818, 0xaaaa0000bbbb1111,
+    0xcccc2222dddd3333, 0xeeee4444ffff5555, 0x0000666677778888, 0x9999aaaabbbbcccc,
+    0xddddeeeeffff0000, 0x1111222233334444, 0x5555666677778888, 0x9999aaaabbbbdddd,
+    0xeeeeffff11112222, 0x3333444455556666, 0x7777888899990000, 0xaaaabbbbccccdddd,
+    0xeeeeffffaaaabbbb, 0xccccddddeeee0000, 0xffff000011112222, 0x4444333322221111,
+    0xbbbb0000aaaa9999, 0x8888777766665555, 0x4444333399998888, 0x7777666655554444,
+    0x3333222211110000, 0xffffeeeeddddcccc, 0xbbbbaaaa99998888, 0x7777666655554444,
+    0x3333222211110000, 0xffffeeeeddddcccc, 0xbbbbaaaa99998888, 0x7777666655554444,
+    0x3333222211110000, 0x0000111122223333, 0x4444555566667777, 0x8888999900001111,
+];
+
+fn normalize_leaf_token(kind: &str) -> &'static str {
+    match kind {
+        "identifier" => "I",
+        "string_literal" | "text_block" => "S",
+        "decimal_integer_literal" | "hex_integer_literal" | "octal_integer_literal"
+        | "binary_integer_literal" | "decimal_floating_point_literal"
+        | "hex_floating_point_literal" => "N",
+        "type_identifier" | "void_type" | "integral_type" | "floating_point_type"
+        | "boolean_type" | "array_type" | "generic_type" => "T",
+        "true" | "false" | "null_literal" | "if" | "else" | "for" | "while" | "do"
+        | "return" | "break" | "continue" | "throw" | "try" | "catch" | "finally"
+        | "switch" | "case" | "default" | "new" | "this" | "super" | "instanceof"
+        | "class" | "interface" | "enum" | "extends" | "implements" | "static"
+        | "final" | "public" | "private" | "protected" | "abstract" | "synchronized"
+        | "volatile" | "transient" | "native" => "K",
+        _ => "O",
+    }
+}
+
+fn collect_leaf_tokens<'a>(node: TsNode<'a>, tokens: &mut Vec<&'static str>) {
+    if node.child_count() == 0 {
+        let t = normalize_leaf_token(node.kind());
+        tokens.push(t);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_leaf_tokens(child, tokens);
+    }
+}
+
+fn minhash_compute(tokens: &[&'static str]) -> [u32; 64] {
+    // Build trigrams from token sequence
+    let mut hashes = [u32::MAX; 64];
+    if tokens.len() < 3 {
+        return hashes;
+    }
+    for i in 0..=(tokens.len() - 3) {
+        // Create trigram string
+        let gram = format!("{}{}{}", tokens[i], tokens[i + 1], tokens[i + 2]);
+        let gram_bytes = gram.as_bytes();
+        for k in 0..MINHASH_K {
+            // Simple hash: FNV-1a-like with seed
+            let mut h: u64 = MINHASH_SEEDS[k];
+            for &b in gram_bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            let v = (h >> 32) as u32;
+            if v < hashes[k] {
+                hashes[k] = v;
+            }
+        }
+    }
+    hashes
+}
+
+fn compute_body_fingerprint(body: TsNode<'_>, _src: &str) -> Option<BodyFingerprint> {
+    let mut tokens: Vec<&'static str> = Vec::new();
+    collect_leaf_tokens(body, &mut tokens);
+    let leaf_token_count = tokens.len() as u32;
+    if leaf_token_count < MINHASH_MIN_TOKENS {
+        return None;
+    }
+    let minhash = minhash_compute(&tokens);
+    Some(BodyFingerprint {
+        provider: "java".to_string(),
+        leaf_token_count,
+        minhash: minhash.to_vec(),
+    })
+}
+
 fn collect_sql_constants(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
     collect_sql_constants_in(root, src, builder, None);
+}
+
+/// Collect ALL `static final String` fields (not just SQL-named ones) into `string_constants`.
+fn collect_static_string_constants(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    collect_static_string_constants_in(root, src, builder, None);
+}
+
+fn collect_static_string_constants_in(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut FileBuilder,
+    owner_fqcn: Option<&str>,
+) {
+    match node.kind() {
+        "class_declaration"
+        | "interface_declaration"
+        | "enum_declaration"
+        | "record_declaration"
+        | "annotation_type_declaration" => {
+            let fqcn = type_context_at(node.start_byte() + 1, builder).map(|t| t.fqcn.clone());
+            let effective = fqcn.as_deref().or(owner_fqcn);
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_static_string_constants_in(child, src, builder, effective);
+            }
+            return;
+        }
+        "field_declaration" => {
+            if let Some(owner) = owner_fqcn {
+                if let Some(sc) = try_extract_string_constant(node, src, owner) {
+                    builder.string_constants.push(sc);
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_static_string_constants_in(child, src, builder, owner_fqcn);
+    }
+}
+
+fn try_extract_string_constant(
+    node: TsNode<'_>,
+    src: &str,
+    owner_fqcn: &str,
+) -> Option<StringConstant> {
+    let mods = modifiers(node, src);
+    if !mods.iter().any(|m| m == "static") || !mods.iter().any(|m| m == "final") {
+        return None;
+    }
+    let type_node = node.child_by_field_name("type")?;
+    if text(type_node, src) != "String" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let name_node = child.child_by_field_name("name")?;
+        let const_name = text(name_node, src);
+        if const_name.is_empty() {
+            continue;
+        }
+        let Some(value_node) = child.child_by_field_name("value") else {
+            continue;
+        };
+        let (value, dynamic) = fold_string_init(value_node, src);
+        if value.is_empty() && !dynamic {
+            continue;
+        }
+        return Some(StringConstant {
+            const_name,
+            owner_fqcn: owner_fqcn.to_string(),
+            value,
+            dynamic,
+            range: range_of(node),
+        });
+    }
+    None
 }
 
 fn collect_sql_constants_in(
@@ -1750,6 +2116,31 @@ fn call_arity(node: TsNode<'_>) -> Option<u16> {
         count = count.saturating_add(1);
     }
     Some(count)
+}
+
+/// Capture argument texts from a call node, truncated to 120 chars each (Gap 3).
+fn capture_arg_texts(node: TsNode<'_>, src: &str) -> Vec<String> {
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if matches!(child.kind(), "block_comment" | "line_comment") {
+            continue;
+        }
+        let raw = text(child, src);
+        if raw.is_empty() {
+            continue;
+        }
+        let truncated = if raw.len() > 120 {
+            format!("{}…", &raw[..120])
+        } else {
+            raw
+        };
+        out.push(truncated);
+    }
+    out
 }
 
 fn should_emit_field_read(node: TsNode<'_>) -> bool {

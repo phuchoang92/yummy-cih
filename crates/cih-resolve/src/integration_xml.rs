@@ -194,6 +194,7 @@ fn extract_camel_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput {
                     kind: EdgeKind::IntegrationLink,
                     confidence: 0.8,
                     reason: format!("camel-{scheme}"),
+            props: None,
                 });
             }
         } else if is_message_scheme(scheme) {
@@ -223,6 +224,7 @@ fn extract_camel_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput {
                     kind: EdgeKind::PublishesEvent,
                     confidence: 0.9,
                     reason: format!("camel-{scheme}-to"),
+            props: None,
                 });
             }
         }

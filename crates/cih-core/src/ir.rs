@@ -37,6 +37,23 @@ pub struct ParsedFile {
     /// Sites where a known DB execution API is called (DBUtil, JdbcTemplate, etc.).
     #[serde(default)]
     pub sql_execution_sites: Vec<SqlExecutionSite>,
+    /// All `static final String` fields (superset of sql_constants); used by constant propagation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub string_constants: Vec<StringConstant>,
+}
+
+/// A `static final String` field with its folded literal value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StringConstant {
+    /// Field name, e.g. `"BASE_URL"`.
+    pub const_name: String,
+    /// FQCN of the declaring class.
+    pub owner_fqcn: String,
+    /// Folded literal value (adjacent string literals concatenated).
+    pub value: String,
+    /// True when concat included non-literals.
+    pub dynamic: bool,
+    pub range: Range,
 }
 
 /// A `private static final String` field whose initializer is (or folds to) a SQL string.
@@ -131,6 +148,12 @@ pub struct SymbolDef {
     /// `"controller"`, `"configuration"`, `"entity"`. `None` for non-types and plain classes.
     #[serde(default)]
     pub stereotype: Option<String>,
+    /// Optional complexity analysis (Gap 1). None = language provider did not compute this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<ComplexityRecord>,
+    /// Optional MinHash body fingerprint (Gap 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_fingerprint: Option<BodyFingerprint>,
 }
 
 /// Semantic import binding kind — more structured than raw text.
@@ -177,6 +200,37 @@ pub struct RawImport {
     pub range: Range,
 }
 
+/// One call-site record stored per CALLS edge (multiple calls to same target → list).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallSiteRecord {
+    pub range: Range,
+    /// Resolved (constant-propagated) arg texts, <= 120 chars each.
+    pub args: Vec<String>,
+}
+
+/// Optional complexity analysis. None = language provider did not compute this.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComplexityRecord {
+    /// e.g., "java"
+    pub provider: String,
+    pub cyclomatic: u16,
+    pub cognitive: u16,
+    pub loop_depth: u8,
+    /// Set during transitive loop depth propagation pass.
+    pub is_recursive: bool,
+}
+
+/// Optional MinHash fingerprint for near-clone detection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BodyFingerprint {
+    /// e.g., "java"
+    pub provider: String,
+    /// Leaf AST node count; size gate.
+    pub leaf_token_count: u32,
+    /// K=64 MinHash values.
+    pub minhash: Vec<u32>,
+}
+
 /// A usage site (call / field access / heritage) before resolution. Phase 4 turns
 /// each into a graph edge — or drops it if the target is out of scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +251,9 @@ pub struct ReferenceSite {
     /// `CALLS`/`ACCESSES` edges never dangle.
     #[serde(default = "unknown_callable_id")]
     pub in_callable: NodeId,
+    /// Raw argument texts captured at parse time (for Call sites only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arg_texts: Vec<String>,
 }
 
 fn unknown_callable_id() -> NodeId {

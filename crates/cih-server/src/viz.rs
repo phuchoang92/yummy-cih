@@ -2,14 +2,14 @@
 //! No async, no store access — all inputs are already fetched by the caller.
 
 use cih_core::NodeId;
-use cih_graph_store::{CommunityEdge, CommunityInfo, FlowNode, Impact, RouteInfo};
+use cih_graph_store::{CommunityEdge, CommunityInfo, FlowHop, Impact, RouteInfo};
 
 // ---- Mermaid: trace_flow ----
 
 /// Render a `flowchart TD` Mermaid diagram from a downstream flow trace.
-/// `entry_id` is the root node (depth 0); `steps` are the downstream nodes.
+/// `hops[0]` is the root entry point (via = None); subsequent hops are downstream nodes.
 /// Edges are drawn from each node's `parent_id` (or the entry if absent).
-pub fn render_mermaid_flow(entry_id: &NodeId, steps: &[FlowNode]) -> String {
+pub fn render_mermaid_flow(entry_id: &NodeId, hops: &[FlowHop]) -> String {
     let mut out = String::from("flowchart TD\n");
 
     // Entry node definition.
@@ -17,15 +17,17 @@ pub fn render_mermaid_flow(entry_id: &NodeId, steps: &[FlowNode]) -> String {
     let entry_label = short_label(entry_id.as_str(), "Entry");
     out.push_str(&format!("    {}[\"{}\"]\n", entry_key, entry_label));
 
-    // Node definitions.
-    for step in steps {
+    // Node definitions (skip the root hop which is the entry).
+    for hop in hops.iter().skip(1) {
+        let step = &hop.node;
         let key = mermaid_key(step.id.as_str());
         let label = truncate(&format!("{}\n{}", step.kind.label(), step.name), 60);
         out.push_str(&format!("    {}[\"{}\"]\n", key, escape_mermaid(&label)));
     }
 
     // Edges.
-    for step in steps {
+    for hop in hops.iter().skip(1) {
+        let step = &hop.node;
         let child_key = mermaid_key(step.id.as_str());
         let parent_key = step
             .parent_id

@@ -130,6 +130,51 @@ pub struct FlowNode {
     pub parent_id: Option<NodeId>,
 }
 
+/// One step in a trace_flow result: the symbol reached, and the edge used to reach it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FlowHop {
+    pub node: FlowNode,
+    /// None for the root entry point.
+    pub via: Option<FlowEdge>,
+}
+
+/// The edge connecting two hops in a trace_flow result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FlowEdge {
+    /// Edge kind label, e.g. "CALLS", "HANDLES_ROUTE".
+    pub kind: String,
+    /// Call-site argument records from the edge's `callSites` property.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_sites: Vec<CallSiteArgs>,
+}
+
+/// Argument texts captured at one call site.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CallSiteArgs {
+    /// Resolved (constant-propagated) argument expressions.
+    pub args: Vec<String>,
+}
+
+/// A method node returned by complexity_hotspots.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HotspotNode {
+    pub id: NodeId,
+    pub name: String,
+    pub file: String,
+    pub cyclomatic: u64,
+    pub cognitive: u64,
+    pub transitive_loop_depth: u64,
+}
+
+/// A near-duplicate method candidate returned by similar_methods.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SimilarMethod {
+    pub id: NodeId,
+    pub name: String,
+    pub file: String,
+    pub jaccard: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommunityEdge {
     pub src: String,
@@ -190,8 +235,27 @@ pub trait GraphStore: Send + Sync {
 
     /// Trace the downstream execution chain from an entry point.
     /// Traverses CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT, LISTENS_TO edges.
-    /// Returns all reachable nodes ordered by minimum depth, capped at 100.
-    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowNode>>;
+    /// Returns all reachable hops ordered by minimum depth, capped at 100.
+    /// Each hop carries the edge used to reach it (with call-site args if available).
+    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowHop>>;
+
+    /// Return methods with complexity above the given thresholds (Gap 1).
+    /// `min_transitive_loop` defaults to 1 if None.
+    async fn complexity_hotspots(
+        &self,
+        min_cyclomatic: Option<u16>,
+        min_cognitive: Option<u16>,
+        min_transitive_loop: Option<u8>,
+        limit: usize,
+    ) -> Result<Vec<HotspotNode>>;
+
+    /// Return near-duplicate methods of `id` with Jaccard >= `min_jaccard` (Gap 2).
+    async fn similar_methods(
+        &self,
+        id: &NodeId,
+        min_jaccard: f32,
+        limit: usize,
+    ) -> Result<Vec<SimilarMethod>>;
 
     /// Return the community each node belongs to (via MEMBER_OF edges).
     /// Nodes with no community are omitted from the result.

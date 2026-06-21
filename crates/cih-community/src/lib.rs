@@ -405,6 +405,7 @@ pub fn detect_communities(
                 kind: EdgeKind::MemberOf,
                 confidence: 1.0,
                 reason: "leiden".into(),
+            props: None,
             });
             out.memberships.push((member_id, comm_id.clone()));
         }
@@ -525,6 +526,7 @@ pub fn trace_processes(
                 kind: EdgeKind::StepInProcess,
                 confidence: 1.0,
                 reason: format!("step:{}", step_idx + 1),
+            props: None,
             });
         }
     }
@@ -569,6 +571,7 @@ pub fn trace_processes(
             kind: EdgeKind::StepInProcess,
             confidence: 1.0,
             reason: "step:1".into(),
+            props: None,
         });
     }
 

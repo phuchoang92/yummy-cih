@@ -150,6 +150,7 @@ fn process_site(
         kind: EdgeKind::ExecutesQuery,
         confidence: 1.0,
         reason: site.api_name.clone(),
+            props: None,
     });
 
     // Emit DbTable nodes + READS_TABLE / WRITES_TABLE edges.
@@ -178,6 +179,7 @@ fn process_site(
             kind: edge_kind,
             confidence: 1.0,
             reason: "sql-scan".into(),
+            props: None,
         });
     }
 }

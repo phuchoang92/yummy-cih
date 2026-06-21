@@ -50,6 +50,7 @@ function NodeCloud({ nodes, selected, onSelect, onHover }: {
   const mesh = useRef<THREE.InstancedMesh>(null);
   const object = useMemo(() => new THREE.Object3D(), []);
   const color = useMemo(() => new THREE.Color(), []);
+  const maxDegree = useMemo(() => Math.max(1, ...nodes.map((n) => n.degree)), [nodes]);
 
   useLayoutEffect(() => {
     if (!mesh.current) return;
@@ -69,12 +70,18 @@ function NodeCloud({ nodes, selected, onSelect, onHover }: {
     const active = selected && selected.size > 0;
     nodes.forEach((node, position) => {
       color.set(node.color);
-      if (active && !selected.has(node.index)) color.multiplyScalar(.1);
-      else color.multiplyScalar(1.45);
+      if (active && !selected.has(node.index)) {
+        color.multiplyScalar(.08);
+      } else {
+        // Nodes called more get brighter: t=0 → dim (0.5×), t=1 → deep into Bloom (4.5×).
+        // Values above ~1.0 exceed the Bloom luminance threshold and emit a visible glow halo.
+        const t = node.degree / maxDegree;
+        color.multiplyScalar(0.5 + t * 4.0);
+      }
       mesh.current!.setColorAt(position, color);
     });
     if (mesh.current.instanceColor) mesh.current.instanceColor.needsUpdate = true;
-  }, [nodes, selected, color]);
+  }, [nodes, selected, color, maxDegree]);
 
   return (
     <instancedMesh

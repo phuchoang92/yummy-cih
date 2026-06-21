@@ -236,6 +236,18 @@ pub(crate) fn analyze_from_scope_with_options(
     let cih_dir = repo_root.join(".cih");
     let mut ui = crate::ui::PhaseProgress::new();
 
+    // Gap 5: auto-bootstrap hint — if a bundle archive exists and file-hashes.json
+    // does not, suggest using `cih-engine artifact bootstrap` to restore state.
+    let bundle_path = cih_dir.join("graph.db.zst");
+    let hashes_path = cih_dir.join("file-hashes.json");
+    if bundle_path.exists() && !hashes_path.exists() {
+        tracing::info!(
+            bundle = %bundle_path.display(),
+            "Bundle archive found but no incremental state — run `cih-engine artifact bootstrap` \
+             to restore; this analyze will be a full re-parse"
+        );
+    }
+
     tracing::info!(
         files = scope_file.files.len(),
         modules = scope_file.modules.len(),
@@ -313,12 +325,17 @@ pub(crate) fn analyze_from_scope_with_options(
     resolvers.register(cih_resolve::JavaResolver);
     resolvers.register(cih_resolve::TypeScriptResolver);
     resolvers.register(cih_resolve::PythonResolver);
+
+    // Gap 4: build Java constant resolver from all parsed files.
+    let java_const_resolver = cih_resolve::build_java_constant_resolver(&parse_output.parsed_files);
+
     let resolve_output = cih_resolve::resolve_with_registry(
         &parse_output.parsed_files,
         &resolvers,
         cih_resolve::ResolveOptions {
             repo_root: Some(&repo_root),
             enable_xml_integrations: !cache.skip_xml_integration,
+            constant_resolver: Some(Box::new(java_const_resolver)),
         },
     );
     tracing::info!(
@@ -416,6 +433,19 @@ pub(crate) fn analyze_from_scope_with_options(
     all_nodes.extend(jar_nodes);
     all_nodes.extend(db_nodes);
     all_nodes.extend(xml_nodes);
+
+    // Gap 1: propagate transitive loop depths along CALLS edges.
+    cih_resolve::propagate_loop_depths(&mut all_nodes, &edges);
+
+    // Gap 2: emit SIMILAR_TO edges from MinHash body fingerprints.
+    let similar_edges = cih_resolve::emit_similar_to_edges(&all_nodes);
+    if !similar_edges.is_empty() {
+        tracing::info!(
+            similar_to_edges = similar_edges.len(),
+            "MinHash near-clone edges emitted"
+        );
+        edges.extend(similar_edges);
+    }
 
     let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
 
@@ -1079,26 +1109,32 @@ fn fmt_count(n: usize) -> String {
 }
 
 fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
-    let mut map: HashMap<(&str, &str, &'static str), &Edge> =
+    let mut map: HashMap<(String, String, &'static str), Edge> =
         HashMap::with_capacity(structure.len() + resolved.len());
     for edge in structure.iter().chain(resolved.iter()) {
         let key = (
-            edge.src.as_str(),
-            edge.dst.as_str(),
+            edge.src.as_str().to_string(),
+            edge.dst.as_str().to_string(),
             edge.kind.cypher_label(),
         );
         match map.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                if edge.confidence > slot.get().confidence {
-                    *slot.get_mut() = edge;
+                let winner = slot.get_mut();
+                // Always merge call_sites from the incoming edge (Gap 3).
+                merge_call_sites(winner, edge);
+                if edge.confidence > winner.confidence {
+                    // Promote confidence/reason but keep the merged props.
+                    let merged_props = winner.props.take();
+                    *winner = edge.clone();
+                    winner.props = merged_props;
                 }
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(edge);
+                slot.insert(edge.clone());
             }
         }
     }
-    let mut result: Vec<Edge> = map.into_values().cloned().collect();
+    let mut result: Vec<Edge> = map.into_values().collect();
     result.sort_unstable_by(|a, b| {
         a.src.as_str()
             .cmp(b.src.as_str())
@@ -1106,6 +1142,25 @@ fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
             .then_with(|| a.kind.cypher_label().cmp(b.kind.cypher_label()))
     });
     result
+}
+
+/// Merge `call_sites` from `incoming` into `winner` (Gap 3).
+/// Caps total call-site records at 20 per edge.
+fn merge_call_sites(winner: &mut Edge, incoming: &Edge) {
+    let Some(incoming_props) = &incoming.props else { return };
+    let Some(incoming_arr) = incoming_props.get("call_sites").and_then(|v| v.as_array()) else {
+        return;
+    };
+    if incoming_arr.is_empty() {
+        return;
+    }
+    let entry = winner.props.get_or_insert_with(|| serde_json::json!({"call_sites": []}));
+    let existing = entry
+        .get_mut("call_sites")
+        .and_then(|v| v.as_array_mut())
+        .expect("call_sites must be an array");
+    existing.extend(incoming_arr.iter().cloned());
+    existing.truncate(20);
 }
 
 #[cfg(test)]
@@ -1120,6 +1175,7 @@ mod combined_edges_tests {
             kind,
             confidence,
             reason: String::new(),
+            props: None,
         }
     }
 
@@ -1204,6 +1260,7 @@ mod combined_edges_tests {
                     kind: EdgeKind::Calls,
                     confidence: (d as f32) / (dup_factor as f32),
                     reason: String::new(),
+            props: None,
                 });
             }
         }

@@ -201,3 +201,31 @@ pub struct ReadFileArgs {
     #[serde(default)]
     pub end_line: Option<u32>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ComplexityHotspotsArgs {
+    /// Minimum cyclomatic complexity to include (default: 5).
+    #[serde(default)]
+    pub min_cyclomatic: Option<u16>,
+    /// Minimum cognitive complexity to include (default: 0).
+    #[serde(default)]
+    pub min_cognitive: Option<u16>,
+    /// Minimum transitive loop depth to include (default: 1).
+    #[serde(default)]
+    pub min_transitive_loop: Option<u8>,
+    /// Maximum number of results (default: 20, max 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindDuplicatesArgs {
+    /// Symbol id or short name of the method to find near-duplicates for.
+    pub name: String,
+    /// Minimum Jaccard similarity threshold (default: 0.95).
+    #[serde(default)]
+    pub min_jaccard: Option<f32>,
+    /// Maximum number of results (default: 10).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}

@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::Path;
 
 use cih_core::{
-    file_id, Edge, EdgeKind, Node, NodeId, ParsedFile, RawImport, RefKind, ReferenceSite,
+    file_id, CallSiteRecord, Edge, EdgeKind, Node, NodeId, ParsedFile, RawImport, RefKind,
+    ReferenceSite,
 };
+use cih_lang::constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 
 use crate::common::index::CommonIndex;
 use crate::common::inheritance::build_mro_map;
@@ -17,6 +20,8 @@ pub struct EdgeEmitter<'a> {
     parsed: &'a [ParsedFile],
     index: CommonIndex,
     registry: &'a ResolverRegistry,
+    /// Optional constant resolver for enriching CALLS edge call-site args (Gap 4/3).
+    constant_resolver: Box<dyn ConstantResolver>,
     handled: HashSet<(usize, usize)>,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -31,6 +36,7 @@ impl<'a> EdgeEmitter<'a> {
             parsed,
             index,
             registry,
+            constant_resolver: Box::new(NullConstantResolver),
             handled: HashSet::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -38,6 +44,18 @@ impl<'a> EdgeEmitter<'a> {
             unresolved_external_fqcns: BTreeSet::new(),
             unresolved_refs: Vec::new(),
         }
+    }
+
+    /// Replace the default no-op constant resolver with a real one (Gap 4).
+    pub fn with_constant_resolver(mut self, resolver: impl ConstantResolver + 'static) -> Self {
+        self.constant_resolver = Box::new(resolver);
+        self
+    }
+
+    /// Replace the default no-op constant resolver with an already-boxed one (Gap 4).
+    pub fn with_constant_resolver_boxed(mut self, resolver: Box<dyn ConstantResolver>) -> Self {
+        self.constant_resolver = resolver;
+        self
     }
 
     fn push_unresolved(
@@ -133,12 +151,13 @@ impl<'a> EdgeEmitter<'a> {
                 }
                 if let Some((dst, confidence, reason)) = self.resolve_receiver_bound_call(pf, site)
                 {
-                    self.push_edge(
+                    self.push_calls_edge(
                         site.in_callable.clone(),
                         dst,
-                        EdgeKind::Calls,
                         confidence,
                         reason,
+                        site,
+                        pf,
                     );
                     self.handled.insert((file_idx, site_idx));
                 }
@@ -164,12 +183,13 @@ impl<'a> EdgeEmitter<'a> {
                     .or_else(|| self.find_static_imported_member(pf, &site.name, site.arity));
 
                 if let Some(dst) = target {
-                    self.push_edge(
+                    self.push_calls_edge(
                         site.in_callable.clone(),
                         dst,
-                        EdgeKind::Calls,
                         0.8,
                         "free-call-fallback".to_string(),
+                        site,
+                        pf,
                     );
                     self.handled.insert((file_idx, site_idx));
                 }
@@ -563,6 +583,54 @@ impl<'a> EdgeEmitter<'a> {
             kind,
             confidence,
             reason,
+            props: None,
+        });
+    }
+
+    /// Push a CALLS edge with call-site arg texts resolved via the constant resolver (Gap 3).
+    fn push_calls_edge(
+        &mut self,
+        src: NodeId,
+        dst: NodeId,
+        confidence: f32,
+        reason: String,
+        site: &ReferenceSite,
+        pf: &ParsedFile,
+    ) {
+        if src.as_str() == "Method:<unknown>" || dst.as_str().is_empty() {
+            self.skipped += 1;
+            return;
+        }
+        let props = if site.arg_texts.is_empty() {
+            None
+        } else {
+            let ctx = ResolutionContext {
+                file: Path::new(&pf.file),
+                owner_fqcn: &site.in_fqcn,
+                imports: &pf.imports,
+            };
+            let resolved_args: Vec<String> = site
+                .arg_texts
+                .iter()
+                .map(|arg| {
+                    self.constant_resolver
+                        .resolve(arg, &ctx)
+                        .unwrap_or_else(|| arg.clone())
+                })
+                .collect();
+            let record = CallSiteRecord {
+                range: site.range,
+                args: resolved_args,
+            };
+            Some(serde_json::json!({ "call_sites": [record] }))
+        };
+        self.edges.push(Edge {
+            src,
+            dst,
+            kind: EdgeKind::Calls,
+            confidence,
+            reason,
+            props,
         });
     }
 

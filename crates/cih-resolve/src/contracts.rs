@@ -50,6 +50,7 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                             _ => "http-client",
                         }
                         .to_string(),
+                        props: None,
                     });
                 }
                 ContractKind::EventPublish | ContractKind::EventListen => {
@@ -79,6 +80,7 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                         kind,
                         confidence: 0.8,
                         reason: reason.to_string(),
+            props: None,
                     });
                 }
             }

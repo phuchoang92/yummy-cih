@@ -142,6 +142,7 @@ fn calls_edge(src: NodeId, dst_kind: NodeKind, dst_fqcn: &str, reason: &str) -> 
         kind: EdgeKind::Calls,
         confidence: 0.7,
         reason: reason.to_string(),
+        props: None,
     }
 }
 

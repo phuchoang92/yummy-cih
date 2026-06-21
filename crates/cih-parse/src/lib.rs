@@ -244,6 +244,7 @@ fn add_structure_path(
                     kind: EdgeKind::Contains,
                     confidence: 1.0,
                     reason: "structure".into(),
+                    props: None,
                 },
             );
         }

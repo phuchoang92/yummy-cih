@@ -387,6 +387,64 @@ impl CihServer {
     }
 
     #[tool(
+        description = "Return methods with high complexity. Finds methods that are hard to test \
+            or maintain: filters by cyclomatic complexity (branches), cognitive complexity \
+            (readability penalty), and transitive loop depth (additive nesting through call chain). \
+            Use to prioritize refactoring targets."
+    )]
+    async fn complexity_hotspots(
+        &self,
+        Parameters(args): Parameters<ComplexityHotspotsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = args.limit.unwrap_or(20);
+        let hotspots = self
+            .store
+            .complexity_hotspots(args.min_cyclomatic, args.min_cognitive, args.min_transitive_loop, limit)
+            .await
+            .map_err(to_mcp)?;
+        json_result(&serde_json::json!({
+            "count": hotspots.len(),
+            "hotspots": hotspots,
+        }))
+    }
+
+    #[tool(
+        description = "Find near-duplicate methods (MinHash similarity >= threshold). \
+            Identifies copy-paste code across the codebase. Returns candidates with Jaccard \
+            similarity score and file path. Use to detect inconsistently-maintained duplicates."
+    )]
+    async fn find_duplicates(
+        &self,
+        Parameters(args): Parameters<FindDuplicatesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = match self.resolve_symbol(&args.name).await? {
+            SymbolResolution::Id(id) => id,
+            SymbolResolution::Ambiguous(candidates) => {
+                return json_result(&AmbiguousResult::from_nodes(candidates));
+            }
+            SymbolResolution::NotFound => {
+                return Err(McpError::invalid_params(
+                    format!("symbol '{}' not found", args.name),
+                    None,
+                ));
+            }
+        };
+        let min_jaccard = args.min_jaccard.unwrap_or(0.95);
+        let limit = args.limit.unwrap_or(10);
+        let similar = self
+            .store
+            .similar_methods(&id, min_jaccard, limit)
+            .await
+            .map_err(to_mcp)?;
+        json_result(&serde_json::json!({
+            "query_id": id.as_str(),
+            "min_jaccard": min_jaccard,
+            "count": similar.len(),
+            "similar": similar,
+        }))
+    }
+
+    #[tool(
         description = "Map business keywords to code clusters: BM25 search results grouped \
             by community. Helps answer 'what code implements the checkout feature?' or \
             'which modules handle payments?'"

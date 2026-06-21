@@ -5,6 +5,11 @@ import { resolve } from "node:path";
 export default defineConfig({
   plugins: [react()],
   base: "/graph/assets/",
+  server: {
+    proxy: {
+      "/api/graph": "http://localhost:8080",
+    },
+  },
   build: {
     outDir: resolve(__dirname, "../crates/cih-server/assets/graph"),
     emptyOutDir: true,

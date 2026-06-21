@@ -535,6 +535,7 @@ impl<'a> EdgeEmitter<'a> {
             kind,
             confidence,
             reason,
+            props: None,
         });
     }
 

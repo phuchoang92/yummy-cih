@@ -5,6 +5,7 @@ use tree_sitter::{Language, Node as TsNode, Parser, Query};
 
 use crate::{LanguageProvider, Stereotype};
 
+pub mod constant_resolver;
 mod parse;
 
 pub const JAVA_SCOPE_QUERY: &str = include_str!("query.scm");

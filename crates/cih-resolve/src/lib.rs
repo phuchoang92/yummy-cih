@@ -10,7 +10,10 @@ use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};
 
 pub mod common;
+pub mod complexity;
+pub mod constant_propagation;
 pub mod lang;
+pub mod similarity;
 
 mod contracts;
 pub mod db_access;
@@ -23,6 +26,9 @@ mod types;
 
 pub use common::emit::EdgeEmitter;
 pub use common::index::CommonIndex;
+pub use complexity::propagate_loop_depths;
+pub use constant_propagation::build_java_constant_resolver;
+pub use similarity::emit_similar_to_edges;
 pub use contracts::resolve_contract_edges;
 pub use db_access::emit_db_access;
 pub use di_xml::{extract_di_xml, DiXmlOutput};
@@ -68,6 +74,9 @@ pub struct ResolveOutput {
 pub struct ResolveOptions<'a> {
     pub repo_root: Option<&'a std::path::Path>,
     pub enable_xml_integrations: bool,
+    /// Optional constant resolver to enrich CALLS edge call-site args (Gap 3/4).
+    /// Pass `None` to use the no-op `NullConstantResolver`.
+    pub constant_resolver: Option<Box<dyn cih_lang::constant_resolver::ConstantResolver>>,
 }
 
 /// Build the default registry with Java, TypeScript, and Python resolvers.
@@ -91,10 +100,16 @@ pub fn resolve_edges(parsed: &[ParsedFile]) -> ResolveOutput {
 pub fn resolve_with_registry(
     parsed: &[ParsedFile],
     registry: &ResolverRegistry,
-    _options: ResolveOptions<'_>,
+    options: ResolveOptions<'_>,
 ) -> ResolveOutput {
     let index = CommonIndex::build(parsed, registry);
-    EdgeEmitter::new(parsed, index, registry).run()
+    let emitter = EdgeEmitter::new(parsed, index, registry);
+    let emitter = if let Some(cr) = options.constant_resolver {
+        emitter.with_constant_resolver_boxed(cr)
+    } else {
+        emitter
+    };
+    emitter.run()
 }
 
 #[cfg(test)]

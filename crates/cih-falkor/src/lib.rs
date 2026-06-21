@@ -15,9 +15,10 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
-    risk_from_fanout, BulkLoader, CommunityEdge, CommunityInfo, Direction, FlowNode, GraphStore,
-    GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStoreError, Impact, ImpactNode,
-    LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
+    risk_from_fanout, BulkLoader, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge,
+    FlowHop, FlowNode, GraphStore, GraphOverview, GraphOverviewEdge, GraphOverviewNode,
+    GraphStoreError, HotspotNode, Impact, ImpactNode, LoadStats, Path, Result, RouteInfo,
+    SimilarMethod, Subgraph, SymbolContext,
 };
 use redis::Value;
 
@@ -104,7 +105,9 @@ impl FalkorStore {
                      n.httpMethod = row.httpMethod, n.path = row.path, \
                      n.decorator = row.decorator, n.handler = row.handler, \
                      n.symbolCount = row.symbolCount, n.cohesion = row.cohesion, \
-                     n.processType = row.processType",
+                     n.processType = row.processType, \
+                     n.cyclomatic = row.cyclomatic, n.cognitive = row.cognitive, \
+                     n.loopDepth = row.loopDepth, n.transitiveLoopDepth = row.transitiveLoopDepth",
                 arr = nodes_to_list(chunk)
             );
             self.run(&q).await?;
@@ -122,7 +125,8 @@ impl FalkorStore {
                     "UNWIND {arr} AS row \
                      MATCH (a:Symbol {{id: row.src}}), (b:Symbol {{id: row.dst}}) \
                      MERGE (a)-[r:{label}]->(b) \
-                     SET r.confidence = row.conf, r.reason = row.reason",
+                     SET r.confidence = row.conf, r.reason = row.reason, \
+                         r.callSites = row.callSites",
                     arr = edges_to_list(chunk)
                 );
                 self.run(&q).await?;
@@ -217,6 +221,7 @@ impl GraphStore for FalkorStore {
                 dst: NodeId::new(r[2].clone()),
                 confidence: 1.0,
                 reason: String::new(),
+            props: None,
             })
             .collect())
     }
@@ -590,10 +595,9 @@ impl GraphStore for FalkorStore {
             .collect())
     }
 
-    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowNode>> {
+    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowHop>> {
         let d = max_depth.clamp(1, 10);
-        // Two-step aggregation picks the shortest-path parent for each node so the
-        // Mermaid renderer can draw accurate edges between caller and callee.
+        // Phase 1: BFS to get node order, depth, and parent relationships.
         let q = format!(
             "CYPHER id={id} \
              MATCH p=(start:Symbol {{id:$id}})\
@@ -605,10 +609,10 @@ impl GraphStore for FalkorStore {
              ORDER BY depth, m.name LIMIT 100",
             id = cstr(entry.as_str())
         );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
+        let rows = self.rows(&q).await?;
+        // Build FlowNode list and collect (parent_id, child_id) pairs.
+        let mut flow_nodes: Vec<FlowNode> = rows
+            .iter()
             .filter(|r| r.len() >= 5)
             .map(|r| FlowNode {
                 id: NodeId::new(r[0].clone()),
@@ -621,6 +625,147 @@ impl GraphStore for FalkorStore {
                     .get(6)
                     .filter(|s| !s.is_empty())
                     .map(|s| NodeId::new(s.clone())),
+            })
+            .collect();
+
+        // Phase 2: for each (parent, child) pair, fetch the CALLS edge callSites.
+        // We do a single batch query returning (src.id, dst.id, r.callSites).
+        let mut call_sites_map: HashMap<(String, String), Vec<CallSiteArgs>> = HashMap::new();
+        if !flow_nodes.is_empty() {
+            // Collect unique (parent_id, child_id) pairs that have a parent.
+            let pairs: Vec<(String, String)> = flow_nodes
+                .iter()
+                .filter_map(|n| n.parent_id.as_ref().map(|p| (p.as_str().to_string(), n.id.as_str().to_string())))
+                .collect();
+            if !pairs.is_empty() {
+                let pair_list = pairs
+                    .iter()
+                    .map(|(s, d)| format!("[{}, {}]", cstr(s), cstr(d)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let eq = format!(
+                    "UNWIND [{pairs}] AS pair \
+                     MATCH (a:Symbol {{id: pair[0]}})-[r:CALLS]->(b:Symbol {{id: pair[1]}}) \
+                     RETURN a.id, b.id, r.callSites",
+                    pairs = pair_list
+                );
+                if let Ok(edge_rows) = self.rows(&eq).await {
+                    for row in edge_rows.iter().filter(|r| r.len() >= 3) {
+                        let src_id = row[0].clone();
+                        let dst_id = row[1].clone();
+                        let cs_json = row[2].as_str();
+                        // callSites is stored as a JSON string
+                        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(cs_json) {
+                            let call_sites: Vec<CallSiteArgs> = arr
+                                .iter()
+                                .filter_map(|v| {
+                                    let args = v.get("args")?.as_array()?;
+                                    Some(CallSiteArgs {
+                                        args: args
+                                            .iter()
+                                            .filter_map(|a| a.as_str().map(|s| s.to_string()))
+                                            .collect(),
+                                    })
+                                })
+                                .collect();
+                            call_sites_map.insert((src_id, dst_id), call_sites);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build root hop (no via edge).
+        let entry_node = FlowNode {
+            id: entry.clone(),
+            kind: NodeKind::Method,
+            name: entry.as_str().rsplit('#').next().unwrap_or("").to_string(),
+            qualified_name: None,
+            file: String::new(),
+            depth: 0,
+            parent_id: None,
+        };
+        let mut hops: Vec<FlowHop> = vec![FlowHop {
+            node: entry_node,
+            via: None,
+        }];
+        for node in flow_nodes.drain(..) {
+            let via = if let Some(ref parent_id) = node.parent_id {
+                let key = (parent_id.as_str().to_string(), node.id.as_str().to_string());
+                let call_sites = call_sites_map.remove(&key).unwrap_or_default();
+                Some(FlowEdge {
+                    kind: "CALLS".to_string(),
+                    call_sites,
+                })
+            } else {
+                None
+            };
+            hops.push(FlowHop { node, via });
+        }
+        Ok(hops)
+    }
+
+    async fn complexity_hotspots(
+        &self,
+        min_cyclomatic: Option<u16>,
+        min_cognitive: Option<u16>,
+        min_transitive_loop: Option<u8>,
+        limit: usize,
+    ) -> Result<Vec<HotspotNode>> {
+        let min_cc = min_cyclomatic.unwrap_or(5) as i64;
+        let min_cog = min_cognitive.unwrap_or(0) as i64;
+        let min_tl = min_transitive_loop.unwrap_or(1) as i64;
+        let lim = limit.clamp(1, 200) as i64;
+        let q = format!(
+            "MATCH (n:Symbol) WHERE n.kind IN ['Method', 'Constructor'] \
+             AND n.transitiveLoopDepth >= {min_tl} \
+             AND n.cyclomatic >= {min_cc} \
+             AND n.cognitive >= {min_cog} \
+             RETURN n.id, n.name, n.file, n.cyclomatic, n.cognitive, n.transitiveLoopDepth \
+             ORDER BY n.transitiveLoopDepth DESC, n.cyclomatic DESC LIMIT {lim}"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 6)
+            .map(|r| HotspotNode {
+                id: NodeId::new(r[0].clone()),
+                name: r[1].clone(),
+                file: r[2].clone(),
+                cyclomatic: r[3].parse().unwrap_or(0),
+                cognitive: r[4].parse().unwrap_or(0),
+                transitive_loop_depth: r[5].parse().unwrap_or(0),
+            })
+            .collect())
+    }
+
+    async fn similar_methods(
+        &self,
+        id: &NodeId,
+        _min_jaccard: f32,
+        limit: usize,
+    ) -> Result<Vec<SimilarMethod>> {
+        let id_lit = cstr(id.as_str());
+        let lim = limit.clamp(1, 50) as i64;
+        // SIMILAR_TO edges carry confidence = Jaccard score.
+        let q = format!(
+            "CYPHER id={id_lit} \
+             MATCH (a:Symbol {{id:$id}})-[r:SIMILAR_TO]->(b:Symbol) \
+             RETURN b.id, b.name, b.file, r.confidence \
+             ORDER BY r.confidence DESC LIMIT {lim}",
+            id_lit = cstr(id.as_str())
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 4)
+            .map(|r| SimilarMethod {
+                id: NodeId::new(r[0].clone()),
+                name: r[1].clone(),
+                file: r[2].clone(),
+                jaccard: r[3].parse().unwrap_or(0.0),
             })
             .collect())
     }
@@ -853,8 +998,13 @@ fn nodes_to_list(nodes: &[Node]) -> String {
             let symbol_count = cnum_u64(prop_u64(n, "symbolCount").or_else(|| prop_u64(n, "symbol_count")));
             let cohesion = cnum_f64(prop_f64(n, "cohesion"));
             let process_type = copt(prop_str(n, "process_type"));
+            // Gap 1: promoted complexity fields (queryable as first-class graph properties)
+            let cyclomatic = cnum_u64(prop_u64(n, "cyclomatic"));
+            let cognitive = cnum_u64(prop_u64(n, "cognitive"));
+            let loop_depth = cnum_u64(prop_u64(n, "loopDepth"));
+            let transitive_ld = cnum_u64(prop_u64(n, "transitiveLoopDepth"));
             format!(
-                "{{id:{id}, name:{name}, kind:{kind}, file:{file}, qn:{qn}, sl:{sl}, el:{el}, props:{props}, stereotype:{stereotype}, httpMethod:{http_method}, path:{path}, decorator:{decorator}, handler:{handler}, symbolCount:{symbol_count}, cohesion:{cohesion}, processType:{process_type}}}"
+                "{{id:{id}, name:{name}, kind:{kind}, file:{file}, qn:{qn}, sl:{sl}, el:{el}, props:{props}, stereotype:{stereotype}, httpMethod:{http_method}, path:{path}, decorator:{decorator}, handler:{handler}, symbolCount:{symbol_count}, cohesion:{cohesion}, processType:{process_type}, cyclomatic:{cyclomatic}, cognitive:{cognitive}, loopDepth:{loop_depth}, transitiveLoopDepth:{transitive_ld}}}"
             )
         })
         .collect();
@@ -885,12 +1035,20 @@ fn edges_to_list(edges: &[&Edge]) -> String {
     let items: Vec<String> = edges
         .iter()
         .map(|e| {
+            // Gap 3: serialize call_sites array from props as a JSON string column.
+            let call_sites = e
+                .props
+                .as_ref()
+                .and_then(|p| p.get("call_sites"))
+                .map(|v| v.to_string());
+            let cs = copt(call_sites.as_deref());
             format!(
-                "{{src:{}, dst:{}, conf:{}, reason:{}}}",
+                "{{src:{}, dst:{}, conf:{}, reason:{}, callSites:{}}}",
                 cstr(e.src.as_str()),
                 cstr(e.dst.as_str()),
                 e.confidence,
                 cstr(&e.reason),
+                cs,
             )
         })
         .collect();
@@ -926,6 +1084,7 @@ fn edge_from_label(label: &str) -> EdgeKind {
         "LISTENS_TO" => EdgeKind::ListensTo,
         "EXTERNAL_CALL" => EdgeKind::ExternalCall,
         "TESTS" => EdgeKind::Tests,
+        "SIMILAR_TO" => EdgeKind::SimilarTo,
         _ => EdgeKind::Other,
     }
 }

@@ -224,6 +224,7 @@ impl JarApiExtractor {
                 kind: EdgeKind::HasMethod,
                 confidence: 1.0,
                 reason: "jar-member".into(),
+            props: None,
             });
         }
 
@@ -256,6 +257,7 @@ impl JarApiExtractor {
                 kind: EdgeKind::HasField,
                 confidence: 1.0,
                 reason: "jar-member".into(),
+            props: None,
             });
         }
 
