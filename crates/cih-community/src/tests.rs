@@ -32,6 +32,7 @@ fn edge(src: &NodeId, dst: &NodeId, kind: EdgeKind, confidence: f32) -> Edge {
         kind,
         confidence,
         reason: String::new(),
+            props: None,
     }
 }
 

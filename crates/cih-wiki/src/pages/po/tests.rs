@@ -38,6 +38,7 @@ fn simple_graph() -> WikiGraph {
         kind: EdgeKind::HandlesRoute,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let comm_edges = [Edge {
         src: sym.id.clone(),
@@ -45,6 +46,7 @@ fn simple_graph() -> WikiGraph {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     WikiGraph::build(&nodes, &edges, &[comm], &comm_edges)
 }
@@ -113,6 +115,7 @@ fn render_po_community_shows_core_tables_when_db_access_present() {
             kind: EdgeKind::ExecutesQuery,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: dbq.id.clone(),
@@ -120,6 +123,7 @@ fn render_po_community_shows_core_tables_when_db_access_present() {
             kind: EdgeKind::ReadsTable,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let comm_edges = [Edge {
@@ -128,6 +132,7 @@ fn render_po_community_shows_core_tables_when_db_access_present() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
     let comm_node = g.community_nodes[0].clone();

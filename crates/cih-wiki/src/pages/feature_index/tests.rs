@@ -30,6 +30,7 @@ fn simple_graph() -> WikiGraph {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         }],
     )
 }

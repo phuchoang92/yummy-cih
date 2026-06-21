@@ -49,6 +49,7 @@ fn simple_dev_graph() -> WikiGraph {
         kind: EdgeKind::Tests,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let comm_edges = [
         Edge {
@@ -57,6 +58,7 @@ fn simple_dev_graph() -> WikiGraph {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: test_cls.id.clone(),
@@ -64,6 +66,7 @@ fn simple_dev_graph() -> WikiGraph {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: method.id.clone(),
@@ -71,6 +74,7 @@ fn simple_dev_graph() -> WikiGraph {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     WikiGraph::build(&nodes, &edges, &[comm], &comm_edges)
@@ -128,6 +132,7 @@ fn render_dev_community_shows_db_access_when_present() {
             kind: EdgeKind::ExecutesQuery,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: dbq.id.clone(),
@@ -135,6 +140,7 @@ fn render_dev_community_shows_db_access_when_present() {
             kind: EdgeKind::WritesTable,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let comm_edges = [
@@ -144,6 +150,7 @@ fn render_dev_community_shows_db_access_when_present() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: method.id.clone(),
@@ -151,6 +158,7 @@ fn render_dev_community_shows_db_access_when_present() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);

@@ -32,6 +32,7 @@ fn member_edge(method: &str, comm: &str) -> Edge {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }
 }
 

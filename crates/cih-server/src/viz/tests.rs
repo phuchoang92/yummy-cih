@@ -1,6 +1,6 @@
 use super::*;
 use cih_core::{NodeId, NodeKind};
-use cih_graph_store::{Direction, ImpactNode};
+use cih_graph_store::{Direction, FlowHop, ImpactNode};
 
 #[test]
 fn render_mermaid_flow_empty_steps() {
@@ -19,23 +19,29 @@ fn render_mermaid_flow_two_hops() {
     let child_id = NodeId::new("Method:com.example.Service#save/1".to_string());
     let grandchild_id = NodeId::new("Method:com.example.Repo#insert/1".to_string());
     let steps = vec![
-        FlowNode {
-            id: child_id.clone(),
-            kind: NodeKind::Method,
-            name: "save".to_string(),
-            qualified_name: None,
-            file: "Service.java".to_string(),
-            depth: 1,
-            parent_id: Some(parent_id.clone()),
+        FlowHop {
+            node: FlowNode {
+                id: child_id.clone(),
+                kind: NodeKind::Method,
+                name: "save".to_string(),
+                qualified_name: None,
+                file: "Service.java".to_string(),
+                depth: 1,
+                parent_id: Some(parent_id.clone()),
+            },
+            via: None,
         },
-        FlowNode {
-            id: grandchild_id.clone(),
-            kind: NodeKind::Method,
-            name: "insert".to_string(),
-            qualified_name: None,
-            file: "Repo.java".to_string(),
-            depth: 2,
-            parent_id: Some(child_id.clone()),
+        FlowHop {
+            node: FlowNode {
+                id: grandchild_id.clone(),
+                kind: NodeKind::Method,
+                name: "insert".to_string(),
+                qualified_name: None,
+                file: "Repo.java".to_string(),
+                depth: 2,
+                parent_id: Some(child_id.clone()),
+            },
+            via: None,
         },
     ];
     let out = render_mermaid_flow(&entry, &steps);

@@ -152,6 +152,8 @@ fn parsed_file_round_trips_json() {
             return_type: Some("User".into()),
             declared_type: None,
             stereotype: None,
+            body_fingerprint: None,
+            complexity: None,
         }],
         imports: vec![RawImport {
             raw: "java.util.List".into(),
@@ -177,6 +179,7 @@ fn parsed_file_round_trips_json() {
             },
             in_fqcn: "com.acme.UserService#save/1".into(),
             in_callable: method_id("com.acme.UserService", "save", 1),
+            arg_texts: vec![],
         }],
         type_bindings: vec![TypeBinding {
             name: "repository".into(),
@@ -205,6 +208,7 @@ fn parsed_file_round_trips_json() {
         }],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
 
     let encoded = serde_json::to_string(&parsed).unwrap();

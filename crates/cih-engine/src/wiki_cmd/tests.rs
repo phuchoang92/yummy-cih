@@ -274,6 +274,7 @@ fn feature_evidence_prefixes_item_ids_by_community() {
             kind: EdgeKind::HandlesRoute,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: handler_b.id.clone(),
@@ -281,6 +282,7 @@ fn feature_evidence_prefixes_item_ids_by_community() {
             kind: EdgeKind::HandlesRoute,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let community_edges = vec![
@@ -290,6 +292,7 @@ fn feature_evidence_prefixes_item_ids_by_community() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: handler_b.id.clone(),
@@ -297,6 +300,7 @@ fn feature_evidence_prefixes_item_ids_by_community() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let graph = WikiGraph::build(&nodes, &edges, &[comm_a, comm_b], &community_edges);

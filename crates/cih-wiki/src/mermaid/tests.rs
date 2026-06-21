@@ -39,6 +39,7 @@ fn community_call_diagram_produces_flowchart() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: m1.id.clone(),
@@ -46,6 +47,7 @@ fn community_call_diagram_produces_flowchart() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: m0.id.clone(),
@@ -53,6 +55,7 @@ fn community_call_diagram_produces_flowchart() {
             kind: EdgeKind::Calls,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let g = WikiGraph::build(&[m0, m1], &edges[2..], &[c0, c1], &edges[..2]);

@@ -20,6 +20,7 @@ fn member_edge(sym_id: &str, comm_id: &str) -> Edge {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }
 }
 
@@ -35,6 +36,7 @@ fn two_community_graph() -> WikiGraph {
         kind: EdgeKind::Calls,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let comm_nodes = [comm_a, comm_b];
     let comm_edges = [
@@ -94,6 +96,7 @@ fn render_ba_community_shows_data_access_when_present() {
             kind: EdgeKind::ExecutesQuery,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: dbq.id.clone(),
@@ -101,6 +104,7 @@ fn render_ba_community_shows_data_access_when_present() {
             kind: EdgeKind::WritesTable,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let comm_edges = [member_edge("Method:A#doA/0", "Community:0")];

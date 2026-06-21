@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
 };
 use cih_core::{Node, NodeId};
-use cih_graph_store::{Direction, FlowHop, GraphStore, GraphStoreError};
+use cih_graph_store::{Direction, FlowHop, FlowNode, GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

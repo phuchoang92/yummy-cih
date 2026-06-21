@@ -58,6 +58,8 @@ fn parsed(file: &str, package: &str, class_name: &str, imports: Vec<&str>) -> Pa
             return_type: None,
             declared_type: None,
             stereotype: None,
+            body_fingerprint: None,
+            complexity: None,
         }],
         imports: imports
             .into_iter()
@@ -73,6 +75,7 @@ fn parsed(file: &str, package: &str, class_name: &str, imports: Vec<&str>) -> Pa
         contract_sites: Vec::new(),
         sql_constants: Vec::new(),
         sql_execution_sites: Vec::new(),
+        string_constants: vec![],
     }
 }
 

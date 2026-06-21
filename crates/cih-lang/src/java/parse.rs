@@ -291,6 +291,12 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             obj.insert("cognitive".into(), serde_json::Value::Number(cx.cognitive.into()));
             obj.insert("loopDepth".into(), serde_json::Value::Number(cx.loop_depth.into()));
         }
+        // Gap 2: Write body fingerprint into Node.props so similarity.rs can read it
+        if let Some(ref fp) = body_fingerprint {
+            if let Ok(v) = serde_json::to_value(fp) {
+                obj.insert("bodyFingerprint".into(), v);
+            }
+        }
         if obj.is_empty() {
             None
         } else {
@@ -338,7 +344,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         stereotype: None,
         complexity,
         body_fingerprint,
-    });
+});
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
         in_fqcn: format!("{}#{name}/{arity}", owner.fqcn),
@@ -374,6 +380,12 @@ fn collect_constructor(
             obj.insert("cognitive".into(), serde_json::Value::Number(cx.cognitive.into()));
             obj.insert("loopDepth".into(), serde_json::Value::Number(cx.loop_depth.into()));
         }
+        // Gap 2: Write body fingerprint into Node.props so similarity.rs can read it
+        if let Some(ref fp) = body_fingerprint {
+            if let Ok(v) = serde_json::to_value(fp) {
+                obj.insert("bodyFingerprint".into(), v);
+            }
+        }
         if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
     };
 
@@ -408,7 +420,7 @@ fn collect_constructor(
         stereotype: None,
         complexity,
         body_fingerprint,
-    });
+});
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
         in_fqcn: format!("{}#<init>/{arity}", owner.fqcn),
@@ -569,7 +581,7 @@ fn reference_site(
         in_fqcn,
         in_callable,
         arg_texts,
-    })
+})
 }
 
 #[derive(Clone, Copy)]

@@ -38,6 +38,7 @@ fn graph_with_routes(pairs: Vec<(Node, Node)>) -> WikiGraph {
             kind: EdgeKind::HandlesRoute,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         });
         nodes.push(handler);
         nodes.push(route);

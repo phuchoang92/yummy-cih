@@ -18,6 +18,7 @@ fn make_parsed_file(
         contract_sites: vec![],
         sql_constants,
         sql_execution_sites,
+        string_constants: vec![],
     }
 }
 

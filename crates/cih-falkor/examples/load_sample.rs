@@ -30,6 +30,7 @@ fn calls(src: &str, dst: &str) -> Edge {
         kind: EdgeKind::Calls,
         confidence: 0.95,
         reason: "sample".to_string(),
+            props: None,
     }
 }
 

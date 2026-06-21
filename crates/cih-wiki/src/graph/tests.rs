@@ -20,6 +20,7 @@ fn step_edge(sym_id: &str, proc_id: &str, step_n: usize) -> Edge {
         kind: EdgeKind::StepInProcess,
         confidence: 1.0,
         reason: format!("step:{}", step_n),
+            props: None,
     }
 }
 
@@ -33,6 +34,7 @@ fn wiki_graph_indexes_community_members() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let g = WikiGraph::build(&[sym], &[], &[comm], &comm_edges);
     assert_eq!(g.community_nodes.len(), 1);
@@ -65,6 +67,7 @@ fn wiki_graph_indexes_routes() {
         kind: EdgeKind::HandlesRoute,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     };
     let g = WikiGraph::build(&[handler, route], &[e], &[], &[]);
     assert_eq!(g.routes.len(), 1);
@@ -97,6 +100,7 @@ fn wiki_graph_indexes_db_table_access() {
             kind: EdgeKind::ExecutesQuery,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: dbq.id.clone(),
@@ -104,6 +108,7 @@ fn wiki_graph_indexes_db_table_access() {
             kind: EdgeKind::ReadsTable,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: dbq.id.clone(),
@@ -111,6 +116,7 @@ fn wiki_graph_indexes_db_table_access() {
             kind: EdgeKind::WritesTable,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let comm_edges = [Edge {
@@ -119,6 +125,7 @@ fn wiki_graph_indexes_db_table_access() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
 
     let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);

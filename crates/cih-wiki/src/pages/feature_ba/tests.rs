@@ -38,6 +38,7 @@ fn simple_graph() -> (WikiGraph, Vec<String>) {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         }],
     );
     (g, vec!["Community:0".to_string()])

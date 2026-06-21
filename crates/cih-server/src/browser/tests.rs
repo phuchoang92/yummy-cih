@@ -1,5 +1,6 @@
 use super::*;
 use cih_core::{NodeKind, Range};
+use cih_graph_store::FlowHop;
 
 #[test]
 fn browser_limits_are_bounded() {
@@ -40,14 +41,17 @@ fn graph_direction_defaults_to_upstream() {
 fn flow_graph_response_contains_d3_and_mermaid_shapes() {
     let entry = NodeId::new("Method:com.acme.Controller#run/0");
     let child = NodeId::new("Method:com.acme.Service#save/1");
-    let steps = vec![FlowNode {
-        id: child.clone(),
-        kind: NodeKind::Method,
-        name: "save".into(),
-        qualified_name: Some("com.acme.Service#save/1".into()),
-        file: "src/main/java/com/acme/Service.java".into(),
-        depth: 1,
-        parent_id: Some(entry.clone()),
+    let steps = vec![FlowHop {
+        node: FlowNode {
+            id: child.clone(),
+            kind: NodeKind::Method,
+            name: "save".into(),
+            qualified_name: Some("com.acme.Service#save/1".into()),
+            file: "src/main/java/com/acme/Service.java".into(),
+            depth: 1,
+            parent_id: Some(entry.clone()),
+        },
+        via: None,
     }];
     let entry_node = Node {
         id: entry.clone(),

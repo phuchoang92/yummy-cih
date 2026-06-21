@@ -69,6 +69,7 @@ fn evidence_pack_includes_routes_and_tables() {
             kind: EdgeKind::HandlesRoute,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: method.id.clone(),
@@ -76,6 +77,7 @@ fn evidence_pack_includes_routes_and_tables() {
             kind: EdgeKind::ExecutesQuery,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: query.id.clone(),
@@ -83,6 +85,7 @@ fn evidence_pack_includes_routes_and_tables() {
             kind: EdgeKind::ReadsTable,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let comm_edges = [Edge {
@@ -91,6 +94,7 @@ fn evidence_pack_includes_routes_and_tables() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let graph = WikiGraph::build(
         &[method, route, query, table],
@@ -165,6 +169,7 @@ fn brd_matching_requires_two_distinct_terms_and_caps_to_two_chunks() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let graph = WikiGraph::build(&[method], &[], &[community.clone()], &comm_edges);
     let corpus = EvidenceCorpus {
@@ -215,6 +220,7 @@ fn source_snippet_selection_is_deterministic_and_capped() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: m2.id.clone(),
@@ -222,6 +228,7 @@ fn source_snippet_selection_is_deterministic_and_capped() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
         Edge {
             src: m3.id.clone(),
@@ -229,6 +236,7 @@ fn source_snippet_selection_is_deterministic_and_capped() {
             kind: EdgeKind::MemberOf,
             confidence: 1.0,
             reason: String::new(),
+                props: None,
         },
     ];
     let graph = WikiGraph::build(&[m1, m2, m3], &[], &[community.clone()], &comm_edges);

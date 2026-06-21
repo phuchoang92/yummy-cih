@@ -20,6 +20,8 @@ fn type_def(kind: NodeKind, fqcn: &str) -> SymbolDef {
         return_type: None,
         declared_type: None,
         stereotype: None,
+        body_fingerprint: None,
+        complexity: None,
     }
 }
 
@@ -36,6 +38,8 @@ fn method_def(owner: &str, name: &str, params: &[&str], ret: Option<&str>) -> Sy
         return_type: ret.map(str::to_string),
         declared_type: None,
         stereotype: None,
+        body_fingerprint: None,
+        complexity: None,
     }
 }
 
@@ -52,6 +56,8 @@ fn field_def(owner: &str, name: &str, ty: &str) -> SymbolDef {
         return_type: None,
         declared_type: Some(ty.into()),
         stereotype: None,
+        body_fingerprint: None,
+        complexity: None,
     }
 }
 
@@ -68,6 +74,8 @@ fn ctor_def(owner: &str, params: &[&str]) -> SymbolDef {
         return_type: None,
         declared_type: None,
         stereotype: None,
+        body_fingerprint: None,
+        complexity: None,
     }
 }
 
@@ -133,6 +141,7 @@ fn contract_sites_emit_nodes_and_edges() {
         ],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
 
     let out = resolve_edges(&[file]);
@@ -166,6 +175,7 @@ fn heritage(class_fqcn: &str, super_name: &str, kind: RefKind) -> ReferenceSite 
         range: Range::default(),
         in_fqcn: class_fqcn.into(),
         in_callable: type_id(NodeKind::Class, class_fqcn),
+        arg_texts: vec![],
     }
 }
 
@@ -185,6 +195,7 @@ fn ref_site(
         range: Range::default(),
         in_fqcn: in_fqcn.into(),
         in_callable,
+        arg_texts: vec![],
     }
 }
 
@@ -206,6 +217,7 @@ fn workspace() -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let service = ParsedFile {
         file: "com/acme/OwnerService.java".into(),
@@ -226,6 +238,7 @@ fn workspace() -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let controller = ParsedFile {
         file: "com/acme/OwnerController.java".into(),
@@ -255,6 +268,7 @@ fn workspace() -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let thing = ParsedFile {
         file: "com/other/Thing.java".into(),
@@ -267,6 +281,7 @@ fn workspace() -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     vec![repo, service, controller, thing]
 }
@@ -497,6 +512,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let mammal = ParsedFile {
         file: "com/acme/Mammal.java".into(),
@@ -513,6 +529,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let dog = ParsedFile {
         file: "com/acme/Dog.java".into(),
@@ -533,6 +550,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     vec![animal, mammal, dog]
 }
@@ -611,6 +629,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let marker = ParsedFile {
         file: "com/acme/Marker.java".into(),
@@ -626,6 +645,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let child = ParsedFile {
         file: "com/acme/Child.java".into(),
@@ -645,6 +665,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let out = resolve_edges(&[base, marker, child]);
     // Exactly one METHOD_OVERRIDES to Base.act (not to Marker).
@@ -694,6 +715,8 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
                 return_type: None,
                 declared_type: None,
                 stereotype: None,
+                body_fingerprint: None,
+                complexity: None,
             },
             method_def("com.acme.UserService", "save", &["User"], None),
         ],
@@ -703,6 +726,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
 
     // Impl: UserServiceImpl implements UserService
@@ -718,6 +742,8 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         return_type: None,
         declared_type: None,
         stereotype: impl_stereotype.map(str::to_string),
+        body_fingerprint: None,
+        complexity: None,
     };
     let impl_file = ParsedFile {
         file: "com/acme/UserServiceImpl.java".into(),
@@ -737,6 +763,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
 
     // Caller: OrderController with field `userService: UserService` and call userService.save(u)
@@ -757,6 +784,8 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
                 return_type: None,
                 declared_type: None,
                 stereotype: Some("controller".into()),
+                body_fingerprint: None,
+                complexity: None,
             },
             method_def("com.acme.OrderController", "placeOrder", &["Order"], None),
             field_def("com.acme.OrderController", "userService", "UserService"),
@@ -770,6 +799,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
             range: Range::default(),
             in_fqcn: "com.acme.OrderController#placeOrder/1".into(),
             in_callable: method_id("com.acme.OrderController", "placeOrder", 1),
+            arg_texts: vec![],
         }],
         type_bindings: vec![TypeBinding {
             name: "userService".into(),
@@ -781,6 +811,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
 
     vec![iface, impl_file, caller]
@@ -855,6 +886,8 @@ fn di_falls_back_when_multiple_service_impls() {
                 return_type: None,
                 declared_type: None,
                 stereotype: None,
+                body_fingerprint: None,
+                complexity: None,
             },
             method_def("com.acme.UserService", "save", &["User"], None),
         ],
@@ -864,6 +897,7 @@ fn di_falls_back_when_multiple_service_impls() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let make_impl = |name: &str| -> ParsedFile {
         let fqcn = format!("com.acme.{name}");
@@ -884,6 +918,8 @@ fn di_falls_back_when_multiple_service_impls() {
                     return_type: None,
                     declared_type: None,
                     stereotype: Some("service".into()),
+                    body_fingerprint: None,
+                    complexity: None,
                 },
                 method_def(&fqcn, "save", &["User"], None),
             ],
@@ -893,6 +929,7 @@ fn di_falls_back_when_multiple_service_impls() {
             contract_sites: vec![],
             sql_constants: vec![],
             sql_execution_sites: vec![],
+            string_constants: vec![],
         }
     };
     let caller = ParsedFile {
@@ -912,6 +949,8 @@ fn di_falls_back_when_multiple_service_impls() {
                 return_type: None,
                 declared_type: None,
                 stereotype: Some("controller".into()),
+                body_fingerprint: None,
+                complexity: None,
             },
             method_def("com.acme.OrderController", "placeOrder", &["Order"], None),
             field_def("com.acme.OrderController", "userService", "UserService"),
@@ -925,6 +964,7 @@ fn di_falls_back_when_multiple_service_impls() {
             range: Range::default(),
             in_fqcn: "com.acme.OrderController#placeOrder/1".into(),
             in_callable: method_id("com.acme.OrderController", "placeOrder", 1),
+            arg_texts: vec![],
         }],
         type_bindings: vec![TypeBinding {
             name: "userService".into(),
@@ -936,6 +976,7 @@ fn di_falls_back_when_multiple_service_impls() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let out = resolve_edges(&[
         iface,
@@ -982,6 +1023,8 @@ fn di_not_applied_to_concrete_class_receiver() {
                     return_type: None,
                     declared_type: None,
                     stereotype: Some("service".into()),
+                    body_fingerprint: None,
+                    complexity: None,
                 },
                 method_def("com.acme.UserServiceImpl", "save", &["User"], None),
             ],
@@ -991,6 +1034,7 @@ fn di_not_applied_to_concrete_class_receiver() {
             contract_sites: vec![],
             sql_constants: vec![],
             sql_execution_sites: vec![],
+            string_constants: vec![],
         };
         let caller = ParsedFile {
             file: "com/acme/OrderController.java".into(),
@@ -1009,6 +1053,8 @@ fn di_not_applied_to_concrete_class_receiver() {
                     return_type: None,
                     declared_type: None,
                     stereotype: Some("controller".into()),
+                    body_fingerprint: None,
+                    complexity: None,
                 },
                 method_def("com.acme.OrderController", "placeOrder", &["Order"], None),
                 field_def(
@@ -1026,6 +1072,7 @@ fn di_not_applied_to_concrete_class_receiver() {
                 range: Range::default(),
                 in_fqcn: "com.acme.OrderController#placeOrder/1".into(),
                 in_callable: method_id("com.acme.OrderController", "placeOrder", 1),
+                arg_texts: vec![],
             }],
             type_bindings: vec![TypeBinding {
                 name: "userServiceImpl".into(),
@@ -1037,6 +1084,7 @@ fn di_not_applied_to_concrete_class_receiver() {
             contract_sites: vec![],
             sql_constants: vec![],
             sql_execution_sites: vec![],
+            string_constants: vec![],
         };
         vec![concrete, caller]
     };
@@ -1102,6 +1150,7 @@ fn unresolved_ref_receiver_type_unknown() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let out = resolve_edges(&[file]);
     assert_eq!(out.skipped, 1);
@@ -1130,6 +1179,7 @@ fn unresolved_ref_member_not_found() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let caller = ParsedFile {
         file: "com/acme/Caller.java".into(),
@@ -1159,6 +1209,7 @@ fn unresolved_ref_member_not_found() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let out = resolve_edges(&[service, caller]);
     assert_eq!(out.skipped, 1);
@@ -1188,6 +1239,7 @@ fn unresolved_ref_heritage_type_unknown() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let out = resolve_edges(&[child]);
     assert_eq!(out.skipped, 1);
@@ -1214,6 +1266,7 @@ fn callresult_factory_pattern_resolved() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let order = ParsedFile {
         file: "com/acme/Order.java".into(),
@@ -1229,6 +1282,7 @@ fn callresult_factory_pattern_resolved() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let service = ParsedFile {
         file: "com/acme/OrderService.java".into(),
@@ -1269,6 +1323,7 @@ fn callresult_factory_pattern_resolved() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let out = resolve_edges(&[order_factory, order, service]);
     let calls: Vec<_> = out
@@ -1319,6 +1374,7 @@ fn callresult_factory_pattern_unresolved_when_return_type_absent() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     };
     let out = resolve_edges(&[service]);
     assert_eq!(out.skipped, 1);

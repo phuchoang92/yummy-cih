@@ -67,6 +67,7 @@ fn generate_wiki_writes_expected_files() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
     let nodes = [sym];
     let comm_nodes = [comm];
@@ -114,6 +115,7 @@ fn generate_wiki_records_llm_model_in_manifest_when_enriched() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
+            props: None,
     }];
 
     let mut summaries = HashMap::new();

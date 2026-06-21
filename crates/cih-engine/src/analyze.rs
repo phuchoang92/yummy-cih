@@ -1210,6 +1210,7 @@ mod combined_edges_tests {
             kind: EdgeKind::Calls,
             confidence: 0.7,
             reason: "first".into(),
+                props: None,
         };
         let second = Edge {
             src: NodeId::new("A"),
@@ -1217,6 +1218,7 @@ mod combined_edges_tests {
             kind: EdgeKind::Calls,
             confidence: 0.7,
             reason: "second".into(),
+                props: None,
         };
         let result = combined_edges(&[first], &[second]);
         assert_eq!(result.len(), 1);

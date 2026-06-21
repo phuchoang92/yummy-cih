@@ -77,6 +77,8 @@ fn field_injection_emits_calls_edge() {
             return_type: None,
             declared_type: None,
             stereotype: None,
+            body_fingerprint: None,
+            complexity: None,
         }],
         imports: vec![],
         reference_sites: vec![],
@@ -90,6 +92,7 @@ fn field_injection_emits_calls_edge() {
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
+        string_constants: vec![],
     }];
 
     let out = extract_di_xml(&dir, &parsed);
