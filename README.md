@@ -42,10 +42,13 @@ If you prefer to configure manually, create a `.env` file next to `docker-compos
 
 ```bash
 REPO_PATH=/absolute/path/to/your/java-project
+POSTGRES_PASSWORD=changeme
 ```
 
-This is the only required variable. Both the `engine` and `cih-server` containers mount this
-path, so the indexer and the MCP server read from the same artifact files.
+`REPO_PATH` and `POSTGRES_PASSWORD` are both required. `REPO_PATH` tells the engine and
+`cih-server` containers where your Java repo lives; `POSTGRES_PASSWORD` is the password for
+the embedded pgvector database (used by `embed` and semantic search). Optionally set
+`REPO_NAME` to a short slug for the docs-viewer URL (defaults to `repo`).
 
 ---
 
@@ -59,6 +62,7 @@ docker compose up -d
 | Service | Host port | Purpose |
 |---|---|---|
 | `falkordb` | 6380 | Graph database (persisted in `falkordb-data` volume) |
+| `postgres` | 5433 | pgvector store for embeddings / semantic search |
 | `cih-server` | 8080 | MCP server — `context`, `impact`, `trace_flow`, `query`, and more |
 
 Wait until healthy:
@@ -87,6 +91,7 @@ docker compose run --rm engine analyze /repo --all
 docker compose run --rm engine discover /repo
 
 # Embedding index → enables semantic search in the query tool (optional)
+# Requires postgres to be healthy (it is when started via docker compose up -d)
 docker compose run --rm engine embed /repo
 ```
 
@@ -239,10 +244,14 @@ Then just run `analyze /repo` without extra flags — the scope file is picked u
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `REPO_PATH` | *(required in .env)* | Absolute path to your Java repo on the host |
+| `POSTGRES_PASSWORD` | *(required in .env)* | Password for the embedded pgvector database |
+| `REPO_NAME` | `repo` | Slug used in the docs-viewer URL (e.g. `payment-service`) |
 | `FALKOR_URL` | `redis://falkordb:6379` | FalkorDB connection (service name inside compose) |
 | `CIH_GRAPH_KEY` | `cih` | Graph name in FalkorDB |
 | `CIH_BIND` | `0.0.0.0:8080` | MCP server listen address |
 | `CIH_ARTIFACTS_DIR` | `/repo/.cih/artifacts` | Artifact path for BM25 `query` tool |
+| `CIH_PG_URL` | *(auto-wired from compose)* | pgvector connection URL for semantic search |
 | `HF_HOME` | `/data/hf-cache` | HuggingFace model cache (downloaded on first `embed`) |
 | `CIH_LLM_API_KEY` | — | API key for `wiki --llm` (also accepts `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) |
 
@@ -334,10 +343,10 @@ files are skipped automatically. Force a full re-parse with `--no-cache`.
 Only needed to modify the engine or server:
 
 ```bash
-# Prerequisites: Rust stable, Docker (for FalkorDB)
+# Prerequisites: Rust stable, Docker (for FalkorDB + postgres)
 
-# Start FalkorDB only
-docker compose up -d falkordb
+# Start FalkorDB and postgres (required by both engine and server)
+POSTGRES_PASSWORD=changeme docker compose up -d falkordb postgres
 
 # Build
 cargo build --release -p cih-server -p cih-engine
@@ -345,6 +354,7 @@ cargo build --release -p cih-server -p cih-engine
 # Run the MCP server
 FALKOR_URL=redis://localhost:6380 CIH_GRAPH_KEY=cih \
   CIH_ARTIFACTS_DIR=/path/to/repo/.cih/artifacts \
+  CIH_PG_URL=postgres://cih:changeme@localhost:5433/cih \
   ./target/release/cih-server
 
 # Index a project
@@ -352,6 +362,11 @@ FALKOR_URL=redis://localhost:6380 CIH_GRAPH_KEY=cih \
   ./target/release/cih-engine analyze /path/to/repo --all
 
 ./target/release/cih-engine discover /path/to/repo
+
+# Build embedding index (optional — needs postgres)
+CIH_PG_URL=postgres://cih:changeme@localhost:5433/cih \
+  ./target/release/cih-engine embed /path/to/repo
+
 ./target/release/cih-engine wiki /path/to/repo
 
 # Run all tests
