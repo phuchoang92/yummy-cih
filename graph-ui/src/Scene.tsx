@@ -47,52 +47,68 @@ function NodeCloud({ nodes, selected, onSelect, onHover }: {
   nodes: OverviewNode[]; selected: Set<number> | null;
   onSelect: (node: OverviewNode) => void; onHover: (node: OverviewNode | null) => void;
 }) {
-  const mesh = useRef<THREE.InstancedMesh>(null);
-  const object = useMemo(() => new THREE.Object3D(), []);
-  const color = useMemo(() => new THREE.Color(), []);
-  const maxDegree = useMemo(() => Math.max(1, ...nodes.map((n) => n.degree)), [nodes]);
+  const pointsRef = useRef<THREE.Points>(null);
+  const maxDegree = useMemo(
+    () => nodes.reduce((m, n) => Math.max(m, n.degree), 1),
+    [nodes],
+  );
 
   useLayoutEffect(() => {
-    if (!mesh.current) return;
-    nodes.forEach((node, position) => {
-      object.position.set(node.x, node.y, node.z);
-      const scale = Math.max(1.5, node.size * .42);
-      object.scale.setScalar(scale);
-      object.updateMatrix();
-      mesh.current!.setMatrixAt(position, object.matrix);
+    if (!pointsRef.current) return;
+    const pos = new Float32Array(nodes.length * 3);
+    const col = new Float32Array(nodes.length * 3);
+    const c = new THREE.Color();
+    nodes.forEach((node, i) => {
+      pos[i * 3] = node.x; pos[i * 3 + 1] = node.y; pos[i * 3 + 2] = node.z;
+      c.set(node.color);
+      const t = Math.log1p(node.degree) / Math.log1p(maxDegree);
+      c.multiplyScalar(1.0 + t * 3.5);
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
     });
-    mesh.current.instanceMatrix.needsUpdate = true;
-    mesh.current.computeBoundingSphere();
-  }, [nodes, object]);
+    const geo = pointsRef.current.geometry;
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.computeBoundingSphere();
+  }, [nodes, maxDegree]);
 
   useLayoutEffect(() => {
-    if (!mesh.current) return;
+    if (!pointsRef.current) return;
+    const colorAttr = pointsRef.current.geometry.attributes.color as THREE.BufferAttribute | undefined;
+    if (!colorAttr) return;
+    const arr = colorAttr.array as Float32Array;
     const active = selected && selected.size > 0;
-    nodes.forEach((node, position) => {
-      color.set(node.color);
+    const c = new THREE.Color();
+    nodes.forEach((node, i) => {
+      c.set(node.color);
       if (active && !selected.has(node.index)) {
-        color.multiplyScalar(.08);
+        c.multiplyScalar(0.08);
       } else {
-        // Nodes called more get brighter: t=0 → dim (0.5×), t=1 → deep into Bloom (4.5×).
-        // Values above ~1.0 exceed the Bloom luminance threshold and emit a visible glow halo.
-        const t = node.degree / maxDegree;
-        color.multiplyScalar(0.5 + t * 4.0);
+        const t = Math.log1p(node.degree) / Math.log1p(maxDegree);
+        c.multiplyScalar(1.0 + t * 3.5);
       }
-      mesh.current!.setColorAt(position, color);
+      arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b;
     });
-    if (mesh.current.instanceColor) mesh.current.instanceColor.needsUpdate = true;
-  }, [nodes, selected, color, maxDegree]);
+    colorAttr.needsUpdate = true;
+  }, [selected, nodes, maxDegree]);
 
   return (
-    <instancedMesh
-      ref={mesh} args={[undefined, undefined, nodes.length]} frustumCulled={false}
-      onPointerMove={(event) => { event.stopPropagation(); if (event.instanceId !== undefined) onHover(nodes[event.instanceId] ?? null); }}
+    <points
+      ref={pointsRef}
+      frustumCulled={false}
+      onPointerMove={(e) => { e.stopPropagation(); if (e.index != null) onHover(nodes[e.index] ?? null); }}
       onPointerOut={() => onHover(null)}
-      onClick={(event) => { event.stopPropagation(); if (event.instanceId !== undefined && nodes[event.instanceId]) onSelect(nodes[event.instanceId]); }}
+      onClick={(e) => { e.stopPropagation(); if (e.index != null && nodes[e.index]) onSelect(nodes[e.index]); }}
     >
-      <sphereGeometry args={[1, 12, 8]} />
-      <meshBasicMaterial vertexColors toneMapped={false} />
-    </instancedMesh>
+      <bufferGeometry />
+      <pointsMaterial
+        vertexColors
+        size={8}
+        sizeAttenuation={false}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+        toneMapped={false}
+      />
+    </points>
   );
 }
 
