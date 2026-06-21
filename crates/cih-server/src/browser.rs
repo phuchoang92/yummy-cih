@@ -17,6 +17,7 @@ use cih_graph_store::{Direction, FlowNode, GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::layout;
 use crate::search::{self, QueryResult, SearchState};
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
@@ -42,6 +43,7 @@ pub(crate) fn router(state: BrowserState) -> Router {
         .route("/graph/", get(graph_shell))
         .route("/graph/assets/app.js", get(app_js))
         .route("/graph/assets/styles.css", get(styles_css))
+        .route("/api/graph/overview", get(graph_overview))
         .route("/api/graph/search", get(graph_search))
         .route("/api/graph/context", get(graph_context))
         .route("/api/graph/impact", get(graph_impact))
@@ -76,6 +78,12 @@ struct SearchParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct OverviewParams {
+    max_nodes: Option<usize>,
+    max_edges: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NodeParams {
     id: String,
 }
@@ -97,6 +105,36 @@ struct FlowParams {
 struct RoutesParams {
     prefix: Option<String>,
     limit: Option<usize>,
+}
+
+const OVERVIEW_DEFAULT_NODES: usize = 20_000;
+const OVERVIEW_MAX_NODES: usize = 50_000;
+const OVERVIEW_DEFAULT_EDGES: usize = 80_000;
+const OVERVIEW_MAX_EDGES: usize = 250_000;
+
+async fn graph_overview(
+    State(state): State<BrowserState>,
+    Query(params): Query<OverviewParams>,
+) -> Result<Json<layout::LayoutOverview>, BrowserError> {
+    let max_nodes = overview_limit(
+        params.max_nodes,
+        OVERVIEW_DEFAULT_NODES,
+        OVERVIEW_MAX_NODES,
+    );
+    let max_edges = overview_limit(
+        params.max_edges,
+        OVERVIEW_DEFAULT_EDGES,
+        OVERVIEW_MAX_EDGES,
+    );
+    let overview = state
+        .store
+        .graph_overview(max_nodes, max_edges)
+        .await
+        .map_err(BrowserError::from_store)?;
+    let positioned = tokio::task::spawn_blocking(move || layout::compute(overview))
+        .await
+        .map_err(|err| BrowserError::internal(format!("layout worker failed: {err}")))?;
+    Ok(Json(positioned))
 }
 
 async fn graph_search(
@@ -308,6 +346,10 @@ fn limit_or_default(raw: Option<usize>, default: usize, max: usize) -> usize {
     raw.unwrap_or(default).clamp(1, max)
 }
 
+fn overview_limit(raw: Option<usize>, default: usize, max: usize) -> usize {
+    raw.unwrap_or(default).clamp(1, max)
+}
+
 #[derive(Debug)]
 struct BrowserError {
     status: StatusCode,
@@ -359,4 +401,3 @@ impl IntoResponse for BrowserError {
 
 #[cfg(test)]
 mod tests;
-

@@ -21,6 +21,7 @@ mod feature;
 mod files;
 mod indexing;
 mod jobs;
+mod layout;
 mod resources;
 mod search;
 mod server;
@@ -34,7 +35,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{middleware, routing::get};
 use cih_embed::{EmbedModelKind, EmbedStore};
-use cih_graph_store::{GraphStore};
+use cih_graph_store::GraphStore;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -49,7 +50,7 @@ use rmcp::{
     },
     ErrorData as McpError, RoleServer, ServerHandler,
 };
-use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
 use args::*;
@@ -601,6 +602,7 @@ async fn main() -> Result<()> {
 
     let app = public
         .merge(protected)
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(120)));
 
@@ -617,4 +619,3 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests;
-

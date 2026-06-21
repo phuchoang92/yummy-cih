@@ -15,6 +15,7 @@ use rayon::prelude::*;
 
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
 use crate::llm::{backoff_ms, make_adapter, redact_key, resolve_api_key, LlmAdapter, LlmRequest};
+use crate::ui::PhaseProgress;
 
 /// FNV-1a 64-bit hash (no external dependency).
 fn fnv64(s: &str) -> String {
@@ -300,6 +301,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
+    let repo_name_display = repo_name.clone();
 
     let mut llm_info: Option<WikiLlmInfo> = None;
     let mut summaries_for_cache: Vec<(String, String, CommunityLlmSummary)> = Vec::new();
@@ -327,7 +329,6 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
         const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
         let consecutive_failures = AtomicU32::new(0);
-        let done_count = AtomicU32::new(0);
         let total = community_nodes.len();
 
         tracing::info!(
@@ -337,10 +338,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             provider = llm_provider,
             "starting LLM community enrichment"
         );
-        eprintln!(
-            "[cih-wiki] enriching {} communities (concurrency={}, model={})",
-            total, concurrency, llm_model
-        );
+
+        let mut ui = PhaseProgress::new();
+        if json { ui.hide(); }
+        ui.start_phase("Enriching communities", Some(total as u64));
 
         // community enrichment (par) + controller enrichment (sequential) run concurrently
         let (community_raw, ctrl): (
@@ -349,7 +350,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         ) = pool.as_ref().unwrap().install(|| {
             rayon::join(
                 || {
-                    community_nodes
+                    let result = community_nodes
                         .par_iter()
                         .map(|comm| {
                             let comm_id = comm.id.as_str().to_string();
@@ -365,8 +366,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                             if let Some(summary) =
                                 cached_summary(&comm_id, &ev_hash, prev_meta.as_ref())
                             {
-                                let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                                eprintln!("[{}/{}] {} — cached (skipped)", done, total, comm.name);
+                                ui.tick_skipped(format!("{} (cached)", &comm.name));
                                 return (comm_id, ev_hash, Ok(summary));
                             }
 
@@ -374,11 +374,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                                 consecutive_failures.load(Ordering::Relaxed),
                                 CIRCUIT_BREAKER_THRESHOLD,
                             ) {
-                                let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                                eprintln!(
-                                    "[{}/{}] {} — SKIPPED (circuit open)",
-                                    done, total, comm.name
-                                );
+                                ui.tick_failed(format!("{} (circuit open)", &comm.name));
                                 return (
                                     comm_id,
                                     ev_hash,
@@ -388,7 +384,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                                 );
                             }
 
-                            eprintln!("[cih-wiki] calling LLM for: {}", comm.name);
+                            ui.tick(comm.name.as_str());
                             let r = enrich_one_community(
                                 comm,
                                 &wiki_graph,
@@ -404,21 +400,18 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                                 llm_debug_evidence,
                                 llm_dry_run,
                             );
-                            let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                            match &r {
-                                Ok(_) => eprintln!("[{}/{}] {} — ok", done, total, comm.name),
-                                Err(e) => {
-                                    eprintln!("[{}/{}] {} — FAILED: {}", done, total, comm.name, e)
-                                }
-                            }
                             if r.is_err() {
                                 consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                                ui.inc_failed();
                             } else {
                                 consecutive_failures.store(0, Ordering::Relaxed);
+                                ui.inc_ok();
                             }
                             (comm_id, ev_hash, r)
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    ui.finish_phase();
+                    result
                 },
                 || {
                     tracing::info!(
@@ -504,11 +497,17 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         } else if wiki_mode == "llm-full" {
             let total_full = community_nodes.len();
             tracing::info!(communities = total_full, "starting LLM full enrichment");
+
+            let mut ui_full = PhaseProgress::new();
+            if json { ui_full.hide(); }
+            ui_full.start_phase("Deep enrichment (PO/BA)", Some(total_full as u64));
+
             let results: Vec<(String, Result<CommunityLlmFull>)> =
                 pool.as_ref().unwrap().install(|| {
                     community_nodes
                         .par_iter()
                         .map(|comm| {
+                            ui_full.tick(comm.name.as_str());
                             let r = enrich_one_community_full(
                                 comm,
                                 &wiki_graph,
@@ -522,10 +521,13 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                                 llm_retries,
                                 wiki_language,
                             );
+                            if r.is_ok() { ui_full.inc_ok(); } else { ui_full.inc_failed(); }
                             (comm.id.as_str().to_string(), r)
                         })
                         .collect()
                 });
+            ui_full.finish_phase();
+
             let mut map = HashMap::new();
             for (id, result) in results {
                 match result {
@@ -587,12 +589,18 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             None
         };
 
+        let active_features: Vec<&FeatureGroup> = feature_groups
+            .iter()
+            .filter(|g| !g.community_ids.is_empty())
+            .collect();
+
+        let mut ui_feat = PhaseProgress::new();
+        if json { ui_feat.hide(); }
+        ui_feat.start_phase("Enriching features", Some(active_features.len() as u64));
+
         let mut map: HashMap<String, FeatureLlmSummary> = HashMap::new();
 
-        for group in &feature_groups {
-            if group.community_ids.is_empty() {
-                continue;
-            }
+        for group in &active_features {
             let merged_ev =
                 build_feature_evidence(&group.community_ids, &wiki_graph, repo, &evidence_corpus);
             let ev_hash = fnv64(&merged_ev);
@@ -603,9 +611,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             {
                 feature_cache_updates.push((group.feature.clone(), ev_hash, cached.clone()));
                 map.insert(group.feature.clone(), cached);
+                ui_feat.tick_skipped(format!("{} (cached)", &group.feature));
                 continue;
             }
 
+            ui_feat.tick(group.feature.as_str());
             tracing::info!(feature = %group.feature, "calling LLM for feature enrichment");
             match enrich_one_feature(
                 &group.feature,
@@ -621,13 +631,16 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 Ok(summary) => {
                     feature_cache_updates.push((group.feature.clone(), ev_hash, summary.clone()));
                     map.insert(group.feature.clone(), summary);
+                    ui_feat.inc_ok();
                 }
                 Err(err) => {
                     tracing::warn!(feature = %group.feature, error = %err, "feature LLM enrichment failed");
+                    ui_feat.inc_failed();
                 }
             }
         }
 
+        ui_feat.finish_phase();
         tracing::info!(features = map.len(), "feature LLM enrichment complete");
         if map.is_empty() {
             None
@@ -684,7 +697,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     };
 
     tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");
+    let mut ui_gen = crate::ui::PhaseProgress::new();
+    if json { ui_gen.hide(); }
+    ui_gen.spin("Generating pages");
     let outcome = generate_wiki(input, &out_dir)?;
+    ui_gen.finish_with(format!("{} pages", outcome.page_count));
 
     tracing::info!(
         pages = outcome.page_count,
@@ -711,21 +728,27 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             }))?
         );
     } else {
-        println!("Wiki generated → {}", outcome.out_dir.display());
-        println!(
-            "  {} pages · {} communities · {} routes",
-            outcome.page_count, outcome.community_count, outcome.route_count
+        crate::ui::print_header("Wiki", &repo_name_display, None);
+        crate::ui::print_row("Pages", &outcome.page_count.to_string());
+        crate::ui::print_row(
+            "Communities",
+            &format!("{}  routes {}", outcome.community_count, outcome.route_count),
         );
-        println!("  Manifest: {}", outcome.manifest_path.display());
-        if let Some(info) = llm_info_for_output {
-            println!(
-                "  LLM enrichment: active (provider={}, model={}, enriched={}, failed={})",
-                info.provider,
-                info.model,
-                info.enriched_community_count,
-                info.failed_community_count
+        if let Some(ref info) = llm_info_for_output {
+            crate::ui::print_row(
+                "LLM",
+                &format!(
+                    "{}  ·  {}  enriched {}  failed {}",
+                    info.provider,
+                    info.model,
+                    info.enriched_community_count,
+                    info.failed_community_count
+                ),
             );
         }
+        crate::ui::print_row("Output", &outcome.out_dir.display().to_string());
+        crate::ui::print_row("Manifest", &outcome.manifest_path.display().to_string());
+        eprintln!();
     }
 
     Ok(())
@@ -1081,15 +1104,16 @@ fn enrich_controllers(
         return HashMap::new();
     }
 
-    eprintln!(
-        "[cih-wiki] enriching {} controllers (batch_size={})",
-        controllers.len(),
-        CONTROLLER_BATCH_SIZE
-    );
+    let n_batches = controllers.chunks(CONTROLLER_BATCH_SIZE).count();
+    let mut ui_ctrl = PhaseProgress::new();
+    ui_ctrl.start_phase("Enriching controllers", Some(n_batches as u64));
 
     let mut result = HashMap::new();
 
     for batch in controllers.chunks(CONTROLLER_BATCH_SIZE) {
+        let batch_names: Vec<&str> = batch.iter().map(|(n, _)| n.as_str()).collect();
+        ui_ctrl.tick(batch_names.first().copied().unwrap_or("batch"));
+
         let user_prompt = build_controller_batch_prompt(batch, language);
 
         if dry_run {
@@ -1103,6 +1127,7 @@ fn enrich_controllers(
                     },
                 );
             }
+            ui_ctrl.inc_ok();
             continue;
         }
 
@@ -1117,16 +1142,17 @@ fn enrich_controllers(
         match adapter.call(api_key, &request) {
             Ok(response) => {
                 let batch_result = parse_controller_batch(&response.text);
-                let n = batch_result.len();
                 result.extend(batch_result);
-                eprintln!("[cih-wiki] controller batch: {} enriched", n);
+                ui_ctrl.inc_ok();
             }
             Err(err) => {
                 tracing::warn!(error = %err, "controller enrichment batch failed — continuing");
+                ui_ctrl.inc_failed();
             }
         }
     }
 
+    ui_ctrl.finish_phase();
     result
 }
 

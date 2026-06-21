@@ -75,6 +75,8 @@ fastembed = { version = "4", default-features = false, features = ["ort-download
 tokio-postgres = "0.7"
 pgvector = { version = "0.4", features = ["postgres"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+indicatif = "0.17"
+console = "0.15"
 
 # internal crates
 cih-core = { path = "crates/cih-core" }

@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
     risk_from_fanout, BulkLoader, CommunityEdge, CommunityInfo, Direction, FlowNode, GraphStore,
-    GraphStoreError, Impact, ImpactNode, LoadStats, Path, Result, RouteInfo, Subgraph,
-    SymbolContext,
+    GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStoreError, Impact, ImpactNode,
+    LoadStats, Path, Result, RouteInfo, Subgraph, SymbolContext,
 };
 use redis::Value;
 
@@ -311,6 +311,134 @@ impl GraphStore for FalkorStore {
             edges.extend(self.neighbors(seed, Direction::Both, &[]).await?);
         }
         Ok(Subgraph { nodes, edges })
+    }
+
+    async fn graph_overview(&self, max_nodes: usize, max_edges: usize) -> Result<GraphOverview> {
+        let max_nodes = max_nodes.max(1);
+        let max_edges = max_edges.max(1);
+
+        let total_nodes = self
+            .rows("MATCH (n:Symbol) RETURN count(n)")
+            .await?
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        let total_edges = self
+            .rows("MATCH (:Symbol)-[r]->(:Symbol) RETURN count(r)")
+            .await?
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Architectural/runtime nodes come first, then connected symbols. The
+        // final id ordering makes the projection stable when degrees tie.
+        let node_query = format!(
+            "MATCH (n:Symbol) \
+             OPTIONAL MATCH (n)-[r]-(:Symbol) \
+             WITH n, count(r) AS degree, \
+                  CASE n.kind \
+                    WHEN 'Community' THEN 0 \
+                    WHEN 'Process' THEN 1 \
+                    WHEN 'Route' THEN 2 \
+                    WHEN 'IntegrationRoute' THEN 3 \
+                    WHEN 'MessageDestination' THEN 4 \
+                    WHEN 'KafkaTopic' THEN 5 \
+                    WHEN 'ExternalEndpoint' THEN 6 \
+                    WHEN 'DbTable' THEN 7 \
+                    WHEN 'DbQuery' THEN 8 \
+                    ELSE 20 \
+                  END AS priority \
+             RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree \
+             ORDER BY priority ASC, degree DESC, n.id ASC \
+             LIMIT {max_nodes}"
+        );
+
+        let mut internal_to_node = HashMap::<i64, NodeId>::with_capacity(max_nodes);
+        let mut nodes = Vec::with_capacity(max_nodes.min(total_nodes as usize));
+        for row in self.rows(&node_query).await? {
+            if row.len() < 7 {
+                continue;
+            }
+            let Ok(internal_id) = row[0].parse::<i64>() else {
+                continue;
+            };
+            let id = NodeId::new(row[1].clone());
+            internal_to_node.insert(internal_id, id.clone());
+            nodes.push(GraphOverviewNode {
+                node: Node {
+                    id,
+                    kind: NodeKind::from_label(&row[2]),
+                    name: row[3].clone(),
+                    qualified_name: row.get(4).filter(|value| !value.is_empty()).cloned(),
+                    file: row.get(5).cloned().unwrap_or_default(),
+                    range: Range::default(),
+                    props: None,
+                },
+                degree: row[6].parse::<u64>().unwrap_or(0),
+            });
+        }
+
+        let mut edges = Vec::new();
+        let selected_internal_ids = internal_to_node.keys().copied().collect::<Vec<_>>();
+        if !selected_internal_ids.is_empty() {
+            let ids = selected_internal_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let edge_limit = max_edges.saturating_add(1);
+            let edge_query = format!(
+                "MATCH (a:Symbol)-[r]->(b:Symbol) \
+                 WHERE id(a) IN [{ids}] AND id(b) IN [{ids}] \
+                 WITH a, b, r, CASE type(r) \
+                    WHEN 'CALLS' THEN 0 \
+                    WHEN 'HANDLES_ROUTE' THEN 1 \
+                    WHEN 'EXTERNAL_CALL' THEN 2 \
+                    WHEN 'PUBLISHES_EVENT' THEN 3 \
+                    WHEN 'LISTENS_TO' THEN 4 \
+                    WHEN 'INTEGRATION_LINK' THEN 5 \
+                    WHEN 'IMPLEMENTS' THEN 6 \
+                    WHEN 'EXTENDS' THEN 7 \
+                    WHEN 'IMPORTS' THEN 8 \
+                    ELSE 20 END AS priority \
+                 RETURN id(a), id(b), type(r) \
+                 ORDER BY priority ASC, a.id ASC, b.id ASC, type(r) ASC \
+                 LIMIT {edge_limit}"
+            );
+
+            for row in self.rows(&edge_query).await? {
+                if row.len() < 3 || edges.len() >= max_edges {
+                    break;
+                }
+                let (Ok(source_internal), Ok(target_internal)) =
+                    (row[0].parse::<i64>(), row[1].parse::<i64>())
+                else {
+                    continue;
+                };
+                let (Some(source), Some(target)) = (
+                    internal_to_node.get(&source_internal),
+                    internal_to_node.get(&target_internal),
+                ) else {
+                    continue;
+                };
+                edges.push(GraphOverviewEdge {
+                    source: source.clone(),
+                    target: target.clone(),
+                    kind: edge_from_label(&row[2]),
+                });
+            }
+        }
+
+        let truncated = nodes.len() < total_nodes as usize || edges.len() < total_edges as usize;
+        Ok(GraphOverview {
+            nodes,
+            edges,
+            total_nodes,
+            total_edges,
+            truncated,
+        })
     }
 
     async fn context(&self, id: &NodeId) -> Result<SymbolContext> {
@@ -853,4 +981,3 @@ fn cell_to_string(v: &&Value) -> String {
 
 #[cfg(test)]
 mod tests;
-

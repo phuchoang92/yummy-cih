@@ -73,6 +73,33 @@ pub struct Subgraph {
     pub edges: Vec<Edge>,
 }
 
+/// A bounded, read-only projection used by whole-repository graph explorers.
+///
+/// `degree` is the undirected degree in the complete stored graph, not only in
+/// the returned projection. This lets clients preserve visually important hubs
+/// even when the overview is sampled.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOverviewNode {
+    pub node: Node,
+    pub degree: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOverviewEdge {
+    pub source: NodeId,
+    pub target: NodeId,
+    pub kind: EdgeKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOverview {
+    pub nodes: Vec<GraphOverviewNode>,
+    pub edges: Vec<GraphOverviewEdge>,
+    pub total_nodes: u64,
+    pub total_edges: u64,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolContext {
     pub node: Node,
@@ -137,6 +164,10 @@ pub trait GraphStore: Send + Sync {
     async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact>;
     async fn call_chain(&self, from: &NodeId, to: &NodeId, max_depth: u32) -> Result<Vec<Path>>;
     async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph>;
+    /// Return a deterministic, bounded whole-graph projection for interactive
+    /// visualization. Implementations should prioritize architectural nodes and
+    /// high-degree symbols, then include only edges whose endpoints were kept.
+    async fn graph_overview(&self, max_nodes: usize, max_edges: usize) -> Result<GraphOverview>;
     async fn context(&self, id: &NodeId) -> Result<SymbolContext>;
     async fn communities(&self) -> Result<Vec<CommunityInfo>>;
     async fn route_map(&self, prefix: Option<&str>, limit: usize) -> Result<Vec<RouteInfo>>;

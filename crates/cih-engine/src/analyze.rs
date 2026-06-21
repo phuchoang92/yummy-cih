@@ -103,7 +103,7 @@ pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
     if flags.json {
         println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
     } else {
-        emit.print_human(&load);
+        emit.print_styled(&load);
     }
 
     let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
@@ -171,7 +171,7 @@ pub(crate) fn run_resolve(
     if json {
         println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
     } else {
-        emit.print_human(&load);
+        emit.print_styled(&load);
     }
 
     if matches!(load, LoadOutcome::Failed(_)) {
@@ -234,6 +234,7 @@ pub(crate) fn analyze_from_scope_with_options(
 ) -> Result<EmitOutcome> {
     let repo_root = PathBuf::from(&scope_file.repo_root);
     let cih_dir = repo_root.join(".cih");
+    let mut ui = crate::ui::PhaseProgress::new();
 
     tracing::info!(
         files = scope_file.files.len(),
@@ -241,6 +242,7 @@ pub(crate) fn analyze_from_scope_with_options(
         cache_enabled = cache.use_cache,
         "starting parse phase"
     );
+    ui.spin(format!("Parsing {} files", scope_file.files.len()));
 
     let incremental = parse_scope(&repo_root, &cih_dir, &scope_file.files, cache)?;
     if let ParseScopeOutcome::Reused {
@@ -252,6 +254,11 @@ pub(crate) fn analyze_from_scope_with_options(
         cache_stats,
     } = incremental
     {
+        ui.finish_with(format!(
+            "{} nodes, {} edges  \x1b[2m(no changes — reused)\x1b[0m",
+            fmt_count(node_count),
+            fmt_count(edge_count)
+        ));
         return Ok(EmitOutcome {
             scope_file,
             scope_path,
@@ -293,7 +300,15 @@ pub(crate) fn analyze_from_scope_with_options(
         "parse phase complete"
     );
 
+    // ── Resolve ───────────────────────────────────────────────────────────────
     tracing::info!("starting resolve phase");
+    ui.finish_with(format!(
+        "{} parsed, {} skipped",
+        fmt_count(parse_output.parsed_files.len()),
+        fmt_count(parse_output.skipped.len())
+    ));
+    ui.spin("Resolving");
+
     let mut resolvers = cih_resolve::ResolverRegistry::new();
     resolvers.register(cih_resolve::JavaResolver);
     resolvers.register(cih_resolve::TypeScriptResolver);
@@ -312,7 +327,16 @@ pub(crate) fn analyze_from_scope_with_options(
         unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
         "resolve phase complete"
     );
+    ui.finish_with(format!(
+        "{} edges  \x1b[2m({} unresolved)\x1b[0m",
+        fmt_count(resolve_output.edges.len()),
+        fmt_count(resolve_output.skipped as usize)
+    ));
 
+    // ── JAR API extraction ────────────────────────────────────────────────────
+    if !jars.is_empty() {
+        ui.spin(format!("JAR API ({} JARs)", jars.len()));
+    }
     tracing::info!(
         jars = jars.len(),
         unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
@@ -327,6 +351,12 @@ pub(crate) fn analyze_from_scope_with_options(
         jar_failed,
         "JAR API extraction complete"
     );
+    if !jars.is_empty() {
+        ui.finish_with(format!("{} nodes", fmt_count(jar_node_count)));
+    }
+
+    // ── DB access + XML integration + artifact write ──────────────────────────
+    ui.spin("Writing artifacts");
 
     let (db_nodes, db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
     tracing::info!(
@@ -423,6 +453,12 @@ pub(crate) fn analyze_from_scope_with_options(
         path = %artifacts_dir.display(),
         "Graph artifacts written"
     );
+    ui.finish_with(format!(
+        "{} nodes, {} edges  \x1b[2m(v{})\x1b[0m",
+        fmt_count(all_nodes.len()),
+        fmt_count(edges.len()),
+        &version[..8.min(version.len())]
+    ));
 
     let cache_stats = cache_stats.with_version(version.clone());
 
@@ -836,6 +872,62 @@ impl EmitOutcome {
             }
         }
     }
+
+    pub(crate) fn print_styled(&self, load: &LoadOutcome) {
+        let repo_name = Path::new(&self.scope_file.repo_root)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let ver = &self.version[..8.min(self.version.len())];
+        crate::ui::print_header("Analyze", repo_name, Some(ver));
+        crate::ui::print_row(
+            "Files",
+            &format!(
+                "{} parsed{}",
+                fmt_count(self.parsed_file_count),
+                if self.skipped_count > 0 {
+                    format!("  \x1b[2m({} skipped)\x1b[0m", self.skipped_count)
+                } else {
+                    String::new()
+                }
+            ),
+        );
+        crate::ui::print_row(
+            "Graph",
+            &format!(
+                "{}  nodes  {}  edges",
+                fmt_count(self.node_count),
+                fmt_count(self.edge_count)
+            ),
+        );
+        if self.resolved_edge_count > 0 {
+            crate::ui::print_row(
+                "Resolve",
+                &format!("{}  edges", fmt_count(self.resolved_edge_count)),
+            );
+        }
+        if self.jar_node_count > 0 {
+            crate::ui::print_row(
+                "JARs",
+                &format!("{}  nodes", fmt_count(self.jar_node_count)),
+            );
+        }
+        crate::ui::print_row("Artifacts", &self.artifacts_dir.display().to_string());
+        let falkor_str = match load {
+            LoadOutcome::Loaded(stats) => {
+                format!(
+                    "{}  nodes  {}  edges",
+                    fmt_count(stats.nodes as usize),
+                    fmt_count(stats.edges as usize)
+                )
+            }
+            LoadOutcome::Skipped => "\x1b[2mskipped (--no-load)\x1b[0m".to_string(),
+            LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
+            LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
+        };
+        crate::ui::print_row("FalkorDB", &falkor_str);
+        eprintln!();
+    }
 }
 
 #[derive(Serialize)]
@@ -971,6 +1063,19 @@ fn load_jars_from_repo_map(repo: &Path) -> Vec<JarInfo> {
     serde_json::from_str::<RepoMap>(&raw)
         .map(|rm| rm.jars)
         .unwrap_or_default()
+}
+
+fn fmt_count(n: usize) -> String {
+    // Insert thousands separators
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
 }
 
 fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {

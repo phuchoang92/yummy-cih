@@ -13,6 +13,7 @@ mod start;
 mod start_env;
 #[cfg(test)]
 mod tests;
+mod ui;
 mod versioning;
 mod wiki_cmd;
 

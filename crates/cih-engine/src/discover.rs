@@ -62,7 +62,7 @@ pub(crate) fn run_discover(
     if json {
         println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
     } else {
-        emit.print_human(&load);
+        emit.print_styled(&load);
     }
 
     crate::registry::persist_discover(&repo, &emit);
@@ -77,6 +77,9 @@ pub(crate) fn run_discover_core(
     repo: &Path,
     overrides: &DiscoverOverrides,
 ) -> Result<DiscoverOutcome> {
+    let mut ui = crate::ui::PhaseProgress::new();
+    ui.spin("Loading graph");
+
     let source = latest_graph_artifacts(repo)?;
     let nodes = source
         .read_nodes()
@@ -91,6 +94,11 @@ pub(crate) fn run_discover_core(
         edges = edges.len(),
         "source graph loaded"
     );
+    ui.finish_with(format!(
+        "{} nodes, {} edges",
+        fmt_count(nodes.len()),
+        fmt_count(edges.len())
+    ));
 
     // Load architecture hint from repo-map.json (written during scan/analyze).
     let arch_hint = read_architecture_hint(repo);
@@ -137,12 +145,14 @@ pub(crate) fn run_discover_core(
         min_community_size = community_cfg.min_community_size,
         "running community detection"
     );
+    ui.spin("Detecting communities");
     let community_output = cih_community::detect_communities(&nodes, &edges, &community_cfg);
     tracing::info!(
         communities = community_output.nodes.len(),
         edges = community_output.edges.len(),
         "community detection complete"
     );
+    ui.finish_with(format!("{} communities", fmt_count(community_output.nodes.len())));
 
     let symbol_count = nodes
         .iter()
@@ -176,6 +186,7 @@ pub(crate) fn run_discover_core(
     );
 
     tracing::info!("tracing business processes");
+    ui.spin("Tracing processes");
     let process_output = cih_community::trace_processes(
         &nodes,
         &edges,
@@ -188,6 +199,7 @@ pub(crate) fn run_discover_core(
         edges = process_output.edges.len(),
         "process tracing complete"
     );
+    ui.finish_with(format!("{} processes", fmt_count(process_output.nodes.len())));
 
     let mut output_nodes = community_output.nodes;
     output_nodes.extend(process_output.nodes);
@@ -205,6 +217,7 @@ pub(crate) fn run_discover_core(
     let version = discover_version(&output_nodes, &output_edges);
     tracing::debug!(version = %version, "community version computed");
 
+    ui.spin("Writing artifacts");
     let artifacts_dir = repo.join(".cih").join("artifacts-community").join(&version);
     let artifacts = GraphArtifacts::write(
         &artifacts_dir,
@@ -227,6 +240,12 @@ pub(crate) fn run_discover_core(
         edges = output_edges.len(),
         "community artifacts written"
     );
+    ui.finish_with(format!(
+        "{} nodes, {} edges  \x1b[2m(v{})\x1b[0m",
+        fmt_count(output_nodes.len()),
+        fmt_count(output_edges.len()),
+        &version[..8.min(version.len())]
+    ));
 
     let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
 
@@ -323,6 +342,46 @@ impl DiscoverOutcome {
             }
         }
     }
+
+    fn print_styled(&self, load: &LoadOutcome) {
+        let ver = &self.version[..8.min(self.version.len())];
+        crate::ui::print_header("Discover", "", Some(ver));
+        crate::ui::print_row("Communities", &fmt_count(self.community_count));
+        crate::ui::print_row("Processes", &fmt_count(self.process_count));
+        crate::ui::print_row(
+            "Edges",
+            &format!(
+                "{}  member  {}  process",
+                fmt_count(self.member_edge_count),
+                fmt_count(self.step_edge_count)
+            ),
+        );
+        crate::ui::print_row("Artifacts", &self.artifacts_dir.display().to_string());
+        let falkor_str = match load {
+            LoadOutcome::Loaded(stats) => format!(
+                "{}  nodes  {}  edges",
+                fmt_count(stats.nodes as usize),
+                fmt_count(stats.edges as usize)
+            ),
+            LoadOutcome::Skipped => "\x1b[2mskipped (--no-load)\x1b[0m".to_string(),
+            LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
+            LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
+        };
+        crate::ui::print_row("FalkorDB", &falkor_str);
+        eprintln!();
+    }
+}
+
+fn fmt_count(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
 }
 
 #[derive(Serialize)]
