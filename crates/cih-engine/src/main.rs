@@ -13,6 +13,7 @@ mod start;
 mod start_env;
 #[cfg(test)]
 mod tests;
+mod tui;
 mod ui;
 mod versioning;
 mod wiki_cmd;
@@ -271,6 +272,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Open the interactive TUI command builder.
+    /// Navigate commands on the left, fill options on the right,
+    /// then press r to review and run the assembled command.
+    Ui,
     /// Interactive guided setup wizard for CIH.
     Start {
         /// CIH workspace directory containing docker-compose.yml. Default: current directory.
@@ -379,6 +384,26 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // TUI command builder — runs before the normal dispatch so the terminal is
+    // restored before we print anything or exec the chosen command.
+    if matches!(cli.command, Command::Ui) {
+        if let Some(args) = tui::run_tui()? {
+            let cmd_display = std::iter::once("cih-engine")
+                .chain(args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!();
+            println!("  Running: {}", cmd_display);
+            println!();
+            let exe = std::env::current_exe()
+                .unwrap_or_else(|_| std::path::PathBuf::from("cih-engine"));
+            let status = std::process::Command::new(&exe).args(&args).status()?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        return Ok(());
+    }
+
     match cli.command {
         Command::Scan { repo, json } => scan::run_scan(&repo, json),
         Command::Analyze {
@@ -599,6 +624,8 @@ fn main() -> Result<()> {
             ..Default::default()
         }),
         Command::Artifact { command } => run_artifact(command),
+        // Handled above before the match; unreachable at runtime.
+        Command::Ui => unreachable!(),
     }
 }
 
