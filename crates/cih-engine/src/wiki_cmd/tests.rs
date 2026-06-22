@@ -357,3 +357,57 @@ fn parse_llm_summary_handles_json_in_markdown_block() {
     let result = parse_llm_summary(text).unwrap();
     assert_eq!(result.po, "A");
 }
+
+fn make_community(route_prefixes: Option<Vec<&str>>) -> cih_core::Node {
+    let props = route_prefixes.map(|ps| {
+        serde_json::json!({
+            "route_prefixes": ps
+        })
+    });
+    cih_core::Node {
+        id: cih_core::NodeId::new("Community:test"),
+        kind: cih_core::NodeKind::Community,
+        name: "Test".to_string(),
+        qualified_name: None,
+        file: String::new(),
+        range: cih_core::Range::default(),
+        props,
+    }
+}
+
+#[test]
+fn route_prefix_filter_matches_simple_segment() {
+    let c = make_community(Some(vec!["membership", "profile"]));
+    assert!(community_matches_route_prefix(&c, &["/membership".to_string()]));
+}
+
+#[test]
+fn route_prefix_filter_no_match() {
+    let c = make_community(Some(vec!["orders", "payments"]));
+    assert!(!community_matches_route_prefix(&c, &["/membership".to_string()]));
+}
+
+#[test]
+fn route_prefix_filter_skips_generic_prefix_in_pattern() {
+    // Pattern /api/membership → meaningful segment is "membership"
+    let c = make_community(Some(vec!["membership"]));
+    assert!(community_matches_route_prefix(&c, &["/api/membership".to_string()]));
+}
+
+#[test]
+fn route_prefix_filter_missing_props_keeps_community() {
+    let c = make_community(None);
+    assert!(community_matches_route_prefix(&c, &["/membership".to_string()]));
+}
+
+#[test]
+fn route_prefix_filter_empty_prefixes_drops_community() {
+    let c = make_community(Some(vec![]));
+    assert!(!community_matches_route_prefix(&c, &["/membership".to_string()]));
+}
+
+#[test]
+fn route_prefix_filter_empty_patterns_keeps_all() {
+    let c = make_community(Some(vec!["orders"]));
+    assert!(community_matches_route_prefix(&c, &[]));
+}

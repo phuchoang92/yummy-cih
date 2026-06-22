@@ -166,67 +166,35 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "starting wiki"
     );
 
-    let graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
-    let nodes = graph_artifacts.read_nodes().with_context(|| {
-        format!(
-            "failed to read nodes from {}",
-            graph_artifacts.nodes_path.display()
-        )
-    })?;
-    let edges = graph_artifacts.read_edges().with_context(|| {
-        format!(
-            "failed to read edges from {}",
-            graph_artifacts.edges_path.display()
-        )
-    })?;
-
-    tracing::info!(
-        graph_version = %graph_artifacts.version.0,
-        nodes = nodes.len(),
-        edges = edges.len(),
-        "graph artifacts loaded"
-    );
-
-    let bodies = cih_wiki::source_bodies(&nodes, repo);
-
-    let (all_community_nodes, community_edges, community_version) = match latest_community_artifacts(
-        repo,
-    ) {
-        Ok(a) => {
-            let nodes = a.read_nodes().with_context(|| {
-                format!(
-                    "failed to read community nodes from {}",
-                    a.nodes_path.display()
-                )
-            })?;
-            let edges = a.read_edges().with_context(|| {
-                format!(
-                    "failed to read community edges from {}",
-                    a.edges_path.display()
-                )
+    // ── 1. Community nodes first (fast JSONL read, no source I/O) ───────────
+    let community_artifact = latest_community_artifacts(repo).ok();
+    let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
+        Some(a) => {
+            let ns = a.read_nodes().with_context(|| {
+                format!("failed to read community nodes from {}", a.nodes_path.display())
             })?;
             let ver = a.version.0.clone();
             tracing::info!(
                 community_version = %ver,
-                communities = nodes.len(),
+                communities = ns.len(),
                 "community artifacts loaded"
             );
-            (nodes, edges, ver)
+            (ns, ver)
         }
-        Err(_) => {
+        None => {
             tracing::info!("no community artifacts found — generating wiki without feature grouping; run `discover` first for richer docs");
             eprintln!(
                 "info: no community artifacts found — generating wiki without feature grouping. \
                      Run `discover` first for richer docs."
             );
-            (Vec::new(), Vec::new(), String::new())
+            (Vec::new(), String::new())
         }
     };
 
-    // Apply --filter-community and --max-communities before any LLM or wiki work.
-    let community_nodes: Vec<Node> = {
-        let before = all_community_nodes.len();
-        let mut filtered = all_community_nodes;
+    // ── 2. --filter-community + --max-communities (before heavy graph load) ──
+    let community_nodes_pre: Vec<Node> = {
+        let before = pre_community_nodes.len();
+        let mut filtered = pre_community_nodes;
         if !filter_community.is_empty() {
             let filters_lower: Vec<String> =
                 filter_community.iter().map(|f| f.to_lowercase()).collect();
@@ -252,12 +220,84 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         filtered
     };
 
-    // Build WikiGraph once; all LLM paths and save_evidence share it.
-    let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes, &community_edges);
+    // ── 3. Route-prefix pre-filter using props["route_prefixes"] ─────────────
+    // Uses the first non-generic path segment stored in community props at discover time.
+    // May have false positives (safe); the precise filter re-runs after WikiGraph::build.
+    let community_nodes_pre: Vec<Node> = if !filter_route.is_empty() {
+        community_nodes_pre
+            .into_iter()
+            .filter(|n| community_matches_route_prefix(n, &filter_route))
+            .collect()
+    } else {
+        community_nodes_pre
+    };
 
-    // Route-prefix filter: keep only communities that own at least one matching route.
-    // Runs after graph build because community_routes is derived from graph edges.
-    let community_nodes = filter_communities_by_route(community_nodes, &wiki_graph, &filter_route);
+    // ── 4. Early bailout: community artifacts exist but nothing survived ──────
+    if !filter_route.is_empty() && community_artifact.is_some() && community_nodes_pre.is_empty() {
+        eprintln!("info: --filter-route matched 0 communities (pre-filter); nothing to generate.");
+        return Ok(());
+    }
+
+    // ── 5. Load heavy graph data (only reached when there is work to do) ─────
+    let graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
+    let nodes = graph_artifacts.read_nodes().with_context(|| {
+        format!(
+            "failed to read nodes from {}",
+            graph_artifacts.nodes_path.display()
+        )
+    })?;
+    let edges = graph_artifacts.read_edges().with_context(|| {
+        format!(
+            "failed to read edges from {}",
+            graph_artifacts.edges_path.display()
+        )
+    })?;
+    tracing::info!(
+        graph_version = %graph_artifacts.version.0,
+        nodes = nodes.len(),
+        edges = edges.len(),
+        "graph artifacts loaded"
+    );
+
+    // ── 6. Load community edges ───────────────────────────────────────────────
+    let (community_nodes_loaded, community_edges, community_version) = match community_artifact {
+        Some(a) => {
+            let edges = a.read_edges().with_context(|| {
+                format!("failed to read community edges from {}", a.edges_path.display())
+            })?;
+            (community_nodes_pre, edges, community_version_raw)
+        }
+        None => (Vec::new(), Vec::new(), String::new()),
+    };
+
+    // ── 7. Build WikiGraph ────────────────────────────────────────────────────
+    let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes_loaded, &community_edges);
+
+    // ── 8. Precise route filter (exact path match; community_routes is graph-derived) ──
+    let community_nodes =
+        filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
+
+    // ── 9. source_bodies deferred: only read source files for filtered members ─
+    // Avoids reading thousands of Java files when only a few communities survive.
+    let bodies = {
+        let member_ids: std::collections::HashSet<&str> = community_nodes
+            .iter()
+            .flat_map(|c| {
+                wiki_graph
+                    .members_by_community
+                    .get(c.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .map(|n| n.id.as_str())
+            })
+            .collect();
+        let body_nodes: Vec<Node> = nodes
+            .iter()
+            .filter(|n| member_ids.contains(n.id.as_str()))
+            .cloned()
+            .collect();
+        cih_wiki::source_bodies(&body_nodes, repo)
+    };
 
     // Create adapter + API key once for all LLM paths.
     let (adapter, api_key): (Option<Box<dyn LlmAdapter>>, Option<String>) =
@@ -1612,6 +1652,63 @@ fn cached_summary(
     let ba = cached.llm_ba.clone()?;
     let dev = cached.llm_dev.clone()?;
     Some(CommunityLlmSummary { po, ba, dev })
+}
+
+/// Extract the first meaningful (non-generic) path segment from a route pattern,
+/// using the same skip-list as community detection so that the result matches
+/// the values stored in `props["route_prefixes"]`.
+fn first_meaningful_route_seg(path: &str) -> Option<String> {
+    const GENERIC: &[&str] = &[
+        "api", "apis", "rest", "internal", "external", "service", "services", "common", "shared",
+        "core", "app", "apps", "admin", "pos", "public", "private",
+    ];
+    for part in path.split('/') {
+        let part = part.trim();
+        if part.is_empty() || part.starts_with('{') || part.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let mut chars = part.chars();
+        if matches!(chars.next(), Some('v') | Some('V')) && chars.all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let lower = part.to_lowercase();
+        if GENERIC.contains(&lower.as_str()) {
+            continue;
+        }
+        return Some(lower);
+    }
+    None
+}
+
+/// Returns true if a community's stored `route_prefixes` (from discover) overlap with
+/// any of the `--filter-route` patterns. Used as a fast pre-filter before loading the
+/// main graph; false-positives are acceptable since the precise filter re-runs later.
+/// Returns true when props are absent (can't pre-filter → keep).
+fn community_matches_route_prefix(community: &Node, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return true;
+    }
+    let Some(props) = &community.props else {
+        return true;
+    };
+    let Some(arr) = props.get("route_prefixes").and_then(|v| v.as_array()) else {
+        return true;
+    };
+    if arr.is_empty() {
+        return false;
+    }
+    let prefixes: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+    patterns.iter().any(|pat| {
+        let Some(pat_seg) = first_meaningful_route_seg(pat) else {
+            return true; // can't parse pattern segment → keep (safe false-positive)
+        };
+        prefixes.iter().any(|p| {
+            let p_lower = p.to_lowercase();
+            p_lower == pat_seg
+                || p_lower.contains(pat_seg.as_str())
+                || pat_seg.contains(p_lower.as_str())
+        })
+    })
 }
 
 #[cfg(test)]
