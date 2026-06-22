@@ -265,6 +265,12 @@ enum Command {
         /// Can be specified multiple times.
         #[arg(long = "filter-feature")]
         filter_feature: Vec<String>,
+        /// Only generate pages for communities that own at least one route whose path starts
+        /// with or contains this pattern (case-insensitive).
+        /// Can be specified multiple times to match several prefixes.
+        /// Example: --filter-route /api/payment --filter-route /api/order
+        #[arg(long = "filter-route")]
+        filter_route: Vec<String>,
         /// Limit total number of communities processed (useful for quick tests).
         #[arg(long)]
         max_communities: Option<usize>,
@@ -581,6 +587,7 @@ fn main() -> Result<()> {
             filter_community,
             max_communities,
             filter_feature,
+            filter_route,
             json,
         } => wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
             repo,
@@ -607,6 +614,7 @@ fn main() -> Result<()> {
             filter_community,
             max_communities,
             filter_feature,
+            filter_route,
             json,
         }),
         Command::Start {

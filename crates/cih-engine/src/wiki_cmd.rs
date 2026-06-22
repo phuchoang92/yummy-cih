@@ -59,6 +59,9 @@ pub struct WikiConfig {
     pub filter_community: Vec<String>,
     pub max_communities: Option<usize>,
     pub filter_feature: Vec<String>,
+    /// Keep only communities that have at least one route whose path starts with
+    /// (or contains) one of these patterns. Empty = no filtering.
+    pub filter_route: Vec<String>,
     pub json: bool,
 }
 
@@ -89,6 +92,7 @@ impl Default for WikiConfig {
             filter_community: vec![],
             max_communities: None,
             filter_feature: vec![],
+            filter_route: vec![],
             json: false,
         }
     }
@@ -120,6 +124,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         filter_community,
         max_communities,
         filter_feature,
+        filter_route,
         json,
     } = cfg;
     let repo = repo.as_path();
@@ -249,6 +254,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     // Build WikiGraph once; all LLM paths and save_evidence share it.
     let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes, &community_edges);
+
+    // Route-prefix filter: keep only communities that own at least one matching route.
+    // Runs after graph build because community_routes is derived from graph edges.
+    let community_nodes = filter_communities_by_route(community_nodes, &wiki_graph, &filter_route);
 
     // Create adapter + API key once for all LLM paths.
     let (adapter, api_key): (Option<Box<dyn LlmAdapter>>, Option<String>) =
@@ -1326,6 +1335,50 @@ fn persist_wiki_meta_caches(
         .with_context(|| format!("failed to write {}", meta_path.display()))?;
 
     Ok(())
+}
+
+/// Retain only communities that have at least one route whose path starts with
+/// or contains one of the given patterns (case-insensitive). When `patterns` is
+/// empty the full list is returned unchanged.
+fn filter_communities_by_route(
+    mut communities: Vec<cih_core::Node>,
+    graph: &WikiGraph,
+    patterns: &[String],
+) -> Vec<cih_core::Node> {
+    if patterns.is_empty() {
+        return communities;
+    }
+    let patterns_lower: Vec<String> = patterns.iter().map(|p| p.to_lowercase()).collect();
+    let before = communities.len();
+    communities.retain(|n| {
+        let comm_id = n.id.as_str();
+        graph
+            .community_routes
+            .get(comm_id)
+            .map(|routes| {
+                routes.iter().any(|(_, route)| {
+                    let path = route_path(route).to_lowercase();
+                    patterns_lower
+                        .iter()
+                        .any(|pat| path.starts_with(pat.as_str()) || path.contains(pat.as_str()))
+                })
+            })
+            .unwrap_or(false)
+    });
+    if communities.len() != before {
+        tracing::info!(
+            before = before,
+            after = communities.len(),
+            patterns = ?patterns,
+            "route filter applied"
+        );
+        eprintln!(
+            "info: --filter-route matched {} of {} communities",
+            communities.len(),
+            before
+        );
+    }
+    communities
 }
 
 fn retain_matching_feature_groups(

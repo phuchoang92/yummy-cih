@@ -216,6 +216,8 @@ fn make_commands() -> Vec<Cmd> {
                 Field::select("--llm-provider", "--llm-provider", "LLM provider. Set the matching env var: DEEPSEEK_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY.", &["deepseek", "gemini", "anthropic", "openai-compatible"], 0),
                 Field::text("--llm-model", "--llm-model", "Model name, e.g. deepseek-chat, gemini-2.5-flash, claude-haiku-4-5-20251001, gpt-4o-mini.", "", false),
                 Field::text("--wiki-language", "--wiki-language", "Language for generated text, e.g. en, vi, ja, fr.", "en", false),
+                Field::text("--filter-route", "--filter-route", "Only document communities that own routes matching this prefix, e.g. /api/payment. Repeat for multiple prefixes.", "/api/", false),
+                Field::text("--filter-community", "--filter-community", "Only document communities whose name contains this substring (case-insensitive), e.g. payment.", "", false),
                 Field::bool("--incremental", "--incremental", "Skip communities whose evidence hasn't changed since last wiki run."),
                 Field::bool("--html", "--html", "Also write a standalone index.html viewer alongside the Markdown files."),
             ],
