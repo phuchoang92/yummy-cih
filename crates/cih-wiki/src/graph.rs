@@ -409,6 +409,305 @@ impl WikiGraph {
         }
     }
 
+    /// Build a `WikiGraph` grouped by Java package path instead of Leiden communities.
+    /// Each `modules/<feature>/` package becomes one synthetic community (`Pkg:<feature>`).
+    /// No community artifacts needed — works directly from the graph nodes/edges.
+    pub fn build_package_grouped(nodes: &[Node], edges: &[Edge]) -> Self {
+        // ── Phase 1: identical edge processing to build() ────────────────────
+        let mut nodes_by_id: BTreeMap<String, Node> = BTreeMap::new();
+        for n in nodes {
+            nodes_by_id.insert(n.id.as_str().to_string(), n.clone());
+        }
+
+        let mut calls_out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut calls_in: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut tests_out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut tests_in: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut external_calls: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut publishes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut listens: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut routes: Vec<(Node, Node)> = Vec::new();
+        let mut methods_by_class: BTreeMap<String, Vec<Node>> = BTreeMap::new();
+        let mut executes_query: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut query_reads_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut query_writes_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        for e in edges {
+            let src = e.src.as_str().to_string();
+            let dst = e.dst.as_str().to_string();
+            match e.kind {
+                EdgeKind::Calls => {
+                    calls_out.entry(src.clone()).or_default().push(dst.clone());
+                    calls_in.entry(dst).or_default().push(src);
+                }
+                EdgeKind::Tests => {
+                    tests_out.entry(src.clone()).or_default().push(dst.clone());
+                    tests_in.entry(dst).or_default().push(src);
+                }
+                EdgeKind::ExternalCall => {
+                    external_calls.entry(src).or_default().push(dst);
+                }
+                EdgeKind::PublishesEvent => {
+                    publishes.entry(src).or_default().push(dst);
+                }
+                EdgeKind::ListensTo => {
+                    listens.entry(src).or_default().push(dst);
+                }
+                EdgeKind::HandlesRoute => {
+                    if let (Some(handler), Some(route)) =
+                        (nodes_by_id.get(&src), nodes_by_id.get(&dst))
+                    {
+                        routes.push((handler.clone(), route.clone()));
+                    }
+                }
+                EdgeKind::HasMethod => {
+                    if let Some(method_node) = nodes_by_id.get(&dst) {
+                        methods_by_class
+                            .entry(src)
+                            .or_default()
+                            .push(method_node.clone());
+                    }
+                }
+                EdgeKind::ExecutesQuery => {
+                    executes_query.entry(src).or_default().push(dst);
+                }
+                EdgeKind::ReadsTable => {
+                    query_reads_table.entry(src).or_default().push(dst);
+                }
+                EdgeKind::WritesTable => {
+                    query_writes_table.entry(src).or_default().push(dst);
+                }
+                _ => {}
+            }
+        }
+
+        for methods in methods_by_class.values_mut() {
+            methods.sort_by_key(|m| m.range.start_line);
+        }
+
+        routes.sort_by(|(_, r1), (_, r2)| {
+            route_path(r1)
+                .cmp(&route_path(r2))
+                .then(route_http_method(r1).cmp(&route_http_method(r2)))
+        });
+
+        let mut routes_by_controller: BTreeMap<String, Vec<(Node, Node)>> = BTreeMap::new();
+        let mut controller_feature: BTreeMap<String, String> = BTreeMap::new();
+        for (handler, route) in &routes {
+            let ctrl = controller_name_from_handler_id(handler.id.as_str()).to_string();
+            routes_by_controller
+                .entry(ctrl.clone())
+                .or_default()
+                .push((handler.clone(), route.clone()));
+            controller_feature
+                .entry(ctrl)
+                .or_insert_with(|| feature_from_file_path(&handler.file));
+        }
+
+        // ── Phase 2: derive package membership from node file paths ──────────
+        // Every method/constructor is assigned to `Pkg:<feature>` based on its file.
+        let mut members_by_community: BTreeMap<String, Vec<Node>> = BTreeMap::new();
+        let mut community_by_member: BTreeMap<String, String> = BTreeMap::new();
+
+        for node in nodes {
+            if !matches!(
+                node.kind,
+                NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+            ) {
+                continue;
+            }
+            let feat = feature_from_file_path(&node.file);
+            let pkg_id = format!("Pkg:{}", feat);
+            community_by_member.insert(node.id.as_str().to_string(), pkg_id.clone());
+            members_by_community
+                .entry(pkg_id)
+                .or_default()
+                .push(node.clone());
+        }
+
+        for members in members_by_community.values_mut() {
+            members.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
+        // ── Phase 3: synthetic community nodes (one per package) ─────────────
+        let mut pkg_names: Vec<String> = members_by_community.keys().cloned().collect();
+        pkg_names.sort();
+
+        let community_nodes: Vec<Node> = pkg_names
+            .iter()
+            .map(|pkg_id| {
+                let name = pkg_id.strip_prefix("Pkg:").unwrap_or(pkg_id).to_string();
+                Node {
+                    id: cih_core::NodeId::new(pkg_id.clone()),
+                    kind: NodeKind::Community,
+                    name,
+                    qualified_name: None,
+                    file: String::new(),
+                    range: cih_core::Range::default(),
+                    props: None,
+                }
+            })
+            .collect();
+
+        // Register synthetic nodes in the id index so community_name() resolves them.
+        let mut nodes_by_id = nodes_by_id;
+        for n in &community_nodes {
+            nodes_by_id.insert(n.id.as_str().to_string(), n.clone());
+        }
+
+        // ── Phase 4: derived community maps (same logic as build()) ──────────
+        let mut community_routes: BTreeMap<String, Vec<(Node, Node)>> = BTreeMap::new();
+        let mut community_class_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut community_method_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut community_stereotypes: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+
+        for (comm_id, members) in &members_by_community {
+            let mut classes = 0usize;
+            let mut methods = 0usize;
+            let mut stereo: BTreeMap<String, usize> = BTreeMap::new();
+            for m in members {
+                match m.kind {
+                    NodeKind::Class
+                    | NodeKind::Interface
+                    | NodeKind::Enum
+                    | NodeKind::Record
+                    | NodeKind::Annotation => {
+                        classes += 1;
+                        if let Some(s) = node_stereotype(m) {
+                            *stereo.entry(s.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                    NodeKind::Method | NodeKind::Function | NodeKind::Constructor => {
+                        methods += 1;
+                    }
+                    _ => {}
+                }
+            }
+            community_class_counts.insert(comm_id.clone(), classes);
+            community_method_counts.insert(comm_id.clone(), methods);
+            if !stereo.is_empty() {
+                community_stereotypes.insert(comm_id.clone(), stereo);
+            }
+        }
+
+        for (handler, route) in &routes {
+            if let Some(comm_id) = community_by_member.get(handler.id.as_str()) {
+                community_routes
+                    .entry(comm_id.clone())
+                    .or_default()
+                    .push((handler.clone(), route.clone()));
+            }
+        }
+
+        let mut community_tests_set: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (comm_id, members) in &members_by_community {
+            for m in members {
+                if let Some(testers) = tests_in.get(m.id.as_str()) {
+                    for t in testers {
+                        community_tests_set
+                            .entry(comm_id.clone())
+                            .or_default()
+                            .insert(t.clone());
+                    }
+                }
+            }
+        }
+        let community_tests: BTreeMap<String, Vec<String>> = community_tests_set
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
+        let mut cross: BTreeMap<(String, String), usize> = BTreeMap::new();
+        for (src_id, dst_ids) in &calls_out {
+            if let Some(src_comm) = community_by_member.get(src_id) {
+                for dst_id in dst_ids {
+                    if let Some(dst_comm) = community_by_member.get(dst_id) {
+                        if src_comm != dst_comm {
+                            *cross
+                                .entry((src_comm.clone(), dst_comm.clone()))
+                                .or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let inter_community_calls: Vec<(String, String, usize)> =
+            cross.into_iter().map(|((a, b), c)| (a, b, c)).collect();
+
+        let mut raw_db: BTreeMap<String, BTreeMap<String, (bool, bool)>> = BTreeMap::new();
+        for (comm_id, members) in &members_by_community {
+            for member in members {
+                if let Some(query_ids) = executes_query.get(member.id.as_str()) {
+                    for qid in query_ids {
+                        for tid in query_reads_table.get(qid.as_str()).into_iter().flatten() {
+                            let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                            raw_db
+                                .entry(comm_id.clone())
+                                .or_default()
+                                .entry(name)
+                                .or_default()
+                                .0 = true;
+                        }
+                        for tid in query_writes_table.get(qid.as_str()).into_iter().flatten() {
+                            let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                            raw_db
+                                .entry(comm_id.clone())
+                                .or_default()
+                                .entry(name)
+                                .or_default()
+                                .1 = true;
+                        }
+                    }
+                }
+            }
+        }
+        let community_db_tables: BTreeMap<String, Vec<DbTableAccess>> = raw_db
+            .into_iter()
+            .map(|(comm_id, tables)| {
+                let mut v: Vec<DbTableAccess> = tables
+                    .into_iter()
+                    .map(|(name, (r, w))| DbTableAccess {
+                        table_name: name,
+                        reads: r,
+                        writes: w,
+                    })
+                    .collect();
+                v.sort_by(|a, b| a.table_name.cmp(&b.table_name));
+                (comm_id, v)
+            })
+            .collect();
+
+        WikiGraph {
+            nodes_by_id,
+            community_nodes,
+            process_nodes: Vec::new(),
+            members_by_community,
+            community_by_member,
+            calls_out,
+            calls_in,
+            tests_out,
+            tests_in,
+            external_calls,
+            publishes,
+            listens,
+            routes,
+            process_steps: BTreeMap::new(),
+            community_routes,
+            community_tests,
+            community_class_counts,
+            community_method_counts,
+            community_stereotypes,
+            inter_community_calls,
+            methods_by_class,
+            executes_query,
+            query_reads_table,
+            query_writes_table,
+            community_db_tables,
+            routes_by_controller,
+            controller_feature,
+        }
+    }
+
     /// Communities that call INTO the given community (callers, with call count).
     pub fn callers_of(&self, community_id: &str) -> Vec<(String, usize)> {
         self.inter_community_calls
@@ -444,30 +743,62 @@ impl WikiGraph {
             Some(n) => n,
             None => return (vec![], vec![]),
         };
-        let props = match node.props.as_ref() {
-            Some(p) => p,
-            None => return (vec![], vec![]),
-        };
-        let parse = |key: &str| -> Vec<(String, String)> {
-            props
-                .get(key)
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let name = item.get("name")?.as_str()?.to_string();
-                            let kind = item
-                                .get("type")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("event")
-                                .to_string();
-                            Some((name, kind))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        (parse("publishes_topics"), parse("consumes_topics"))
+
+        // Leiden communities store pre-computed topic lists in props.
+        // Package communities (Pkg:xxx) have no props — compute from member edges instead.
+        if let Some(props) = &node.props {
+            let parse = |key: &str| -> Vec<(String, String)> {
+                props
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                let name = item.get("name")?.as_str()?.to_string();
+                                let kind = item
+                                    .get("type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("event")
+                                    .to_string();
+                                Some((name, kind))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            return (parse("publishes_topics"), parse("consumes_topics"));
+        }
+
+        // Package mode: derive from publishes/listens edge maps for each member method.
+        let members = self
+            .members_by_community
+            .get(community_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let mut pub_set: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut con_set: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for m in members {
+            for topic_id in self.publishes.get(m.id.as_str()).into_iter().flatten() {
+                let name = topic_id
+                    .strip_prefix("KafkaTopic:")
+                    .unwrap_or(topic_id)
+                    .to_string();
+                pub_set.insert(name, "Kafka".to_string());
+            }
+            for topic_id in self.listens.get(m.id.as_str()).into_iter().flatten() {
+                let name = topic_id
+                    .strip_prefix("KafkaTopic:")
+                    .unwrap_or(topic_id)
+                    .to_string();
+                con_set.insert(name, "Kafka".to_string());
+            }
+        }
+        (
+            pub_set.into_iter().collect(),
+            con_set.into_iter().collect(),
+        )
     }
 
     pub fn community_display_name<'a>(&'a self, community_id: &'a str) -> &'a str {

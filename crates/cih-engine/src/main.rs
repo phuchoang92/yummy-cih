@@ -218,7 +218,7 @@ enum Command {
         /// Model name for LLM enrichment. Provider-specific defaults:
         ///   deepseek-chat (deepseek), gemini-2.5-flash (gemini),
         ///   claude-haiku-4-5-20251001 (anthropic), gpt-4o-mini (openai-compatible).
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value = "")]
         llm_model: String,
         /// Maximum output tokens per LLM call. Increase to 4096 for Gemini to avoid truncation.
         #[arg(long, default_value = "600")]
@@ -244,8 +244,8 @@ enum Command {
         /// Wiki generation mode: graph (no LLM), llm-summary, or llm-full.
         #[arg(long, default_value = "graph")]
         wiki_mode: String,
-        /// Community grouping strategy: graph (deterministic) or llm (LLM-proposed).
-        #[arg(long, default_value = "graph")]
+        /// Community grouping strategy: package (by Java package path, default), graph (Leiden communities), or llm (LLM-proposed).
+        #[arg(long, default_value = "package")]
         grouping: String,
         /// Write a standalone index.html viewer alongside the Markdown files.
         #[arg(long)]

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use cih_core::{Node, NodeId, NodeKind, Range};
-use features::{build_dev_page_paths, group_communities_by_feature};
+use features::{build_dev_page_paths, group_communities_by_feature, group_nodes_by_package};
 use graph::node_stereotype;
 use slugify::slugify;
 
@@ -113,6 +113,8 @@ pub struct WikiInput<'a> {
     pub controller_summaries: Option<HashMap<String, ControllerLlmSummary>>,
     /// Keyed by feature name. One entry per wiki feature from the feature-enrichment LLM pass.
     pub feature_llm_summaries: Option<HashMap<String, FeatureLlmSummary>>,
+    /// Grouping strategy: "package" (by Java package path) or "graph"/"llm" (Leiden communities).
+    pub grouping: String,
     /// Only generate pages for features whose name contains one of these substrings
     /// (case-insensitive). Empty = no filter.
     pub filter_feature: Vec<String>,
@@ -131,12 +133,11 @@ pub struct WikiOutcome {
 }
 
 pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome> {
-    let graph = WikiGraph::build(
-        input.nodes,
-        input.edges,
-        input.community_nodes,
-        input.community_edges,
-    );
+    let graph = if input.grouping == "package" {
+        WikiGraph::build_package_grouped(input.nodes, input.edges)
+    } else {
+        WikiGraph::build(input.nodes, input.edges, input.community_nodes, input.community_edges)
+    };
 
     let unresolved_count = count_unresolved_refs(input.unresolved_report.as_deref());
     let class_count: usize = graph.community_class_counts.values().sum();
@@ -162,7 +163,23 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     }
 
     // Feature grouping — the core of the new hierarchy
-    let mut feature_groups = group_communities_by_feature(&graph);
+    let mut feature_groups = if input.grouping == "package" {
+        // Restrict to packages that survived --filter-route (stored in input.community_nodes).
+        // When no route filter was active, input.community_nodes contains all packages.
+        let allowed_ids: std::collections::HashSet<&str> =
+            input.community_nodes.iter().map(|n| n.id.as_str()).collect();
+        let all_groups = group_nodes_by_package(&graph);
+        if allowed_ids.is_empty() {
+            all_groups
+        } else {
+            all_groups
+                .into_iter()
+                .filter(|g| g.community_ids.iter().any(|id| allowed_ids.contains(id.as_str())))
+                .collect()
+        }
+    } else {
+        group_communities_by_feature(&graph)
+    };
 
     // No communities (discover not run): synthesize one group per feature found in
     // controller file paths so controller pages still get generated.

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{bail, Context, Result};
-use cih_core::{GraphArtifacts, Node, RepoMap, VersionId};
+use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
 use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
@@ -85,7 +85,7 @@ impl Default for WikiConfig {
             llm_dry_run: false,
             wiki_language: "en".into(),
             wiki_mode: "graph".into(),
-            grouping: "graph".into(),
+            grouping: "package".into(),
             html: false,
             incremental: false,
             save_evidence: false,
@@ -130,7 +130,19 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let repo = repo.as_path();
     let llm_provider = llm_provider.as_str();
     let llm_base_url = llm_base_url.as_str();
-    let llm_model = llm_model.as_str();
+    let default_model = match llm_provider {
+        "gemini" => "gemini-2.5-flash",
+        "anthropic" => "claude-haiku-4-5-20251001",
+        "deepseek" => "deepseek-chat",
+        _ => "gpt-4o-mini",
+    };
+    let llm_model_owned;
+    let llm_model = if llm_model.is_empty() {
+        default_model
+    } else {
+        llm_model_owned = llm_model;
+        llm_model_owned.as_str()
+    };
     let wiki_language = wiki_language.as_str();
     let wiki_mode = wiki_mode.as_str();
     let grouping = grouping.as_str();
@@ -143,8 +155,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     if !["graph", "llm-summary", "llm-full"].contains(&wiki_mode) {
         bail!("--wiki-mode must be one of: graph, llm-summary, llm-full");
     }
-    if !["graph", "llm"].contains(&grouping) {
-        bail!("--grouping must be one of: graph, llm");
+    if !["package", "graph", "llm"].contains(&grouping) {
+        bail!("--grouping must be one of: package, graph, llm");
     }
     // llm-full requests 10 JSON fields; 600 tokens (the CLI default) truncates the
     // response mid-object and causes parse failures. Silently raise the floor.
@@ -166,122 +178,148 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "starting wiki"
     );
 
-    // ── 1. Community nodes first (fast JSONL read, no source I/O) ───────────
-    let community_artifact = latest_community_artifacts(repo).ok();
-    let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
-        Some(a) => {
-            let ns = a.read_nodes().with_context(|| {
-                format!("failed to read community nodes from {}", a.nodes_path.display())
-            })?;
-            let ver = a.version.0.clone();
-            tracing::info!(
-                community_version = %ver,
-                communities = ns.len(),
-                "community artifacts loaded"
-            );
-            (ns, ver)
-        }
-        None => {
-            tracing::info!("no community artifacts found — generating wiki without feature grouping; run `discover` first for richer docs");
-            eprintln!(
-                "info: no community artifacts found — generating wiki without feature grouping. \
-                     Run `discover` first for richer docs."
-            );
-            (Vec::new(), String::new())
-        }
-    };
+    // ── Build WikiGraph: package mode skips community artifacts ─────────────
+    let graph_artifacts;
+    let nodes;
+    let edges;
+    let wiki_graph;
+    let community_nodes: Vec<Node>;
+    let community_edges: Vec<cih_core::Edge>;
+    let community_version: String;
 
-    // ── 2. --filter-community + --max-communities (before heavy graph load) ──
-    let community_nodes_pre: Vec<Node> = {
-        let before = pre_community_nodes.len();
-        let mut filtered = pre_community_nodes;
-        if !filter_community.is_empty() {
-            let filters_lower: Vec<String> =
-                filter_community.iter().map(|f| f.to_lowercase()).collect();
-            filtered.retain(|n| {
-                let name_lower = n.name.to_lowercase();
-                filters_lower
-                    .iter()
-                    .any(|f| name_lower.contains(f.as_str()))
-            });
+    if grouping == "package" {
+        graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
+        nodes = graph_artifacts.read_nodes().with_context(|| {
+            format!("failed to read nodes from {}", graph_artifacts.nodes_path.display())
+        })?;
+        edges = graph_artifacts.read_edges().with_context(|| {
+            format!("failed to read edges from {}", graph_artifacts.edges_path.display())
+        })?;
+        tracing::info!(
+            graph_version = %graph_artifacts.version.0,
+            nodes = nodes.len(),
+            edges = edges.len(),
+            "graph artifacts loaded (package mode)"
+        );
+        wiki_graph = WikiGraph::build_package_grouped(&nodes, &edges);
+        let all_pkg_nodes: Vec<Node> = wiki_graph.community_nodes.clone();
+        community_nodes = filter_communities_by_route(all_pkg_nodes, &wiki_graph, &filter_route);
+        if !filter_route.is_empty() && community_nodes.is_empty() {
+            eprintln!("info: --filter-route matched 0 packages; nothing to generate.");
+            return Ok(());
         }
-        if let Some(max) = max_communities {
-            filtered.truncate(max);
-        }
-        if filtered.len() != before {
-            tracing::info!(
-                before = before,
-                after = filtered.len(),
-                filter_community = ?filter_community,
-                max_communities = ?max_communities,
-                "community filter applied"
-            );
-        }
-        filtered
-    };
-
-    // ── 3. Route-prefix pre-filter using props["route_prefixes"] ─────────────
-    // Uses the first non-generic path segment stored in community props at discover time.
-    // May have false positives (safe); the precise filter re-runs after WikiGraph::build.
-    let community_nodes_pre: Vec<Node> = if !filter_route.is_empty() {
-        community_nodes_pre
-            .into_iter()
-            .filter(|n| community_matches_route_prefix(n, &filter_route))
-            .collect()
+        community_edges = Vec::new();
+        community_version = graph_artifacts.version.0.clone();
     } else {
-        community_nodes_pre
-    };
+        // ── 1. Community nodes first (fast JSONL read, no source I/O) ─────────
+        let community_artifact = latest_community_artifacts(repo).ok();
+        let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
+            Some(a) => {
+                let ns = a.read_nodes().with_context(|| {
+                    format!("failed to read community nodes from {}", a.nodes_path.display())
+                })?;
+                let ver = a.version.0.clone();
+                tracing::info!(
+                    community_version = %ver,
+                    communities = ns.len(),
+                    "community artifacts loaded"
+                );
+                (ns, ver)
+            }
+            None => {
+                tracing::info!("no community artifacts found — generating wiki without feature grouping; run `discover` first for richer docs");
+                eprintln!(
+                    "info: no community artifacts found — generating wiki without feature grouping. \
+                         Run `discover` first for richer docs."
+                );
+                (Vec::new(), String::new())
+            }
+        };
 
-    // ── 4. Early bailout: community artifacts exist but nothing survived ──────
-    if !filter_route.is_empty() && community_artifact.is_some() && community_nodes_pre.is_empty() {
-        eprintln!("info: --filter-route matched 0 communities (pre-filter); nothing to generate.");
-        return Ok(());
+        // ── 2. --filter-community + --max-communities ─────────────────────────
+        let community_nodes_pre: Vec<Node> = {
+            let before = pre_community_nodes.len();
+            let mut filtered = pre_community_nodes;
+            if !filter_community.is_empty() {
+                let filters_lower: Vec<String> =
+                    filter_community.iter().map(|f| f.to_lowercase()).collect();
+                filtered.retain(|n| {
+                    let name_lower = n.name.to_lowercase();
+                    filters_lower
+                        .iter()
+                        .any(|f| name_lower.contains(f.as_str()))
+                });
+            }
+            if let Some(max) = max_communities {
+                filtered.truncate(max);
+            }
+            if filtered.len() != before {
+                tracing::info!(
+                    before = before,
+                    after = filtered.len(),
+                    filter_community = ?filter_community,
+                    max_communities = ?max_communities,
+                    "community filter applied"
+                );
+            }
+            filtered
+        };
+
+        // ── 3. Route-prefix pre-filter using props["route_prefixes"] ─────────
+        let community_nodes_pre: Vec<Node> = if !filter_route.is_empty() {
+            community_nodes_pre
+                .into_iter()
+                .filter(|n| community_matches_route_prefix(n, &filter_route))
+                .collect()
+        } else {
+            community_nodes_pre
+        };
+
+        // ── 4. Early bailout ──────────────────────────────────────────────────
+        if !filter_route.is_empty() && community_artifact.is_some() && community_nodes_pre.is_empty() {
+            eprintln!("info: --filter-route matched 0 communities (pre-filter); nothing to generate.");
+            return Ok(());
+        }
+
+        // ── 5. Load heavy graph data ──────────────────────────────────────────
+        graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
+        nodes = graph_artifacts.read_nodes().with_context(|| {
+            format!("failed to read nodes from {}", graph_artifacts.nodes_path.display())
+        })?;
+        edges = graph_artifacts.read_edges().with_context(|| {
+            format!("failed to read edges from {}", graph_artifacts.edges_path.display())
+        })?;
+        tracing::info!(
+            graph_version = %graph_artifacts.version.0,
+            nodes = nodes.len(),
+            edges = edges.len(),
+            "graph artifacts loaded"
+        );
+
+        // ── 6. Load community edges ───────────────────────────────────────────
+        let (community_nodes_loaded, community_edges_loaded, cv) = match community_artifact {
+            Some(a) => {
+                let comm_edges = a.read_edges().with_context(|| {
+                    format!("failed to read community edges from {}", a.edges_path.display())
+                })?;
+                (community_nodes_pre, comm_edges, community_version_raw)
+            }
+            None => (Vec::new(), Vec::new(), String::new()),
+        };
+        community_version = cv;
+
+        // ── 7. Build WikiGraph ────────────────────────────────────────────────
+        wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes_loaded, &community_edges_loaded);
+        community_edges = community_edges_loaded;
+
+        // ── 8. Precise route filter ───────────────────────────────────────────
+        community_nodes = filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
     }
 
-    // ── 5. Load heavy graph data (only reached when there is work to do) ─────
-    let graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
-    let nodes = graph_artifacts.read_nodes().with_context(|| {
-        format!(
-            "failed to read nodes from {}",
-            graph_artifacts.nodes_path.display()
-        )
-    })?;
-    let edges = graph_artifacts.read_edges().with_context(|| {
-        format!(
-            "failed to read edges from {}",
-            graph_artifacts.edges_path.display()
-        )
-    })?;
-    tracing::info!(
-        graph_version = %graph_artifacts.version.0,
-        nodes = nodes.len(),
-        edges = edges.len(),
-        "graph artifacts loaded"
-    );
-
-    // ── 6. Load community edges ───────────────────────────────────────────────
-    let (community_nodes_loaded, community_edges, community_version) = match community_artifact {
-        Some(a) => {
-            let edges = a.read_edges().with_context(|| {
-                format!("failed to read community edges from {}", a.edges_path.display())
-            })?;
-            (community_nodes_pre, edges, community_version_raw)
-        }
-        None => (Vec::new(), Vec::new(), String::new()),
-    };
-
-    // ── 7. Build WikiGraph ────────────────────────────────────────────────────
-    let wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes_loaded, &community_edges);
-
-    // ── 8. Precise route filter (exact path match; community_routes is graph-derived) ──
-    let community_nodes =
-        filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
-
-    // Derive controller scope from filtered communities so enrich_controllers only
-    // calls the LLM for controllers whose routes are actually in the surviving set.
-    // None = no filter active → enrich all controllers as before.
+    // Derive controller scope from filtered communities.
+    // Package mode: no scope restriction (all controllers are in scope).
     let controller_scope: Option<std::collections::HashSet<String>> =
-        if filter_route.is_empty() && filter_community.is_empty() && max_communities.is_none() {
+        if grouping == "package" || (filter_route.is_empty() && filter_community.is_empty() && max_communities.is_none()) {
             None
         } else {
             let names: std::collections::HashSet<String> = community_nodes
@@ -488,12 +526,19 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                                 llm_debug_evidence,
                                 llm_dry_run,
                             );
-                            if r.is_err() {
-                                consecutive_failures.fetch_add(1, Ordering::Relaxed);
-                                ui.inc_failed();
-                            } else {
-                                consecutive_failures.store(0, Ordering::Relaxed);
-                                ui.inc_ok();
+                            match &r {
+                                Err(e) if is_transient_overload(e) => {
+                                    // 503/overload is not a circuit-breaker event — don't count
+                                    ui.inc_failed();
+                                }
+                                Err(_) => {
+                                    consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                                    ui.inc_failed();
+                                }
+                                Ok(_) => {
+                                    consecutive_failures.store(0, Ordering::Relaxed);
+                                    ui.inc_ok();
+                                }
                             }
                             (comm_id, ev_hash, r)
                         })
@@ -783,6 +828,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         save_evidence: save_evidence_map,
         controller_summaries,
         feature_llm_summaries: feature_llm_map,
+        grouping: grouping.to_string(),
         filter_feature,
         bodies,
     };
@@ -1354,6 +1400,16 @@ fn parse_controller_batch(text: &str) -> HashMap<String, ControllerLlmSummary> {
     }
 
     result
+}
+
+fn is_transient_overload(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("HTTP 503")
+        || msg.contains("HTTP 429")
+        || msg.contains("high demand")
+        || msg.contains("UNAVAILABLE")
+        || msg.contains("rate limit")
+        || msg.contains("Too Many Requests")
 }
 
 fn is_circuit_open(consecutive: u32, threshold: u32) -> bool {

@@ -152,6 +152,20 @@ fn is_generic_route_token(token: &str) -> bool {
     )
 }
 
+/// Group by Java package path (package-grouping mode).
+/// Each `Pkg:<feature>` synthetic community node maps 1:1 to a FeatureGroup.
+pub fn group_nodes_by_package(graph: &WikiGraph) -> Vec<FeatureGroup> {
+    graph
+        .community_nodes
+        .iter()
+        .filter(|n| n.id.as_str().starts_with("Pkg:"))
+        .map(|n| FeatureGroup {
+            feature: n.name.clone(),
+            community_ids: vec![n.id.as_str().to_string()],
+        })
+        .collect()
+}
+
 /// Group all communities in the graph by their dominant feature.
 /// Features are sorted alphabetically; communities within each feature by id.
 pub fn group_communities_by_feature(graph: &WikiGraph) -> Vec<FeatureGroup> {
