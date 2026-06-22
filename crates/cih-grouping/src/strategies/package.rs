@@ -1,7 +1,7 @@
 use cih_core::NodeKind;
 
 use crate::config::PackageConfig;
-use crate::entry::FeatureGroupEntry;
+use crate::entry::{fnv64_node, FeatureGroupEntry};
 use crate::strategy::{FeatureStrategy, StrategyInput};
 
 /// Rule-based feature classifier derived from Java/Kotlin file paths.
@@ -123,16 +123,6 @@ impl PackageStrategy {
         None
     }
 
-    /// FNV-1a 64-bit hash of `node_id|file|kind` — stable cache key for incremental runs.
-    fn fnv64_node(node: &cih_core::Node) -> u64 {
-        let key = format!("{}|{}|{:?}", node.id.as_str(), node.file, node.kind);
-        let mut h: u64 = 0xcbf29ce484222325;
-        for b in key.bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        h
-    }
 }
 
 impl FeatureStrategy for PackageStrategy {
@@ -171,7 +161,7 @@ impl FeatureStrategy for PackageStrategy {
                     confidence: 1.0,
                     pinned: false,
                     evidence,
-                    node_content_hash: Self::fnv64_node(n),
+                    node_content_hash: fnv64_node(n),
                 }
             })
             .collect()

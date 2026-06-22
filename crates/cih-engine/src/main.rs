@@ -5,6 +5,7 @@ mod embed;
 mod file_cache;
 mod group;
 mod group_cmd;
+mod grouping;
 mod llm;
 mod registry;
 mod scan;
@@ -147,6 +148,12 @@ enum Command {
         /// Minimum edge confidence to follow during BFS (0.0–1.0). Default: 0.5.
         #[arg(long)]
         min_trace_confidence: Option<f32>,
+
+        // ── Feature grouping strategy ──────────────────────────────────────
+        /// Feature classification strategy: package (default), structural, hybrid.
+        /// "hybrid" runs structural + package + embed in sequence (requires model download).
+        #[arg(long, default_value = "package")]
+        feature_strategy: String,
     },
     /// Embed searchable graph nodes from the latest analyzed artifacts into pgvector.
     Embed {
@@ -464,6 +471,7 @@ fn main() -> Result<()> {
             max_processes,
             max_branching,
             min_trace_confidence,
+            feature_strategy,
         } => discover::run_discover(
             repo,
             falkor_url,
@@ -477,6 +485,7 @@ fn main() -> Result<()> {
                 max_processes,
                 max_branching,
                 min_trace_confidence,
+                feature_strategy,
             },
         ),
         Command::Embed {

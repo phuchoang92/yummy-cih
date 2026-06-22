@@ -5,16 +5,17 @@ use anyhow::{Context, Result};
 use cih_core::{ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind, RepoMap, VersionId};
 use cih_grouping::{
     apply_overrides, feature_artifact_dir, prune_feature_artifacts, write_feature_artifacts,
-    FeatureOverrides, FeatureStrategy, PackageConfig, PackageStrategy, StrategyInput,
+    FeatureOverrides, FeatureStrategy, PackageConfig, StrategyInput,
 };
+
+use crate::grouping::build_feature_strategy;
 use serde::Serialize;
 
 use crate::db::{load_many_to_falkor, LoadOutcome};
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
 use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
-/// CLI overrides for community detection and process tracing.
-/// Each field is `None` (use heuristic) or `Some(x)` (override).
+/// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
 pub(crate) struct DiscoverOverrides {
     pub resolution: Option<f64>,
@@ -23,6 +24,8 @@ pub(crate) struct DiscoverOverrides {
     pub max_processes: Option<usize>,
     pub max_branching: Option<usize>,
     pub min_trace_confidence: Option<f32>,
+    /// Feature classification strategy: "package" (default), "structural", "hybrid".
+    pub feature_strategy: String,
 }
 
 pub(crate) fn run_discover(
@@ -251,15 +254,32 @@ pub(crate) fn run_discover_core(
         &version[..8.min(version.len())]
     ));
 
-    // ── Feature artifacts (package grouping) ─────────────────────────────────
-    ui.spin("Grouping features");
-    let pkg_strategy = PackageStrategy::new(PackageConfig::load_or_default(repo));
+    // ── Feature artifacts ─────────────────────────────────────────────────────
+    let feature_strategy_kind = if overrides.feature_strategy.is_empty() {
+        "package"
+    } else {
+        overrides.feature_strategy.as_str()
+    };
+    ui.spin(format!("Grouping features ({})", feature_strategy_kind));
+    let pkg_cfg = PackageConfig::load_or_default(repo);
+    let feature_strategy = match build_feature_strategy(feature_strategy_kind, pkg_cfg) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(
+                strategy = feature_strategy_kind,
+                error = %err,
+                "feature strategy failed to load — falling back to package"
+            );
+            Box::new(cih_grouping::PackageStrategy::new(PackageConfig::load_or_default(repo)))
+        }
+    };
     let strategy_input = StrategyInput {
         nodes: &nodes,
         edges: &edges,
         graph_version: &source.version.0,
+        prior_assignments: &[],
     };
-    let raw_entries = pkg_strategy.assign(&strategy_input);
+    let raw_entries = feature_strategy.assign(&strategy_input);
     let merged_entries = match FeatureOverrides::load(repo) {
         Some(ov) if !ov.is_empty() => {
             tracing::info!(overrides = ov.len(), "applying feature overrides");
@@ -275,7 +295,7 @@ pub(crate) fn run_discover_core(
         names.len()
     };
     let feat_dir = feature_artifact_dir(repo, &source.version.0);
-    write_feature_artifacts(&feat_dir, pkg_strategy.name(), &raw_entries, &merged_entries)
+    write_feature_artifacts(&feat_dir, feature_strategy.name(), &raw_entries, &merged_entries)
         .with_context(|| {
             format!("failed to write feature artifacts to {}", feat_dir.display())
         })?;

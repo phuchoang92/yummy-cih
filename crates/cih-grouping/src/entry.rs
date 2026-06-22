@@ -1,3 +1,4 @@
+use cih_core::Node;
 use serde::{Deserialize, Serialize};
 
 /// One node-to-feature assignment record, written to `groups.jsonl`.
@@ -19,4 +20,15 @@ pub struct FeatureGroupEntry {
     pub evidence: String,
     /// FNV-64 of (fqn|file_path|kind) for cache hits
     pub node_content_hash: u64,
+}
+
+/// FNV-1a 64-bit hash of `node_id|file|kind` — stable cache key for incremental runs.
+pub fn fnv64_node(node: &Node) -> u64 {
+    let key = format!("{}|{}|{:?}", node.id.as_str(), node.file, node.kind);
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in key.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

@@ -10,7 +10,10 @@ pub use artifact::{
     read_feature_artifact, write_feature_artifacts,
 };
 pub use config::PackageConfig;
-pub use entry::FeatureGroupEntry;
+pub use entry::{fnv64_node, FeatureGroupEntry};
 pub use overrides::{apply_overrides, FeatureOverrides};
+pub use strategies::embed::{EmbedConfig, EmbedStrategy};
+pub use strategies::hybrid::HybridStrategy;
 pub use strategies::package::PackageStrategy;
-pub use strategy::{FeatureStrategy, StrategyInput};
+pub use strategies::structural::{StructuralConfig, StructuralStrategy};
+pub use strategy::{Embedder, FeatureStrategy, StrategyInput};
