@@ -1,4 +1,18 @@
-# ─── Stage 1: Builder ─────────────────────────────────────────────────────────
+# ─── Stage 1: graph-ui ────────────────────────────────────────────────────────
+# Build the Vite/React graph browser. vite.config.ts resolves outDir as
+# `../crates/cih-server/assets/graph` relative to graph-ui/ — mirror that
+# path so the resolve() call lands at the right place inside the container.
+FROM node:22-slim AS ui-builder
+
+WORKDIR /build/graph-ui
+COPY graph-ui/package.json graph-ui/package-lock.json ./
+RUN npm ci --prefer-offline
+
+COPY graph-ui/ ./
+# Output lands at /build/crates/cih-server/assets/graph
+RUN npm run build
+
+# ─── Stage 2: Rust builder ─────────────────────────────────────────────────────
 # tree-sitter compiles a C grammar; fastembed downloads the ONNX Runtime binary
 # at build time via ort-download-binaries. Both require build tooling.
 FROM rust:slim-bookworm AS builder
@@ -9,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY . .
+# Overwrite the committed assets with the freshly built UI from Stage 1.
+COPY --from=ui-builder /build/crates/cih-server/assets/graph \
+     ./crates/cih-server/assets/graph
 
 # Build both release binaries in one pass.
 # ort-download-binaries fetches libonnxruntime.so into target/release/build/ort-sys-*/out/
