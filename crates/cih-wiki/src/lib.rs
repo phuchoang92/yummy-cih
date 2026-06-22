@@ -120,6 +120,11 @@ pub struct WikiInput<'a> {
     pub filter_feature: Vec<String>,
     /// Stripped source bodies keyed by node_id string. Empty map = no bodies shown.
     pub bodies: HashMap<String, BodyEntry>,
+    /// Maps `(node_id, file)` to a feature slug. Supplied by `cih-engine`; called during
+    /// `WikiGraph::build_package_grouped`. When grouping is "graph"/"llm" never called.
+    /// When a pre-computed artifact is available, `node_id` gives a direct lookup;
+    /// otherwise fall back to file-path heuristics.
+    pub feature_of: Box<dyn Fn(&str, &str) -> String + Send>,
 }
 
 #[derive(Debug)]
@@ -134,7 +139,7 @@ pub struct WikiOutcome {
 
 pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome> {
     let graph = if input.grouping == "package" {
-        WikiGraph::build_package_grouped(input.nodes, input.edges)
+        WikiGraph::build_package_grouped(input.nodes, input.edges, &*input.feature_of)
     } else {
         WikiGraph::build(input.nodes, input.edges, input.community_nodes, input.community_edges)
     };

@@ -54,6 +54,7 @@ fn minimal_input<'a>(
         grouping: "graph".to_string(),
         filter_feature: vec![],
         bodies: HashMap::new(),
+        feature_of: Box::new(|_, _| "shared".to_string()),
     }
 }
 
@@ -160,6 +161,7 @@ fn generate_wiki_records_llm_model_in_manifest_when_enriched() {
         grouping: "graph".to_string(),
         filter_feature: vec![],
         bodies: HashMap::new(),
+        feature_of: Box::new(|_, _| "shared".to_string()),
     };
     let outcome = generate_wiki(input, &out).unwrap();
 

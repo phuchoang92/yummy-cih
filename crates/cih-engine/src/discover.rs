@@ -3,6 +3,10 @@ use std::process;
 
 use anyhow::{Context, Result};
 use cih_core::{ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind, RepoMap, VersionId};
+use cih_grouping::{
+    apply_overrides, feature_artifact_dir, prune_feature_artifacts, write_feature_artifacts,
+    FeatureOverrides, FeatureStrategy, PackageConfig, PackageStrategy, StrategyInput,
+};
 use serde::Serialize;
 
 use crate::db::{load_many_to_falkor, LoadOutcome};
@@ -247,6 +251,45 @@ pub(crate) fn run_discover_core(
         &version[..8.min(version.len())]
     ));
 
+    // ── Feature artifacts (package grouping) ─────────────────────────────────
+    ui.spin("Grouping features");
+    let pkg_strategy = PackageStrategy::new(PackageConfig::load_or_default(repo));
+    let strategy_input = StrategyInput {
+        nodes: &nodes,
+        edges: &edges,
+        graph_version: &source.version.0,
+    };
+    let raw_entries = pkg_strategy.assign(&strategy_input);
+    let merged_entries = match FeatureOverrides::load(repo) {
+        Some(ov) if !ov.is_empty() => {
+            tracing::info!(overrides = ov.len(), "applying feature overrides");
+            apply_overrides(raw_entries.clone(), &ov)
+        }
+        _ => raw_entries.clone(),
+    };
+    let feature_count = {
+        let mut names = std::collections::HashSet::new();
+        for e in &merged_entries {
+            names.insert(e.name.as_str());
+        }
+        names.len()
+    };
+    let feat_dir = feature_artifact_dir(repo, &source.version.0);
+    write_feature_artifacts(&feat_dir, pkg_strategy.name(), &raw_entries, &merged_entries)
+        .with_context(|| {
+            format!("failed to write feature artifacts to {}", feat_dir.display())
+        })?;
+    prune_feature_artifacts(
+        &repo.join(".cih").join("artifacts-features"),
+        &source.version.0,
+    )?;
+    tracing::info!(
+        features = feature_count,
+        entries = merged_entries.len(),
+        "feature artifacts written"
+    );
+    ui.finish_with(format!("{} features", fmt_count(feature_count)));
+
     let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
 
     Ok(DiscoverOutcome {
@@ -273,6 +316,7 @@ pub(crate) fn run_discover_core(
             .count(),
         node_count: output_nodes.len(),
         edge_count: output_edges.len(),
+        feature_count,
     })
 }
 
@@ -289,6 +333,7 @@ pub(crate) struct DiscoverOutcome {
     pub(crate) step_edge_count: usize,
     pub(crate) node_count: usize,
     pub(crate) edge_count: usize,
+    pub(crate) feature_count: usize,
 }
 
 impl DiscoverOutcome {
@@ -303,6 +348,7 @@ impl DiscoverOutcome {
             artifacts_path: self.artifacts_dir.display().to_string(),
             community_count: self.community_count,
             process_count: self.process_count,
+            feature_count: self.feature_count,
             member_edge_count: self.member_edge_count,
             step_edge_count: self.step_edge_count,
             node_count: self.node_count,
@@ -348,6 +394,7 @@ impl DiscoverOutcome {
         crate::ui::print_header("Discover", "", Some(ver));
         crate::ui::print_row("Communities", &fmt_count(self.community_count));
         crate::ui::print_row("Processes", &fmt_count(self.process_count));
+        crate::ui::print_row("Features", &fmt_count(self.feature_count));
         crate::ui::print_row(
             "Edges",
             &format!(
@@ -391,6 +438,7 @@ struct DiscoverSummary<'a> {
     artifacts_path: String,
     community_count: usize,
     process_count: usize,
+    feature_count: usize,
     member_edge_count: usize,
     step_edge_count: usize,
     node_count: usize,

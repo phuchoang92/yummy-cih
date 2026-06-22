@@ -75,16 +75,165 @@ fn controller_name_from_handler_id(handler_id: &str) -> &str {
 }
 
 fn feature_from_file_path(file: &str) -> String {
-    let prefix = "modules/";
-    if let Some(start) = file.find(prefix) {
-        let rest = &file[start + prefix.len()..];
+    // Strategy 1: explicit modules/<feature>/ segment (e.g. com.example.modules.order)
+    if let Some(start) = file.find("modules/") {
+        let rest = &file[start + "modules/".len()..];
         if let Some(end) = rest.find('/') {
             if end > 0 {
                 return rest[..end].to_string();
             }
         }
     }
+
+    // Strategy 2: Maven multi-module layout — extract the root module dir (the part
+    // before /src/main/java/ or /src/main/kotlin/) and normalise it.
+    //   banking-overdraft/src/...       → "overdraft"
+    //   banking-overdraft-api/src/...   → "overdraft"
+    //   custom-impl/src/.../overdraft/  → fallthrough to strategy 3
+    let src_markers = ["/src/main/java/", "/src/main/kotlin/",
+                        "/src/test/java/",  "/src/test/kotlin/"];
+    if let Some(marker_pos) = src_markers.iter().find_map(|m| file.find(m)) {
+        let module_dir = &file[..marker_pos];
+        // Keep only the last path segment (the Maven module name itself)
+        let module_name = module_dir.rsplit('/').next().unwrap_or(module_dir);
+        if !module_name.is_empty() {
+            let normalised = normalise_module_name(module_name);
+            // Only use the normalised module name when it resolves to something
+            // domain-specific.  Bare catch-all module names like "core", "common",
+            // "custom", "impl" carry no feature meaning — fall through to strategy 3.
+            const STILL_GENERIC: &[&str] = &[
+                "core", "common", "shared", "base", "impl",
+                "custom", "default", "generic", "abstract",
+                "infra", "infrastructure", "platform",
+            ];
+            if !normalised.is_empty()
+                && normalised != "shared"
+                && !STILL_GENERIC.contains(&normalised.as_str())
+            {
+                return normalised;
+            }
+        }
+
+        // Strategy 3 (fallback): read the deepest meaningful segment of the Java
+        // package path after src/main/java/.
+        for marker in &src_markers {
+            if let Some(pos) = file.find(marker) {
+                let pkg_path = &file[pos + marker.len()..];
+                // Drop the filename (last segment) — we want the package, not the class.
+                let pkg_dir = match pkg_path.rfind('/') {
+                    Some(p) => &pkg_path[..p],
+                    None => pkg_path,
+                };
+                if let Some(feat) = meaningful_package_feature(pkg_dir) {
+                    return feat;
+                }
+                break;
+            }
+        }
+    }
+
     "shared".to_string()
+}
+
+/// Strip well-known project prefixes and suffixes from a Maven module name.
+/// Returns a normalised feature slug, or empty string if no useful name remains.
+///
+/// Examples:
+///   "banking-overdraft"      → "overdraft"
+///   "banking-overdraft-api"  → "overdraft"
+///   "payment-service-impl"   → "payment"
+///   "my-app-core"            → (empty — too generic, handled as catch-all)
+fn normalise_module_name(name: &str) -> String {
+    const GENERIC_SUFFIXES: &[&str] = &[
+        "-api", "-service", "-impl", "-core", "-common", "-module",
+        "-lib", "-client", "-server", "-domain", "-model", "-dto",
+        "-web", "-rest", "-grpc",
+    ];
+    const GENERIC_PREFIXES: &[&str] = &[
+        "banking-", "payment-", "finance-", "base-", "common-",
+        "core-", "shared-", "platform-", "infra-", "infrastructure-",
+        "app-", "service-",
+    ];
+
+    let mut s = name.to_lowercase();
+
+    // Strip suffixes (order matters — strip longest first)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for suf in GENERIC_SUFFIXES {
+            if s.len() > suf.len() && s.ends_with(suf) {
+                s.truncate(s.len() - suf.len());
+                changed = true;
+            }
+        }
+    }
+
+    // Strip prefixes
+    changed = true;
+    while changed {
+        changed = false;
+        for pfx in GENERIC_PREFIXES {
+            if s.len() > pfx.len() && s.starts_with(pfx) {
+                s = s[pfx.len()..].to_string();
+                changed = true;
+            }
+        }
+    }
+
+    // Reject single-character or purely numeric leftovers
+    if s.len() <= 1 || s.chars().all(|c| c.is_ascii_digit()) {
+        return String::new();
+    }
+
+    s
+}
+
+/// Walk a Java package path (e.g. "com/example/bank/overdraft/service") from right
+/// to left and return the first segment that isn't a generic Java package name.
+fn meaningful_package_feature(pkg_dir: &str) -> Option<String> {
+    const SKIP: &[&str] = &[
+        // language / build dirs
+        "java", "kotlin", "scala", "groovy",
+        "main", "test",
+        // top-level TLDs and common org segments (skip first 1-2 segments after these)
+        "com", "org", "net", "io", "co", "dev",
+        // cross-cutting technical layers
+        "impl", "internal", "common", "shared", "core", "base", "custom", "default",
+        "util", "utils", "helper", "helpers", "support",
+        "model", "models", "dto", "dtos", "entity", "entities", "domain",
+        "config", "configuration", "properties",
+        "service", "services", "usecase", "usecases",
+        "repository", "repositories", "repo", "repos", "persistence",
+        "controller", "controllers", "handler", "handlers", "resource", "resources",
+        "exception", "exceptions", "error", "errors",
+        "web", "rest", "grpc", "api", "client", "server",
+        "messaging", "event", "events", "listener", "listeners",
+        "gateway", "adapter", "adapters", "infrastructure", "infra",
+        "security", "filter", "filters", "interceptor", "interceptors",
+        "mapper", "mappers", "converter", "converters",
+        "scheduler", "job", "jobs", "task", "tasks",
+    ];
+
+    for segment in pkg_dir.split('/').rev() {
+        let seg = segment.trim();
+        if seg.is_empty() || seg.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if SKIP.contains(&seg) {
+            continue;
+        }
+        // Skip single letters (e.g. "v" from versioning) and pure version segments
+        if seg.len() <= 1 {
+            continue;
+        }
+        let mut chars = seg.chars();
+        if matches!(chars.next(), Some('v') | Some('V')) && chars.all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        return Some(seg.to_string());
+    }
+    None
 }
 
 impl WikiGraph {
@@ -412,7 +561,15 @@ impl WikiGraph {
     /// Build a `WikiGraph` grouped by Java package path instead of Leiden communities.
     /// Each `modules/<feature>/` package becomes one synthetic community (`Pkg:<feature>`).
     /// No community artifacts needed — works directly from the graph nodes/edges.
-    pub fn build_package_grouped(nodes: &[Node], edges: &[Edge]) -> Self {
+    ///
+    /// `feature_of(node_id, file)` maps a node to a feature slug.
+    /// When a pre-computed artifact is available, use the node_id for direct lookup;
+    /// otherwise fall back to file-path heuristics.
+    pub fn build_package_grouped(
+        nodes: &[Node],
+        edges: &[Edge],
+        feature_of: &dyn Fn(&str, &str) -> String,
+    ) -> Self {
         // ── Phase 1: identical edge processing to build() ────────────────────
         let mut nodes_by_id: BTreeMap<String, Node> = BTreeMap::new();
         for n in nodes {
@@ -501,7 +658,7 @@ impl WikiGraph {
                 .push((handler.clone(), route.clone()));
             controller_feature
                 .entry(ctrl)
-                .or_insert_with(|| feature_from_file_path(&handler.file));
+                .or_insert_with(|| feature_of(handler.id.as_str(), &handler.file));
         }
 
         // ── Phase 2: derive package membership from node file paths ──────────
@@ -516,7 +673,7 @@ impl WikiGraph {
             ) {
                 continue;
             }
-            let feat = feature_from_file_path(&node.file);
+            let feat = feature_of(node.id.as_str(), &node.file);
             let pkg_id = format!("Pkg:{}", feat);
             community_by_member.insert(node.id.as_str().to_string(), pkg_id.clone());
             members_by_community

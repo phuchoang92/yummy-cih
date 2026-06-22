@@ -18,6 +18,7 @@
 #
 #  Product      cih-engine        CLI orchestrator: scan/analyze/discover/embed/wiki/group
 #               cih-wiki          wiki page generation library
+#               cih-grouping      feature grouping strategies (package, LLM, embed, hybrid)
 #               cih-server        rmcp+axum MCP server; exposes all tools over Streamable HTTP
 
 [workspace]
@@ -36,6 +37,7 @@ members = [
   "crates/cih-engine",
   "crates/cih-wiki",
   "crates/cih-server",
+  "crates/cih-grouping",
 ]
 
 [workspace.package]
@@ -81,6 +83,7 @@ zstd = "0.13"
 
 # internal crates
 cih-core = { path = "crates/cih-core" }
+cih-grouping = { path = "crates/cih-grouping" }
 cih-engine = { path = "crates/cih-engine" }
 cih-lang = { path = "crates/cih-lang" }
 cih-parse = { path = "crates/cih-parse" }

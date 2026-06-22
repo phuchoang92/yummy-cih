@@ -595,6 +595,7 @@ dependencies = [
  "cih-embed",
  "cih-falkor",
  "cih-graph-store",
+ "cih-grouping",
  "cih-jar",
  "cih-lang",
  "cih-parse",
@@ -643,6 +644,17 @@ dependencies = [
  "cih-core",
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cih-grouping"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cih-core",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

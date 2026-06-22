@@ -163,3 +163,5 @@ fn wiki_graph_orders_process_steps_from_edge_reasons() {
     assert_eq!(steps[1].symbol.name, "step2");
     assert_eq!(steps[2].symbol.name, "step3");
 }
+
+// Feature-path tests live in cih-grouping/src/strategies/package.rs

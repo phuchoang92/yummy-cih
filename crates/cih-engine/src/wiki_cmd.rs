@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
+use cih_grouping::{FeatureStrategy, PackageConfig, PackageStrategy};
 use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
@@ -186,6 +188,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let community_nodes: Vec<Node>;
     let community_edges: Vec<cih_core::Edge>;
     let community_version: String;
+    // Maps (node_id, file) to a feature slug; passed to WikiInput for generate_wiki.
+    let feature_of: Box<dyn Fn(&str, &str) -> String + Send>;
 
     if grouping == "package" {
         graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
@@ -201,7 +205,30 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             edges = edges.len(),
             "graph artifacts loaded (package mode)"
         );
-        wiki_graph = WikiGraph::build_package_grouped(&nodes, &edges);
+        let pkg_cfg = PackageConfig::load_or_default(repo);
+        let pkg_strategy: Arc<dyn FeatureStrategy> = Arc::new(PackageStrategy::new(pkg_cfg));
+
+        // Load pre-computed feature artifact if available (written by `discover`).
+        let feature_lookup: Arc<std::collections::HashMap<String, String>> = Arc::new(
+            cih_grouping::find_feature_artifact_dir(repo, &graph_artifacts.version.0)
+                .and_then(|dir| cih_grouping::read_feature_artifact(&dir).ok())
+                .map(|entries| entries.into_iter().map(|e| (e.node_id, e.name)).collect())
+                .unwrap_or_default(),
+        );
+        if !feature_lookup.is_empty() {
+            tracing::info!(
+                entries = feature_lookup.len(),
+                "loaded pre-computed feature artifact"
+            );
+        }
+
+        {
+            let s = pkg_strategy.clone();
+            let lk = feature_lookup.clone();
+            wiki_graph = WikiGraph::build_package_grouped(&nodes, &edges, &|node_id, f| {
+                lk.get(node_id).cloned().unwrap_or_else(|| s.feature_of(f))
+            });
+        }
         let all_pkg_nodes: Vec<Node> = wiki_graph.community_nodes.clone();
         community_nodes = filter_communities_by_route(all_pkg_nodes, &wiki_graph, &filter_route);
         if !filter_route.is_empty() && community_nodes.is_empty() {
@@ -210,6 +237,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         }
         community_edges = Vec::new();
         community_version = graph_artifacts.version.0.clone();
+        feature_of = Box::new(move |node_id: &str, f: &str| {
+            feature_lookup.get(node_id).cloned().unwrap_or_else(|| pkg_strategy.feature_of(f))
+        });
     } else {
         // ── 1. Community nodes first (fast JSONL read, no source I/O) ─────────
         let community_artifact = latest_community_artifacts(repo).ok();
@@ -314,6 +344,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
         // ── 8. Precise route filter ───────────────────────────────────────────
         community_nodes = filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
+        // In community/Leiden mode feature_of is never called (generate_wiki uses build() not
+        // build_package_grouped), but WikiInput requires the field — supply a no-op default.
+        feature_of = Box::new(|_, _| "shared".to_string());
     }
 
     // Derive controller scope from filtered communities.
@@ -831,6 +864,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         grouping: grouping.to_string(),
         filter_feature,
         bodies,
+        feature_of,
     };
 
     tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");

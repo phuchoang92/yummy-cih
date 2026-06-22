@@ -1,0 +1,267 @@
+use cih_core::NodeKind;
+
+use crate::config::PackageConfig;
+use crate::entry::FeatureGroupEntry;
+use crate::strategy::{FeatureStrategy, StrategyInput};
+
+/// Rule-based feature classifier derived from Java/Kotlin file paths.
+///
+/// Three-strategy cascade (in order):
+/// 1. `modules/<feature>/` explicit segment in the path
+/// 2. Maven multi-module directory name before `/src/main/java/` (normalised)
+/// 3. Deepest meaningful segment of the Java package path (walking right to left)
+///
+/// Falls back to `"shared"` when no strategy yields a domain-specific name.
+pub struct PackageStrategy {
+    config: PackageConfig,
+}
+
+impl PackageStrategy {
+    pub fn new(config: PackageConfig) -> Self {
+        PackageStrategy { config }
+    }
+
+    // ── private helpers ────────────────────────────────────────────────────
+
+    /// Core three-strategy classifier (shared by `feature_of` and `assign`).
+    fn classify(&self, file: &str) -> (String, String) {
+        // Strategy 1: explicit modules/<feature>/ segment
+        if let Some(start) = file.find("modules/") {
+            let rest = &file[start + "modules/".len()..];
+            if let Some(end) = rest.find('/') {
+                if end > 0 {
+                    let feat = rest[..end].to_string();
+                    return (feat.clone(), format!("modules/{}/", feat));
+                }
+            }
+        }
+
+        // Strategy 2: Maven multi-module directory before src root marker
+        if let Some(marker_pos) = self.config.src_roots.iter().find_map(|m| file.find(m.as_str())) {
+            let module_dir = &file[..marker_pos];
+            let module_name = module_dir.rsplit('/').next().unwrap_or(module_dir);
+            if !module_name.is_empty() {
+                let normalised = self.normalise_module_name(module_name);
+                if !normalised.is_empty()
+                    && normalised != "shared"
+                    && !self.config.catch_all.iter().any(|c| c == &normalised)
+                {
+                    return (
+                        normalised.clone(),
+                        format!("Maven module {} → {}", module_name, normalised),
+                    );
+                }
+            }
+
+            // Strategy 3: deepest meaningful segment of the Java package path
+            for marker in &self.config.src_roots {
+                if let Some(pos) = file.find(marker.as_str()) {
+                    let pkg_path = &file[pos + marker.len()..];
+                    let pkg_dir = match pkg_path.rfind('/') {
+                        Some(p) => &pkg_path[..p],
+                        None => pkg_path,
+                    };
+                    if let Some(feat) = self.meaningful_package_feature(pkg_dir) {
+                        return (feat.clone(), format!("Java package {}", pkg_dir));
+                    }
+                    break;
+                }
+            }
+        }
+
+        ("shared".to_string(), "no domain segment found".to_string())
+    }
+
+    fn normalise_module_name(&self, name: &str) -> String {
+        let mut s = name.to_lowercase();
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for suf in &self.config.strip_suffixes {
+                if s.len() > suf.len() && s.ends_with(suf.as_str()) {
+                    s.truncate(s.len() - suf.len());
+                    changed = true;
+                }
+            }
+        }
+        changed = true;
+        while changed {
+            changed = false;
+            for pfx in &self.config.strip_prefixes {
+                if s.len() > pfx.len() && s.starts_with(pfx.as_str()) {
+                    s = s[pfx.len()..].to_string();
+                    changed = true;
+                }
+            }
+        }
+
+        if s.len() <= 1 || s.chars().all(|c| c.is_ascii_digit()) {
+            return String::new();
+        }
+        s
+    }
+
+    fn meaningful_package_feature(&self, pkg_dir: &str) -> Option<String> {
+        for segment in pkg_dir.split('/').rev() {
+            let seg = segment.trim();
+            if seg.is_empty() || seg.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            if self.config.skip_segments.iter().any(|s| s == seg) {
+                continue;
+            }
+            if seg.len() <= 1 {
+                continue;
+            }
+            let mut chars = seg.chars();
+            if matches!(chars.next(), Some('v') | Some('V')) && chars.all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            return Some(seg.to_string());
+        }
+        None
+    }
+
+    /// FNV-1a 64-bit hash of `node_id|file|kind` — stable cache key for incremental runs.
+    fn fnv64_node(node: &cih_core::Node) -> u64 {
+        let key = format!("{}|{}|{:?}", node.id.as_str(), node.file, node.kind);
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in key.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+}
+
+impl FeatureStrategy for PackageStrategy {
+    fn name(&self) -> &str {
+        "package"
+    }
+
+    fn feature_of(&self, file: &str) -> String {
+        self.classify(file).0
+    }
+
+    fn assign(&self, input: &StrategyInput<'_>) -> Vec<FeatureGroupEntry> {
+        input
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Class
+                        | NodeKind::Interface
+                        | NodeKind::Enum
+                        | NodeKind::Record
+                        | NodeKind::Annotation
+                        | NodeKind::Method
+                        | NodeKind::Function
+                        | NodeKind::Constructor
+                )
+            })
+            .map(|n| {
+                let (feat, evidence) = self.classify(&n.file);
+                FeatureGroupEntry {
+                    id: format!("feature:{}", feat),
+                    name: feat,
+                    node_id: n.id.as_str().to_string(),
+                    strategy: "package".to_string(),
+                    confidence: 1.0,
+                    pinned: false,
+                    evidence,
+                    node_content_hash: Self::fnv64_node(n),
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strategy() -> PackageStrategy {
+        PackageStrategy::new(PackageConfig::default())
+    }
+
+    #[test]
+    fn modules_segment_takes_priority() {
+        let s = strategy();
+        assert_eq!(
+            s.feature_of("src/main/java/com/example/modules/order/service/OrderService.java"),
+            "order"
+        );
+        assert_eq!(
+            s.feature_of("src/main/java/org/phuc/commerce/modules/cart/CartController.java"),
+            "cart"
+        );
+    }
+
+    #[test]
+    fn maven_module_name_normalisation() {
+        let s = strategy();
+        assert_eq!(
+            s.feature_of("banking-overdraft/src/main/java/com/bank/overdraft/OverdraftService.java"),
+            "overdraft"
+        );
+        assert_eq!(
+            s.feature_of(
+                "banking-overdraft-api/src/main/java/com/bank/overdraft/api/OverdraftApi.java"
+            ),
+            "overdraft"
+        );
+        assert_eq!(
+            s.feature_of("payment-service/src/main/java/com/example/PaymentProcessor.java"),
+            "payment"
+        );
+        assert_eq!(
+            s.feature_of("payment-service-impl/src/main/java/com/example/PaymentImpl.java"),
+            "payment"
+        );
+    }
+
+    #[test]
+    fn catch_all_module_falls_through_to_package() {
+        let s = strategy();
+        assert_eq!(
+            s.feature_of(
+                "custom-impl/src/main/java/com/bank/overdraft/CustomOverdraftImpl.java"
+            ),
+            "overdraft"
+        );
+        assert_eq!(
+            s.feature_of(
+                "core/src/main/java/com/example/payment/gateway/PaymentGateway.java"
+            ),
+            "payment"
+        );
+    }
+
+    #[test]
+    fn no_known_structure_returns_shared() {
+        let s = strategy();
+        assert_eq!(s.feature_of("SomeClass.java"), "shared");
+        assert_eq!(s.feature_of(""), "shared");
+    }
+
+    #[test]
+    fn custom_config_strip_prefixes() {
+        let mut cfg = PackageConfig::default();
+        cfg.strip_prefixes.push("myco-".into());
+        let s = PackageStrategy::new(cfg);
+        assert_eq!(
+            s.feature_of("myco-payments/src/main/java/com/myco/PaymentService.java"),
+            "payments"
+        );
+    }
+
+    #[test]
+    fn classify_returns_evidence() {
+        let s = strategy();
+        let (feat, ev) = s.classify("payment-service/src/main/java/com/example/PaymentService.java");
+        assert_eq!(feat, "payment");
+        assert!(ev.contains("payment-service"), "evidence: {ev}");
+    }
+}

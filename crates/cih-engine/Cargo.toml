@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 cih-core.workspace = true
+cih-grouping.workspace = true
 cih-community.workspace = true
 cih-lang.workspace = true
 cih-wiki.workspace = true
