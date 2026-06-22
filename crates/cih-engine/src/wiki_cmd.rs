@@ -277,6 +277,36 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let community_nodes =
         filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
 
+    // Derive controller scope from filtered communities so enrich_controllers only
+    // calls the LLM for controllers whose routes are actually in the surviving set.
+    // None = no filter active → enrich all controllers as before.
+    let controller_scope: Option<std::collections::HashSet<String>> =
+        if filter_route.is_empty() && filter_community.is_empty() && max_communities.is_none() {
+            None
+        } else {
+            let names: std::collections::HashSet<String> = community_nodes
+                .iter()
+                .flat_map(|c| {
+                    wiki_graph
+                        .community_routes
+                        .get(c.id.as_str())
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|(handler, _route)| {
+                            handler
+                                .id
+                                .as_str()
+                                .strip_prefix("Method:")
+                                .or_else(|| handler.id.as_str().strip_prefix("Constructor:"))
+                                .and_then(|s| s.split('#').next())
+                                .and_then(|fqcn| fqcn.rsplit('.').next())
+                                .map(|s| s.to_string())
+                        })
+                })
+                .collect();
+            Some(names)
+        };
+
     // ── 9. source_bodies deferred: only read source files for filtered members ─
     // Avoids reading thousands of Java files when only a few communities survive.
     let bodies = {
@@ -474,10 +504,12 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 || {
                     tracing::info!(
                         controllers = wiki_graph.routes_by_controller.len(),
+                        scoped_to = controller_scope.as_ref().map(|s| s.len()),
                         "starting LLM controller enrichment"
                     );
                     let r = enrich_controllers(
                         &wiki_graph,
+                        controller_scope.as_ref(),
                         adapter.as_ref().unwrap().as_ref(),
                         api_key.as_deref(),
                         llm_model,
@@ -1147,6 +1179,7 @@ const MAX_ROUTES_PER_CONTROLLER: usize = 15;
 
 fn enrich_controllers(
     graph: &WikiGraph,
+    scope: Option<&std::collections::HashSet<String>>,
     adapter: &dyn LlmAdapter,
     api_key: Option<&str>,
     model: &str,
@@ -1155,8 +1188,11 @@ fn enrich_controllers(
     language: &str,
     dry_run: bool,
 ) -> HashMap<String, ControllerLlmSummary> {
-    let mut controllers: Vec<(&String, &Vec<(cih_core::Node, cih_core::Node)>)> =
-        graph.routes_by_controller.iter().collect();
+    let mut controllers: Vec<(&String, &Vec<(cih_core::Node, cih_core::Node)>)> = graph
+        .routes_by_controller
+        .iter()
+        .filter(|(name, _)| scope.map_or(true, |s| s.contains(*name)))
+        .collect();
     controllers.sort_by_key(|(name, _)| name.as_str());
 
     if controllers.is_empty() {
