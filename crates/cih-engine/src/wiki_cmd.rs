@@ -129,8 +129,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let wiki_language = wiki_language.as_str();
     let wiki_mode = wiki_mode.as_str();
     let grouping = grouping.as_str();
-    if wiki_language != "en" && wiki_language != "vi" {
-        bail!("--wiki-language must be 'en' or 'vi'");
+    // Accept any BCP-47 language tag; we only special-case known languages in
+    // prompts but a generic "Write in <lang>" instruction works for any model.
+    if wiki_language.is_empty() {
+        bail!("--wiki-language must not be empty (e.g. en, vi, ja, fr)");
     }
     let effective_run_llm = run_llm || wiki_mode == "llm-summary" || wiki_mode == "llm-full";
     if !["graph", "llm-summary", "llm-full"].contains(&wiki_mode) {
@@ -139,6 +141,13 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     if !["graph", "llm"].contains(&grouping) {
         bail!("--grouping must be one of: graph, llm");
     }
+    // llm-full requests 10 JSON fields; 600 tokens (the CLI default) truncates the
+    // response mid-object and causes parse failures. Silently raise the floor.
+    let llm_max_tokens = if wiki_mode == "llm-full" {
+        llm_max_tokens.max(2048)
+    } else {
+        llm_max_tokens
+    };
     let llm_no_call = llm_dry_run || llm_debug_evidence;
 
     let span = tracing::info_span!("wiki", repo = %repo.display());
@@ -625,6 +634,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 llm_model,
                 llm_max_tokens,
                 llm_timeout_secs,
+                llm_retries,
                 llm_debug_evidence,
                 llm_dry_run,
             ) {
@@ -887,8 +897,8 @@ fn build_system_prompt(language: &str) -> String {
 Do not invent behavior, routes, tables, or class names not in the evidence.\n\
 Cite evidence IDs (R1, P1, T1, S1, B1, ...) inline when they support a claim.",
     );
-    if language == "vi" {
-        prompt.push_str("\nWrite all documentation in Vietnamese.");
+    if language != "en" {
+        prompt.push_str(&format!("\nWrite all documentation in language: {}.", language));
     }
     prompt
 }
@@ -1045,8 +1055,8 @@ fn enrich_one_community_full(
          Do not invent behavior, routes, tables, or class names not in the evidence.\n\
          Cite evidence IDs (R1, T1, S1, B1, ...) when they support a claim.",
     );
-    if language == "vi" {
-        system.push_str("\nWrite all documentation in Vietnamese.");
+    if language != "en" {
+        system.push_str(&format!("\nWrite all documentation in language: {}.", language));
     }
     let user = build_full_prompt(&community.name, &evidence);
     let request = LlmRequest {
@@ -1162,8 +1172,8 @@ fn build_controller_system_prompt(language: &str) -> String {
          from the provided API route signatures. Do not invent behavior not implied by \
          the route paths and method names.",
     );
-    if language == "vi" {
-        s.push_str(" Write all descriptions in Vietnamese.");
+    if language != "en" {
+        s.push_str(&format!(" Write all descriptions in language: {}.", language));
     }
     s
 }
@@ -1389,6 +1399,7 @@ fn enrich_one_feature(
     model: &str,
     max_tokens: u32,
     timeout_secs: u64,
+    retries: u32,
     debug_evidence: bool,
     dry_run: bool,
 ) -> Result<FeatureLlmSummary> {
@@ -1430,8 +1441,26 @@ fn enrich_one_feature(
         max_tokens,
         timeout_secs,
     };
-    let resp = adapter.call(api_key, &req)?;
-    parse_feature_summary(&resp.text)
+    let jitter_seed: u64 = feature
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let mut last_err = None;
+    for attempt in 0..=(retries as usize) {
+        match adapter.call(api_key, &req).and_then(|r| parse_feature_summary(&r.text)) {
+            Ok(summary) => return Ok(summary),
+            Err(err) => {
+                if attempt < retries as usize {
+                    let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
+                    tracing::debug!(attempt = attempt + 1, delay_ms = delay, error = %err, "feature LLM call failed, retrying");
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    last_err = Some(err);
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
 }
 
 fn build_feature_system_prompt() -> String {
@@ -1451,22 +1480,29 @@ Evidence (grouped by community):
 Respond ONLY with a JSON object:
 {{
   "po_overview": "<3-5 sentences of plain-language business overview>",
-  "po_capabilities": "<bullet list of business capabilities, one per line starting with ->",
+  "po_capabilities": "<bullet list of business capabilities, one per line starting with - >",
   "ba_process_overview": "<3-5 sentences describing business processes and flows>",
-  "ba_business_rules": "<key business rules or invariants, one per line starting with ->>"
+  "ba_business_rules": "<key business rules or invariants, one per line starting with - >"
 }}"#
     )
 }
 
 fn parse_feature_summary(text: &str) -> Result<FeatureLlmSummary> {
-    let json_str = if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
+    // Some models (e.g. Gemini) wrap JSON in ```json ... ``` fences.
+    let stripped = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let json_str = if let (Some(start), Some(end)) = (stripped.find('{'), stripped.rfind('}')) {
         if start <= end {
-            &text[start..=end]
+            &stripped[start..=end]
         } else {
-            text.trim()
+            stripped
         }
     } else {
-        text.trim()
+        stripped
     };
     let val: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
         anyhow::anyhow!(
