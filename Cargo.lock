@@ -694,6 +694,7 @@ dependencies = [
  "cih-lang",
  "cih-parse",
  "ignore",
+ "rayon",
  "serde",
  "serde_json",
  "tracing",

@@ -318,59 +318,66 @@ pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
 /// Walk `repo_root` for DI XML files and parse their bean/reference definitions.
 /// Best-effort: unreadable files and walk errors are skipped with a warning.
 fn collect_di_definitions(repo_root: &Path) -> (Vec<BeanDef>, Vec<ReferenceDef>) {
+    use rayon::prelude::*;
+
+    // Collect candidate DI XML paths sequentially — the ignore walker is not Sync.
+    let candidates: Vec<(std::path::PathBuf, String)> = {
+        let walker = ignore::WalkBuilder::new(repo_root)
+            .hidden(false)
+            .git_ignore(true)
+            .git_exclude(true)
+            .git_global(true)
+            .build();
+
+        walker
+            .filter_map(|result| match result {
+                Ok(entry) if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) => {
+                    let path = entry.into_path();
+                    let is_xml = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("xml"))
+                        .unwrap_or(false);
+                    if !is_xml {
+                        return None;
+                    }
+                    let rel = path
+                        .strip_prefix(repo_root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if is_di_xml_path(&rel) { Some((path, rel)) } else { None }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "di-xml: walk error — skipping");
+                    None
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Read and parse candidate files in parallel.
+    let results: Vec<(Vec<BeanDef>, Vec<ReferenceDef>)> = candidates
+        .par_iter()
+        .filter_map(|(path, rel)| {
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(err) => {
+                    tracing::warn!(file = %rel, error = %err, "di-xml: read failed — skipping");
+                    return None;
+                }
+            };
+            if !is_di_xml(&content) {
+                return None;
+            }
+            Some(parse_di_document(rel, &content))
+        })
+        .collect();
+
     let mut beans: Vec<BeanDef> = Vec::new();
     let mut references: Vec<ReferenceDef> = Vec::new();
-
-    let walker = ignore::WalkBuilder::new(repo_root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .build();
-
-    for result in walker {
-        let entry = match result {
-            Ok(entry) => entry,
-            Err(err) => {
-                tracing::warn!(error = %err, "di-xml: walk error — skipping");
-                continue;
-            }
-        };
-        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let path = entry.path();
-        let is_xml = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("xml"))
-            .unwrap_or(false);
-        if !is_xml {
-            continue;
-        }
-
-        let rel = path
-            .strip_prefix(repo_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        if !is_di_xml_path(&rel) {
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(content) => content,
-            Err(err) => {
-                tracing::warn!(file = %rel, error = %err, "di-xml: read failed — skipping");
-                continue;
-            }
-        };
-        if !is_di_xml(&content) {
-            continue;
-        }
-
-        let (file_beans, file_refs) = parse_di_document(&rel, &content);
+    for (file_beans, file_refs) in results {
         beans.extend(file_beans);
         references.extend(file_refs);
     }

@@ -385,8 +385,14 @@ fn discover_emits_community_and_process_artifacts() {
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
     assert!(analyze.resolved_edge_count >= 2);
 
-    let discover =
-        run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
+    let discover = run_discover_core(
+        &root,
+        &crate::discover::DiscoverOverrides {
+            min_community_size: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(discover.artifacts_dir.join("nodes.jsonl").exists());
     assert!(discover.artifacts_dir.join("edges.jsonl").exists());
     assert!(
@@ -409,7 +415,14 @@ fn repo_with_wiki_artifacts() -> PathBuf {
     let root = temp_repo();
     let scan = scan::scan_repo(&root).unwrap();
     analyze_emit(&scan, all_scope()).unwrap();
-    run_discover_core(&root, &crate::discover::DiscoverOverrides::default()).unwrap();
+    run_discover_core(
+        &root,
+        &crate::discover::DiscoverOverrides {
+            min_community_size: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     root
 }
 

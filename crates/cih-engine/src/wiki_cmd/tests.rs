@@ -194,6 +194,7 @@ fn feature_dry_run_does_not_call_adapter() {
         "model",
         100,
         5,
+        0,
         false,
         true,
     )
