@@ -284,14 +284,15 @@ pub fn render_feature_po(
     feature_controllers.sort_by_key(|(ctrl, _)| ctrl.as_str());
 
     if !feature_controllers.is_empty() {
-        md.push_str("## Controllers\n\n");
-        md.push_str("| Controller | Routes |\n");
+        md.push_str("## API Surface\n\n");
+        md.push_str("| Endpoint Group | Routes |\n");
         md.push_str("|---|---|\n");
         for (ctrl_name, routes) in &feature_controllers {
             let slug = slugify(ctrl_name);
+            let display = controller_display_name(ctrl_name);
             md.push_str(&format!(
-                "| [{}](controllers/{}.md) | {} |\n",
-                ctrl_name,
+                "| [{}](api/{}.md) | {} |\n",
+                display,
                 slug,
                 routes.len()
             ));
@@ -302,6 +303,23 @@ pub fn render_feature_po(
     md
 }
 
+/// Strips the "Controller" suffix and returns a human-friendly display name.
+/// E.g. "CartController" → "Cart API", "AdminOrderController" → "Admin Order API".
+pub fn controller_display_name(controller_name: &str) -> String {
+    let base = controller_name
+        .strip_suffix("Controller")
+        .unwrap_or(controller_name);
+    // Insert spaces before uppercase letters (PascalCase → words)
+    let mut words = String::new();
+    for (i, ch) in base.chars().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            words.push(' ');
+        }
+        words.push(ch);
+    }
+    format!("{} API", words)
+}
+
 /// Render a single controller's route page (PO-facing).
 pub fn render_controller_page(
     controller_name: &str,
@@ -309,14 +327,15 @@ pub fn render_controller_page(
     description: Option<&str>,
     method_descriptions: &HashMap<String, String>,
 ) -> String {
+    let display_name = controller_display_name(controller_name);
     let route_count = routes.len();
     let mut md = String::new();
     md.push_str(&format!(
         "---\ntitle: {}\nrole: po\n---\n\n",
-        controller_name
+        display_name
     ));
     md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
-    md.push_str(&format!("# {}\n\n", controller_name));
+    md.push_str(&format!("# {}\n\n", display_name));
     if let Some(desc) = description.filter(|s| !s.is_empty()) {
         md.push_str(desc);
         md.push_str("\n\n");

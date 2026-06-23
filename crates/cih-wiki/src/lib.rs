@@ -346,7 +346,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         )?;
         std::fs::write(
             dev_dir.join("_category_.json"),
-            "{\"position\": 3, \"label\": \"Technical Reference\"}\n",
+            "{\"position\": 4, \"label\": \"Technical Reference\"}\n",
         )?;
     }
 
@@ -730,7 +730,12 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         feature_controllers.sort_by_key(|(ctrl, _)| *ctrl);
 
         if !feature_controllers.is_empty() {
-            std::fs::create_dir_all(out_dir.join(format!("pages/{}/controllers", feature)))?;
+            let api_dir = out_dir.join(format!("pages/{}/api", feature));
+            std::fs::create_dir_all(&api_dir)?;
+            std::fs::write(
+                api_dir.join("_category_.json"),
+                "{\"position\": 3, \"label\": \"API Surface\"}\n",
+            )?;
             for (ctrl_name, routes) in &feature_controllers {
                 let slug = slugify(ctrl_name);
                 let ctrl_summary = input
@@ -746,18 +751,19 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                     .unwrap_or(&empty_methods);
                 let ctrl_md =
                     pages::feature_po::render_controller_page(ctrl_name, routes, description, method_descriptions);
-                let page_path = format!("{}/controllers/{}", feature, slug);
+                let page_path = format!("{}/api/{}", feature, slug);
                 std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &ctrl_md)?;
+                let display_title = pages::feature_po::controller_display_name(ctrl_name);
                 nav.entry(feature.clone()).or_default().push(NavEntry {
                     slug: page_path.clone(),
-                    title: ctrl_name.to_string(),
-                    kind: "controller".into(),
+                    title: display_title.clone(),
+                    kind: "api".into(),
                 });
                 all_pages.push(PageEntry {
                     slug: page_path.clone(),
                     role: feature.clone(),
-                    title: ctrl_name.to_string(),
-                    kind: "controller".into(),
+                    title: display_title,
+                    kind: "api".into(),
                     path: format!("pages/{}.md", page_path),
                     json_path: None,
                     community_id: None,
