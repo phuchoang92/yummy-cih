@@ -211,16 +211,25 @@ pub fn render_api_flow_page(
             let meth = method_name_from_id(mid.as_str());
             let cls_id = class_id_from_method_id(mid.as_str(), graph);
             if !seen_class_ids.contains(&cls_id) {
-                seen_class_ids.push(cls_id);
+                seen_class_ids.push(cls_id.clone());
             }
 
-            // Description: prefer flow step_descriptions, fall back to method_desc.
+            // Description: prefer flow step_descriptions → method_desc → class stereotype → "—".
+            let stereotype_fallback = graph
+                .nodes_by_id
+                .get(cls_id.as_str())
+                .and_then(|n| n.props.as_ref())
+                .and_then(|p| p.get("stereotype"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("—");
             let desc = flow_summary
                 .and_then(|fs| fs.step_descriptions.get(i))
                 .map(|s| s.as_str())
                 .filter(|s| !s.is_empty())
                 .or_else(|| method_desc.get(mid.as_str()).map(|s| s.as_str()))
-                .unwrap_or("");
+                .filter(|s| !s.is_empty())
+                .unwrap_or(stereotype_fallback);
 
             if has_db {
                 let db_str = if step_dbs[i].is_empty() {

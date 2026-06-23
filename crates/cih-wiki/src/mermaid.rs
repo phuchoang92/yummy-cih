@@ -4,11 +4,24 @@ const MAX_NODES: usize = 20;
 const MAX_EDGES: usize = 30;
 const MAX_SEQ_PARTICIPANTS: usize = 8;
 
-/// Escape a label for use inside a Mermaid `["..."]` node.
+/// Unescape common HTML entities so that graph-stored names like `&lt;init&gt;`
+/// are treated as raw `<init>` before Mermaid-specific escaping is applied.
+fn unescape_html(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+/// Escape a label for use inside a Mermaid `["..."]` flowchart node.
+/// Angle brackets become parens — Mermaid's parser rejects `&lt;`/`&gt;` in node labels.
+/// HTML entities from the graph are unescaped first so `&lt;init&gt;` → `(init)`.
 fn sanitize(s: &str) -> String {
+    let s = unescape_html(s);
     s.replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+        .replace('<', "(")
+        .replace('>', ")")
         .replace('\n', " ")
         // double-dash is parsed as an arrow; replace with em-dash
         .replace("--", "—")
@@ -17,7 +30,9 @@ fn sanitize(s: &str) -> String {
 /// Escape a label for use in a Mermaid `sequenceDiagram` message.
 /// Mermaid's sequenceDiagram parser rejects HTML entities in message text,
 /// so angle brackets must become plain parens rather than &lt;/&gt;.
+/// HTML entities from the graph are unescaped first so `&lt;init&gt;` → `(init)`.
 fn sanitize_seq(s: &str) -> String {
+    let s = unescape_html(s);
     s.replace('<', "(")
         .replace('>', ")")
         .replace('\n', " ")

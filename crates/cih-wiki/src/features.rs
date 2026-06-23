@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cih_core::NodeKind;
 
@@ -314,6 +314,51 @@ pub fn build_dev_page_paths(
         }
     }
 
+    result
+}
+
+/// Assign dev-page slugs to a sorted set of class IDs using a two-pass collision counter.
+///
+/// `get_name` returns the simple class name for a given class_id; used to compute the base
+/// kebab slug. When two class IDs in the same set produce the same base slug, `-2`, `-3`, …
+/// are appended in BTreeSet iteration order so the result is fully deterministic.
+///
+/// Both `lib.rs` page generation and `wiki_cmd.rs` citation-map building must call this
+/// function with the same `class_ids` set to guarantee they produce identical slugs.
+/// Assign dev-page slugs to a sorted set of class IDs using a two-pass collision counter.
+///
+/// `get_name` returns the simple class name for a given class_id (returned as an owned
+/// `String` to avoid lifetime constraints on borrows from external maps). When two class
+/// IDs in the same set produce the same base kebab slug, `-2`, `-3`, … are appended in
+/// BTreeSet iteration order so the result is fully deterministic.
+///
+/// Both `lib.rs` page generation and `wiki_cmd.rs` citation-map building must call this
+/// function with the same `class_ids` set to guarantee they produce identical slugs.
+pub fn assign_class_slugs<F>(class_ids: &BTreeSet<String>, get_name: F) -> HashMap<String, String>
+where
+    F: Fn(&str) -> String,
+{
+    // Pass 1: count how many IDs share each base slug.
+    let mut slug_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for id in class_ids {
+        let base = pascal_to_kebab(&get_name(id.as_str()));
+        *slug_counts.entry(base).or_insert(0) += 1;
+    }
+    // Pass 2: assign final slugs (BTreeSet guarantees sorted/deterministic order).
+    let mut slug_assign: BTreeMap<String, usize> = BTreeMap::new();
+    let mut result: HashMap<String, String> = HashMap::with_capacity(class_ids.len());
+    for id in class_ids {
+        let base = pascal_to_kebab(&get_name(id.as_str()));
+        let n = slug_counts.get(&base).copied().unwrap_or(1);
+        let idx = slug_assign.entry(base.clone()).or_insert(0);
+        *idx += 1;
+        let slug = if n == 1 {
+            base
+        } else {
+            format!("{}-{}", base, idx)
+        };
+        result.insert(id.clone(), slug);
+    }
     result
 }
 

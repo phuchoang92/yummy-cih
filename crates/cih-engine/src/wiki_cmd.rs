@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
 use cih_grouping::{FeatureStrategy, PackageConfig, PackageStrategy};
 use cih_wiki::features::{group_communities_by_feature, pascal_to_kebab, FeatureGroup};
+use cih_wiki::assign_class_slugs;
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
     generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary,
@@ -2177,7 +2178,14 @@ fn build_file_dev_map(
     nodes: &[Node],
     feature_of: &dyn Fn(&str, &str) -> String,
 ) -> HashMap<String, String> {
-    let mut map: HashMap<String, String> = HashMap::new();
+    use std::collections::BTreeSet;
+
+    // Group class-like nodes by feature; track id→name and id→file for lookup.
+    let mut by_feature: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut id_to_name: HashMap<String, String> = HashMap::new();
+    let mut id_to_file: HashMap<String, String> = HashMap::new();
+
     for node in nodes {
         if !matches!(
             node.kind,
@@ -2189,13 +2197,35 @@ fn build_file_dev_map(
         {
             continue;
         }
-        let feature = feature_of(node.id.as_str(), node.file.as_str());
-        let slug = pascal_to_kebab(node.name.as_str());
-        let url = format!("/docs/{}/dev/{}", feature, slug);
-        // Keep first match per file (avoids inner classes overwriting the primary class).
-        map.entry(node.file.clone()).or_insert(url);
+        let id = node.id.as_str().to_string();
+        let feature = feature_of(id.as_str(), node.file.as_str());
+        by_feature.entry(feature).or_default().insert(id.clone());
+        id_to_name.entry(id.clone()).or_insert_with(|| node.name.clone());
+        id_to_file.entry(id).or_insert_with(|| node.file.clone());
     }
-    map
+
+    // For each feature, use the same collision-aware slug algorithm as lib.rs,
+    // then map each class's source file to its canonical dev-page URL.
+    let mut file_to_url: HashMap<String, String> = HashMap::new();
+    for (feature, class_ids) in by_feature {
+        let slugs = assign_class_slugs(&class_ids, |id| {
+            id_to_name.get(id).cloned().unwrap_or_else(|| {
+                id.trim_start_matches("Class:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string()
+            })
+        });
+        for (class_id, slug) in slugs {
+            if let Some(file) = id_to_file.get(&class_id) {
+                let url = format!("/docs/{}/dev/{}", feature, slug);
+                // Keep first match per file (avoids inner classes overwriting the outer one).
+                file_to_url.entry(file.clone()).or_insert(url);
+            }
+        }
+    }
+    file_to_url
 }
 
 /// Builds a citation-ID → dev-page-URL map for one feature's merged community evidence.
@@ -2250,8 +2280,12 @@ fn replace_citations(text: &str, map: &HashMap<String, String>) -> String {
         while let Some(idx) = out[pos..].find(&bare) {
             let abs = pos + idx;
             let after = abs + bare.len();
-            if out.as_bytes().get(after) == Some(&b'(') {
-                // Already a link, skip
+            let next = out.as_bytes().get(after).copied();
+            if next == Some(b'(') {
+                // Already a link — skip
+                pos = after;
+            } else if next.map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
+                // Substring of a longer ID, e.g. [C1-S2] inside [C1-S20] — skip
                 pos = after;
             } else {
                 out.replace_range(abs..after, &linked);

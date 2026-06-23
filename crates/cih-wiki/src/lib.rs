@@ -10,7 +10,7 @@ pub mod slugify;
 
 pub use bodies::{source_bodies, BodyEntry};
 pub use cih_core::RepoMap;
-pub use features::FeatureGroup;
+pub use features::{assign_class_slugs, FeatureGroup};
 pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
 pub use module_tree::{
@@ -655,42 +655,26 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             }
         }
 
-        // Assign slugs — pascal_to_kebab with collision counter
-        let mut slug_counts: BTreeMap<String, usize> = BTreeMap::new();
-        for class_id in &feature_class_set {
-            let cls_node = graph.nodes_by_id.get(class_id.as_str());
-            let cls_name = cls_node.map(|n| n.name.as_str()).unwrap_or_else(|| {
-                class_id
-                    .trim_start_matches("Class:")
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("Unknown")
-            });
-            let base_slug = features::pascal_to_kebab(cls_name);
-            let count = slug_counts.entry(base_slug).or_insert(0);
-            *count += 1;
-        }
+        // Assign dev-page slugs using the shared two-pass collision counter.
+        let slug_for = features::assign_class_slugs(&feature_class_set, |id| {
+            graph
+                .nodes_by_id
+                .get(id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| {
+                    id.trim_start_matches("Class:")
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("Unknown")
+                        .to_string()
+                })
+        });
 
-        // Second pass: assign final slugs in sorted order (BTreeSet is already sorted)
-        let mut slug_assign: BTreeMap<String, usize> = BTreeMap::new();
         for class_id in &feature_class_set {
-            let cls_node = graph.nodes_by_id.get(class_id.as_str());
-            let cls_name = cls_node.map(|n| n.name.as_str()).unwrap_or_else(|| {
-                class_id
-                    .trim_start_matches("Class:")
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("Unknown")
-            });
-            let base_slug = features::pascal_to_kebab(cls_name);
-            let n = slug_counts.get(&base_slug).copied().unwrap_or(1);
-            let idx = slug_assign.entry(base_slug.clone()).or_insert(0);
-            *idx += 1;
-            let slug = if n == 1 {
-                base_slug
-            } else {
-                format!("{}-{}", base_slug, idx)
-            };
+            let slug = slug_for
+                .get(class_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
             let page_path = format!("{}/dev/{}", feature, slug);
             // Capture slug for use in flow page Technical Reference links.
             class_dev_slugs.insert(class_id.clone(), slug.clone());
