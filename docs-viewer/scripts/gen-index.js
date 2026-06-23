@@ -36,6 +36,12 @@ if (process.env.CIH_WIKI_PATH) {
     href: `/docs/${feature}/`,
   }));
 
+  // Resolve persona button destinations: prefer system-level pages, fall back to first feature.
+  const systemNavExists = (manifest?.nav || {})['system'] !== undefined;
+  const firstFeature = navFeatures[0] || null;
+  const poHref = systemNavExists ? '/docs/system/po' : (firstFeature ? `/docs/${firstFeature}/po` : '/docs/');
+  const baHref = systemNavExists ? '/docs/system/ba' : (firstFeature ? `/docs/${firstFeature}/ba` : '/docs/');
+
   const cardsJs = communityCards.length > 0
     ? communityCards.map(c =>
         `    { name: ${JSON.stringify(c.name)}, href: ${JSON.stringify(c.href)} }`
@@ -99,8 +105,8 @@ export default function Home() {
 
         <div className="cih-section-title">Browse by persona</div>
         <div className="cih-persona-nav">
-          <PersonaBtn href="/docs/system/po" cls="po" icon="👔" label="Product Owner" desc="Business capabilities &amp; stakeholder view" />
-          <PersonaBtn href="/docs/system/ba" cls="ba" icon="📊" label="Business Analyst" desc="Workflows, contracts &amp; event flows" />
+          <PersonaBtn href="${poHref}" cls="po" icon="👔" label="Product Owner" desc="Business capabilities &amp; stakeholder view" />
+          <PersonaBtn href="${baHref}" cls="ba" icon="📊" label="Business Analyst" desc="Workflows, contracts &amp; event flows" />
           <PersonaBtn href="/docs/" cls="dev" icon="⚙️" label="Developer" desc="Technical structure, calls &amp; tests" />
         </div>
 

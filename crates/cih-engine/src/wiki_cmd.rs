@@ -1345,6 +1345,7 @@ fn enrich_controllers(
                     ControllerLlmSummary {
                         description: format!("[dry-run] {}", name),
                         feature: None,
+                        method_descriptions: HashMap::new(),
                     },
                 );
             }
@@ -1398,9 +1399,11 @@ fn build_controller_batch_prompt(
          For each controller provide:\n\
          - \"description\": 1-2 sentences in plain business language\n\
          - \"feature\": business domain slug (e.g. \"payment\", \"auth\", \"order\") \
-           inferred from the class name and routes\n\n\
+           inferred from the class name and routes\n\
+         - \"methods\": object mapping each handler name to a one-sentence business description\n\n\
          Respond with a single JSON object only:\n\
-         { \"ControllerName\": { \"description\": \"...\", \"feature\": \"slug\" }, ... }\n\n\
+         { \"ControllerName\": { \"description\": \"...\", \"feature\": \"slug\", \
+         \"methods\": { \"handlerName\": \"one sentence\", ... } }, ... }\n\n\
          Controllers:\n\n",
     );
 
@@ -1467,12 +1470,21 @@ fn parse_controller_batch(text: &str) -> HashMap<String, ControllerLlmSummary> {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
-            if !description.is_empty() || feature.is_some() {
+            let method_descriptions: HashMap<String, String> = ctrl_val["methods"]
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !description.is_empty() || feature.is_some() || !method_descriptions.is_empty() {
                 result.insert(
                     ctrl_name.clone(),
                     ControllerLlmSummary {
                         description,
                         feature,
+                        method_descriptions,
                     },
                 );
             }

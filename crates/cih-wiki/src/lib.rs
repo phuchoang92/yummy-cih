@@ -49,6 +49,8 @@ pub struct ControllerLlmSummary {
     /// Business domain slug inferred by LLM (e.g. "payment"). Applied only when the
     /// file-path heuristic returns "shared", to move the controller to the right feature.
     pub feature: Option<String>,
+    /// Per-handler-method descriptions keyed by Java method name (e.g. "addItemToMyCart").
+    pub method_descriptions: HashMap<String, String>,
 }
 
 /// LLM-generated feature-level overview for PO and BA pages.
@@ -232,7 +234,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     let dev_paths = build_dev_page_paths(&feature_groups, &graph);
 
     // Flat method_id → description lookup built once from flow_llm_summaries.
-    let method_flow_desc: HashMap<String, String> = {
+    let mut method_flow_desc: HashMap<String, String> = {
         let mut map = HashMap::new();
         if let Some(flow_map) = &input.flow_llm_summaries {
             for (proc_id, summary) in flow_map {
@@ -250,6 +252,39 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         }
         map
     };
+
+    // Merge per-method descriptions from controller LLM enrichment into method_flow_desc.
+    // The controller summaries use simple Java method names as keys; resolve them to full
+    // node IDs by scanning all methods in the graph.
+    if let Some(ctrl_summaries) = &input.controller_summaries {
+        for method_nodes in graph.methods_by_class.values() {
+            for method in method_nodes {
+                let method_id = method.id.as_str();
+                let class_name = method_id
+                    .split_once('#')
+                    .and_then(|(prefix, _)| {
+                        prefix
+                            .trim_start_matches("Method:")
+                            .trim_start_matches("Constructor:")
+                            .rsplit('.')
+                            .next()
+                    });
+                let simple_method_name = method_id
+                    .split('#')
+                    .nth(1)
+                    .and_then(|x| x.split('/').next());
+                if let (Some(cls), Some(meth)) = (class_name, simple_method_name) {
+                    if let Some(ctrl_summary) = ctrl_summaries.get(cls) {
+                        if let Some(desc) = ctrl_summary.method_descriptions.get(meth) {
+                            method_flow_desc
+                                .entry(method_id.to_string())
+                                .or_insert_with(|| desc.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let module_tree = input.module_tree.unwrap_or_else(|| {
         build_graph_module_tree(
@@ -698,14 +733,19 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             std::fs::create_dir_all(out_dir.join(format!("pages/{}/controllers", feature)))?;
             for (ctrl_name, routes) in &feature_controllers {
                 let slug = slugify(ctrl_name);
-                let description = input
+                let ctrl_summary = input
                     .controller_summaries
                     .as_ref()
-                    .and_then(|m| m.get(*ctrl_name))
+                    .and_then(|m| m.get(*ctrl_name));
+                let description = ctrl_summary
                     .map(|s| s.description.as_str())
                     .filter(|s| !s.is_empty());
+                let empty_methods = HashMap::new();
+                let method_descriptions = ctrl_summary
+                    .map(|s| &s.method_descriptions)
+                    .unwrap_or(&empty_methods);
                 let ctrl_md =
-                    pages::feature_po::render_controller_page(ctrl_name, routes, description);
+                    pages::feature_po::render_controller_page(ctrl_name, routes, description, method_descriptions);
                 let page_path = format!("{}/controllers/{}", feature, slug);
                 std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &ctrl_md)?;
                 nav.entry(feature.clone()).or_default().push(NavEntry {

@@ -307,6 +307,7 @@ pub fn render_controller_page(
     controller_name: &str,
     routes: &[(Node, Node)],
     description: Option<&str>,
+    method_descriptions: &HashMap<String, String>,
 ) -> String {
     let route_count = routes.len();
     let mut md = String::new();
@@ -325,16 +326,33 @@ pub fn render_controller_page(
         route_count,
         if route_count == 1 { "" } else { "s" }
     ));
-    md.push_str("| Method | Path | Handler |\n");
-    md.push_str("|---|---|---|\n");
+    let has_method_descs = !method_descriptions.is_empty();
+    if has_method_descs {
+        md.push_str("| Method | Path | Handler | Description |\n");
+        md.push_str("|---|---|---|---|\n");
+    } else {
+        md.push_str("| Method | Path | Handler |\n");
+        md.push_str("|---|---|---|\n");
+    }
     for (handler, route) in routes {
         let method_name = handler_method_name(handler.id.as_str());
-        md.push_str(&format!(
-            "| `{}` | `{}` | `{}` |\n",
-            route_http_method(route),
-            route_path(route),
-            method_name,
-        ));
+        if has_method_descs {
+            let desc = method_descriptions.get(method_name).map(|s| s.as_str()).unwrap_or("");
+            md.push_str(&format!(
+                "| `{}` | `{}` | `{}` | {} |\n",
+                route_http_method(route),
+                route_path(route),
+                method_name,
+                desc,
+            ));
+        } else {
+            md.push_str(&format!(
+                "| `{}` | `{}` | `{}` |\n",
+                route_http_method(route),
+                route_path(route),
+                method_name,
+            ));
+        }
     }
     md.push('\n');
     md
