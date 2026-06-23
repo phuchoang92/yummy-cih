@@ -17,8 +17,8 @@ pub fn render_mermaid_flow(entry_id: &NodeId, hops: &[FlowHop]) -> String {
     let entry_label = short_label(entry_id.as_str(), "Entry");
     out.push_str(&format!("    {}[\"{}\"]\n", entry_key, entry_label));
 
-    // Node definitions (skip the root hop which is the entry).
-    for hop in hops.iter().skip(1) {
+    // Node definitions.
+    for hop in hops.iter() {
         let step = &hop.node;
         let key = mermaid_key(step.id.as_str());
         let label = truncate(&format!("{}\n{}", step.kind.label(), step.name), 60);
@@ -26,7 +26,7 @@ pub fn render_mermaid_flow(entry_id: &NodeId, hops: &[FlowHop]) -> String {
     }
 
     // Edges.
-    for hop in hops.iter().skip(1) {
+    for hop in hops.iter() {
         let step = &hop.node;
         let child_key = mermaid_key(step.id.as_str());
         let parent_key = step

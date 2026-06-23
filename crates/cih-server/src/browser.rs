@@ -275,7 +275,7 @@ fn render_flow_graph(
         "file": entry_node.map(|node| node.file.as_str()).unwrap_or(""),
     }));
 
-    for hop in hops.iter().skip(1) {
+    for hop in hops.iter() {
         let step = &hop.node;
         nodes.push(json!({
             "id": step.id.as_str(),
