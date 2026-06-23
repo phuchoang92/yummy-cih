@@ -140,7 +140,7 @@ Open `/docs/order/api/scheduled/` — shows scheduled job pages with call chains
 
 ---
 
-## Phase 4 — Evidence Citations → Real Links  *(~2 days, medium effort)*
+## Phase 4 — Evidence Citations → Real Links  *(DONE)*
 
 **Goal:** Replace `[C1-S2]` citation tags in LLM-generated text with clickable Markdown links to the relevant dev class page.
 
@@ -167,7 +167,7 @@ Open `/docs/payment/ba` — citation `[C1-S2]` renders as a clickable link to `/
 
 ---
 
-## Phase 5 — Cross-Feature Sequence Diagrams  *(~5 days, high effort)*
+## Phase 5 — Cross-Feature Sequence Diagrams  *(DONE)*
 
 **Goal:** For flows that span multiple features (e.g. order placement calling payment, inventory, notification), show a full Mermaid sequence diagram.
 
@@ -201,14 +201,14 @@ Open `/docs/payment/ba` — citation `[C1-S2]` renders as a clickable link to `/
 
 ## Critical Files
 
-| File | Changed in |
-|---|---|
-| `crates/cih-wiki/src/lib.rs` | P1, P2, P3, P4 |
-| `crates/cih-wiki/src/pages/feature_po.rs` | P1, P2, P5 |
-| `crates/cih-wiki/src/pages/feature_index.rs` | P1, P3 |
-| `crates/cih-wiki/src/pages/feature_ba.rs` | P2 |
-| `crates/cih-wiki/src/graph.rs` | P3 |
-| `crates/cih-wiki/src/mermaid.rs` | P5 |
-| `crates/cih-engine/src/wiki_cmd.rs` | P3, P4 |
-| `crates/cih-engine/src/llm/evidence.rs` | P4 |
-| `docs-viewer/scripts/gen-index.js` | P1 |
+| File | Changed in | Status |
+|---|---|---|
+| `crates/cih-wiki/src/lib.rs` | P1, P2, P3 | Done |
+| `crates/cih-wiki/src/pages/feature_po.rs` | P1, P2, P3 | Done |
+| `crates/cih-wiki/src/pages/api_flow.rs` | P2, P3 | Done (new file) |
+| `crates/cih-community/src/lib.rs` | P3 | Done |
+| `crates/cih-community/src/entry_points.rs` | P3 | Done |
+| `crates/cih-wiki/src/mermaid.rs` | P5 | Done |
+| `crates/cih-engine/src/discover.rs` | P3 | Done |
+| `crates/cih-engine/src/wiki_cmd.rs` | P3, P4 | Done |
+| `crates/cih-engine/src/llm/evidence.rs` | P4 | Done |

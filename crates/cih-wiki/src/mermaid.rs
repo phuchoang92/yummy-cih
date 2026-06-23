@@ -2,6 +2,7 @@ use crate::graph::WikiGraph;
 
 const MAX_NODES: usize = 20;
 const MAX_EDGES: usize = 30;
+const MAX_SEQ_PARTICIPANTS: usize = 8;
 
 /// Escape a label for use inside a Mermaid `["..."]` node.
 fn sanitize(s: &str) -> String {
@@ -10,6 +11,15 @@ fn sanitize(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('\n', " ")
         // double-dash is parsed as an arrow; replace with em-dash
+        .replace("--", "—")
+}
+
+/// Escape a label for use in a Mermaid `sequenceDiagram` message.
+fn sanitize_seq(s: &str) -> String {
+    s.replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\n', " ")
+        .replace(':', ";")
         .replace("--", "—")
 }
 
@@ -440,6 +450,124 @@ pub fn community_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String
     }
     if truncated {
         out.push_str("  %%diagram truncated\n");
+    }
+    Some(out)
+}
+
+/// Build a `sequenceDiagram` block from a BFS call chain plus the raw `calls_out` graph.
+///
+/// Uses the actual call edges to determine which class calls which, so the arrows
+/// reflect real control flow rather than BFS visit order.  Participants are listed
+/// in BFS first-appearance order.  Returns `None` when fewer than two distinct
+/// classes or no cross-class edges exist.
+///
+/// `http_method` / `path` are passed for HTTP entry points so a "Client" actor
+/// and the initial request arrow can be rendered; pass empty strings for
+/// scheduled / listener entry points.
+pub fn call_sequence_diagram(
+    chain: &[String],
+    calls_out: &std::collections::BTreeMap<String, Vec<String>>,
+    http_method: &str,
+    path: &str,
+) -> Option<String> {
+    fn cls_name(method_id: &str) -> String {
+        let stripped = method_id
+            .strip_prefix("Method:")
+            .or_else(|| method_id.strip_prefix("Constructor:"))
+            .or_else(|| method_id.strip_prefix("Function:"))
+            .unwrap_or(method_id);
+        let fqcn = stripped.split('#').next().unwrap_or(stripped);
+        fqcn.rsplit('.').next().unwrap_or(fqcn).to_string()
+    }
+
+    fn meth_name(method_id: &str) -> &str {
+        method_id
+            .split('#')
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+            .unwrap_or(method_id)
+    }
+
+    let chain_set: std::collections::HashSet<&str> = chain.iter().map(|s| s.as_str()).collect();
+
+    // Unique participants in BFS first-appearance order.
+    let mut participants: Vec<String> = Vec::new();
+    for mid in chain {
+        let cls = cls_name(mid);
+        if !participants.contains(&cls) {
+            participants.push(cls);
+            if participants.len() >= MAX_SEQ_PARTICIPANTS {
+                break;
+            }
+        }
+    }
+
+    if participants.len() < 2 {
+        return None;
+    }
+
+    // Build class-level arrows using actual call edges.
+    // For each method in the chain, scan its callees that are also in the chain.
+    // If the callee is in a different class, record the (caller_class, callee_class) pair.
+    let mut arrows: Vec<(String, String, String)> = Vec::new(); // (from, to, first_callee_method)
+    for mid in chain {
+        let caller_cls = cls_name(mid);
+        let Some(callees) = calls_out.get(mid.as_str()) else {
+            continue;
+        };
+        for callee_id in callees {
+            if !chain_set.contains(callee_id.as_str()) {
+                continue;
+            }
+            let callee_cls = cls_name(callee_id);
+            if callee_cls == caller_cls {
+                continue; // intra-class call — skip
+            }
+            // Only add arrow if both classes are known participants.
+            if !participants.contains(&caller_cls) || !participants.contains(&callee_cls) {
+                continue;
+            }
+            if !arrows.iter().any(|(f, t, _)| f == &caller_cls && t == &callee_cls) {
+                let label = meth_name(callee_id).to_string();
+                arrows.push((caller_cls.clone(), callee_cls, label));
+            }
+        }
+    }
+
+    if arrows.is_empty() {
+        return None;
+    }
+
+    let has_http = !http_method.is_empty();
+    let truncated = participants.len() >= MAX_SEQ_PARTICIPANTS;
+
+    let mut out = String::from("sequenceDiagram\n");
+    if has_http {
+        out.push_str("    actor Client\n");
+    }
+    for p in &participants {
+        out.push_str(&format!("    participant {}\n", p));
+    }
+    if has_http && !participants.is_empty() {
+        out.push_str(&format!(
+            "    Client->>{}: {} {}\n",
+            participants[0],
+            http_method,
+            sanitize_seq(path)
+        ));
+    }
+    for (from, to, label) in &arrows {
+        out.push_str(&format!(
+            "    {}->>{}:{}\n",
+            from,
+            to,
+            sanitize_seq(&label)
+        ));
+    }
+    if truncated {
+        if let Some(first_p) = participants.first() {
+            out.push_str(&format!("    Note over {}: …truncated\n", first_p));
+        }
     }
     Some(out)
 }

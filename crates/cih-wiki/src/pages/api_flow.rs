@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
+use crate::mermaid;
 use crate::FlowLlmSummary;
 
 /// camelCase method name from a handler node ID → "Title Case Words"
@@ -173,6 +174,14 @@ pub fn render_api_flow_page(
     let chain = build_call_chain(handler.id.as_str(), graph, 4);
 
     if !chain.is_empty() {
+        // Sequence diagram — shown when multiple classes are involved.
+        if let Some(diagram) = mermaid::call_sequence_diagram(&chain, &graph.calls_out, &http_method, &path) {
+            md.push_str("## Sequence\n\n");
+            md.push_str("```mermaid\n");
+            md.push_str(&diagram);
+            md.push_str("```\n\n");
+        }
+
         md.push_str("## Flow\n\n");
 
         // LLM narrative if available.
@@ -304,6 +313,14 @@ fn render_entrypoint_body(
     let chain = build_call_chain(method_id, graph, 4);
     if chain.is_empty() {
         return md;
+    }
+
+    // Sequence diagram (no HTTP method/path for scheduled/listener entry points).
+    if let Some(diagram) = mermaid::call_sequence_diagram(&chain, &graph.calls_out, "", "") {
+        md.push_str("## Sequence\n\n");
+        md.push_str("```mermaid\n");
+        md.push_str(&diagram);
+        md.push_str("```\n\n");
     }
 
     md.push_str("## Flow\n\n");

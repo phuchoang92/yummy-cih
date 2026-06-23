@@ -30,6 +30,22 @@ pub struct EvidenceItem {
     pub text: String,
 }
 
+impl EvidenceItem {
+    /// True when this item is a source-code snippet (id starts with "S").
+    pub fn is_snippet(&self) -> bool {
+        matches!(self.kind, EvidenceKind::Snippet)
+    }
+
+    /// For snippet items, returns the relative file path (strips the line-range suffix).
+    pub fn snippet_file(&self) -> Option<&str> {
+        if !self.is_snippet() {
+            return None;
+        }
+        // text format: "src/main/.../Foo.java:41-50\n    ..."
+        self.text.lines().next().and_then(|first| first.split(':').next())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct EvidencePack {
     pub community_id: String,

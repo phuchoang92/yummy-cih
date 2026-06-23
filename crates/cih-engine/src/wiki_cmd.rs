@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
 use cih_grouping::{FeatureStrategy, PackageConfig, PackageStrategy};
-use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
+use cih_wiki::features::{group_communities_by_feature, pascal_to_kebab, FeatureGroup};
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
     generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary,
@@ -462,6 +462,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         .to_string();
     let repo_name_display = repo_name.clone();
 
+    // Pre-compute file → dev URL map for citation resolution (Phase 4).
+    let file_dev_map = build_file_dev_map(&nodes, &*feature_of);
+
     let mut llm_info: Option<WikiLlmInfo> = None;
     let mut summaries_for_cache: Vec<(String, String, CommunityLlmSummary)> = Vec::new();
     let (llm_summaries, controller_summaries): (
@@ -773,10 +776,20 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 build_feature_evidence(&group.community_ids, &wiki_graph, repo, &evidence_corpus);
             let ev_hash = fnv64(&merged_ev);
 
-            // Cache hit?
-            if let Some(cached) =
+            // Build citation map for this feature (used to resolve [C1-S2] → links).
+            let citation_map = build_feature_citation_map(
+                &group.community_ids,
+                &wiki_graph,
+                repo,
+                &evidence_corpus,
+                &file_dev_map,
+            );
+
+            // Cache hit? Post-process cached summaries too so links stay current.
+            if let Some(mut cached) =
                 cached_feature_summary(&group.feature, &ev_hash, prev_meta_for_features.as_ref())
             {
+                resolve_feature_citations(&mut cached, &citation_map);
                 feature_cache_updates.push((group.feature.clone(), ev_hash, cached.clone()));
                 map.insert(group.feature.clone(), cached);
                 ui_feat.tick_skipped(format!("{} (cached)", &group.feature));
@@ -797,7 +810,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 llm_debug_evidence,
                 llm_dry_run,
             ) {
-                Ok(summary) => {
+                Ok(mut summary) => {
+                    resolve_feature_citations(&mut summary, &citation_map);
                     feature_cache_updates.push((group.feature.clone(), ev_hash, summary.clone()));
                     map.insert(group.feature.clone(), summary);
                     ui_feat.inc_ok();
@@ -2140,6 +2154,112 @@ fn community_matches_route_prefix(community: &Node, patterns: &[String]) -> bool
                 || pat_seg.contains(p_lower.as_str())
         })
     })
+}
+
+/// Post-processes all text fields in a `FeatureLlmSummary`, replacing bare
+/// citation IDs with Markdown links wherever the citation map has a URL.
+fn resolve_feature_citations(
+    summary: &mut FeatureLlmSummary,
+    citation_map: &HashMap<String, String>,
+) {
+    if citation_map.is_empty() {
+        return;
+    }
+    summary.po_overview = replace_citations(&summary.po_overview, citation_map);
+    summary.po_capabilities = replace_citations(&summary.po_capabilities, citation_map);
+    summary.ba_process_overview = replace_citations(&summary.ba_process_overview, citation_map);
+    summary.ba_business_rules = replace_citations(&summary.ba_business_rules, citation_map);
+}
+
+/// Maps every class/interface source file to its wiki dev page URL.
+/// Used for resolving snippet citation IDs (e.g. `[C1-S2]`) to real links.
+fn build_file_dev_map(
+    nodes: &[Node],
+    feature_of: &dyn Fn(&str, &str) -> String,
+) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for node in nodes {
+        if !matches!(
+            node.kind,
+            cih_core::NodeKind::Class
+                | cih_core::NodeKind::Interface
+                | cih_core::NodeKind::Enum
+                | cih_core::NodeKind::Record
+        ) || node.file.is_empty()
+        {
+            continue;
+        }
+        let feature = feature_of(node.id.as_str(), node.file.as_str());
+        let slug = pascal_to_kebab(node.name.as_str());
+        let url = format!("/docs/{}/dev/{}", feature, slug);
+        // Keep first match per file (avoids inner classes overwriting the primary class).
+        map.entry(node.file.clone()).or_insert(url);
+    }
+    map
+}
+
+/// Builds a citation-ID → dev-page-URL map for one feature's merged community evidence.
+/// Mirrors the `[C{n}-S{m}]` numbering used in `build_feature_evidence`.
+fn build_feature_citation_map(
+    community_ids: &[String],
+    graph: &WikiGraph,
+    repo: &Path,
+    corpus: &EvidenceCorpus,
+    file_dev_map: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut citation_map: HashMap<String, String> = HashMap::new();
+    let mut seen_texts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for (community_idx, comm_id) in community_ids.iter().enumerate() {
+        let Some(comm_node) = graph.nodes_by_id.get(comm_id) else {
+            continue;
+        };
+        let pack = build_evidence_pack(Some(repo), graph, comm_node, corpus);
+        let community_evidence_id = format!("C{}", community_idx + 1);
+
+        for item in &pack.items {
+            if seen_texts.contains(&item.text) {
+                continue;
+            }
+            seen_texts.insert(item.text.clone());
+
+            if let Some(file) = item.snippet_file() {
+                if let Some(url) = file_dev_map.get(file) {
+                    let citation_id = format!("{}-{}", community_evidence_id, item.id);
+                    citation_map.insert(citation_id, url.clone());
+                }
+            }
+        }
+    }
+    citation_map
+}
+
+/// Replaces bare citation IDs (e.g. `[C1-S2]`) with Markdown links when a URL is known.
+/// Leaves citations unchanged when no mapping is available.
+fn replace_citations(text: &str, map: &HashMap<String, String>) -> String {
+    if map.is_empty() || !text.contains('[') {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for (citation_id, url) in map {
+        let bare = format!("[{}]", citation_id);
+        // Only replace if not already a link (not followed by '(')
+        let linked = format!("[{}]({})", citation_id, url);
+        // Avoid double-linking: skip if bare pattern is already followed by '('
+        let mut pos = 0;
+        while let Some(idx) = out[pos..].find(&bare) {
+            let abs = pos + idx;
+            let after = abs + bare.len();
+            if out.as_bytes().get(after) == Some(&b'(') {
+                // Already a link, skip
+                pos = after;
+            } else {
+                out.replace_range(abs..after, &linked);
+                pos = abs + linked.len();
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
