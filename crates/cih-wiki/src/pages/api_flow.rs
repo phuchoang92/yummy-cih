@@ -197,12 +197,32 @@ pub fn render_api_flow_page(
             chain.iter().map(|id| db_access(id.as_str(), graph)).collect();
         let has_db = step_dbs.iter().any(|v| !v.is_empty());
 
-        if has_db {
-            md.push_str("| # | Class | Method | What it does | DB access |\n");
-            md.push_str("|---|---|---|---|---|\n");
-        } else {
-            md.push_str("| # | Class | Method | What it does |\n");
-            md.push_str("|---|---|---|---|\n");
+        // Only show "What it does" when real LLM descriptions exist — stereotype labels
+        // ("service", "controller", etc.) are not meaningful as method descriptions.
+        let has_desc = flow_summary
+            .map(|fs| fs.step_descriptions.iter().any(|s| !s.is_empty()))
+            .unwrap_or(false)
+            || chain
+                .iter()
+                .any(|mid| method_desc.get(mid.as_str()).map(|s| !s.is_empty()).unwrap_or(false));
+
+        match (has_desc, has_db) {
+            (true, true) => {
+                md.push_str("| # | Class | Method | What it does | DB access |\n");
+                md.push_str("|---|---|---|---|---|\n");
+            }
+            (true, false) => {
+                md.push_str("| # | Class | Method | What it does |\n");
+                md.push_str("|---|---|---|---|\n");
+            }
+            (false, true) => {
+                md.push_str("| # | Class | Method | DB access |\n");
+                md.push_str("|---|---|---|---|\n");
+            }
+            (false, false) => {
+                md.push_str("| # | Class | Method |\n");
+                md.push_str("|---|---|---|\n");
+            }
         }
 
         let mut seen_class_ids: Vec<String> = Vec::new();
@@ -214,24 +234,19 @@ pub fn render_api_flow_page(
                 seen_class_ids.push(cls_id.clone());
             }
 
-            // Description: prefer flow step_descriptions → method_desc → class stereotype → "—".
-            let stereotype_fallback = graph
-                .nodes_by_id
-                .get(cls_id.as_str())
-                .and_then(|n| n.props.as_ref())
-                .and_then(|p| p.get("stereotype"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("—");
-            let desc = flow_summary
-                .and_then(|fs| fs.step_descriptions.get(i))
-                .map(|s| s.as_str())
-                .filter(|s| !s.is_empty())
-                .or_else(|| method_desc.get(mid.as_str()).map(|s| s.as_str()))
-                .filter(|s| !s.is_empty())
-                .unwrap_or(stereotype_fallback);
+            let desc = if has_desc {
+                flow_summary
+                    .and_then(|fs| fs.step_descriptions.get(i))
+                    .map(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| method_desc.get(mid.as_str()).map(|s| s.as_str()))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("—")
+            } else {
+                ""
+            };
 
-            if has_db {
+            if has_desc && has_db {
                 let db_str = if step_dbs[i].is_empty() {
                     "—".to_string()
                 } else {
@@ -250,11 +265,32 @@ pub fn render_api_flow_page(
                     "| {} | `{}` | `{}` | {} | {} |\n",
                     i + 1, cls, meth, desc, db_str
                 ));
-            } else {
+            } else if has_desc {
                 md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} |\n",
                     i + 1, cls, meth, desc
                 ));
+            } else if has_db {
+                let db_str = if step_dbs[i].is_empty() {
+                    "—".to_string()
+                } else {
+                    step_dbs[i]
+                        .iter()
+                        .map(|(name, r, w)| match (r, w) {
+                            (true, true) => format!("`{}` R+W", name),
+                            (true, false) => format!("`{}` R", name),
+                            (false, true) => format!("`{}` W", name),
+                            _ => format!("`{}`", name),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} |\n",
+                    i + 1, cls, meth, db_str
+                ));
+            } else {
+                md.push_str(&format!("| {} | `{}` | `{}` |\n", i + 1, cls, meth));
             }
         }
         md.push('\n');
