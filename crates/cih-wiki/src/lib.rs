@@ -483,6 +483,20 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             .collect()
     };
 
+    // Build handler_id → process_id lookup (used for flow pages).
+    let process_by_handler: HashMap<String, String> = graph
+        .process_steps
+        .iter()
+        .filter_map(|(proc_id, steps)| {
+            steps
+                .first()
+                .map(|s| (s.symbol.id.as_str().to_string(), proc_id.clone()))
+        })
+        .collect();
+
+    // class_id → dev page slug (populated during dev page generation below).
+    let mut class_dev_slugs: HashMap<String, String> = HashMap::new();
+
     // Per-feature pages
     for group in &feature_groups {
         let feature = &group.feature;
@@ -646,6 +660,8 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 format!("{}-{}", base_slug, idx)
             };
             let page_path = format!("{}/dev/{}", feature, slug);
+            // Capture slug for use in flow page Technical Reference links.
+            class_dev_slugs.insert(class_id.clone(), slug.clone());
 
             // Build or synthesize the class node (class nodes may be absent when only
             // method nodes are present in the raw graph — synthesize a stub in that case)
@@ -736,8 +752,9 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 api_dir.join("_category_.json"),
                 "{\"position\": 3, \"label\": \"API Surface\"}\n",
             )?;
-            for (ctrl_name, routes) in &feature_controllers {
-                let slug = slugify(ctrl_name);
+            for (ctrl_pos, (ctrl_name, routes)) in feature_controllers.iter().enumerate() {
+                let ctrl_slug = slugify(ctrl_name);
+                let display_title = pages::feature_po::controller_display_name(ctrl_name);
                 let ctrl_summary = input
                     .controller_summaries
                     .as_ref()
@@ -749,26 +766,71 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 let method_descriptions = ctrl_summary
                     .map(|s| &s.method_descriptions)
                     .unwrap_or(&empty_methods);
-                let ctrl_md =
-                    pages::feature_po::render_controller_page(ctrl_name, routes, description, method_descriptions);
-                let page_path = format!("{}/api/{}", feature, slug);
-                std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &ctrl_md)?;
-                let display_title = pages::feature_po::controller_display_name(ctrl_name);
-                nav.entry(feature.clone()).or_default().push(NavEntry {
-                    slug: page_path.clone(),
-                    title: display_title.clone(),
-                    kind: "api".into(),
-                });
-                all_pages.push(PageEntry {
-                    slug: page_path.clone(),
-                    role: feature.clone(),
-                    title: display_title,
-                    kind: "api".into(),
-                    path: format!("pages/{}.md", page_path),
-                    json_path: None,
-                    community_id: None,
-                });
-                page_count += 1;
+
+                // Remove any stale top-level controller .md files left from Phase 1.
+                let stale = api_dir.join(format!("{}.md", ctrl_slug));
+                let _ = std::fs::remove_file(&stale);
+
+                // Subdirectory for this controller's flow pages.
+                let ctrl_dir = api_dir.join(&ctrl_slug);
+                std::fs::create_dir_all(&ctrl_dir)?;
+                // Docusaurus 3.5+ auto-links index.md as the category page — no `link` needed.
+                std::fs::write(
+                    ctrl_dir.join("_category_.json"),
+                    format!(
+                        "{{\"position\": {}, \"label\": \"{}\", \"collapsible\": true, \"collapsed\": false}}\n",
+                        ctrl_pos + 1,
+                        display_title
+                    ),
+                )?;
+
+                // index.md — controller overview (route table + descriptions).
+                let ctrl_md = pages::feature_po::render_controller_page(
+                    ctrl_name,
+                    routes,
+                    description,
+                    method_descriptions,
+                );
+                std::fs::write(ctrl_dir.join("index.md"), &ctrl_md)?;
+
+                // One flow page per route handler.
+                for (route_pos, (handler, route)) in routes.iter().enumerate() {
+                    let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
+                    let process_id = process_by_handler.get(handler.id.as_str());
+                    let flow_summary = process_id.and_then(|pid| {
+                        input.flow_llm_summaries.as_ref().and_then(|m| m.get(pid.as_str()))
+                    });
+                    let flow_md = pages::api_flow::render_api_flow_page(
+                        handler,
+                        route,
+                        route_pos + 1,
+                        flow_summary,
+                        &graph,
+                        &class_dev_slugs,
+                        &method_flow_desc,
+                    );
+                    let page_path = format!("{}/api/{}/{}", feature, ctrl_slug, handler_slug);
+                    std::fs::write(
+                        out_dir.join(format!("pages/{}.md", page_path)),
+                        &flow_md,
+                    )?;
+                    let flow_title = pages::api_flow::handler_title(handler.id.as_str());
+                    nav.entry(feature.clone()).or_default().push(NavEntry {
+                        slug: page_path.clone(),
+                        title: flow_title.clone(),
+                        kind: "api-flow".into(),
+                    });
+                    all_pages.push(PageEntry {
+                        slug: page_path.clone(),
+                        role: feature.clone(),
+                        title: flow_title,
+                        kind: "api-flow".into(),
+                        path: format!("pages/{}.md", page_path),
+                        json_path: None,
+                        community_id: None,
+                    });
+                    page_count += 1;
+                }
             }
         }
     }

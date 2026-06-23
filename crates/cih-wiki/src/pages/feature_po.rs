@@ -291,7 +291,7 @@ pub fn render_feature_po(
             let slug = slugify(ctrl_name);
             let display = controller_display_name(ctrl_name);
             md.push_str(&format!(
-                "| [{}](api/{}.md) | {} |\n",
+                "| [{}](api/{}/index.md) | {} |\n",
                 display,
                 slug,
                 routes.len()
