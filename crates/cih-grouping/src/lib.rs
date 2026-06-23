@@ -11,7 +11,7 @@ pub use artifact::{
 };
 pub use config::PackageConfig;
 pub use entry::{fnv64_node, FeatureGroupEntry};
-pub use overrides::{apply_overrides, FeatureOverrides};
+pub use overrides::{apply_overrides, FeatureOverrideEntry, FeatureOverrides};
 pub use strategies::embed::{EmbedConfig, EmbedStrategy};
 pub use strategies::hybrid::HybridStrategy;
 pub use strategies::llm::{FeatureLlmCaller, LlmConfig, LlmStrategy};

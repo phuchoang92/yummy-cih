@@ -2,6 +2,7 @@ mod analyze;
 mod db;
 mod discover;
 mod embed;
+mod features_cmd;
 mod file_cache;
 mod group;
 mod group_cmd;
@@ -309,6 +310,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect and manage feature grouping assignments.
+    Features {
+        #[command(subcommand)]
+        command: FeaturesCommand,
+    },
     /// Open the interactive TUI command builder.
     /// Navigate commands on the left, fill options on the right,
     /// then press r to review and run the assembled command.
@@ -409,6 +415,32 @@ enum GroupCommand {
         /// Print sync summary as JSON.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FeaturesCommand {
+    /// Print the current feature groupings table (reads .cih/artifacts-features/).
+    /// Run `discover` first to generate the artifact.
+    Show {
+        /// Repository root with `.cih/artifacts-features/` from a prior discover run.
+        repo: PathBuf,
+        /// Print as JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or update a manual override in .cih/feature-overrides.json.
+    /// Re-run `discover` to apply the override to the artifact.
+    Override {
+        /// Repository root.
+        repo: PathBuf,
+        /// Node ID to lock (e.g. "Class:com.example.PaymentService").
+        node_id: String,
+        /// Feature slug to assign (e.g. "payment").
+        feature: String,
+        /// Optional human-readable reason stored in the sidecar.
+        #[arg(long, default_value = "")]
+        reason: String,
     },
 }
 
@@ -580,15 +612,34 @@ fn main() -> Result<()> {
             let reg = Registry::load();
             if let Some(entry) = reg.find(&name) {
                 let stale = reg.is_stale(&name);
+                let repo_path = std::path::Path::new(&entry.path);
+                let feat_status = features_cmd::load_feature_status(repo_path);
                 if json {
+                    #[derive(serde::Serialize)]
+                    struct FeatureInfo {
+                        feature_count: usize,
+                        node_count: usize,
+                        pinned_count: usize,
+                        strategy: String,
+                        graph_version: String,
+                    }
                     #[derive(serde::Serialize)]
                     struct StatusOutput<'a> {
                         entry: &'a cih_core::RegistryEntry,
                         stale: bool,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        features: Option<FeatureInfo>,
                     }
+                    let features = feat_status.map(|fs| FeatureInfo {
+                        feature_count: fs.feature_count,
+                        node_count: fs.node_count,
+                        pinned_count: fs.pinned_count,
+                        strategy: fs.strategy,
+                        graph_version: fs.graph_version,
+                    });
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&StatusOutput { entry, stale })?
+                        serde_json::to_string_pretty(&StatusOutput { entry, stale, features })?
                     );
                 } else {
                     println!("name:          {}", entry.name);
@@ -606,6 +657,11 @@ fn main() -> Result<()> {
                     println!("routes:        {}", entry.stats.routes);
                     println!("communities:   {}", entry.stats.communities);
                     println!("processes:     {}", entry.stats.processes);
+                    if let Some(fs) = feat_status {
+                        println!("features:      {} ({} nodes, strategy: {})", fs.feature_count, fs.node_count, fs.strategy);
+                        println!("pinned:        {}", fs.pinned_count);
+                        println!("feat_version:  {}", &fs.graph_version[..fs.graph_version.len().min(16)]);
+                    }
                 }
             } else {
                 eprintln!(
@@ -625,6 +681,15 @@ fn main() -> Result<()> {
                 falkor_url: _,
                 json,
             } => group_cmd::run_group_sync(&name, json),
+        },
+        Command::Features { command } => match command {
+            FeaturesCommand::Show { repo, json } => features_cmd::run_features_show(repo, json),
+            FeaturesCommand::Override {
+                repo,
+                node_id,
+                feature,
+                reason,
+            } => features_cmd::run_features_override(repo, node_id, feature, reason),
         },
         Command::Wiki {
             repo,
