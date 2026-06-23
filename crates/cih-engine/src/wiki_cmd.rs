@@ -597,6 +597,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                         llm_model,
                         llm_max_tokens,
                         llm_timeout_secs,
+                        llm_retries,
                         wiki_language,
                         llm_dry_run || llm_debug_evidence,
                     );
@@ -1336,6 +1337,7 @@ fn enrich_controllers(
     model: &str,
     max_tokens: u32,
     timeout_secs: u64,
+    retries: u32,
     language: &str,
     dry_run: bool,
 ) -> HashMap<String, ControllerLlmSummary> {
@@ -1386,16 +1388,38 @@ fn enrich_controllers(
             timeout_secs,
         };
 
-        match adapter.call(api_key, &request) {
-            Ok(response) => {
-                let batch_result = parse_controller_batch(&response.text);
-                result.extend(batch_result);
-                ui_ctrl.inc_ok();
+        let jitter_seed: u64 = batch_names
+            .first()
+            .copied()
+            .unwrap_or("")
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let mut last_err = None;
+        let mut batch_ok = false;
+        for attempt in 0..=(retries as usize) {
+            match adapter.call(api_key, &request) {
+                Ok(response) => {
+                    let batch_result = parse_controller_batch(&response.text);
+                    result.extend(batch_result);
+                    ui_ctrl.inc_ok();
+                    batch_ok = true;
+                    break;
+                }
+                Err(err) => {
+                    if attempt < retries as usize {
+                        let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
+                        tracing::debug!(attempt = attempt + 1, delay_ms = delay, error = %err, "controller batch failed, retrying");
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                        last_err = Some(err);
+                    } else {
+                        last_err = Some(err);
+                    }
+                }
             }
-            Err(err) => {
-                tracing::warn!(error = %err, "controller enrichment batch failed — continuing");
-                ui_ctrl.inc_failed();
-            }
+        }
+        if !batch_ok {
+            tracing::warn!(error = %last_err.unwrap(), "controller enrichment batch failed — continuing");
+            ui_ctrl.inc_failed();
         }
     }
 
