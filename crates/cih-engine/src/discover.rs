@@ -221,6 +221,10 @@ pub(crate) fn run_discover_core(
     );
     ui.finish_with(format!("{} processes", fmt_count(process_output.nodes.len())));
 
+    // Write entrypoints sidecar — persists Scheduled/EventListener methods that are
+    // detected in-memory but not stored in any graph artifact.
+    write_entrypoints_sidecar(repo, &nodes, &edges, process_cfg.min_trace_confidence, &entry_registry);
+
     let mut output_nodes = community_output.nodes;
     output_nodes.extend(process_output.nodes);
     let mut output_edges = community_output.edges;
@@ -517,6 +521,56 @@ struct DiscoverSummary<'a> {
     falkor_edges: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     falkor_error: Option<&'a str>,
+}
+
+/// Record written per method into `.cih/entrypoints.json`.
+#[derive(Serialize)]
+struct EntrypointRecord {
+    method_id: String,
+    kind: String,
+    /// Topic names for EventListener; empty for Scheduled.
+    topics: Vec<String>,
+}
+
+fn write_entrypoints_sidecar(
+    repo: &Path,
+    nodes: &[cih_core::Node],
+    edges: &[cih_core::Edge],
+    min_confidence: f32,
+    registry: &cih_community::EntrypointRegistry,
+) {
+    let scored = cih_community::score_all_entry_points(nodes, edges, min_confidence, registry);
+    let records: Vec<EntrypointRecord> = scored
+        .into_iter()
+        .filter(|ep| {
+            matches!(
+                ep.kind,
+                cih_community::EntrypointKind::Scheduled
+                    | cih_community::EntrypointKind::EventListener
+            )
+        })
+        .map(|ep| EntrypointRecord {
+            method_id: ep.id.as_str().to_string(),
+            kind: ep.kind.as_str().to_string(),
+            topics: ep.event_topics,
+        })
+        .collect();
+
+    if records.is_empty() {
+        return;
+    }
+
+    let path = repo.join(".cih").join("entrypoints.json");
+    match serde_json::to_string_pretty(&records) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!(error = %e, "failed to write entrypoints sidecar");
+            } else {
+                tracing::info!(count = records.len(), path = %path.display(), "entrypoints sidecar written");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to serialize entrypoints"),
+    }
 }
 
 fn read_architecture_hint(repo: &Path) -> ArchitectureHint {

@@ -24,6 +24,8 @@ pub fn render_feature_po(
     llm_full: Option<&HashMap<String, CommunityLlmFull>>,
     feature_llm: Option<&FeatureLlmSummary>,
     flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
+    scheduled_count: usize,
+    listener_count: usize,
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
@@ -283,18 +285,30 @@ pub fn render_feature_po(
         .collect();
     feature_controllers.sort_by_key(|(ctrl, _)| ctrl.as_str());
 
-    if !feature_controllers.is_empty() {
+    if !feature_controllers.is_empty() || scheduled_count > 0 || listener_count > 0 {
         md.push_str("## API Surface\n\n");
-        md.push_str("| Endpoint Group | Routes |\n");
+        md.push_str("| Endpoint Group | Count |\n");
         md.push_str("|---|---|\n");
         for (ctrl_name, routes) in &feature_controllers {
             let slug = slugify(ctrl_name);
             let display = controller_display_name(ctrl_name);
             md.push_str(&format!(
-                "| [{}](api/{}/index.md) | {} |\n",
+                "| [{}](api/{}/index.md) | {} routes |\n",
                 display,
                 slug,
                 routes.len()
+            ));
+        }
+        if scheduled_count > 0 {
+            md.push_str(&format!(
+                "| [Scheduled Jobs](api/scheduled/) | {} jobs |\n",
+                scheduled_count
+            ));
+        }
+        if listener_count > 0 {
+            md.push_str(&format!(
+                "| [Event Listeners](api/events/) | {} listeners |\n",
+                listener_count
             ));
         }
         md.push('\n');

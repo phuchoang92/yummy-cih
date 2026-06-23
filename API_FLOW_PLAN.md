@@ -18,7 +18,7 @@ This is a multi-phase effort. Each phase is independently releasable and adds cl
 
 ---
 
-## Phase 1 — Rename & Restructure Navigation  *(~1 day, low risk)*
+## Phase 1 — Rename & Restructure Navigation  *(DONE)*
 
 **Goal:** Replace the raw "controllers/" section with a named "API Surface" section in the nav and feature index page. Quick UX win, zero data changes needed.
 
@@ -40,7 +40,7 @@ Run wiki, open `/docs/order/` — sidebar shows "API Surface" → "Cart API", "O
 
 ---
 
-## Phase 2 — Per-Endpoint Flow Pages  *(~3 days, medium effort)*
+## Phase 2 — Per-Endpoint Flow Pages  *(DONE)*
 
 **Goal:** Each HTTP route gets its own dedicated page showing its full call chain with LLM descriptions, instead of all routes being listed in one flat table per controller.
 
@@ -108,7 +108,7 @@ Open `/docs/order/api/add-item-to-cart` — shows step table with descriptions a
 
 ---
 
-## Phase 3 — Surface Scheduled Jobs & Event Listeners  *(~3 days, medium effort)*
+## Phase 3 — Surface Scheduled Jobs & Event Listeners  *(DONE)*
 
 **Goal:** Detect `@Scheduled` and `@KafkaListener` entry points and render them as dedicated sections alongside HTTP routes in the "API Surface" section.
 

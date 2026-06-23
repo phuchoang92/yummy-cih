@@ -28,6 +28,16 @@ use features::{build_dev_page_paths, group_communities_by_feature, group_nodes_b
 use graph::node_stereotype;
 use slugify::slugify;
 
+/// Scheduled job or event-listener method detected during `discover`.
+/// Loaded from `.cih/entrypoints.json` and threaded into wiki generation.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct EntrypointRecord {
+    pub method_id: String,
+    /// "scheduled" or "event_listener"
+    pub kind: String,
+    pub topics: Vec<String>,
+}
+
 /// Pre-computed short AI summaries for one community (all three roles).
 /// Used in `llm-summary` mode. Produced by `enrich_communities()`; passed into `WikiInput`.
 #[derive(Clone, Debug, Default)]
@@ -141,6 +151,9 @@ pub struct WikiInput<'a> {
     /// When a pre-computed artifact is available, `node_id` gives a direct lookup;
     /// otherwise fall back to file-path heuristics.
     pub feature_of: Box<dyn Fn(&str, &str) -> String + Send>,
+    /// Scheduled jobs and event listeners from `.cih/entrypoints.json`.
+    /// Empty when the sidecar does not exist (no such methods in the repo).
+    pub entrypoints: Vec<EntrypointRecord>,
 }
 
 #[derive(Debug)]
@@ -497,6 +510,23 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     // class_id → dev page slug (populated during dev page generation below).
     let mut class_dev_slugs: HashMap<String, String> = HashMap::new();
 
+    // Pre-compute per-feature entrypoint counts for the PO page API Surface table.
+    let mut feature_scheduled_counts: HashMap<String, usize> = HashMap::new();
+    let mut feature_listener_counts: HashMap<String, usize> = HashMap::new();
+    for ep in &input.entrypoints {
+        let file = graph
+            .nodes_by_id
+            .get(ep.method_id.as_str())
+            .map(|n| n.file.as_str())
+            .unwrap_or("");
+        let feature = (input.feature_of)(ep.method_id.as_str(), file);
+        match ep.kind.as_str() {
+            "scheduled" => *feature_scheduled_counts.entry(feature).or_insert(0) += 1,
+            "event_listener" => *feature_listener_counts.entry(feature).or_insert(0) += 1,
+            _ => {}
+        }
+    }
+
     // Per-feature pages
     for group in &feature_groups {
         let feature = &group.feature;
@@ -534,6 +564,8 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             input.llm_full.as_ref(),
             feature_llm,
             input.flow_llm_summaries.as_ref(),
+            feature_scheduled_counts.get(feature.as_str()).copied().unwrap_or(0),
+            feature_listener_counts.get(feature.as_str()).copied().unwrap_or(0),
         );
         std::fs::write(out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -831,6 +863,134 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                     });
                     page_count += 1;
                 }
+            }
+        }
+    }
+
+    // ── Scheduled jobs & event listeners ────────────────────────────────────
+    if !input.entrypoints.is_empty() {
+        // Build a flat method-desc map from all controller LLM summaries.
+        let all_method_desc: HashMap<String, String> = input
+            .controller_summaries
+            .iter()
+            .flat_map(|m| m.values())
+            .flat_map(|s| s.method_descriptions.iter())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Group by feature
+        let mut by_feature_scheduled: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
+            BTreeMap::new();
+        let mut by_feature_events: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
+            BTreeMap::new();
+
+        for ep in &input.entrypoints {
+            let file = graph
+                .nodes_by_id
+                .get(ep.method_id.as_str())
+                .map(|n| n.file.as_str())
+                .unwrap_or("");
+            let feature = (input.feature_of)(ep.method_id.as_str(), file);
+            match ep.kind.as_str() {
+                "scheduled" => by_feature_scheduled.entry(feature).or_default().push(ep),
+                "event_listener" => by_feature_events.entry(feature).or_default().push(ep),
+                _ => {}
+            }
+        }
+
+        // Write pages for each feature's scheduled jobs
+        for (feature, entries) in &by_feature_scheduled {
+            let api_dir = out_dir.join(format!("pages/{}/api", feature));
+            std::fs::create_dir_all(&api_dir)?;
+            // Ensure api/_category_.json exists (may not if no HTTP controllers).
+            let cat_path = api_dir.join("_category_.json");
+            if !cat_path.exists() {
+                std::fs::write(&cat_path, "{\"position\": 3, \"label\": \"API Surface\"}\n")?;
+            }
+            let sched_dir = api_dir.join("scheduled");
+            std::fs::create_dir_all(&sched_dir)?;
+            std::fs::write(
+                sched_dir.join("_category_.json"),
+                "{\"label\": \"Scheduled Jobs\", \"collapsible\": true, \"collapsed\": false}\n",
+            )?;
+            for (pos, ep) in entries.iter().enumerate() {
+                let slug = pages::api_flow::handler_slug(ep.method_id.as_str());
+                let md = pages::api_flow::render_scheduled_flow_page(
+                    ep.method_id.as_str(),
+                    pos + 1,
+                    &graph,
+                    &class_dev_slugs,
+                    &all_method_desc,
+                );
+                let page_path = format!("{}/api/scheduled/{}", feature, slug);
+                std::fs::write(
+                    out_dir.join(format!("pages/{}.md", page_path)),
+                    &md,
+                )?;
+                let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
+                nav.entry(feature.clone()).or_default().push(NavEntry {
+                    slug: page_path.clone(),
+                    title: flow_title.clone(),
+                    kind: "scheduled-flow".into(),
+                });
+                all_pages.push(PageEntry {
+                    slug: page_path.clone(),
+                    role: feature.clone(),
+                    title: flow_title,
+                    kind: "scheduled-flow".into(),
+                    path: format!("pages/{}.md", page_path),
+                    json_path: None,
+                    community_id: None,
+                });
+                page_count += 1;
+            }
+        }
+
+        // Write pages for each feature's event listeners
+        for (feature, entries) in &by_feature_events {
+            let api_dir = out_dir.join(format!("pages/{}/api", feature));
+            std::fs::create_dir_all(&api_dir)?;
+            let cat_path = api_dir.join("_category_.json");
+            if !cat_path.exists() {
+                std::fs::write(&cat_path, "{\"position\": 3, \"label\": \"API Surface\"}\n")?;
+            }
+            let events_dir = api_dir.join("events");
+            std::fs::create_dir_all(&events_dir)?;
+            std::fs::write(
+                events_dir.join("_category_.json"),
+                "{\"label\": \"Event Listeners\", \"collapsible\": true, \"collapsed\": false}\n",
+            )?;
+            for (pos, ep) in entries.iter().enumerate() {
+                let slug = pages::api_flow::handler_slug(ep.method_id.as_str());
+                let md = pages::api_flow::render_listener_flow_page(
+                    ep.method_id.as_str(),
+                    ep.topics.as_slice(),
+                    pos + 1,
+                    &graph,
+                    &class_dev_slugs,
+                    &all_method_desc,
+                );
+                let page_path = format!("{}/api/events/{}", feature, slug);
+                std::fs::write(
+                    out_dir.join(format!("pages/{}.md", page_path)),
+                    &md,
+                )?;
+                let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
+                nav.entry(feature.clone()).or_default().push(NavEntry {
+                    slug: page_path.clone(),
+                    title: flow_title.clone(),
+                    kind: "listener-flow".into(),
+                });
+                all_pages.push(PageEntry {
+                    slug: page_path.clone(),
+                    role: feature.clone(),
+                    title: flow_title,
+                    kind: "listener-flow".into(),
+                    path: format!("pages/{}.md", page_path),
+                    json_path: None,
+                    community_id: None,
+                });
+                page_count += 1;
             }
         }
     }

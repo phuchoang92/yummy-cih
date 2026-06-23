@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use cih_core::{community_id, process_id, Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 use petgraph::graph::NodeIndex;
 
+pub use entry_points::{EntrypointKind, ScoredEntrypoint};
 pub use graph::{build_calls_digraph, build_community_graph, is_large_graph};
 pub use registry::EntrypointRegistry;
 
@@ -756,6 +757,23 @@ fn slugify(name: &str) -> String {
     } else {
         out
     }
+}
+
+/// Convenience wrapper: build a calls digraph from raw nodes/edges, run
+/// `score_entry_points`, and return all scored entry points.  Used by
+/// `cih-engine discover` to write the entrypoints sidecar without duplicating
+/// the digraph-building logic.
+pub fn score_all_entry_points(
+    nodes: &[Node],
+    edges: &[Edge],
+    min_confidence: f32,
+    registry: &EntrypointRegistry,
+) -> Vec<ScoredEntrypoint> {
+    let (digraph, node_index) = graph::build_calls_digraph(nodes, edges, min_confidence);
+    if digraph.node_count() == 0 {
+        return Vec::new();
+    }
+    entry_points::score_entry_points(nodes, edges, &digraph, &node_index, registry)
 }
 
 #[cfg(test)]

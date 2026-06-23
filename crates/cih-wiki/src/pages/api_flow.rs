@@ -291,3 +291,164 @@ pub fn render_api_flow_page(
 
     md
 }
+
+/// Shared inner body for Scheduled and EventListener flow pages.
+/// Writes the call-chain table, events section, and Technical Reference links.
+fn render_entrypoint_body(
+    method_id: &str,
+    graph: &WikiGraph,
+    class_dev_slugs: &HashMap<String, String>,
+    method_desc: &HashMap<String, String>,
+) -> String {
+    let mut md = String::new();
+    let chain = build_call_chain(method_id, graph, 4);
+    if chain.is_empty() {
+        return md;
+    }
+
+    md.push_str("## Flow\n\n");
+
+    let step_dbs: Vec<Vec<(String, bool, bool)>> =
+        chain.iter().map(|id| db_access(id.as_str(), graph)).collect();
+    let has_db = step_dbs.iter().any(|v| !v.is_empty());
+
+    if has_db {
+        md.push_str("| # | Class | Method | What it does | DB access |\n");
+        md.push_str("|---|---|---|---|---|\n");
+    } else {
+        md.push_str("| # | Class | Method | What it does |\n");
+        md.push_str("|---|---|---|---|\n");
+    }
+
+    let mut seen_class_ids: Vec<String> = Vec::new();
+    for (i, mid) in chain.iter().enumerate() {
+        let cls = class_simple_name_from_method_id(mid.as_str());
+        let meth = method_name_from_id(mid.as_str());
+        let cls_id = class_id_from_method_id(mid.as_str(), graph);
+        if !seen_class_ids.contains(&cls_id) {
+            seen_class_ids.push(cls_id);
+        }
+        let desc = method_desc.get(mid.as_str()).map(|s| s.as_str()).unwrap_or("");
+        if has_db {
+            let db_str = if step_dbs[i].is_empty() {
+                "—".to_string()
+            } else {
+                step_dbs[i]
+                    .iter()
+                    .map(|(name, r, w)| match (r, w) {
+                        (true, true) => format!("`{}` R+W", name),
+                        (true, false) => format!("`{}` R", name),
+                        (false, true) => format!("`{}` W", name),
+                        _ => format!("`{}`", name),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            md.push_str(&format!(
+                "| {} | `{}` | `{}` | {} | {} |\n",
+                i + 1, cls, meth, desc, db_str
+            ));
+        } else {
+            md.push_str(&format!(
+                "| {} | `{}` | `{}` | {} |\n",
+                i + 1, cls, meth, desc
+            ));
+        }
+    }
+    md.push('\n');
+
+    // Events published
+    let mut published: BTreeMap<String, ()> = BTreeMap::new();
+    for mid in &chain {
+        for eid in graph.publishes.get(mid.as_str()).into_iter().flatten() {
+            let name = graph.nodes_by_id.get(eid.as_str())
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| eid.clone());
+            published.insert(name, ());
+        }
+    }
+    if !published.is_empty() {
+        md.push_str("## Events\n\n");
+        md.push_str("| Direction | Topic |\n");
+        md.push_str("|---|---|\n");
+        for topic in published.keys() {
+            md.push_str(&format!("| Publishes | `{}` |\n", topic));
+        }
+        md.push('\n');
+    }
+
+    // Technical Reference
+    let ref_links: Vec<String> = seen_class_ids
+        .iter()
+        .filter_map(|cls_id| {
+            class_dev_slugs.get(cls_id.as_str()).map(|slug| {
+                let simple = cls_id
+                    .trim_start_matches("Class:")
+                    .trim_start_matches("Interface:")
+                    .trim_start_matches("Enum:")
+                    .trim_start_matches("Record:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(cls_id.as_str());
+                format!("- [{}](../../dev/{}.md)", simple, slug)
+            })
+        })
+        .collect();
+
+    if !ref_links.is_empty() {
+        md.push_str("## Technical Reference\n\n");
+        for link in &ref_links {
+            md.push_str(link);
+            md.push('\n');
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
+pub fn render_scheduled_flow_page(
+    method_id: &str,
+    position: usize,
+    graph: &WikiGraph,
+    class_dev_slugs: &HashMap<String, String>,
+    method_desc: &HashMap<String, String>,
+) -> String {
+    let title = handler_title(method_id);
+    let mut md = String::new();
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: {}\nrole: po\n---\n\n",
+        title, position
+    ));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
+    md.push_str(&format!("# {}\n\n", title));
+    md.push_str("> Scheduled job\n\n");
+    md.push_str(&render_entrypoint_body(method_id, graph, class_dev_slugs, method_desc));
+    md
+}
+
+pub fn render_listener_flow_page(
+    method_id: &str,
+    topics: &[String],
+    position: usize,
+    graph: &WikiGraph,
+    class_dev_slugs: &HashMap<String, String>,
+    method_desc: &HashMap<String, String>,
+) -> String {
+    let title = handler_title(method_id);
+    let mut md = String::new();
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: {}\nrole: po\n---\n\n",
+        title, position
+    ));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
+    md.push_str(&format!("# {}\n\n", title));
+    if topics.is_empty() {
+        md.push_str("> Event listener\n\n");
+    } else {
+        let topic_list = topics.iter().map(|t| format!("`{}`", t)).collect::<Vec<_>>().join(", ");
+        md.push_str(&format!("> Listens to: {}\n\n", topic_list));
+    }
+    md.push_str(&render_entrypoint_body(method_id, graph, class_dev_slugs, method_desc));
+    md
+}

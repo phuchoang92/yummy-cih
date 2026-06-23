@@ -6,7 +6,7 @@ use petgraph::Direction;
 
 use crate::registry::EntrypointRegistry;
 
-pub(crate) enum EntrypointKind {
+pub enum EntrypointKind {
     HttpRoute,
     EventListener,
     Scheduled,
@@ -15,7 +15,7 @@ pub(crate) enum EntrypointKind {
 }
 
 impl EntrypointKind {
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             EntrypointKind::HttpRoute => "http_route",
             EntrypointKind::EventListener => "event_listener",
@@ -25,14 +25,14 @@ impl EntrypointKind {
         }
     }
 
-    pub(crate) fn business_flow(&self) -> bool {
+    pub fn business_flow(&self) -> bool {
         matches!(
             self,
             EntrypointKind::HttpRoute | EntrypointKind::EventListener
         )
     }
 
-    pub(crate) fn business_surface(&self) -> &'static str {
+    pub fn business_surface(&self) -> &'static str {
         match self {
             EntrypointKind::HttpRoute => "http",
             EntrypointKind::EventListener => "event",
@@ -43,7 +43,7 @@ impl EntrypointKind {
     }
 }
 
-pub(crate) struct ScoredEntrypoint {
+pub struct ScoredEntrypoint {
     pub id: NodeId,
     pub score: f64,
     pub kind: EntrypointKind,

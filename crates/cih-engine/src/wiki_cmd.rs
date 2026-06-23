@@ -881,6 +881,15 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     let llm_info_for_output = llm_info.clone();
 
+    let entrypoints = {
+        let path = repo.join(".cih").join("entrypoints.json");
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => serde_json::from_str::<Vec<cih_wiki::EntrypointRecord>>(&raw)
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    };
+
     let input = WikiInput {
         nodes: &nodes,
         edges: &edges,
@@ -911,6 +920,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         filter_feature,
         bodies,
         feature_of,
+        entrypoints,
     };
 
     tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");
