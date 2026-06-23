@@ -4,7 +4,7 @@ use cih_core::Node;
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::slugify::slugify;
-use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary};
+use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
 fn capitalize(s: &str) -> String {
     let mut out = s.to_string();
@@ -23,6 +23,7 @@ pub fn render_feature_po(
     llm_summaries: Option<&HashMap<String, CommunityLlmSummary>>,
     llm_full: Option<&HashMap<String, CommunityLlmFull>>,
     feature_llm: Option<&FeatureLlmSummary>,
+    flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
@@ -229,6 +230,43 @@ pub fn render_feature_po(
             ));
         }
         md.push('\n');
+    }
+
+    // Key Workflows section — per-flow narrative + collapsible step table
+    if let Some(flow_map) = flow_llm_summaries {
+        let mut any_flows = false;
+        for cid in community_ids {
+            let procs = graph.processes_for_community(cid, true);
+            for proc_id in &procs {
+                let Some(fs) = flow_map.get(proc_id.as_str()) else { continue };
+                if fs.business_impact.is_empty() && fs.narrative.is_empty() {
+                    continue;
+                }
+                if !any_flows {
+                    md.push_str("## Key Workflows\n\n");
+                    any_flows = true;
+                }
+                if let Some(proc_node) = graph.nodes_by_id.get(proc_id.as_str()) {
+                    md.push_str(&format!("### {}\n\n", proc_node.name));
+                }
+                if !fs.business_impact.is_empty() {
+                    md.push_str(&fs.business_impact);
+                    md.push_str("\n\n");
+                }
+                if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
+                    if !steps.is_empty() {
+                        md.push_str("<details>\n<summary>Steps</summary>\n\n");
+                        md.push_str("| Step | What it does |\n");
+                        md.push_str("|---|---|\n");
+                        for (i, step) in steps.iter().enumerate() {
+                            let desc = fs.step_descriptions.get(i).map(|s| s.as_str()).unwrap_or("");
+                            md.push_str(&format!("| `{}` | {} |\n", step.symbol.name, desc));
+                        }
+                        md.push_str("\n</details>\n\n");
+                    }
+                }
+            }
+        }
     }
 
     // Controllers section — one entry per controller class in this feature

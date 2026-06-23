@@ -65,6 +65,18 @@ pub struct FeatureLlmSummary {
     pub ba_business_rules: String,
 }
 
+/// LLM-generated summary for a single process trace (flow).
+/// One per process_id; produced by the per-flow enrichment pass in `cih-engine`.
+#[derive(Clone, Debug, Default)]
+pub struct FlowLlmSummary {
+    /// 2-3 sentence narrative of the full flow for BA pages.
+    pub narrative: String,
+    /// 1-2 sentence business impact for PO pages.
+    pub business_impact: String,
+    /// One sentence per step, indexed by step_number - 1 (0-based).
+    pub step_descriptions: Vec<String>,
+}
+
 /// Richer per-community LLM content for `llm-full` mode.
 /// Each field is a markdown string that is inserted into the relevant page section.
 #[derive(Clone, Debug, Default)]
@@ -113,6 +125,8 @@ pub struct WikiInput<'a> {
     pub controller_summaries: Option<HashMap<String, ControllerLlmSummary>>,
     /// Keyed by feature name. One entry per wiki feature from the feature-enrichment LLM pass.
     pub feature_llm_summaries: Option<HashMap<String, FeatureLlmSummary>>,
+    /// Keyed by process_id. One entry per flow from the per-flow enrichment LLM pass.
+    pub flow_llm_summaries: Option<HashMap<String, FlowLlmSummary>>,
     /// Grouping strategy: "package" (by Java package path) or "graph"/"llm" (Leiden communities).
     pub grouping: String,
     /// Only generate pages for features whose name contains one of these substrings
@@ -216,6 +230,26 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     }
 
     let dev_paths = build_dev_page_paths(&feature_groups, &graph);
+
+    // Flat method_id → description lookup built once from flow_llm_summaries.
+    let method_flow_desc: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        if let Some(flow_map) = &input.flow_llm_summaries {
+            for (proc_id, summary) in flow_map {
+                if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
+                    for step in steps {
+                        let idx = (step.step_number as usize).saturating_sub(1);
+                        if let Some(desc) = summary.step_descriptions.get(idx) {
+                            if !desc.is_empty() {
+                                map.insert(step.symbol.id.as_str().to_string(), desc.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        map
+    };
 
     let module_tree = input.module_tree.unwrap_or_else(|| {
         build_graph_module_tree(
@@ -450,6 +484,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             input.llm_summaries.as_ref(),
             input.llm_full.as_ref(),
             feature_llm,
+            input.flow_llm_summaries.as_ref(),
         );
         std::fs::write(out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -476,6 +511,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
             input.llm_summaries.as_ref(),
             input.llm_full.as_ref(),
             feature_llm,
+            input.flow_llm_summaries.as_ref(),
         );
         std::fs::write(out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
         nav.entry(feature.clone()).or_default().push(NavEntry {
@@ -606,7 +642,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                     &synthesized
                 }
             };
-            let md = pages::dev::render_dev_class(&graph, cls_node, &input.bodies);
+            let md = pages::dev::render_dev_class(&graph, cls_node, &input.bodies, &method_flow_desc);
             let json_val = pages::dev::render_dev_class_json(&graph, cls_node);
             std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &md)?;
             std::fs::write(

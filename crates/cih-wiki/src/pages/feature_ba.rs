@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::WikiGraph;
 use crate::mermaid;
-use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary};
+use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
 fn capitalize(s: &str) -> String {
     let mut out = s.to_string();
@@ -21,6 +21,7 @@ pub fn render_feature_ba(
     llm_summaries: Option<&HashMap<String, CommunityLlmSummary>>,
     llm_full: Option<&HashMap<String, CommunityLlmFull>>,
     feature_llm: Option<&FeatureLlmSummary>,
+    flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
 ) -> String {
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
@@ -126,20 +127,34 @@ pub fn render_feature_ba(
         for proc_id in &procs {
             if let Some(proc_node) = graph.nodes_by_id.get(proc_id) {
                 md.push_str(&format!("#### {}\n\n", proc_node.name));
+                let flow_summary = flow_llm_summaries.and_then(|m| m.get(proc_id.as_str()));
                 if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
-                    for (i, step) in steps.iter().enumerate() {
-                        let loc = if !step.symbol.file.is_empty()
-                            && step.symbol.range.start_line > 0
-                        {
-                            format!(" — `{}:{}`", step.symbol.file, step.symbol.range.start_line)
-                        } else if !step.symbol.file.is_empty() {
-                            format!(" — `{}`", step.symbol.file)
-                        } else {
-                            String::new()
-                        };
-                        md.push_str(&format!("{}. `{}`{}\n", i + 1, step.symbol.name, loc));
+                    if let Some(fs) = flow_summary {
+                        if !fs.narrative.is_empty() {
+                            md.push_str(&format!("*{}*\n\n", fs.narrative));
+                        }
+                        md.push_str("| Step | Method | What it does |\n");
+                        md.push_str("|---|---|---|\n");
+                        for (i, step) in steps.iter().enumerate() {
+                            let desc = fs.step_descriptions.get(i).map(|s| s.as_str()).unwrap_or("");
+                            md.push_str(&format!("| {} | `{}` | {} |\n", i + 1, step.symbol.name, desc));
+                        }
+                        md.push('\n');
+                    } else {
+                        for (i, step) in steps.iter().enumerate() {
+                            let loc = if !step.symbol.file.is_empty()
+                                && step.symbol.range.start_line > 0
+                            {
+                                format!(" — `{}:{}`", step.symbol.file, step.symbol.range.start_line)
+                            } else if !step.symbol.file.is_empty() {
+                                format!(" — `{}`", step.symbol.file)
+                            } else {
+                                String::new()
+                            };
+                            md.push_str(&format!("{}. `{}`{}\n", i + 1, step.symbol.name, loc));
+                        }
+                        md.push('\n');
                     }
-                    md.push('\n');
                 }
             }
         }

@@ -10,8 +10,8 @@ use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
     generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary,
-    FeatureMetaEntry, WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo, WikiMeta,
-    WikiModuleCacheEntry, WikiModuleTree,
+    FeatureMetaEntry, FlowLlmSummary, WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo,
+    WikiMeta, WikiModuleCacheEntry, WikiModuleTree,
 };
 use rayon::prelude::*;
 
@@ -820,6 +820,51 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         None
     };
 
+    // Per-flow LLM enrichment: one LLM call per process trace.
+    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> =
+        if effective_run_llm && !llm_no_call {
+            let total_flows = wiki_graph.process_nodes.len();
+            if total_flows > 0 {
+                tracing::info!(flows = total_flows, "starting per-flow LLM enrichment");
+                let mut ui_flow = PhaseProgress::new();
+                if json { ui_flow.hide(); }
+                ui_flow.start_phase("Enriching flows", Some(total_flows as u64));
+                let mut map = HashMap::new();
+                for proc in &wiki_graph.process_nodes {
+                    ui_flow.tick(proc.name.as_str());
+                    match enrich_one_flow(
+                        proc,
+                        &wiki_graph,
+                        adapter.as_ref().unwrap().as_ref(),
+                        api_key.as_deref(),
+                        llm_model,
+                        llm_max_tokens,
+                        llm_timeout_secs,
+                        llm_retries,
+                        &wiki_language,
+                        llm_debug_evidence,
+                        llm_dry_run,
+                    ) {
+                        Ok(summary) => {
+                            map.insert(proc.id.as_str().to_string(), summary);
+                            ui_flow.inc_ok();
+                        }
+                        Err(err) => {
+                            tracing::warn!(flow = %proc.id, error = %err, "flow LLM enrichment failed");
+                            ui_flow.inc_failed();
+                        }
+                    }
+                }
+                ui_flow.finish_phase();
+                tracing::info!(enriched = map.len(), "per-flow LLM enrichment complete");
+                if map.is_empty() { None } else { Some(map) }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     // Collect evidence packs for --save-evidence
     let save_evidence_map: Option<HashMap<String, String>> = if save_evidence {
         let map: HashMap<String, String> = community_nodes
@@ -861,6 +906,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         save_evidence: save_evidence_map,
         controller_summaries,
         feature_llm_summaries: feature_llm_map,
+        flow_llm_summaries: flow_llm_map,
         grouping: grouping.to_string(),
         filter_feature,
         bodies,
@@ -1545,6 +1591,243 @@ fn filter_communities_by_route(
         );
     }
     communities
+}
+
+/// Build evidence text for a single process trace (call chain).
+/// Format: triggering route if any, then per-step context, capped at 2000 chars.
+fn build_flow_evidence(process_node: &cih_core::Node, graph: &WikiGraph) -> String {
+    const MAX_FLOW_EVIDENCE: usize = 2_000;
+    let proc_id = process_node.id.as_str();
+    let mut out = String::new();
+
+    // Triggering route from props["route"]
+    if let Some(route) = process_node
+        .props
+        .as_ref()
+        .and_then(|p| p.get("route"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!("Triggered by: {}\n\n", route));
+    }
+
+    let Some(steps) = graph.process_steps.get(proc_id) else {
+        return out;
+    };
+
+    out.push_str("Steps:\n");
+    for step in steps {
+        let method_id = step.symbol.id.as_str();
+
+        // Derive class name from method id (Method:fqcn#name → SimpleClass)
+        let class_name = method_id
+            .split_once('#')
+            .map(|(prefix, _)| {
+                prefix
+                    .trim_start_matches("Method:")
+                    .trim_start_matches("Constructor:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(prefix)
+            })
+            .unwrap_or("");
+
+        // Stereotype of the class
+        let stereotype = method_id
+            .split_once('#')
+            .and_then(|(prefix, _)| {
+                let fqcn = prefix
+                    .trim_start_matches("Method:")
+                    .trim_start_matches("Constructor:");
+                let cls_id = format!("Class:{}", fqcn);
+                graph
+                    .nodes_by_id
+                    .get(&cls_id)
+                    .and_then(cih_wiki::graph::node_stereotype)
+            })
+            .unwrap_or("");
+
+        // Outgoing calls (up to 4)
+        let empty_calls: Vec<String> = Vec::new();
+        let calls: Vec<&str> = graph
+            .calls_out
+            .get(method_id)
+            .unwrap_or(&empty_calls)
+            .iter()
+            .take(4)
+            .filter_map(|cid| graph.nodes_by_id.get(cid).map(|n| n.name.as_str()))
+            .collect();
+
+        // DB tables (reads/writes)
+        let mut tables: Vec<String> = Vec::new();
+        if let Some(qids) = graph.executes_query.get(method_id) {
+            for qid in qids.iter().take(4) {
+                for tid in graph.query_reads_table.get(qid.as_str()).into_iter().flatten().take(2) {
+                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid);
+                    tables.push(format!("{}(r)", name));
+                }
+                for tid in graph.query_writes_table.get(qid.as_str()).into_iter().flatten().take(2) {
+                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid);
+                    tables.push(format!("{}(w)", name));
+                }
+            }
+        }
+
+        let mut line = format!(
+            "[{}] {} — {} ({})",
+            step.step_number,
+            step.symbol.name,
+            class_name,
+            if stereotype.is_empty() { "?" } else { stereotype }
+        );
+        if !calls.is_empty() {
+            line.push_str(&format!(" | calls: {}", calls.join(", ")));
+        }
+        if !tables.is_empty() {
+            line.push_str(&format!(" | tables: {}", tables.join(", ")));
+        }
+        line.push('\n');
+
+        if out.len() + line.len() > MAX_FLOW_EVIDENCE {
+            break;
+        }
+        out.push_str(&line);
+    }
+
+    out
+}
+
+fn enrich_one_flow(
+    process_node: &cih_core::Node,
+    graph: &WikiGraph,
+    adapter: &dyn LlmAdapter,
+    api_key: Option<&str>,
+    model: &str,
+    max_tokens: u32,
+    timeout_secs: u64,
+    retries: u32,
+    language: &str,
+    debug_evidence: bool,
+    dry_run: bool,
+) -> Result<FlowLlmSummary> {
+    let evidence = build_flow_evidence(process_node, graph);
+    let step_count = graph
+        .process_steps
+        .get(process_node.id.as_str())
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    let mut system = String::from(
+        "You are a code documentation assistant. Describe this business process \
+         based solely on the provided evidence. Do not invent behavior not shown.",
+    );
+    if language != "en" {
+        system.push_str(&format!(" Write all documentation in language: {}.", language));
+    }
+    let evidence_str = if evidence.trim().is_empty() { "none" } else { &evidence };
+    let user = format!(
+        r#"Process: "{name}"
+
+{evidence}
+
+Respond ONLY with this JSON object (no extra commentary):
+{{
+  "narrative": "<2-3 sentences describing this flow for a business analyst>",
+  "business_impact": "<1-2 sentences describing the business value for a product owner>",
+  "step_descriptions": [<one quoted sentence per step, {step_count} total>]
+}}"#,
+        name = process_node.name,
+        evidence = evidence_str,
+        step_count = step_count,
+    );
+
+    if debug_evidence {
+        println!("--- [flow evidence] process: {} ---", process_node.name);
+        println!("{}", evidence_str);
+        return Ok(FlowLlmSummary {
+            narrative: format!("[debug-evidence] {}", process_node.name),
+            business_impact: String::new(),
+            step_descriptions: vec!["[debug]".into(); step_count],
+        });
+    }
+    if dry_run {
+        println!("--- [dry-run] flow: {} ---", process_node.name);
+        println!("System:\n{}\n", system);
+        println!("User:\n{}", user);
+        return Ok(FlowLlmSummary {
+            narrative: format!("[dry-run] {}", process_node.name),
+            business_impact: String::new(),
+            step_descriptions: vec!["[dry-run]".into(); step_count],
+        });
+    }
+
+    let req = LlmRequest {
+        system,
+        user,
+        model: model.to_string(),
+        max_tokens,
+        timeout_secs,
+    };
+    let jitter_seed: u64 = process_node
+        .id
+        .as_str()
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let mut last_err = None;
+    for attempt in 0..=(retries as usize) {
+        match adapter.call(api_key, &req).and_then(|r| parse_flow_summary(&r.text, step_count)) {
+            Ok(summary) => return Ok(summary),
+            Err(err) => {
+                if attempt < retries as usize {
+                    let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
+                    tracing::debug!(attempt = attempt + 1, delay_ms = delay, error = %err, "flow LLM call failed, retrying");
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    last_err = Some(err);
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
+fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
+    let stripped = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let json_str = if let (Some(s), Some(e)) = (stripped.find('{'), stripped.rfind('}')) {
+        if s <= e { &stripped[s..=e] } else { stripped }
+    } else {
+        stripped
+    };
+    let val: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse flow LLM response: {e}: {:?}",
+            &text[..text.len().min(200)]
+        )
+    })?;
+    let narrative = val["narrative"].as_str().unwrap_or("").to_string();
+    let business_impact = val["business_impact"].as_str().unwrap_or("").to_string();
+    let step_descriptions: Vec<String> = val["step_descriptions"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    // Pad to step_count if LLM returned fewer
+    let mut descs = step_descriptions;
+    descs.resize(step_count, String::new());
+
+    if narrative.is_empty() && business_impact.is_empty() && descs.iter().all(|s| s.is_empty()) {
+        bail!("flow LLM response did not contain any expected fields");
+    }
+    Ok(FlowLlmSummary { narrative, business_impact, step_descriptions: descs })
 }
 
 fn retain_matching_feature_groups(

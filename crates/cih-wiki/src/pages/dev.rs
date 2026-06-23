@@ -626,6 +626,7 @@ pub fn render_dev_class(
     graph: &WikiGraph,
     cls: &Node,
     bodies: &HashMap<String, BodyEntry>,
+    method_desc: &HashMap<String, String>,
 ) -> String {
     let cls_id = cls.id.as_str();
     let cls_name = &cls.name;
@@ -713,6 +714,11 @@ pub fn render_dev_class(
                     md.push_str(&format!("- `{}`\n", call));
                 }
                 md.push('\n');
+            }
+
+            // Per-flow description blockquote (from flow LLM enrichment)
+            if let Some(desc) = method_desc.get(method.id.as_str()) {
+                md.push_str(&format!("> {}\n\n", desc));
             }
 
             // Source body block
