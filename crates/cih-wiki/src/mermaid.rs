@@ -15,9 +15,11 @@ fn sanitize(s: &str) -> String {
 }
 
 /// Escape a label for use in a Mermaid `sequenceDiagram` message.
+/// Mermaid's sequenceDiagram parser rejects HTML entities in message text,
+/// so angle brackets must become plain parens rather than &lt;/&gt;.
 fn sanitize_seq(s: &str) -> String {
-    s.replace('<', "&lt;")
-        .replace('>', "&gt;")
+    s.replace('<', "(")
+        .replace('>', ")")
         .replace('\n', " ")
         .replace(':', ";")
         .replace("--", "—")
