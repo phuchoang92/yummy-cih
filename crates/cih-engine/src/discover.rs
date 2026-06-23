@@ -4,16 +4,27 @@ use std::process;
 use anyhow::{Context, Result};
 use cih_core::{ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind, RepoMap, VersionId};
 use cih_grouping::{
-    apply_overrides, feature_artifact_dir, prune_feature_artifacts, write_feature_artifacts,
-    FeatureOverrides, FeatureStrategy, PackageConfig, StrategyInput,
+    apply_overrides, feature_artifact_dir, find_feature_artifact_dir, prune_feature_artifacts,
+    read_feature_artifact, write_feature_artifacts, FeatureOverrides, FeatureStrategy,
+    PackageConfig, StrategyInput,
 };
 
-use crate::grouping::build_feature_strategy;
+use crate::grouping::{build_feature_strategy, FeatureLlmOptions};
 use serde::Serialize;
 
 use crate::db::{load_many_to_falkor, LoadOutcome};
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
 use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+
+/// LLM provider config for the feature classification stage.
+pub(crate) struct FeatureLlmConfig {
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub max_tokens: u32,
+    pub timeout_secs: u64,
+}
 
 /// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
@@ -24,8 +35,10 @@ pub(crate) struct DiscoverOverrides {
     pub max_processes: Option<usize>,
     pub max_branching: Option<usize>,
     pub min_trace_confidence: Option<f32>,
-    /// Feature classification strategy: "package" (default), "structural", "hybrid".
+    /// Feature classification strategy: "package" (default), "structural", "hybrid", "llm".
     pub feature_strategy: String,
+    /// LLM config — required when feature_strategy is "llm" or "hybrid".
+    pub feature_llm: Option<FeatureLlmConfig>,
 }
 
 pub(crate) fn run_discover(
@@ -262,7 +275,40 @@ pub(crate) fn run_discover_core(
     };
     ui.spin(format!("Grouping features ({})", feature_strategy_kind));
     let pkg_cfg = PackageConfig::load_or_default(repo);
-    let feature_strategy = match build_feature_strategy(feature_strategy_kind, pkg_cfg) {
+
+    // Build optional LLM caller from CLI config.
+    let llm_opts: Option<FeatureLlmOptions> = if let Some(llm_cfg) = &overrides.feature_llm {
+        match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
+            Ok(adapter) => {
+                // Load prior artifact for incremental cache.
+                let prior_artifact =
+                    find_feature_artifact_dir(repo, &source.version.0)
+                        .and_then(|dir| read_feature_artifact(&dir).ok())
+                        .unwrap_or_default();
+                let prior_artifact = prior_artifact
+                    .iter()
+                    .filter(|e| e.strategy == "llm")
+                    .cloned()
+                    .collect();
+                Some(FeatureLlmOptions {
+                    adapter,
+                    api_key: llm_cfg.api_key.clone(),
+                    model: llm_cfg.model.clone(),
+                    max_tokens: llm_cfg.max_tokens,
+                    timeout_secs: llm_cfg.timeout_secs,
+                    prior_artifact,
+                })
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "feature LLM adapter failed to build — LLM stage disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let feature_strategy = match build_feature_strategy(feature_strategy_kind, pkg_cfg, llm_opts) {
         Ok(s) => s,
         Err(err) => {
             tracing::warn!(

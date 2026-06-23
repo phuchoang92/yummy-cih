@@ -14,6 +14,7 @@ pub use entry::{fnv64_node, FeatureGroupEntry};
 pub use overrides::{apply_overrides, FeatureOverrides};
 pub use strategies::embed::{EmbedConfig, EmbedStrategy};
 pub use strategies::hybrid::HybridStrategy;
+pub use strategies::llm::{FeatureLlmCaller, LlmConfig, LlmStrategy};
 pub use strategies::package::PackageStrategy;
 pub use strategies::structural::{StructuralConfig, StructuralStrategy};
 pub use strategy::{Embedder, FeatureStrategy, StrategyInput};

@@ -150,10 +150,34 @@ enum Command {
         min_trace_confidence: Option<f32>,
 
         // ── Feature grouping strategy ──────────────────────────────────────
-        /// Feature classification strategy: package (default), structural, hybrid.
-        /// "hybrid" runs structural + package + embed in sequence (requires model download).
+        /// Feature classification strategy: package (default), structural, hybrid, llm.
+        /// "hybrid" runs structural → package → embed → llm (if --feature-llm-provider set).
+        /// "llm" requires --feature-llm-provider.
         #[arg(long, default_value = "package")]
         feature_strategy: String,
+        /// LLM provider for feature classification.
+        /// One of: deepseek, gemini, anthropic, openai-compatible.
+        /// Required when --feature-strategy is llm or hybrid with LLM stage.
+        #[arg(long)]
+        feature_llm_provider: Option<String>,
+        /// LLM model for feature classification.
+        /// Defaults: deepseek-chat (deepseek), gemini-2.5-flash (gemini),
+        /// claude-haiku-4-5-20251001 (anthropic), gpt-4o-mini (openai-compatible).
+        #[arg(long, default_value = "")]
+        feature_llm_model: String,
+        /// Base URL for --feature-llm-provider openai-compatible.
+        #[arg(long, default_value = "https://api.openai.com/v1")]
+        feature_llm_base_url: String,
+        /// Override which env var holds the API key for feature LLM.
+        /// Defaults to auto-detect (CIH_LLM_API_KEY, DEEPSEEK_API_KEY, etc.).
+        #[arg(long)]
+        feature_llm_api_key_env: Option<String>,
+        /// Maximum output tokens per feature LLM call.
+        #[arg(long, default_value = "2048")]
+        feature_llm_max_tokens: u32,
+        /// Timeout in seconds per feature LLM API call.
+        #[arg(long, default_value = "60")]
+        feature_llm_timeout_secs: u64,
     },
     /// Embed searchable graph nodes from the latest analyzed artifacts into pgvector.
     Embed {
@@ -472,22 +496,54 @@ fn main() -> Result<()> {
             max_branching,
             min_trace_confidence,
             feature_strategy,
-        } => discover::run_discover(
-            repo,
-            falkor_url,
-            graph_key,
-            no_load,
-            json,
-            discover::DiscoverOverrides {
-                resolution,
-                min_community_size,
-                max_trace_depth,
-                max_processes,
-                max_branching,
-                min_trace_confidence,
-                feature_strategy,
-            },
-        ),
+            feature_llm_provider,
+            feature_llm_model,
+            feature_llm_base_url,
+            feature_llm_api_key_env,
+            feature_llm_max_tokens,
+            feature_llm_timeout_secs,
+        } => {
+            // Build optional LLM config when a provider is specified.
+            let feature_llm = feature_llm_provider.map(|provider| {
+                let model = if feature_llm_model.is_empty() {
+                    match provider.as_str() {
+                        "deepseek" => "deepseek-chat".to_string(),
+                        "gemini" => "gemini-2.5-flash".to_string(),
+                        "anthropic" => "claude-haiku-4-5-20251001".to_string(),
+                        _ => "gpt-4o-mini".to_string(),
+                    }
+                } else {
+                    feature_llm_model.clone()
+                };
+                let api_key =
+                    llm::resolve_api_key(feature_llm_api_key_env.as_deref()).ok().flatten();
+                discover::FeatureLlmConfig {
+                    provider,
+                    base_url: feature_llm_base_url,
+                    model,
+                    api_key,
+                    max_tokens: feature_llm_max_tokens,
+                    timeout_secs: feature_llm_timeout_secs,
+                }
+            });
+            discover::run_discover(
+                repo,
+                falkor_url,
+                graph_key,
+                no_load,
+                json,
+                discover::DiscoverOverrides {
+                    resolution,
+                    min_community_size,
+                    max_trace_depth,
+                    max_processes,
+                    max_branching,
+                    min_trace_confidence,
+                    feature_strategy,
+                    feature_llm,
+                },
+            )
+        }
         Command::Embed {
             repo,
             pg_url,
