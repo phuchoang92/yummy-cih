@@ -56,6 +56,7 @@ fn minimal_input<'a>(
         filter_feature: vec![],
         bodies: HashMap::new(),
         feature_of: Box::new(|_, _| "shared".to_string()),
+        entrypoints: vec![],
     }
 }
 
@@ -164,6 +165,7 @@ fn generate_wiki_records_llm_model_in_manifest_when_enriched() {
         filter_feature: vec![],
         bodies: HashMap::new(),
         feature_of: Box::new(|_, _| "shared".to_string()),
+        entrypoints: vec![],
     };
     let outcome = generate_wiki(input, &out).unwrap();
 
