@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
+
 use once_cell::sync::Lazy;
 use tree_sitter::{Language, Node as TsNode, Query};
 
-use crate::{LanguageProvider, Stereotype};
+use crate::{LanguageProvider, SourceScan, Stereotype};
 
 mod parse;
 
@@ -57,6 +59,22 @@ impl LanguageProvider for TypescriptProvider {
 
     fn parse_file(&self, rel: &str, src: &str) -> anyhow::Result<cih_core::ParsedUnit> {
         parse::parse_typescript_file(rel, src)
+    }
+
+    fn scan_file(&self, _rel: &str, src: &str) -> anyhow::Result<SourceScan> {
+        let loc = src.bytes().filter(|b| *b == b'\n').count() as u64;
+        let mut frameworks = BTreeSet::new();
+        if src.contains("@Controller")
+            || src.contains("@Injectable")
+            || src.contains("@Module")
+        {
+            frameworks.insert("nestjs".into());
+        }
+        Ok(SourceScan {
+            loc,
+            package: None,
+            frameworks,
+        })
     }
 }
 

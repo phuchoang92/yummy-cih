@@ -145,3 +145,22 @@ fn stereotype_detects_java_framework_annotations() {
     );
     assert_eq!(provider.stereotype("class Plain {}"), None);
 }
+
+#[test]
+fn scan_file_extracts_package_and_spring_framework() {
+    let provider = JavaProvider::new();
+    let java = r#"
+        package com.acme.owner;
+        import org.springframework.web.bind.annotation.GetMapping;
+        @RestController
+        class OwnerController {
+          @GetMapping("/owners")
+          String owners() { return ""; }
+        }
+    "#;
+    let scan = provider.scan_file("OwnerController.java", java).unwrap();
+    assert_eq!(scan.package.as_deref(), Some("com.acme.owner"));
+    assert!(scan.frameworks.contains("spring"));
+    assert_eq!(scan.frameworks.len(), 1);
+}
+

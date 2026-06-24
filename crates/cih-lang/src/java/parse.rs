@@ -1521,10 +1521,8 @@ fn nth_identifier_argument(node: TsNode<'_>, src: &str, n: usize) -> Option<Stri
                 }
             }
             count += 1;
-        } else if !matches!(child.kind(), "line_comment" | "block_comment") {
-            if count <= n {
-                count += 1;
-            }
+        } else if !matches!(child.kind(), "line_comment" | "block_comment") && count <= n {
+            count += 1;
         }
     }
     None

@@ -91,25 +91,23 @@ fn db_id_helpers_use_locked_scheme() {
 
 #[test]
 fn repo_map_round_trips_json() {
+    let mut per_lang = std::collections::BTreeMap::new();
+    per_lang.insert("java".into(), 3);
+
     let repo_map = RepoMap {
         root: "/repo".into(),
         build_system: BuildSystem::Maven,
-        total_java_files: 3,
-        total_loc: 120,
+        total_source_loc: 120,
         modules: vec![ModuleInfo {
             name: "app".into(),
             rel_path: ".".into(),
             build_file: Some("pom.xml".into()),
-            java_files: 3,
-            loc: 120,
+            source_files: 3,
+            source_loc: 120,
             packages: vec!["com.acme".into()],
-            spring: SpringSignal {
-                services: 1,
-                controllers: 1,
-                ..SpringSignal::default()
-            },
             depends_on: vec!["core".into()],
-            frameworks: Vec::new(),
+            frameworks: vec!["spring".into()],
+            per_language: per_lang.clone(),
         }],
         jars: vec![JarInfo {
             path: "lib/example.jar".into(),
@@ -120,8 +118,8 @@ fn repo_map_round_trips_json() {
         }],
         decompiled_dirs: vec![".workspace-dependencies".into()],
         architecture_hint: ArchitectureHint::Unknown,
-        total_source_files: 0,
-        per_language: Default::default(),
+        total_source_files: 3,
+        per_language: per_lang,
     };
 
     let encoded = serde_json::to_string(&repo_map).unwrap();

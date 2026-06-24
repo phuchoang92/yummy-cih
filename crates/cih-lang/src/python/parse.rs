@@ -43,7 +43,7 @@ fn unquote(raw: &str) -> String {
 
 fn module_path(rel: &str) -> String {
     let stripped = rel.strip_suffix(".py").unwrap_or(rel);
-    stripped.replace('/', ".").replace('\\', ".")
+    stripped.replace(['/', '\\'], ".")
 }
 
 fn parameter_count(node: TsNode<'_>) -> u16 {
@@ -68,7 +68,7 @@ fn parameter_count(node: TsNode<'_>) -> u16 {
         }
     }
     // Subtract self/cls if present
-    count.saturating_sub(1).max(0)
+    count.saturating_sub(1)
 }
 
 // ── Decorator helpers ─────────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ fn methods_kwarg_in_call(call_node: TsNode<'_>, src: &str) -> Vec<String> {
     out
 }
 
-fn kwarg_string_value<'a>(call_node: TsNode<'_>, key: &str, src: &'a str) -> Option<String> {
+fn kwarg_string_value(call_node: TsNode<'_>, key: &str, src: &str) -> Option<String> {
     let args = call_node.child_by_field_name("arguments")?;
     let mut cursor = args.walk();
     for child in args.named_children(&mut cursor) {

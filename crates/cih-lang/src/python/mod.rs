@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
+
 use once_cell::sync::Lazy;
 use tree_sitter::{Language, Node as TsNode, Query};
 
-use crate::{LanguageProvider, Stereotype};
+use crate::{LanguageProvider, SourceScan, Stereotype};
 
 pub mod parse;
 
@@ -68,6 +70,22 @@ impl LanguageProvider for PythonProvider {
 
     fn parse_file(&self, rel: &str, src: &str) -> anyhow::Result<cih_core::ParsedUnit> {
         parse::parse_python_file(rel, src)
+    }
+
+    fn scan_file(&self, _rel: &str, src: &str) -> anyhow::Result<SourceScan> {
+        let loc = src.bytes().filter(|b| *b == b'\n').count() as u64;
+        let mut frameworks = BTreeSet::new();
+        if src.contains("from flask") || src.contains("import flask") {
+            frameworks.insert("flask".into());
+        }
+        if src.contains("from fastapi") || src.contains("import fastapi") {
+            frameworks.insert("fastapi".into());
+        }
+        Ok(SourceScan {
+            loc,
+            package: None,
+            frameworks,
+        })
     }
 }
 

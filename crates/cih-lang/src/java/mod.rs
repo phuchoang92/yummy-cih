@@ -1,9 +1,10 @@
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 use once_cell::sync::Lazy;
 use tree_sitter::{Language, Node as TsNode, Parser, Query};
 
-use crate::{LanguageProvider, Stereotype};
+use crate::{LanguageProvider, SourceScan, Stereotype};
 
 pub mod constant_resolver;
 mod parse;
@@ -71,6 +72,20 @@ impl LanguageProvider for JavaProvider {
     fn parse_file(&self, rel: &str, src: &str) -> anyhow::Result<cih_core::ParsedUnit> {
         parse::parse_java_file(self, rel, src)
     }
+
+    fn scan_file(&self, _rel: &str, src: &str) -> anyhow::Result<SourceScan> {
+        let loc = src.bytes().filter(|b| *b == b'\n').count() as u64;
+        let package = scan_extract_package(src);
+        let mut frameworks = BTreeSet::new();
+        if has_spring_signal(src) {
+            frameworks.insert("spring".into());
+        }
+        Ok(SourceScan {
+            loc,
+            package,
+            frameworks,
+        })
+    }
 }
 
 fn language() -> Language {
@@ -124,6 +139,43 @@ fn stereotype(def_text: &str) -> Option<Stereotype> {
     }
 
     None
+}
+
+/// Cheap line-based package extraction (no tree-sitter).
+/// Used by [`JavaProvider::scan_file`] during the scan phase.
+fn scan_extract_package(src: &str) -> Option<String> {
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("package ") {
+            return rest
+                .split(';')
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Returns `true` if the source contains any Spring annotation substring.
+fn has_spring_signal(src: &str) -> bool {
+    const SPRING_MARKERS: &[&str] = &[
+        "@RestController",
+        "@Controller",
+        "@Service",
+        "@Repository",
+        "@Component",
+        "@Configuration",
+        "@Entity",
+        "@RequestMapping",
+        "@GetMapping",
+        "@PostMapping",
+        "@PutMapping",
+        "@PatchMapping",
+        "@DeleteMapping",
+    ];
+    SPRING_MARKERS.iter().any(|marker| src.contains(marker))
 }
 
 #[cfg(test)]

@@ -8,9 +8,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use cih_core::{BuildSystem, ModuleInfo};
 
-use super::build_files::{parse_gradle, parse_gradle_includes, parse_pom};
+use super::build_files::{
+    parse_gradle, parse_gradle_includes, parse_package_json, parse_pom, parse_pyproject_toml,
+    parse_setup_cfg,
+};
 use super::paths::{join_rel, parent_rel, path_from_rel};
-use super::{JavaFileInfo, ModuleCandidate, ScannedFile};
+use super::{ModuleCandidate, ScannedFile, SourceFileInfo};
 
 pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<ModuleCandidate>> {
     tracing::debug!(
@@ -33,7 +36,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                     .map(|m| m.artifact_id.clone())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| fallback_module_name(root, &rel_path));
-                let artifact_key = meta
+                let module_key = meta
                     .as_ref()
                     .map(|m| format!("{}:{}", m.group_id, m.artifact_id));
                 let deps = meta.as_ref().map(|m| m.deps.clone()).unwrap_or_default();
@@ -47,7 +50,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                         rel_path: rel_path.clone(),
                         build_file: Some(file.path.clone()),
                         build_system: BuildSystem::Maven,
-                        artifact_key,
+                        module_key,
                         deps,
                     },
                 );
@@ -63,7 +66,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                             rel_path: child_rel,
                             build_file: None,
                             build_system: BuildSystem::Maven,
-                            artifact_key: None,
+                            module_key: None,
                             deps: Vec::new(),
                         },
                     );
@@ -80,7 +83,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                     .map(|m| m.artifact_id.clone())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| fallback_module_name(root, &rel_path));
-                let artifact_key = meta
+                let module_key = meta
                     .as_ref()
                     .filter(|m| !m.group_id.is_empty())
                     .map(|m| format!("{}:{}", m.group_id, m.artifact_id));
@@ -94,7 +97,7 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                         rel_path,
                         build_file: Some(file.path.clone()),
                         build_system: BuildSystem::Gradle,
-                        artifact_key,
+                        module_key,
                         deps,
                     },
                 );
@@ -120,11 +123,128 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                             rel_path: child_rel,
                             build_file: None,
                             build_system: BuildSystem::Gradle,
-                            artifact_key: None,
+                            module_key: None,
                             deps: Vec::new(),
                         },
                     );
                 }
+            }
+            "package.json" => {
+                tracing::debug!(path = %file.path, "modules: found package.json");
+                let content = fs::read_to_string(root.join(&file.path))
+                    .with_context(|| format!("failed to read {}", file.path))?;
+                let rel_path = parent_rel(&file.path);
+                let meta = parse_package_json(&content);
+                let name = meta
+                    .as_ref()
+                    .map(|m| m.artifact_id.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| fallback_module_name(root, &rel_path));
+                let module_key = meta
+                    .as_ref()
+                    .map(|m| if m.group_id.is_empty() { m.artifact_id.clone() } else { format!("{}/{}", m.group_id, m.artifact_id) });
+                let deps = meta.as_ref().map(|m| m.deps.clone()).unwrap_or_default();
+
+                tracing::debug!(module = %name, path = %rel_path, deps = deps.len(), "modules: Node module detected");
+                upsert_candidate(
+                    &mut modules,
+                    ModuleCandidate {
+                        name,
+                        rel_path: rel_path.clone(),
+                        build_file: Some(file.path.clone()),
+                        build_system: BuildSystem::Node,
+                        module_key,
+                        deps,
+                    },
+                );
+            }
+            "pyproject.toml" => {
+                tracing::debug!(path = %file.path, "modules: found pyproject.toml");
+                let content = fs::read_to_string(root.join(&file.path))
+                    .with_context(|| format!("failed to read {}", file.path))?;
+                let rel_path = parent_rel(&file.path);
+                let meta = parse_pyproject_toml(&content);
+                let name = meta
+                    .as_ref()
+                    .map(|m| m.artifact_id.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| fallback_module_name(root, &rel_path));
+                let module_key = Some(name.clone());
+                let deps = meta.as_ref().map(|m| m.deps.clone()).unwrap_or_default();
+
+                tracing::debug!(module = %name, path = %rel_path, deps = deps.len(), "modules: Python pyproject module detected");
+                upsert_candidate(
+                    &mut modules,
+                    ModuleCandidate {
+                        name,
+                        rel_path: rel_path.clone(),
+                        build_file: Some(file.path.clone()),
+                        build_system: BuildSystem::Python,
+                        module_key,
+                        deps,
+                    },
+                );
+            }
+            "setup.cfg" => {
+                tracing::debug!(path = %file.path, "modules: found setup.cfg");
+                let content = fs::read_to_string(root.join(&file.path))
+                    .with_context(|| format!("failed to read {}", file.path))?;
+                let rel_path = parent_rel(&file.path);
+                let meta = parse_setup_cfg(&content);
+                let name = meta
+                    .as_ref()
+                    .map(|m| m.artifact_id.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| fallback_module_name(root, &rel_path));
+                let module_key = Some(name.clone());
+                let deps = meta.as_ref().map(|m| m.deps.clone()).unwrap_or_default();
+
+                tracing::debug!(module = %name, path = %rel_path, deps = deps.len(), "modules: Python setup.cfg module detected");
+                upsert_candidate(
+                    &mut modules,
+                    ModuleCandidate {
+                        name,
+                        rel_path: rel_path.clone(),
+                        build_file: Some(file.path.clone()),
+                        build_system: BuildSystem::Python,
+                        module_key,
+                        deps,
+                    },
+                );
+            }
+            "setup.py" => {
+                tracing::debug!(path = %file.path, "modules: found setup.py");
+                let rel_path = parent_rel(&file.path);
+                let name = fallback_module_name(root, &rel_path);
+                tracing::debug!(module = %name, path = %rel_path, "modules: Python setup.py module detected");
+                upsert_candidate(
+                    &mut modules,
+                    ModuleCandidate {
+                        name: name.clone(),
+                        rel_path: rel_path.clone(),
+                        build_file: Some(file.path.clone()),
+                        build_system: BuildSystem::Python,
+                        module_key: Some(name),
+                        deps: Vec::new(),
+                    },
+                );
+            }
+            "requirements.txt" => {
+                tracing::debug!(path = %file.path, "modules: found requirements.txt");
+                let rel_path = parent_rel(&file.path);
+                let name = fallback_module_name(root, &rel_path);
+                tracing::debug!(module = %name, path = %rel_path, "modules: Python requirements.txt module detected");
+                upsert_candidate(
+                    &mut modules,
+                    ModuleCandidate {
+                        name: name.clone(),
+                        rel_path: rel_path.clone(),
+                        build_file: Some(file.path.clone()),
+                        build_system: BuildSystem::Python,
+                        module_key: Some(name),
+                        deps: Vec::new(),
+                    },
+                );
             }
             _ => {}
         }
@@ -135,18 +255,32 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
     Ok(modules)
 }
 
+fn build_file_priority(file_name: Option<&str>) -> i32 {
+    let Some(f) = file_name else { return 0; };
+    let name = f.rsplit('/').next().unwrap_or(f);
+    match name {
+        "pom.xml" | "build.gradle" | "build.gradle.kts" | "package.json" => 10,
+        "pyproject.toml" => 4,
+        "setup.cfg" => 3,
+        "setup.py" => 2,
+        "requirements.txt" => 1,
+        _ => 0,
+    }
+}
+
 pub(super) fn upsert_candidate(modules: &mut Vec<ModuleCandidate>, candidate: ModuleCandidate) {
     if let Some(existing) = modules
         .iter_mut()
         .find(|m| m.rel_path == candidate.rel_path)
     {
-        if candidate.build_file.is_some() {
+        let new_pri = build_file_priority(candidate.build_file.as_deref());
+        let old_pri = build_file_priority(existing.build_file.as_deref());
+
+        if new_pri > old_pri || (new_pri == old_pri && candidate.build_file.is_some() && existing.build_file.is_none()) {
             existing.build_file = candidate.build_file;
             existing.name = candidate.name;
             existing.build_system = candidate.build_system;
-        }
-        if candidate.artifact_key.is_some() {
-            existing.artifact_key = candidate.artifact_key;
+            existing.module_key = candidate.module_key;
         }
         existing.deps.extend(candidate.deps);
         existing.deps.sort();
@@ -156,18 +290,18 @@ pub(super) fn upsert_candidate(modules: &mut Vec<ModuleCandidate>, candidate: Mo
     }
 }
 
-pub(super) fn ensure_unassigned_java_module(
+pub(super) fn ensure_unassigned_source_module(
     candidates: &mut Vec<ModuleCandidate>,
-    java_files: &[JavaFileInfo],
+    source_files: &[SourceFileInfo],
     root: &Path,
 ) {
-    if java_files.is_empty() {
+    if source_files.is_empty() {
         return;
     }
 
-    let has_unassigned = java_files
+    let has_unassigned = source_files
         .iter()
-        .any(|java| find_owner_module(candidates, &java.path).is_none());
+        .any(|sf| find_owner_module(candidates, &sf.path).is_none());
     if has_unassigned {
         upsert_candidate(
             candidates,
@@ -176,7 +310,7 @@ pub(super) fn ensure_unassigned_java_module(
                 rel_path: ".".into(),
                 build_file: None,
                 build_system: BuildSystem::None,
-                artifact_key: None,
+                module_key: None,
                 deps: Vec::new(),
             },
         );

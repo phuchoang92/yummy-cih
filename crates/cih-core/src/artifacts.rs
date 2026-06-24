@@ -78,7 +78,7 @@ const BUNDLE_MAGIC: &[u8; 8] = b"CIHPACK1";
 /// Write one entry to a bundle: 4-byte LE length + zstd-compressed content.
 fn write_bundle_entry(w: &mut impl Write, content: &[u8]) -> io::Result<()> {
     let compressed = zstd::encode_all(content, 3)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     let len = compressed.len() as u32;
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&compressed)?;

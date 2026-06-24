@@ -1,13 +1,13 @@
-//! Phase 3 discovery scan: walk the repo, detect Maven/Gradle modules, and
-//! summarize each module (file counts, LOC, packages, Spring signal) WITHOUT
-//! tree-sitter. This module file holds the shared data model + orchestration;
-//! the work is split across `scan/` submodules:
+//! Phase 3 discovery scan: walk the repo, detect modules, and summarize each
+//! module (file counts, LOC, packages, framework signals) WITHOUT tree-sitter.
+//! This module file holds the shared data model + orchestration; the work is
+//! split across `scan/` submodules:
 //!   - `ignore_rules` - ignore lists + path/dir/extension predicates
 //!   - `walk`         - gitignore-aware filesystem walk
 //!   - `paths`        - relative-path helpers
-//!   - `build_files`  - pom.xml / build.gradle parsing
+//!   - `build_files`  - pom.xml / build.gradle / package.json / pyproject.toml parsing
 //!   - `modules`      - module detection, ownership, build-system
-//!   - `java_scan`    - per-file LOC / package / Spring-signal extraction
+//!   - `source_scan`  - per-file LOC / package / framework extraction (registry-driven)
 //!   - `report`       - summary table + recommendation
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,24 +15,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cih_core::{auto_detect_architecture, BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
+use cih_core::{auto_detect_architecture, BuildSystem, JarInfo, ModuleInfo, RepoMap};
 
 pub mod build_files;
 pub mod ignore_rules;
 pub mod jars;
-pub mod java_scan;
+pub mod source_scan;
 mod modules;
 mod paths;
 mod report;
 mod walk;
 
-use java_scan::{add_spring_signal, collect_decompiled_dirs, collect_java_files};
 use modules::{
-    detect_build_system, detect_modules, ensure_unassigned_java_module, find_owner_module,
+    detect_build_system, detect_modules, ensure_unassigned_source_module, find_owner_module,
     upsert_candidate,
 };
 use paths::normalize_path;
 pub use report::print_summary;
+use source_scan::{collect_decompiled_dirs, collect_source_files};
 use walk::walk_repository_paths;
 
 // --- shared data model (used across the scan submodules) ---
@@ -44,11 +44,12 @@ pub struct ScannedFile {
 }
 
 #[derive(Clone, Debug)]
-pub struct JavaFileInfo {
+pub struct SourceFileInfo {
     pub path: String,
+    pub language: String,
     pub loc: u64,
     pub package: Option<String>,
-    pub spring: SpringSignal,
+    pub frameworks: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,16 +66,17 @@ struct ModuleCandidate {
     rel_path: String,
     build_file: Option<String>,
     build_system: BuildSystem,
-    artifact_key: Option<String>,
+    module_key: Option<String>,
     deps: Vec<String>,
 }
 
 #[derive(Default)]
 struct ModuleAggregate {
-    java_files: u64,
-    loc: u64,
+    source_files: u64,
+    source_loc: u64,
     packages: BTreeSet<String>,
-    spring: SpringSignal,
+    frameworks: BTreeSet<String>,
+    per_language: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +89,7 @@ pub struct ScanResult {
 pub struct OwnedSourceFile {
     pub rel: String,
     pub module_rel: Option<String>,
+    pub language: String,
 }
 
 pub fn run_scan(repo: &Path, json: bool) -> Result<()> {
@@ -113,6 +116,15 @@ pub fn write_repo_map(repo_map: &RepoMap) -> Result<PathBuf> {
     Ok(output_path)
 }
 
+/// Shared registry builder — used by both scan and analyze.
+pub fn default_scan_registry() -> cih_parse::LanguageRegistry {
+    let mut r = cih_parse::LanguageRegistry::new();
+    r.register(cih_lang::java::JavaProvider::new());
+    r.register(cih_lang::typescript::TypescriptProvider::new());
+    r.register(cih_lang::python::PythonProvider::new());
+    r
+}
+
 pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
     let root = repo
         .canonicalize()
@@ -131,12 +143,13 @@ pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
         "filesystem walk complete"
     );
 
-    let java_files = collect_java_files(&root, &files);
+    let registry = default_scan_registry();
+    let source_files_info = collect_source_files(&root, &files, &registry);
     let decompiled_dirs = collect_decompiled_dirs(&files);
     tracing::info!(
-        java_files = java_files.len(),
+        source_files = source_files_info.len(),
         decompiled_dirs = decompiled_dirs.len(),
-        "Java files collected"
+        "source files collected"
     );
 
     let mut candidates = detect_modules(&root, &files)?;
@@ -149,7 +162,7 @@ pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
                 rel_path: decompiled.clone(),
                 build_file: None,
                 build_system: BuildSystem::None,
-                artifact_key: None,
+                module_key: None,
                 deps: Vec::new(),
             },
         );
@@ -166,45 +179,34 @@ pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
             rel_path: ".".into(),
             build_file: None,
             build_system: BuildSystem::None,
-            artifact_key: None,
+            module_key: None,
             deps: Vec::new(),
         });
     }
-    ensure_unassigned_java_module(&mut candidates, &java_files, &root);
+    ensure_unassigned_source_module(&mut candidates, &source_files_info, &root);
 
     tracing::info!(modules = candidates.len(), "modules detected");
     for c in &candidates {
         tracing::debug!(module = %c.name, path = %c.rel_path, build = ?c.build_system, "module");
     }
 
-    let (all_deps, own_group_prefix, artifact_to_name) = jar_discovery_inputs(&candidates);
-    let (aggregates, mut owned_source_files) = collect_java_aggregates(&candidates, &java_files);
-    let modules = build_modules_from_aggregates(candidates.clone(), aggregates, &artifact_to_name);
+    let (all_deps, own_group_prefix, key_to_name) = jar_discovery_inputs(&candidates);
+    let (aggregates, mut owned_source_files) =
+        collect_source_aggregates(&candidates, &source_files_info);
+    let modules =
+        build_modules_from_aggregates(candidates.clone(), aggregates, &key_to_name);
 
-    let extra_ts = collect_extra_source_files(&candidates, &files, &[".ts", ".tsx"]);
-    let extra_py = collect_extra_source_files(&candidates, &files, &[".py"]);
-    let ts_count = extra_ts.len() as u64;
-    let py_count = extra_py.len() as u64;
-    let java_count = java_files.len() as u64;
-    owned_source_files.extend(extra_ts);
-    owned_source_files.extend(extra_py);
     owned_source_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let discovered_jars = discover_and_link_jars(&root, &all_deps, &own_group_prefix);
     tracing::info!(jars = discovered_jars.len(), "JAR discovery complete");
 
-    let total_loc: u64 = java_files.iter().map(|f| f.loc).sum();
-    let total_source_files = java_count + ts_count + py_count;
+    let total_source_loc: u64 = source_files_info.iter().map(|f| f.loc).sum();
+    let total_source_files = source_files_info.len() as u64;
 
     let mut per_language: BTreeMap<String, u64> = BTreeMap::new();
-    if java_count > 0 {
-        per_language.insert("java".into(), java_count);
-    }
-    if ts_count > 0 {
-        per_language.insert("typescript".into(), ts_count);
-    }
-    if py_count > 0 {
-        per_language.insert("python".into(), py_count);
+    for sf in &source_files_info {
+        *per_language.entry(sf.language.clone()).or_default() += 1;
     }
 
     let has_node = files.iter().any(|f| {
@@ -235,13 +237,10 @@ pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
         java_build_system
     };
 
-    let modules = annotate_frameworks(modules, &files);
-
     let mut repo_map = RepoMap {
         root: normalize_path(root),
         build_system,
-        total_java_files: java_count,
-        total_loc,
+        total_source_loc,
         total_source_files,
         per_language,
         modules,
@@ -252,8 +251,8 @@ pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
     repo_map.architecture_hint = auto_detect_architecture(&repo_map);
 
     tracing::info!(
-        java_files = java_files.len(),
-        total_loc,
+        source_files = total_source_files,
+        total_source_loc,
         modules = repo_map.modules.len(),
         jars = repo_map.jars.len(),
         "scan complete"
@@ -279,44 +278,49 @@ fn jar_discovery_inputs(
         .iter()
         .find(|candidate| candidate.rel_path == ".")
         .or_else(|| candidates.first())
-        .and_then(|candidate| candidate.artifact_key.as_ref())
+        .and_then(|candidate| candidate.module_key.as_ref())
         .and_then(|key| key.split(':').next())
         .unwrap_or("")
         .to_string();
-    let artifact_to_name = candidates
+    let key_to_name = candidates
         .iter()
         .filter_map(|candidate| {
             candidate
-                .artifact_key
+                .module_key
                 .as_ref()
                 .map(|key| (key.clone(), candidate.name.clone()))
         })
         .collect();
-    (all_deps, own_group_prefix, artifact_to_name)
+    (all_deps, own_group_prefix, key_to_name)
 }
 
-fn collect_java_aggregates(
+fn collect_source_aggregates(
     candidates: &[ModuleCandidate],
-    java_files: &[JavaFileInfo],
+    source_files: &[SourceFileInfo],
 ) -> (BTreeMap<String, ModuleAggregate>, Vec<OwnedSourceFile>) {
     let mut aggregates: BTreeMap<String, ModuleAggregate> = BTreeMap::new();
     let mut owned_source_files = Vec::new();
 
-    for java in java_files {
-        let module_rel = find_owner_module(candidates, &java.path).map(str::to_string);
+    for sf in source_files {
+        let module_rel = find_owner_module(candidates, &sf.path).map(str::to_string);
         owned_source_files.push(OwnedSourceFile {
-            rel: java.path.clone(),
+            rel: sf.path.clone(),
             module_rel: module_rel.clone(),
+            language: sf.language.clone(),
         });
 
         if let Some(module_rel) = module_rel {
             let aggregate = aggregates.entry(module_rel.to_string()).or_default();
-            aggregate.java_files += 1;
-            aggregate.loc += java.loc;
-            if let Some(package) = &java.package {
+            aggregate.source_files += 1;
+            aggregate.source_loc += sf.loc;
+            if let Some(package) = &sf.package {
                 aggregate.packages.insert(package.clone());
             }
-            add_spring_signal(&mut aggregate.spring, &java.spring);
+            aggregate.frameworks.extend(sf.frameworks.iter().cloned());
+            *aggregate
+                .per_language
+                .entry(sf.language.clone())
+                .or_default() += 1;
         }
     }
 
@@ -326,7 +330,7 @@ fn collect_java_aggregates(
 fn build_modules_from_aggregates(
     candidates: Vec<ModuleCandidate>,
     mut aggregates: BTreeMap<String, ModuleAggregate>,
-    artifact_to_name: &BTreeMap<String, String>,
+    key_to_name: &BTreeMap<String, String>,
 ) -> Vec<ModuleInfo> {
     let mut modules: Vec<ModuleInfo> = candidates
         .into_iter()
@@ -335,22 +339,26 @@ fn build_modules_from_aggregates(
             let mut depends_on: Vec<String> = candidate
                 .deps
                 .iter()
-                .filter_map(|dep| artifact_to_name.get(dep).cloned())
+                .filter_map(|dep| key_to_name.get(dep).cloned())
                 .filter(|name| name != &candidate.name)
                 .collect();
             depends_on.sort();
             depends_on.dedup();
 
+            let mut frameworks: Vec<String> = aggregate.frameworks.into_iter().collect();
+            frameworks.sort();
+            frameworks.dedup();
+
             ModuleInfo {
                 name: candidate.name,
                 rel_path: candidate.rel_path,
                 build_file: candidate.build_file,
-                java_files: aggregate.java_files,
-                loc: aggregate.loc,
+                source_files: aggregate.source_files,
+                source_loc: aggregate.source_loc,
                 packages: aggregate.packages.into_iter().collect(),
-                spring: aggregate.spring,
                 depends_on,
-                frameworks: Vec::new(),
+                frameworks,
+                per_language: aggregate.per_language,
             }
         })
         .collect();
@@ -365,73 +373,3 @@ fn discover_and_link_jars(
 ) -> Vec<JarInfo> {
     jars::discover_jars(root, all_deps, own_group_prefix)
 }
-
-fn collect_extra_source_files(
-    candidates: &[ModuleCandidate],
-    files: &[ScannedFile],
-    extensions: &[&str],
-) -> Vec<OwnedSourceFile> {
-    files
-        .iter()
-        .filter(|f| extensions.iter().any(|ext| f.path.ends_with(ext)))
-        .map(|f| OwnedSourceFile {
-            rel: f.path.clone(),
-            module_rel: find_owner_module(candidates, &f.path).map(str::to_string),
-        })
-        .collect()
-}
-
-/// Populate `ModuleInfo.frameworks` based on spring signal and indicator files.
-fn annotate_frameworks(mut modules: Vec<ModuleInfo>, files: &[ScannedFile]) -> Vec<ModuleInfo> {
-    for module in &mut modules {
-        let s = &module.spring;
-        let has_spring = s.controllers > 0
-            || s.services > 0
-            || s.repositories > 0
-            || s.components > 0
-            || s.configs > 0
-            || s.entities > 0
-            || s.mappings > 0;
-        if has_spring {
-            module.frameworks.push("spring".into());
-        }
-
-        let module_prefix = if module.rel_path == "." {
-            String::new()
-        } else {
-            format!("{}/", module.rel_path)
-        };
-
-        let has_node = files.iter().any(|f| {
-            let name = f.path.trim_start_matches(&module_prefix as &str);
-            (name == "package.json" || name == "nest-cli.json" || name == "tsconfig.json")
-                && !name.contains('/')
-        });
-        if has_node {
-            let framework = if files.iter().any(|f| {
-                f.path.starts_with(&module_prefix) && f.path.ends_with("/nest-cli.json")
-                    || f.path.trim_start_matches(&module_prefix as &str) == "nest-cli.json"
-            }) {
-                "nestjs"
-            } else {
-                "node"
-            };
-            module.frameworks.push(framework.into());
-        }
-
-        let has_python = files.iter().any(|f| {
-            let name = f.path.trim_start_matches(&module_prefix as &str);
-            (name == "pyproject.toml"
-                || name == "setup.py"
-                || name == "requirements.txt"
-                || name == "setup.cfg")
-                && !name.contains('/')
-        });
-        if has_python {
-            module.frameworks.push("python".into());
-        }
-    }
-    modules
-}
-
-

@@ -183,4 +183,139 @@ fn all_quoted(s: &str) -> Vec<String> {
     out
 }
 
+pub fn parse_package_json(content: &str) -> Option<BuildMeta> {
+    let val: serde_json::Value = serde_json::from_str(content).ok()?;
+    let name = val.get("name")?.as_str()?;
+    let mut deps = Vec::new();
+    if let Some(deps_obj) = val.get("dependencies").and_then(|d| d.as_object()) {
+        for key in deps_obj.keys() {
+            deps.push(key.clone());
+        }
+    }
+    if let Some(dev_deps_obj) = val.get("devDependencies").and_then(|d| d.as_object()) {
+        for key in dev_deps_obj.keys() {
+            deps.push(key.clone());
+        }
+    }
+
+    let (group_id, artifact_id) = if name.starts_with('@') && name.contains('/') {
+        let mut parts = name.splitn(2, '/');
+        (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string())
+    } else {
+        ("".to_string(), name.to_string())
+    };
+
+    Some(BuildMeta {
+        group_id,
+        artifact_id,
+        deps,
+        modules: Vec::new(),
+    })
+}
+
+pub fn parse_pyproject_toml(content: &str) -> Option<BuildMeta> {
+    let val: toml::Value = toml::from_str(content).ok()?;
+    let name = val.get("project")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .or_else(|| {
+            val.get("tool")
+                .and_then(|t| t.get("poetry"))
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+        })?;
+
+    let mut deps = Vec::new();
+
+    if let Some(deps_array) = val.get("project").and_then(|p| p.get("dependencies")).and_then(|d| d.as_array()) {
+        for dep in deps_array {
+            if let Some(dep_str) = dep.as_str() {
+                let name = dep_str.split(&['<', '>', '=', '!', '~', ';'][..]).next().unwrap_or("").trim();
+                if !name.is_empty() {
+                    deps.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(poetry_deps) = val.get("tool")
+        .and_then(|t| t.get("poetry"))
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_table()) {
+        for key in poetry_deps.keys() {
+            if key != "python" {
+                deps.push(key.clone());
+            }
+        }
+    }
+
+    Some(BuildMeta {
+        group_id: "".to_string(),
+        artifact_id: name.to_string(),
+        deps,
+        modules: Vec::new(),
+    })
+}
+
+pub fn parse_setup_cfg(content: &str) -> Option<BuildMeta> {
+    let mut name = None;
+    let mut deps = Vec::new();
+    let mut in_metadata = false;
+    let mut in_options = false;
+    let mut in_requires = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_metadata = trimmed == "[metadata]";
+            in_options = trimmed == "[options]";
+            in_requires = false;
+            continue;
+        }
+
+        if in_metadata && trimmed.starts_with("name") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                name = Some(val.trim().to_string());
+            }
+        }
+
+        if in_options && trimmed.starts_with("install_requires") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                let val_trimmed = val.trim();
+                if !val_trimmed.is_empty() {
+                    let dep = val_trimmed.split(&['<', '>', '=', '!', '~', ';'][..]).next().unwrap_or("").trim();
+                    if !dep.is_empty() {
+                        deps.push(dep.to_string());
+                    }
+                }
+                in_requires = true;
+            }
+            continue;
+        }
+
+        if in_requires {
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if line.starts_with(' ') || line.starts_with('\t') {
+                let dep = trimmed.split(&['<', '>', '=', '!', '~', ';'][..]).next().unwrap_or("").trim();
+                if !dep.is_empty() {
+                    deps.push(dep.to_string());
+                }
+            } else {
+                in_requires = false;
+            }
+        }
+    }
+
+    let artifact_id = name?;
+    Some(BuildMeta {
+        group_id: "".to_string(),
+        artifact_id,
+        deps,
+        modules: Vec::new(),
+    })
+}
+
+
 

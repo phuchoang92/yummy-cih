@@ -46,7 +46,7 @@ impl ScopeRequest {
 
 pub fn resolve(
     repo_map: &RepoMap,
-    java_files: &[OwnedSourceFile],
+    source_files: &[OwnedSourceFile],
     request: ScopeRequest,
 ) -> Result<ScopeFile> {
     if !request.has_selector() {
@@ -61,7 +61,7 @@ pub fn resolve(
 
     let mut files = Vec::new();
     let mut touched_module_rels = BTreeSet::new();
-    for file in java_files {
+    for file in source_files {
         if !matches_selector(
             file,
             &request,
@@ -79,7 +79,7 @@ pub fn resolve(
         {
             continue;
         }
-        if !matches_language_filter(&file.rel, &request.languages) {
+        if !matches_language_filter(&file.language, &request.languages) {
             continue;
         }
         files.push(file.rel.clone());
@@ -199,20 +199,11 @@ fn build_globs(patterns: &[String]) -> Result<Option<GlobSet>> {
 
 /// Returns `true` when the file should be included given the languages filter.
 /// Empty filter = all languages included.
-fn matches_language_filter(rel: &str, languages: &[String]) -> bool {
+fn matches_language_filter(file_language: &str, languages: &[String]) -> bool {
     if languages.is_empty() {
         return true;
     }
-    let lang = if rel.ends_with(".java") {
-        "java"
-    } else if rel.ends_with(".ts") || rel.ends_with(".tsx") {
-        "typescript"
-    } else if rel.ends_with(".py") {
-        "python"
-    } else {
-        return false;
-    };
-    languages.iter().any(|l| l == lang)
+    languages.iter().any(|l| l == file_language)
 }
 
 fn is_decompiled(path: &str, decompiled_dirs: &[String]) -> bool {

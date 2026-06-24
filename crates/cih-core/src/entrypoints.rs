@@ -284,8 +284,8 @@ pub fn score_entry_points(
                         .unwrap_or_else(|| {
                             route_node
                                 .name
-                                .splitn(2, ' ')
-                                .nth(1)
+                                .split_once(' ')
+                                .map(|x| x.1)
                                 .unwrap_or(&route_node.name)
                         })
                         .to_string();
@@ -342,7 +342,7 @@ pub fn score_entry_points(
             } else if node_annotation_matches(node, registry.http_annotations()) {
                 let method = prop_str(node, "httpMethod").unwrap_or("GET").to_string();
                 let path = prop_str(node, "path")
-                    .unwrap_or_else(|| node.name.splitn(2, ' ').nth(1).unwrap_or(""))
+                    .unwrap_or_else(|| node.name.split_once(' ').map(|x| x.1).unwrap_or(""))
                     .to_string();
                 (EntrypointKind::HttpRoute, Some(method), Some(path), Vec::new())
             } else if node_annotation_matches(node, registry.event_annotations()) {

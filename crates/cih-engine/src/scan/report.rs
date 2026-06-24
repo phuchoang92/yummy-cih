@@ -13,18 +13,26 @@ pub fn print_summary(repo_map: &RepoMap, output_path: &Path) {
     println!("Repo: {}", repo_map.root);
     println!("Build system: {:?}", repo_map.build_system);
     println!(
-        "Java files: {} - LOC: {}",
-        repo_map.total_java_files,
-        format_count(repo_map.total_loc)
+        "Source files: {} — LOC: {}",
+        repo_map.total_source_files,
+        format_count(repo_map.total_source_loc)
     );
+    if !repo_map.per_language.is_empty() {
+        let langs: Vec<String> = repo_map
+            .per_language
+            .iter()
+            .map(|(lang, count)| format!("{lang}: {count}"))
+            .collect();
+        println!("Languages: {}", langs.join(", "));
+    }
     if !repo_map.decompiled_dirs.is_empty() {
         println!("Decompiler dirs: {}", repo_map.decompiled_dirs.join(", "));
     }
     println!("Repo map: {}", output_path.display());
     println!();
     println!(
-        "{:<32} {:>7} {:>8} {:>5} {:>5} {:>5} {:>7} {:>8} {:>10}",
-        "Module", ".java", "LOC", "svc", "ctrl", "repo", "entity", "mapping", "est.nodes"
+        "{:<32} {:>7} {:>8} {:>12} {:>14} {:>10}",
+        "Module", "source", "LOC", "languages", "frameworks", "est.nodes"
     );
     for module in &repo_map.modules {
         let display = if module.rel_path == "." {
@@ -32,17 +40,21 @@ pub fn print_summary(repo_map: &RepoMap, output_path: &Path) {
         } else {
             format!("{} ({})", module.name, module.rel_path)
         };
+        let langs: String = module
+            .per_language
+            .keys()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let fws: String = module.frameworks.join(",");
         println!(
-            "{:<32} {:>7} {:>8} {:>5} {:>5} {:>5} {:>7} {:>8} {:>10}",
+            "{:<32} {:>7} {:>8} {:>12} {:>14} {:>10}",
             truncate(&display, 32),
-            module.java_files,
-            format_count(module.loc),
-            module.spring.services,
-            module.spring.controllers,
-            module.spring.repositories,
-            module.spring.entities,
-            module.spring.mappings,
-            format!("~{}", format_count(module.java_files * EST_NODES_PER_FILE))
+            module.source_files,
+            format_count(module.source_loc),
+            truncate(&langs, 12),
+            truncate(&fws, 14),
+            format!("~{}", format_count(module.source_files * EST_NODES_PER_FILE))
         );
     }
     println!();
@@ -53,7 +65,7 @@ fn recommendation(repo_map: &RepoMap) -> String {
     let mut modules: Vec<&ModuleInfo> = repo_map
         .modules
         .iter()
-        .filter(|m| m.java_files > 0 && !is_deferred_module(m))
+        .filter(|m| m.source_files > 0 && !is_deferred_module(m))
         .collect();
     modules.sort_by(|a, b| {
         module_score(b)
@@ -63,11 +75,11 @@ fn recommendation(repo_map: &RepoMap) -> String {
     });
 
     if modules.is_empty() {
-        return "Recommend: no application Java modules found to index.".into();
+        return "Recommend: no application source modules found to index.".into();
     }
 
     let selected: Vec<&ModuleInfo> = modules.into_iter().take(3).collect();
-    let files: u64 = selected.iter().map(|m| m.java_files).sum();
+    let files: u64 = selected.iter().map(|m| m.source_files).sum();
     let estimated_ms = files * PARSE_MS_PER_FILE;
     let nodes = files * EST_NODES_PER_FILE;
     let names = selected
@@ -82,15 +94,11 @@ fn recommendation(repo_map: &RepoMap) -> String {
     )
 }
 
+/// Score modules for recommendation priority.
+/// Framework-annotated modules score higher; then by file count.
 fn module_score(module: &ModuleInfo) -> u64 {
-    let spring = module.spring.controllers
-        + module.spring.services
-        + module.spring.repositories
-        + module.spring.components
-        + module.spring.configs
-        + module.spring.entities
-        + module.spring.mappings;
-    spring as u64 * 10_000 + module.java_files
+    let fw_score = module.frameworks.len() as u64;
+    fw_score * 10_000 + module.source_files
 }
 
 fn is_deferred_module(module: &ModuleInfo) -> bool {

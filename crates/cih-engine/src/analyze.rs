@@ -45,7 +45,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
     let repo_map_path = scan::write_repo_map(&scan.repo_map)?;
     tracing::info!(
         path = %repo_map_path.display(),
-        java_files = scan.repo_map.total_java_files,
+        source_files = scan.repo_map.total_source_files,
         modules = scan.repo_map.modules.len(),
         "repo-map written"
     );
@@ -556,11 +556,7 @@ enum ParseScopeOutcome {
 }
 
 fn default_registry() -> cih_parse::LanguageRegistry {
-    let mut r = cih_parse::LanguageRegistry::new();
-    r.register(cih_lang::java::JavaProvider::new());
-    r.register(cih_lang::typescript::TypescriptProvider::new());
-    r.register(cih_lang::python::PythonProvider::new());
-    r
+    scan::default_scan_registry()
 }
 
 fn parse_scope(

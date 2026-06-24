@@ -30,7 +30,6 @@ pub use ir::{
 pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
 pub use repo_map::{
     auto_detect_architecture, ArchitectureHint, BuildSystem, JarInfo, ModuleInfo, RepoMap,
-    SpringSignal,
 };
 
 /// Stable, unique node identifier (e.g. `Method:com.acme.UserService#save`).

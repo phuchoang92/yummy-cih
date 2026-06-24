@@ -1,4 +1,4 @@
-use cih_core::{BuildSystem, ModuleInfo, SpringSignal};
+use cih_core::{BuildSystem, ModuleInfo};
 use cih_engine_lib::scan::OwnedSourceFile;
 use cih_engine_lib::scope::*;
 
@@ -6,8 +6,7 @@ fn repo_map() -> cih_core::RepoMap {
     cih_core::RepoMap {
         root: "/repo".into(),
         build_system: BuildSystem::Maven,
-        total_java_files: 3,
-        total_loc: 30,
+        total_source_loc: 30,
         modules: vec![
             module("app", "app"),
             module("infra", "infra"),
@@ -16,8 +15,8 @@ fn repo_map() -> cih_core::RepoMap {
         jars: Vec::new(),
         decompiled_dirs: vec![".workspace-dependencies".into()],
         architecture_hint: cih_core::ArchitectureHint::Unknown,
-        total_source_files: 0,
-        per_language: Default::default(),
+        total_source_files: 3,
+        per_language: std::collections::BTreeMap::from([("java".into(), 3)]),
     }
 }
 
@@ -26,12 +25,12 @@ fn module(name: &str, rel_path: &str) -> ModuleInfo {
         name: name.into(),
         rel_path: rel_path.into(),
         build_file: None,
-        java_files: 1,
-        loc: 10,
+        source_files: 1,
+        source_loc: 10,
         packages: Vec::new(),
-        spring: SpringSignal::default(),
         depends_on: Vec::new(),
         frameworks: Vec::new(),
+        per_language: std::collections::BTreeMap::from([("java".into(), 1)]),
     }
 }
 
@@ -47,9 +46,14 @@ fn source_files() -> Vec<OwnedSourceFile> {
 }
 
 fn owned(rel: &str, module_rel: Option<&str>) -> OwnedSourceFile {
+    let language = if rel.ends_with(".java") { "java" }
+    else if rel.ends_with(".ts") || rel.ends_with(".tsx") { "typescript" }
+    else if rel.ends_with(".py") { "python" }
+    else { "java" };
     OwnedSourceFile {
         rel: rel.into(),
         module_rel: module_rel.map(str::to_string),
+        language: language.into(),
     }
 }
 
@@ -156,8 +160,7 @@ fn parent_module_selects_descendant_files() {
     let repo_map = cih_core::RepoMap {
         root: "/repo".into(),
         build_system: BuildSystem::Maven,
-        total_java_files: 2,
-        total_loc: 20,
+        total_source_loc: 20,
         modules: vec![
             module("payments", "payments"),
             module("api", "payments/api"),
@@ -166,8 +169,8 @@ fn parent_module_selects_descendant_files() {
         jars: Vec::new(),
         decompiled_dirs: Vec::new(),
         architecture_hint: cih_core::ArchitectureHint::Unknown,
-        total_source_files: 0,
-        per_language: Default::default(),
+        total_source_files: 2,
+        per_language: std::collections::BTreeMap::from([("java".into(), 2)]),
     };
     let files = vec![
         owned("payments/api/src/main/java/Api.java", Some("payments/api")),
@@ -202,8 +205,7 @@ fn duplicate_module_name_selects_all_and_unknown_bails() {
     let repo_map = cih_core::RepoMap {
         root: "/repo".into(),
         build_system: BuildSystem::Gradle,
-        total_java_files: 2,
-        total_loc: 20,
+        total_source_loc: 20,
         modules: vec![
             module("billing", "services/billing"),
             module("billing", "legacy/billing"),
@@ -211,8 +213,8 @@ fn duplicate_module_name_selects_all_and_unknown_bails() {
         jars: Vec::new(),
         decompiled_dirs: Vec::new(),
         architecture_hint: cih_core::ArchitectureHint::Unknown,
-        total_source_files: 0,
-        per_language: Default::default(),
+        total_source_files: 2,
+        per_language: std::collections::BTreeMap::from([("java".into(), 2)]),
     };
     let files = vec![
         owned("services/billing/src/A.java", Some("services/billing")),

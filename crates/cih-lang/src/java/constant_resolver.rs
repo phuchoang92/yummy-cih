@@ -23,6 +23,7 @@ pub struct JavaConstantResolver {
     /// For static imports: map from (owner_fqcn, member_name) → const_name → value.
     /// We reuse `index` for this; static imports just resolve owner_fqcn from imports.
     /// simple_name → owner_fqcn (for single-class imports `import static pkg.Cls.NAME`)
+    #[allow(dead_code)]
     static_import_owners: StaticImportIndex,
     /// owner_fqcn → parent_fqcn (one level, for inheritance)
     super_index: SuperIndex,
