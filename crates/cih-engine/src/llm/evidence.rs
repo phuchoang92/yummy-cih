@@ -42,7 +42,10 @@ impl EvidenceItem {
             return None;
         }
         // text format: "src/main/.../Foo.java:41-50\n    ..."
-        self.text.lines().next().and_then(|first| first.split(':').next())
+        self.text
+            .lines()
+            .next()
+            .and_then(|first| first.split(':').next())
     }
 }
 
@@ -681,5 +684,3 @@ pub fn split_chunks(text: &str) -> Vec<String> {
     }
     chunks
 }
-
-

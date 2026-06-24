@@ -48,7 +48,11 @@ impl HttpJsonAdapter {
         Ok(out)
     }
 
-    pub fn render_body(&self, api_key: Option<&str>, req: &LlmRequest) -> Result<serde_json::Value> {
+    pub fn render_body(
+        &self,
+        api_key: Option<&str>,
+        req: &LlmRequest,
+    ) -> Result<serde_json::Value> {
         render_value(&self.config.body_template, api_key, Some(req))
     }
 }
@@ -164,5 +168,3 @@ pub fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a 
     }
     Some(current)
 }
-
-

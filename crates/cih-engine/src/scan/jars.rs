@@ -309,5 +309,3 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 // --- tests ---
-
-

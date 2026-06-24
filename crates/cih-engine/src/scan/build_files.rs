@@ -183,24 +183,74 @@ fn all_quoted(s: &str) -> Vec<String> {
     out
 }
 
+fn normalize_python_distribution_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut prev_sep = false;
+
+    for ch in trimmed.chars() {
+        if matches!(ch, '-' | '_' | '.') {
+            if !normalized.is_empty() && !prev_sep {
+                normalized.push('-');
+            }
+            prev_sep = true;
+            continue;
+        }
+
+        for lower in ch.to_lowercase() {
+            normalized.push(lower);
+        }
+        prev_sep = false;
+    }
+
+    while normalized.ends_with('-') {
+        normalized.pop();
+    }
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn parse_python_requirement_name(spec: &str) -> Option<String> {
+    let base = spec
+        .split(&['<', '>', '=', '!', '~', ';'][..])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let base = base.split('[').next().unwrap_or("").trim();
+    normalize_python_distribution_name(base)
+}
+
 pub fn parse_package_json(content: &str) -> Option<BuildMeta> {
     let val: serde_json::Value = serde_json::from_str(content).ok()?;
     let name = val.get("name")?.as_str()?;
-    let mut deps = Vec::new();
-    if let Some(deps_obj) = val.get("dependencies").and_then(|d| d.as_object()) {
-        for key in deps_obj.keys() {
-            deps.push(key.clone());
-        }
-    }
-    if let Some(dev_deps_obj) = val.get("devDependencies").and_then(|d| d.as_object()) {
-        for key in dev_deps_obj.keys() {
-            deps.push(key.clone());
+    let mut deps = BTreeSet::new();
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(deps_obj) = val.get(section).and_then(|d| d.as_object()) {
+            for key in deps_obj.keys() {
+                deps.insert(key.clone());
+            }
         }
     }
 
     let (group_id, artifact_id) = if name.starts_with('@') && name.contains('/') {
         let mut parts = name.splitn(2, '/');
-        (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string())
+        (
+            parts.next().unwrap_or("").to_string(),
+            parts.next().unwrap_or("").to_string(),
+        )
     } else {
         ("".to_string(), name.to_string())
     };
@@ -208,14 +258,15 @@ pub fn parse_package_json(content: &str) -> Option<BuildMeta> {
     Some(BuildMeta {
         group_id,
         artifact_id,
-        deps,
+        deps: deps.into_iter().collect(),
         modules: Vec::new(),
     })
 }
 
 pub fn parse_pyproject_toml(content: &str) -> Option<BuildMeta> {
     let val: toml::Value = toml::from_str(content).ok()?;
-    let name = val.get("project")
+    let name = val
+        .get("project")
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .or_else(|| {
@@ -225,41 +276,49 @@ pub fn parse_pyproject_toml(content: &str) -> Option<BuildMeta> {
                 .and_then(|n| n.as_str())
         })?;
 
-    let mut deps = Vec::new();
+    let artifact_id = normalize_python_distribution_name(name)?;
+    let mut deps = BTreeSet::new();
 
-    if let Some(deps_array) = val.get("project").and_then(|p| p.get("dependencies")).and_then(|d| d.as_array()) {
+    if let Some(deps_array) = val
+        .get("project")
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_array())
+    {
         for dep in deps_array {
             if let Some(dep_str) = dep.as_str() {
-                let name = dep_str.split(&['<', '>', '=', '!', '~', ';'][..]).next().unwrap_or("").trim();
-                if !name.is_empty() {
-                    deps.push(name.to_string());
+                if let Some(name) = parse_python_requirement_name(dep_str) {
+                    deps.insert(name);
                 }
             }
         }
     }
 
-    if let Some(poetry_deps) = val.get("tool")
+    if let Some(poetry_deps) = val
+        .get("tool")
         .and_then(|t| t.get("poetry"))
         .and_then(|p| p.get("dependencies"))
-        .and_then(|d| d.as_table()) {
+        .and_then(|d| d.as_table())
+    {
         for key in poetry_deps.keys() {
             if key != "python" {
-                deps.push(key.clone());
+                if let Some(name) = normalize_python_distribution_name(key) {
+                    deps.insert(name);
+                }
             }
         }
     }
 
     Some(BuildMeta {
         group_id: "".to_string(),
-        artifact_id: name.to_string(),
-        deps,
+        artifact_id,
+        deps: deps.into_iter().collect(),
         modules: Vec::new(),
     })
 }
 
 pub fn parse_setup_cfg(content: &str) -> Option<BuildMeta> {
     let mut name = None;
-    let mut deps = Vec::new();
+    let mut deps = BTreeSet::new();
     let mut in_metadata = false;
     let mut in_options = false;
     let mut in_requires = false;
@@ -275,7 +334,7 @@ pub fn parse_setup_cfg(content: &str) -> Option<BuildMeta> {
 
         if in_metadata && trimmed.starts_with("name") {
             if let Some(val) = trimmed.split('=').nth(1) {
-                name = Some(val.trim().to_string());
+                name = normalize_python_distribution_name(val);
             }
         }
 
@@ -283,9 +342,8 @@ pub fn parse_setup_cfg(content: &str) -> Option<BuildMeta> {
             if let Some(val) = trimmed.split('=').nth(1) {
                 let val_trimmed = val.trim();
                 if !val_trimmed.is_empty() {
-                    let dep = val_trimmed.split(&['<', '>', '=', '!', '~', ';'][..]).next().unwrap_or("").trim();
-                    if !dep.is_empty() {
-                        deps.push(dep.to_string());
+                    if let Some(dep) = parse_python_requirement_name(val_trimmed) {
+                        deps.insert(dep);
                     }
                 }
                 in_requires = true;
@@ -298,9 +356,8 @@ pub fn parse_setup_cfg(content: &str) -> Option<BuildMeta> {
                 continue;
             }
             if line.starts_with(' ') || line.starts_with('\t') {
-                let dep = trimmed.split(&['<', '>', '=', '!', '~', ';'][..]).next().unwrap_or("").trim();
-                if !dep.is_empty() {
-                    deps.push(dep.to_string());
+                if let Some(dep) = parse_python_requirement_name(trimmed) {
+                    deps.insert(dep);
                 }
             } else {
                 in_requires = false;
@@ -312,10 +369,83 @@ pub fn parse_setup_cfg(content: &str) -> Option<BuildMeta> {
     Some(BuildMeta {
         group_id: "".to_string(),
         artifact_id,
-        deps,
+        deps: deps.into_iter().collect(),
         modules: Vec::new(),
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{parse_package_json, parse_pyproject_toml, parse_setup_cfg};
 
+    #[test]
+    fn package_json_includes_peer_and_optional_dependencies() {
+        let meta = parse_package_json(
+            r#"
+            {
+              "name": "@acme/app",
+              "dependencies": { "@acme/core": "1.0.0" },
+              "devDependencies": { "typescript": "^5.0.0" },
+              "peerDependencies": { "react": "^18.0.0" },
+              "optionalDependencies": { "fsevents": "^2.0.0" }
+            }
+            "#,
+        )
+        .unwrap();
 
+        assert_eq!(meta.group_id, "@acme");
+        assert_eq!(meta.artifact_id, "app");
+        assert_eq!(
+            meta.deps,
+            vec![
+                "@acme/core".to_string(),
+                "fsevents".to_string(),
+                "react".to_string(),
+                "typescript".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn pyproject_normalizes_project_and_dependency_names() {
+        let meta = parse_pyproject_toml(
+            r#"
+            [project]
+            name = "My_Service"
+            dependencies = [
+              "Other.Service>=1.0",
+              "Third_Party[httpx]>=2.0; python_version >= '3.10'"
+            ]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(meta.artifact_id, "my-service");
+        assert_eq!(
+            meta.deps,
+            vec!["other-service".to_string(), "third-party".to_string()]
+        );
+    }
+
+    #[test]
+    fn setup_cfg_normalizes_project_and_dependency_names() {
+        let meta = parse_setup_cfg(
+            r#"
+            [metadata]
+            name = My.Service
+
+            [options]
+            install_requires =
+                Other_Service>=1.0
+                third-party[uvicorn]>=2.0
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(meta.artifact_id, "my-service");
+        assert_eq!(
+            meta.deps,
+            vec!["other-service".to_string(), "third-party".to_string()]
+        );
+    }
+}

@@ -4,11 +4,7 @@ use anyhow::{Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, ParsedFile, VersionId};
 
 /// blake3 (first 16 hex) over deterministic nodes+edges+IR → graph version.
-pub fn content_version(
-    nodes: &[Node],
-    edges: &[Edge],
-    parsed_files: &[ParsedFile],
-) -> String {
+pub fn content_version(nodes: &[Node], edges: &[Edge], parsed_files: &[ParsedFile]) -> String {
     let mut hasher = blake3::Hasher::new();
     for node in nodes {
         hasher.update(&serde_json::to_vec(node).unwrap_or_default());

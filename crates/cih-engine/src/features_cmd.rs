@@ -33,9 +33,8 @@ fn load_feature_artifact(repo: &Path) -> Result<(PathBuf, Vec<FeatureGroupEntry>
             parent.display()
         )
     })?;
-    let entries = cih_grouping::read_feature_artifact(&dir).with_context(|| {
-        format!("failed to read groups.jsonl from {}", dir.display())
-    })?;
+    let entries = cih_grouping::read_feature_artifact(&dir)
+        .with_context(|| format!("failed to read groups.jsonl from {}", dir.display()))?;
     Ok((dir, entries))
 }
 
@@ -127,21 +126,28 @@ fn dominant_strategy(group: &[&FeatureGroupEntry]) -> String {
 }
 
 fn print_summary(repo: &Path, summary: &FeatureSummary) {
-    let repo_name = repo
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
+    let repo_name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
     let ver = &summary.graph_version[..summary.graph_version.len().min(8)];
     crate::ui::print_header("Features", repo_name, Some(ver));
 
     // Column widths.
-    let name_w = summary.features.iter().map(|r| r.name.len()).max().unwrap_or(7).max(7);
+    let name_w = summary
+        .features
+        .iter()
+        .map(|r| r.name.len())
+        .max()
+        .unwrap_or(7)
+        .max(7);
     let strategy_w = 10usize;
 
     eprintln!(
         "     {:<name_w$}  {:>6}  {:<strategy_w$}  {}",
-        "Feature", "Nodes", "Strategy", "Pinned",
-        name_w = name_w, strategy_w = strategy_w
+        "Feature",
+        "Nodes",
+        "Strategy",
+        "Pinned",
+        name_w = name_w,
+        strategy_w = strategy_w
     );
     eprintln!(
         "     {}  {}  {}  {}",
@@ -159,8 +165,12 @@ fn print_summary(repo: &Path, summary: &FeatureSummary) {
         };
         eprintln!(
             "     {:<name_w$}  {:>6}  {:<strategy_w$}{}",
-            row.name, row.node_count, row.strategy, pin,
-            name_w = name_w, strategy_w = strategy_w
+            row.name,
+            row.node_count,
+            row.strategy,
+            pin,
+            name_w = name_w,
+            strategy_w = strategy_w
         );
     }
 
@@ -192,10 +202,7 @@ pub(crate) fn run_features_override(
     };
 
     // Upsert: update existing entry for this node_id, or append a new one.
-    let existing = overrides
-        .entries
-        .iter_mut()
-        .find(|e| e.node_id == node_id);
+    let existing = overrides.entries.iter_mut().find(|e| e.node_id == node_id);
 
     let is_update = existing.is_some();
     if let Some(entry) = existing {
@@ -216,8 +223,7 @@ pub(crate) fn run_features_override(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(&overrides)?;
-    std::fs::write(&path, json)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
 
     let action = if is_update { "Updated" } else { "Added" };
     eprintln!("{action} override: {node_id} → \x1b[1m{feature}\x1b[0m");

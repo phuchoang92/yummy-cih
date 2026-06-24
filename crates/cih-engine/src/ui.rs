@@ -212,7 +212,11 @@ impl PhaseProgress {
         let g = glyphs();
         self.bar.println(format!(
             "\x1b[2m{}\x1b[0m  \x1b[32m{}\x1b[0m  {}  {} {}",
-            g.rail, g.phase_done, self.phase_name, g.dash, detail.into(),
+            g.rail,
+            g.phase_done,
+            self.phase_name,
+            g.dash,
+            detail.into(),
         ));
         self.bar.finish_and_clear();
     }

@@ -1,9 +1,9 @@
+use anyhow::Result;
 use cih_engine_lib::llm::evidence::EvidenceCorpus;
 use cih_engine_lib::llm::{LlmAdapter, LlmRequest, LlmResponse};
 use cih_engine_lib::wiki_cmd::*;
-use cih_wiki::{FeatureMetaEntry, WikiGraph, WikiMeta, WikiModuleCacheEntry};
 use cih_wiki::features::FeatureGroup;
-use anyhow::Result;
+use cih_wiki::{FeatureMetaEntry, WikiGraph, WikiMeta, WikiModuleCacheEntry};
 use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicUsize, Ordering as AOrdering},
@@ -357,8 +357,7 @@ fn parse_llm_summary_extracts_valid_json() {
 
 #[test]
 fn parse_llm_summary_handles_json_in_markdown_block() {
-    let text =
-        "Here is the summary:\n```json\n{\"po\": \"A\", \"ba\": \"B\", \"dev\": \"C\"}\n```";
+    let text = "Here is the summary:\n```json\n{\"po\": \"A\", \"ba\": \"B\", \"dev\": \"C\"}\n```";
     let result = parse_llm_summary(text).unwrap();
     assert_eq!(result.po, "A");
 }
@@ -383,32 +382,47 @@ fn make_community(route_prefixes: Option<Vec<&str>>) -> cih_core::Node {
 #[test]
 fn route_prefix_filter_matches_simple_segment() {
     let c = make_community(Some(vec!["membership", "profile"]));
-    assert!(community_matches_route_prefix(&c, &["/membership".to_string()]));
+    assert!(community_matches_route_prefix(
+        &c,
+        &["/membership".to_string()]
+    ));
 }
 
 #[test]
 fn route_prefix_filter_no_match() {
     let c = make_community(Some(vec!["orders", "payments"]));
-    assert!(!community_matches_route_prefix(&c, &["/membership".to_string()]));
+    assert!(!community_matches_route_prefix(
+        &c,
+        &["/membership".to_string()]
+    ));
 }
 
 #[test]
 fn route_prefix_filter_skips_generic_prefix_in_pattern() {
     // Pattern /api/membership → meaningful segment is "membership"
     let c = make_community(Some(vec!["membership"]));
-    assert!(community_matches_route_prefix(&c, &["/api/membership".to_string()]));
+    assert!(community_matches_route_prefix(
+        &c,
+        &["/api/membership".to_string()]
+    ));
 }
 
 #[test]
 fn route_prefix_filter_missing_props_keeps_community() {
     let c = make_community(None);
-    assert!(community_matches_route_prefix(&c, &["/membership".to_string()]));
+    assert!(community_matches_route_prefix(
+        &c,
+        &["/membership".to_string()]
+    ));
 }
 
 #[test]
 fn route_prefix_filter_empty_prefixes_drops_community() {
     let c = make_community(Some(vec![]));
-    assert!(!community_matches_route_prefix(&c, &["/membership".to_string()]));
+    assert!(!community_matches_route_prefix(
+        &c,
+        &["/membership".to_string()]
+    ));
 }
 
 #[test]

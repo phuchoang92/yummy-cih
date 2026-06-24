@@ -20,10 +20,10 @@ use cih_core::{auto_detect_architecture, BuildSystem, JarInfo, ModuleInfo, RepoM
 pub mod build_files;
 pub mod ignore_rules;
 pub mod jars;
-pub mod source_scan;
 mod modules;
 mod paths;
 mod report;
+pub mod source_scan;
 mod walk;
 
 use modules::{
@@ -193,8 +193,7 @@ pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
     let (all_deps, own_group_prefix, key_to_name) = jar_discovery_inputs(&candidates);
     let (aggregates, mut owned_source_files) =
         collect_source_aggregates(&candidates, &source_files_info);
-    let modules =
-        build_modules_from_aggregates(candidates.clone(), aggregates, &key_to_name);
+    let modules = build_modules_from_aggregates(candidates.clone(), aggregates, &key_to_name);
 
     owned_source_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 

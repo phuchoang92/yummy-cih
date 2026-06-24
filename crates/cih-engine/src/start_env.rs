@@ -194,6 +194,3 @@ fn parse_env_line(line: &str) -> Option<(&str, &str)> {
     let (key, rest) = trimmed.split_once('=')?;
     Some((key.trim(), rest))
 }
-
-
-

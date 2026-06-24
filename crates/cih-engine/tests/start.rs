@@ -1,5 +1,5 @@
-use cih_engine_lib::start::*;
 use anyhow::Result;
+use cih_engine_lib::start::*;
 use std::path::{Path, PathBuf};
 
 /// Test runner that records commands instead of executing them.

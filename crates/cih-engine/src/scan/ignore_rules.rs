@@ -283,5 +283,3 @@ fn compound_extension_like(file_name: &str) -> Option<&str> {
     let second = file_name[..last].rfind('.')?;
     Some(&file_name[second..])
 }
-
-

@@ -1,10 +1,10 @@
+use cih_core::JarInfo;
 use cih_engine_lib::analyze::{analyze_emit, analyze_from_scope, extract_jar_api};
 use cih_engine_lib::db::LoadOutcome;
 use cih_engine_lib::discover::run_discover_core;
 use cih_engine_lib::scan;
 use cih_engine_lib::scope::{ScopeFile, ScopeRequest};
 use cih_engine_lib::wiki_cmd;
-use cih_core::JarInfo;
 use cih_wiki::{WikiManifest, WikiMeta};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -605,7 +605,11 @@ fn discover_preserves_analyze_artifacts_on_disk() {
     let analyze_edges = analyze.artifacts.edges_path.clone();
     let analyze_version = analyze.artifacts.version.0.clone();
 
-    run_discover_core(&root, &cih_engine_lib::discover::DiscoverOverrides::default()).unwrap();
+    run_discover_core(
+        &root,
+        &cih_engine_lib::discover::DiscoverOverrides::default(),
+    )
+    .unwrap();
 
     assert!(
         analyze_nodes.exists(),
@@ -640,8 +644,11 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
     let scan = scan::scan_repo(&root).unwrap();
     analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover =
-        run_discover_core(&root, &cih_engine_lib::discover::DiscoverOverrides::default()).unwrap();
+    let discover = run_discover_core(
+        &root,
+        &cih_engine_lib::discover::DiscoverOverrides::default(),
+    )
+    .unwrap();
 
     assert!(
         discover
@@ -686,8 +693,11 @@ fn discover_load_artifacts_are_analyze_then_community() {
     let scan = scan::scan_repo(&root).unwrap();
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover =
-        run_discover_core(&root, &cih_engine_lib::discover::DiscoverOverrides::default()).unwrap();
+    let discover = run_discover_core(
+        &root,
+        &cih_engine_lib::discover::DiscoverOverrides::default(),
+    )
+    .unwrap();
     let artifact_sets = discover.artifact_sets_for_load();
 
     // Canonicalize both sides: macOS temp_dir() symlinks may differ from canonicalized paths.

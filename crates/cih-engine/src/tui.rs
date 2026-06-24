@@ -55,8 +55,13 @@ struct Field {
 impl Field {
     fn bool(flag: &'static str, label: &'static str, desc: &'static str) -> Self {
         Field {
-            flag, label, desc, placeholder: "",
-            val: FieldVal::Bool(false), required: false, options: &[],
+            flag,
+            label,
+            desc,
+            placeholder: "",
+            val: FieldVal::Bool(false),
+            required: false,
+            options: &[],
         }
     }
 
@@ -68,8 +73,13 @@ impl Field {
         required: bool,
     ) -> Self {
         Field {
-            flag, label, desc, placeholder,
-            val: FieldVal::Text(String::new()), required, options: &[],
+            flag,
+            label,
+            desc,
+            placeholder,
+            val: FieldVal::Text(String::new()),
+            required,
+            options: &[],
         }
     }
 
@@ -81,21 +91,34 @@ impl Field {
         default: usize,
     ) -> Self {
         Field {
-            flag, label, desc, placeholder: "",
-            val: FieldVal::Select(default), required: false, options,
+            flag,
+            label,
+            desc,
+            placeholder: "",
+            val: FieldVal::Select(default),
+            required: false,
+            options,
         }
     }
 
     /// The display string for the value column.
     fn display_value(&self) -> String {
         match &self.val {
-            FieldVal::Bool(b) => if *b { "[x]".into() } else { "[ ]".into() },
+            FieldVal::Bool(b) => {
+                if *b {
+                    "[x]".into()
+                } else {
+                    "[ ]".into()
+                }
+            }
             FieldVal::Text(s) => {
-                if s.is_empty() { self.placeholder.into() } else { s.clone() }
+                if s.is_empty() {
+                    self.placeholder.into()
+                } else {
+                    s.clone()
+                }
             }
-            FieldVal::Select(i) => {
-                self.options.get(*i).copied().unwrap_or("").to_string()
-            }
+            FieldVal::Select(i) => self.options.get(*i).copied().unwrap_or("").to_string(),
         }
     }
 
@@ -449,17 +472,13 @@ fn render(frame: &mut Frame, app: &App) {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " — Command Builder",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" — Command Builder", Style::default().fg(Color::DarkGray)),
         ])),
         outer[0],
     );
 
     // Content: left cmd list | right field form
-    let content = Layout::horizontal([Constraint::Length(13), Constraint::Min(30)])
-        .split(outer[1]);
+    let content = Layout::horizontal([Constraint::Length(13), Constraint::Min(30)]).split(outer[1]);
 
     render_cmd_list(frame, app, content[0]);
     render_fields(frame, app, content[1]);
@@ -489,19 +508,19 @@ fn render(frame: &mut Frame, app: &App) {
         Mode::Confirm => Line::from(vec![
             Span::styled(
                 "  [Enter/y] Run",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
             Span::styled("[Esc/n] Edit more", Style::default().fg(Color::DarkGray)),
             Span::raw("   "),
             Span::styled("[q] Quit", Style::default().fg(Color::DarkGray)),
         ]),
-        Mode::TextEdit => Line::from(vec![
-            Span::styled(
-                "  [Enter/Esc] Done editing",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
+        Mode::TextEdit => Line::from(vec![Span::styled(
+            "  [Enter/Esc] Done editing",
+            Style::default().fg(Color::DarkGray),
+        )]),
         Mode::FieldNav => Line::from(vec![
             Span::styled("  [↑↓/jk]", Style::default().fg(Color::DarkGray)),
             Span::raw(" field   "),
@@ -509,7 +528,12 @@ fn render(frame: &mut Frame, app: &App) {
             Span::raw(" edit/toggle   "),
             Span::styled("[→]", Style::default().fg(Color::DarkGray)),
             Span::raw(" cycle   "),
-            Span::styled("[r]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[r]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" run   "),
             Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
             Span::raw(" commands   "),
@@ -681,9 +705,7 @@ fn event_loop(
 
         if let Event::Key(key) = event::read()? {
             // Ctrl-C always quits
-            if key.code == KeyCode::Char('c')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Ok(None);
             }
 

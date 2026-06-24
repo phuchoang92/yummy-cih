@@ -223,5 +223,3 @@ fn scope_version(files: &[String], request: &ScopeRequest) -> Result<String> {
     hasher.update(&selection);
     Ok(hasher.finalize().to_hex()[..16].to_string())
 }
-
-

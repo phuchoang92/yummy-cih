@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use cih_embed::{EmbedModel, EmbedModelKind};
 use cih_grouping::{
-    Embedder, EmbedConfig, EmbedStrategy, FeatureGroupEntry, FeatureLlmCaller, FeatureStrategy,
+    EmbedConfig, EmbedStrategy, Embedder, FeatureGroupEntry, FeatureLlmCaller, FeatureStrategy,
     HybridStrategy, LlmConfig, LlmStrategy, PackageConfig, PackageStrategy, StructuralConfig,
     StructuralStrategy,
 };
@@ -70,7 +70,9 @@ pub fn build_feature_strategy(
     llm: Option<FeatureLlmOptions>,
 ) -> Result<Box<dyn FeatureStrategy>> {
     match kind {
-        "structural" => Ok(Box::new(StructuralStrategy::new(StructuralConfig::default()))),
+        "structural" => Ok(Box::new(StructuralStrategy::new(
+            StructuralConfig::default(),
+        ))),
         "llm" => {
             if let Some(opts) = llm {
                 let caller = Arc::new(EngineLlmCaller {
@@ -80,9 +82,15 @@ pub fn build_feature_strategy(
                     max_tokens: opts.max_tokens,
                     timeout_secs: opts.timeout_secs,
                 });
-                Ok(Box::new(LlmStrategy::new(caller, LlmConfig::default(), opts.prior_artifact)))
+                Ok(Box::new(LlmStrategy::new(
+                    caller,
+                    LlmConfig::default(),
+                    opts.prior_artifact,
+                )))
             } else {
-                tracing::warn!("--feature-strategy llm requires LLM config; falling back to package");
+                tracing::warn!(
+                    "--feature-strategy llm requires LLM config; falling back to package"
+                );
                 Ok(Box::new(PackageStrategy::new(pkg_cfg)))
             }
         }
@@ -94,8 +102,7 @@ pub fn build_feature_strategy(
 
             let catch_all = vec!["shared".into(), "core".into(), "common".into()];
 
-            let mut strategies: Vec<Box<dyn FeatureStrategy>> =
-                vec![structural, package, embed];
+            let mut strategies: Vec<Box<dyn FeatureStrategy>> = vec![structural, package, embed];
 
             if let Some(opts) = llm {
                 let caller = Arc::new(EngineLlmCaller {
@@ -107,7 +114,10 @@ pub fn build_feature_strategy(
                 });
                 strategies.push(Box::new(LlmStrategy::new(
                     caller,
-                    LlmConfig { batch_size: 18, catch_all_features: catch_all.clone() },
+                    LlmConfig {
+                        batch_size: 18,
+                        catch_all_features: catch_all.clone(),
+                    },
                     opts.prior_artifact,
                 )));
             }

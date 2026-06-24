@@ -285,5 +285,3 @@ fn write_jsonl(path: &Path, matches: &[ContractMatch]) -> Result<()> {
     writer.flush()?;
     Ok(())
 }
-
-

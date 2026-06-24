@@ -16,8 +16,8 @@ fn tmp_dir(tag: &str) -> PathBuf {
 fn write_fake_jar(path: &Path, class_count: usize) {
     let file = std::fs::File::create(path).unwrap();
     let mut writer = zip::ZipWriter::new(file);
-    let opts = zip::write::FileOptions::<()>::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let opts =
+        zip::write::FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
     for i in 0..class_count {
         writer
             .start_file(format!("com/example/Class{i}.class"), opts)

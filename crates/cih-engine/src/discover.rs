@@ -93,10 +93,7 @@ pub fn run_discover(
     Ok(())
 }
 
-pub fn run_discover_core(
-    repo: &Path,
-    overrides: &DiscoverOverrides,
-) -> Result<DiscoverOutcome> {
+pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<DiscoverOutcome> {
     let mut ui = crate::ui::PhaseProgress::new();
     ui.spin("Loading graph");
 
@@ -172,7 +169,10 @@ pub fn run_discover_core(
         edges = community_output.edges.len(),
         "community detection complete"
     );
-    ui.finish_with(format!("{} communities", fmt_count(community_output.nodes.len())));
+    ui.finish_with(format!(
+        "{} communities",
+        fmt_count(community_output.nodes.len())
+    ));
 
     let symbol_count = nodes
         .iter()
@@ -219,11 +219,20 @@ pub fn run_discover_core(
         edges = process_output.edges.len(),
         "process tracing complete"
     );
-    ui.finish_with(format!("{} processes", fmt_count(process_output.nodes.len())));
+    ui.finish_with(format!(
+        "{} processes",
+        fmt_count(process_output.nodes.len())
+    ));
 
     // Write entrypoints sidecar — persists Scheduled/EventListener methods that are
     // detected in-memory but not stored in any graph artifact.
-    write_entrypoints_sidecar(repo, &nodes, &edges, process_cfg.min_trace_confidence, &entry_registry);
+    write_entrypoints_sidecar(
+        repo,
+        &nodes,
+        &edges,
+        process_cfg.min_trace_confidence,
+        &entry_registry,
+    );
 
     let mut output_nodes = community_output.nodes;
     output_nodes.extend(process_output.nodes);
@@ -285,10 +294,9 @@ pub fn run_discover_core(
         match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
             Ok(adapter) => {
                 // Load prior artifact for incremental cache.
-                let prior_artifact =
-                    find_feature_artifact_dir(repo, &source.version.0)
-                        .and_then(|dir| read_feature_artifact(&dir).ok())
-                        .unwrap_or_default();
+                let prior_artifact = find_feature_artifact_dir(repo, &source.version.0)
+                    .and_then(|dir| read_feature_artifact(&dir).ok())
+                    .unwrap_or_default();
                 let prior_artifact = prior_artifact
                     .iter()
                     .filter(|e| e.strategy == "llm")
@@ -320,7 +328,9 @@ pub fn run_discover_core(
                 error = %err,
                 "feature strategy failed to load — falling back to package"
             );
-            Box::new(cih_grouping::PackageStrategy::new(PackageConfig::load_or_default(repo)))
+            Box::new(cih_grouping::PackageStrategy::new(
+                PackageConfig::load_or_default(repo),
+            ))
         }
     };
     let strategy_input = StrategyInput {
@@ -345,10 +355,18 @@ pub fn run_discover_core(
         names.len()
     };
     let feat_dir = feature_artifact_dir(repo, &source.version.0);
-    write_feature_artifacts(&feat_dir, feature_strategy.name(), &raw_entries, &merged_entries)
-        .with_context(|| {
-            format!("failed to write feature artifacts to {}", feat_dir.display())
-        })?;
+    write_feature_artifacts(
+        &feat_dir,
+        feature_strategy.name(),
+        &raw_entries,
+        &merged_entries,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write feature artifacts to {}",
+            feat_dir.display()
+        )
+    })?;
     prune_feature_artifacts(
         &repo.join(".cih").join("artifacts-features"),
         &source.version.0,

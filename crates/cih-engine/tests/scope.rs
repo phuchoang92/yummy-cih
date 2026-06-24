@@ -46,10 +46,15 @@ fn source_files() -> Vec<OwnedSourceFile> {
 }
 
 fn owned(rel: &str, module_rel: Option<&str>) -> OwnedSourceFile {
-    let language = if rel.ends_with(".java") { "java" }
-    else if rel.ends_with(".ts") || rel.ends_with(".tsx") { "typescript" }
-    else if rel.ends_with(".py") { "python" }
-    else { "java" };
+    let language = if rel.ends_with(".java") {
+        "java"
+    } else if rel.ends_with(".ts") || rel.ends_with(".tsx") {
+        "typescript"
+    } else if rel.ends_with(".py") {
+        "python"
+    } else {
+        "java"
+    };
     OwnedSourceFile {
         rel: rel.into(),
         module_rel: module_rel.map(str::to_string),

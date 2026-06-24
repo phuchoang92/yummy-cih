@@ -54,7 +54,10 @@ pub fn print_summary(repo_map: &RepoMap, output_path: &Path) {
             format_count(module.source_loc),
             truncate(&langs, 12),
             truncate(&fws, 14),
-            format!("~{}", format_count(module.source_files * EST_NODES_PER_FILE))
+            format!(
+                "~{}",
+                format_count(module.source_files * EST_NODES_PER_FILE)
+            )
         );
     }
     println!();
@@ -97,7 +100,7 @@ fn recommendation(repo_map: &RepoMap) -> String {
 /// Score modules for recommendation priority.
 /// Framework-annotated modules score higher; then by file count.
 fn module_score(module: &ModuleInfo) -> u64 {
-    let fw_score = module.frameworks.len() as u64;
+    let fw_score = u64::from(!module.frameworks.is_empty());
     fw_score * 10_000 + module.source_files
 }
 
@@ -139,5 +142,37 @@ fn truncate(s: &str, max: usize) -> String {
         let take = max.saturating_sub(3);
         let prefix: String = s.chars().take(take).collect();
         format!("{prefix}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use cih_core::ModuleInfo;
+
+    use super::module_score;
+
+    fn module(frameworks: &[&str], source_files: u64) -> ModuleInfo {
+        ModuleInfo {
+            name: "m".to_string(),
+            rel_path: ".".to_string(),
+            build_file: None,
+            source_files,
+            source_loc: 0,
+            packages: Vec::new(),
+            depends_on: Vec::new(),
+            frameworks: frameworks.iter().map(|s| (*s).to_string()).collect(),
+            per_language: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn module_score_treats_framework_presence_as_boolean() {
+        assert_eq!(
+            module_score(&module(&["spring"], 12)),
+            module_score(&module(&["spring", "nestjs"], 12))
+        );
+        assert!(module_score(&module(&["spring"], 12)) > module_score(&module(&[], 999)));
     }
 }

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
 use cih_grouping::{FeatureStrategy, PackageConfig, PackageStrategy};
-use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::assign_class_slugs;
+use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
     generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary,
@@ -195,10 +195,16 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     if grouping == "package" {
         graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
         nodes = graph_artifacts.read_nodes().with_context(|| {
-            format!("failed to read nodes from {}", graph_artifacts.nodes_path.display())
+            format!(
+                "failed to read nodes from {}",
+                graph_artifacts.nodes_path.display()
+            )
         })?;
         edges = graph_artifacts.read_edges().with_context(|| {
-            format!("failed to read edges from {}", graph_artifacts.edges_path.display())
+            format!(
+                "failed to read edges from {}",
+                graph_artifacts.edges_path.display()
+            )
         })?;
         tracing::info!(
             graph_version = %graph_artifacts.version.0,
@@ -239,7 +245,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         community_edges = Vec::new();
         community_version = graph_artifacts.version.0.clone();
         feature_of = Box::new(move |node_id: &str, f: &str| {
-            feature_lookup.get(node_id).cloned().unwrap_or_else(|| pkg_strategy.feature_of(f))
+            feature_lookup
+                .get(node_id)
+                .cloned()
+                .unwrap_or_else(|| pkg_strategy.feature_of(f))
         });
     } else {
         // ── 1. Community nodes first (fast JSONL read, no source I/O) ─────────
@@ -247,7 +256,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
             Some(a) => {
                 let ns = a.read_nodes().with_context(|| {
-                    format!("failed to read community nodes from {}", a.nodes_path.display())
+                    format!(
+                        "failed to read community nodes from {}",
+                        a.nodes_path.display()
+                    )
                 })?;
                 let ver = a.version.0.clone();
                 tracing::info!(
@@ -307,18 +319,29 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         };
 
         // ── 4. Early bailout ──────────────────────────────────────────────────
-        if !filter_route.is_empty() && community_artifact.is_some() && community_nodes_pre.is_empty() {
-            eprintln!("info: --filter-route matched 0 communities (pre-filter); nothing to generate.");
+        if !filter_route.is_empty()
+            && community_artifact.is_some()
+            && community_nodes_pre.is_empty()
+        {
+            eprintln!(
+                "info: --filter-route matched 0 communities (pre-filter); nothing to generate."
+            );
             return Ok(());
         }
 
         // ── 5. Load heavy graph data ──────────────────────────────────────────
         graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
         nodes = graph_artifacts.read_nodes().with_context(|| {
-            format!("failed to read nodes from {}", graph_artifacts.nodes_path.display())
+            format!(
+                "failed to read nodes from {}",
+                graph_artifacts.nodes_path.display()
+            )
         })?;
         edges = graph_artifacts.read_edges().with_context(|| {
-            format!("failed to read edges from {}", graph_artifacts.edges_path.display())
+            format!(
+                "failed to read edges from {}",
+                graph_artifacts.edges_path.display()
+            )
         })?;
         tracing::info!(
             graph_version = %graph_artifacts.version.0,
@@ -331,7 +354,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let (community_nodes_loaded, community_edges_loaded, cv) = match community_artifact {
             Some(a) => {
                 let comm_edges = a.read_edges().with_context(|| {
-                    format!("failed to read community edges from {}", a.edges_path.display())
+                    format!(
+                        "failed to read community edges from {}",
+                        a.edges_path.display()
+                    )
                 })?;
                 (community_nodes_pre, comm_edges, community_version_raw)
             }
@@ -340,11 +366,17 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         community_version = cv;
 
         // ── 7. Build WikiGraph ────────────────────────────────────────────────
-        wiki_graph = WikiGraph::build(&nodes, &edges, &community_nodes_loaded, &community_edges_loaded);
+        wiki_graph = WikiGraph::build(
+            &nodes,
+            &edges,
+            &community_nodes_loaded,
+            &community_edges_loaded,
+        );
         community_edges = community_edges_loaded;
 
         // ── 8. Precise route filter ───────────────────────────────────────────
-        community_nodes = filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
+        community_nodes =
+            filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
         // In community/Leiden mode feature_of is never called (generate_wiki uses build() not
         // build_package_grouped), but WikiInput requires the field — supply a no-op default.
         feature_of = Box::new(|_, _| "shared".to_string());
@@ -352,32 +384,33 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     // Derive controller scope from filtered communities.
     // Package mode: no scope restriction (all controllers are in scope).
-    let controller_scope: Option<std::collections::HashSet<String>> =
-        if grouping == "package" || (filter_route.is_empty() && filter_community.is_empty() && max_communities.is_none()) {
-            None
-        } else {
-            let names: std::collections::HashSet<String> = community_nodes
-                .iter()
-                .flat_map(|c| {
-                    wiki_graph
-                        .community_routes
-                        .get(c.id.as_str())
-                        .into_iter()
-                        .flatten()
-                        .flat_map(|(handler, _route)| {
-                            handler
-                                .id
-                                .as_str()
-                                .strip_prefix("Method:")
-                                .or_else(|| handler.id.as_str().strip_prefix("Constructor:"))
-                                .and_then(|s| s.split('#').next())
-                                .and_then(|fqcn| fqcn.rsplit('.').next())
-                                .map(|s| s.to_string())
-                        })
-                })
-                .collect();
-            Some(names)
-        };
+    let controller_scope: Option<std::collections::HashSet<String>> = if grouping == "package"
+        || (filter_route.is_empty() && filter_community.is_empty() && max_communities.is_none())
+    {
+        None
+    } else {
+        let names: std::collections::HashSet<String> = community_nodes
+            .iter()
+            .flat_map(|c| {
+                wiki_graph
+                    .community_routes
+                    .get(c.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|(handler, _route)| {
+                        handler
+                            .id
+                            .as_str()
+                            .strip_prefix("Method:")
+                            .or_else(|| handler.id.as_str().strip_prefix("Constructor:"))
+                            .and_then(|s| s.split('#').next())
+                            .and_then(|fqcn| fqcn.rsplit('.').next())
+                            .map(|s| s.to_string())
+                    })
+            })
+            .collect();
+        Some(names)
+    };
 
     // ── 9. source_bodies deferred: only read source files for filtered members ─
     // Avoids reading thousands of Java files when only a few communities survive.
@@ -503,7 +536,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         );
 
         let mut ui = PhaseProgress::new();
-        if json { ui.hide(); }
+        if json {
+            ui.hide();
+        }
         ui.start_phase("Enriching communities", Some(total as u64));
 
         // community enrichment (par) + controller enrichment (sequential) run concurrently
@@ -672,7 +707,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             tracing::info!(communities = total_full, "starting LLM full enrichment");
 
             let mut ui_full = PhaseProgress::new();
-            if json { ui_full.hide(); }
+            if json {
+                ui_full.hide();
+            }
             ui_full.start_phase("Deep enrichment (PO/BA)", Some(total_full as u64));
 
             let results: Vec<(String, Result<CommunityLlmFull>)> =
@@ -694,7 +731,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                                 llm_retries,
                                 wiki_language,
                             );
-                            if r.is_ok() { ui_full.inc_ok(); } else { ui_full.inc_failed(); }
+                            if r.is_ok() {
+                                ui_full.inc_ok();
+                            } else {
+                                ui_full.inc_failed();
+                            }
                             (comm.id.as_str().to_string(), r)
                         })
                         .collect()
@@ -768,7 +809,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             .collect();
 
         let mut ui_feat = PhaseProgress::new();
-        if json { ui_feat.hide(); }
+        if json {
+            ui_feat.hide();
+        }
         ui_feat.start_phase("Enriching features", Some(active_features.len() as u64));
 
         let mut map: HashMap<String, FeatureLlmSummary> = HashMap::new();
@@ -839,7 +882,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     // Build handler-ID scope for route flow enrichment, filtered to the same features
     // that page generation will use. Without this, all 200+ handlers would be enriched
     // even when --filter-feature limits page output to a single module.
-    let route_flow_scope: Option<std::collections::HashSet<String>> = if !filter_feature.is_empty() {
+    let route_flow_scope: Option<std::collections::HashSet<String>> = if !filter_feature.is_empty()
+    {
         let mut fg = group_communities_by_feature(&wiki_graph);
         retain_matching_feature_groups(&mut fg, &filter_feature);
         let ids: std::collections::HashSet<String> = fg
@@ -860,52 +904,59 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     };
 
     // Per-flow LLM enrichment: one LLM call per process trace.
-    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> =
-        if effective_run_llm && !llm_no_call {
-            let total_flows = wiki_graph.process_nodes.len();
-            if total_flows > 0 {
-                tracing::info!(flows = total_flows, "starting per-flow LLM enrichment");
-                let mut ui_flow = PhaseProgress::new();
-                if json { ui_flow.hide(); }
-                ui_flow.start_phase("Enriching flows", Some(total_flows as u64));
-                let mut map = HashMap::new();
-                for proc in &wiki_graph.process_nodes {
-                    ui_flow.tick(proc.name.as_str());
-                    match enrich_one_flow(
-                        proc,
-                        &wiki_graph,
-                        adapter.as_ref().unwrap().as_ref(),
-                        api_key.as_deref(),
-                        llm_model,
-                        llm_max_tokens,
-                        llm_timeout_secs,
-                        llm_retries,
-                        &wiki_language,
-                        llm_debug_evidence,
-                        llm_dry_run,
-                    ) {
-                        Ok(summary) => {
-                            map.insert(proc.id.as_str().to_string(), summary);
-                            ui_flow.inc_ok();
-                        }
-                        Err(err) => {
-                            tracing::warn!(flow = %proc.id, error = %err, "flow LLM enrichment failed");
-                            ui_flow.inc_failed();
-                        }
+    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if effective_run_llm && !llm_no_call
+    {
+        let total_flows = wiki_graph.process_nodes.len();
+        if total_flows > 0 {
+            tracing::info!(flows = total_flows, "starting per-flow LLM enrichment");
+            let mut ui_flow = PhaseProgress::new();
+            if json {
+                ui_flow.hide();
+            }
+            ui_flow.start_phase("Enriching flows", Some(total_flows as u64));
+            let mut map = HashMap::new();
+            for proc in &wiki_graph.process_nodes {
+                ui_flow.tick(proc.name.as_str());
+                match enrich_one_flow(
+                    proc,
+                    &wiki_graph,
+                    adapter.as_ref().unwrap().as_ref(),
+                    api_key.as_deref(),
+                    llm_model,
+                    llm_max_tokens,
+                    llm_timeout_secs,
+                    llm_retries,
+                    &wiki_language,
+                    llm_debug_evidence,
+                    llm_dry_run,
+                ) {
+                    Ok(summary) => {
+                        map.insert(proc.id.as_str().to_string(), summary);
+                        ui_flow.inc_ok();
+                    }
+                    Err(err) => {
+                        tracing::warn!(flow = %proc.id, error = %err, "flow LLM enrichment failed");
+                        ui_flow.inc_failed();
                     }
                 }
-                ui_flow.finish_phase();
-                tracing::info!(enriched = map.len(), "per-flow LLM enrichment complete");
-                if map.is_empty() { None } else { Some(map) }
-            } else {
+            }
+            ui_flow.finish_phase();
+            tracing::info!(enriched = map.len(), "per-flow LLM enrichment complete");
+            if map.is_empty() {
                 None
+            } else {
+                Some(map)
             }
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     // Per-route flow enrichment: one LLM call per HTTP handler, generates step descriptions.
-    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if let Some(mut map) = flow_llm_map {
+    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if let Some(mut map) = flow_llm_map
+    {
         if effective_run_llm && !llm_no_call {
             let route_flows = enrich_route_flows(
                 &wiki_graph,
@@ -935,7 +986,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             wiki_language,
             llm_dry_run,
         );
-        if route_flows.is_empty() { None } else { Some(route_flows) }
+        if route_flows.is_empty() {
+            None
+        } else {
+            Some(route_flows)
+        }
     } else {
         flow_llm_map
     };
@@ -959,8 +1014,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let entrypoints = {
         let path = repo.join(".cih").join("entrypoints.json");
         match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str::<Vec<cih_wiki::EntrypointRecord>>(&raw)
-                .unwrap_or_default(),
+            Ok(raw) => {
+                serde_json::from_str::<Vec<cih_wiki::EntrypointRecord>>(&raw).unwrap_or_default()
+            }
             Err(_) => Vec::new(),
         }
     };
@@ -1000,7 +1056,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");
     let mut ui_gen = crate::ui::PhaseProgress::new();
-    if json { ui_gen.hide(); }
+    if json {
+        ui_gen.hide();
+    }
     ui_gen.spin("Generating pages");
     let outcome = generate_wiki(input, &out_dir)?;
     ui_gen.finish_with(format!("{} pages", outcome.page_count));
@@ -1034,7 +1092,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         crate::ui::print_row("Pages", &outcome.page_count.to_string());
         crate::ui::print_row(
             "Communities",
-            &format!("{}  routes {}", outcome.community_count, outcome.route_count),
+            &format!(
+                "{}  routes {}",
+                outcome.community_count, outcome.route_count
+            ),
         );
         if let Some(ref info) = llm_info_for_output {
             crate::ui::print_row(
@@ -1190,7 +1251,10 @@ Do not invent behavior, routes, tables, or class names not in the evidence.\n\
 Cite evidence IDs (R1, P1, T1, S1, B1, ...) inline when they support a claim.",
     );
     if language != "en" {
-        prompt.push_str(&format!("\nWrite all documentation in language: {}.", language));
+        prompt.push_str(&format!(
+            "\nWrite all documentation in language: {}.",
+            language
+        ));
     }
     prompt
 }
@@ -1348,7 +1412,10 @@ fn enrich_one_community_full(
          Cite evidence IDs (R1, T1, S1, B1, ...) when they support a claim.",
     );
     if language != "en" {
-        system.push_str(&format!("\nWrite all documentation in language: {}.", language));
+        system.push_str(&format!(
+            "\nWrite all documentation in language: {}.",
+            language
+        ));
     }
     let user = build_full_prompt(&community.name, &evidence);
     let request = LlmRequest {
@@ -1493,7 +1560,10 @@ fn build_controller_system_prompt(language: &str) -> String {
          the route paths and method names.",
     );
     if language != "en" {
-        s.push_str(&format!(" Write all descriptions in language: {}.", language));
+        s.push_str(&format!(
+            " Write all descriptions in language: {}.",
+            language
+        ));
     }
     s
 }
@@ -1782,11 +1852,23 @@ fn build_flow_evidence(process_node: &cih_core::Node, graph: &WikiGraph) -> Stri
         let mut tables: Vec<String> = Vec::new();
         if let Some(qids) = graph.executes_query.get(method_id) {
             for qid in qids.iter().take(4) {
-                for tid in graph.query_reads_table.get(qid.as_str()).into_iter().flatten().take(2) {
+                for tid in graph
+                    .query_reads_table
+                    .get(qid.as_str())
+                    .into_iter()
+                    .flatten()
+                    .take(2)
+                {
                     let name = tid.strip_prefix("DbTable:").unwrap_or(tid);
                     tables.push(format!("{}(r)", name));
                 }
-                for tid in graph.query_writes_table.get(qid.as_str()).into_iter().flatten().take(2) {
+                for tid in graph
+                    .query_writes_table
+                    .get(qid.as_str())
+                    .into_iter()
+                    .flatten()
+                    .take(2)
+                {
                     let name = tid.strip_prefix("DbTable:").unwrap_or(tid);
                     tables.push(format!("{}(w)", name));
                 }
@@ -1798,7 +1880,11 @@ fn build_flow_evidence(process_node: &cih_core::Node, graph: &WikiGraph) -> Stri
             step.step_number,
             step.symbol.name,
             class_name,
-            if stereotype.is_empty() { "?" } else { stereotype }
+            if stereotype.is_empty() {
+                "?"
+            } else {
+                stereotype
+            }
         );
         if !calls.is_empty() {
             line.push_str(&format!(" | calls: {}", calls.join(", ")));
@@ -1834,14 +1920,19 @@ fn chain_steps_text(chain: &[String], graph: &WikiGraph) -> String {
                     (cls, method)
                 })
                 .unwrap_or(("?", mid.as_str()));
-            let cls_id =
-                cih_wiki::pages::api_flow::class_id_from_method_id(mid.as_str(), graph);
+            let cls_id = cih_wiki::pages::api_flow::class_id_from_method_id(mid.as_str(), graph);
             let stereotype = graph
                 .nodes_by_id
                 .get(cls_id.as_str())
                 .and_then(cih_wiki::graph::node_stereotype)
                 .unwrap_or("?");
-            format!("[{}] {}.{}() ({})", i + 1, class_name, method_name, stereotype)
+            format!(
+                "[{}] {}.{}() ({})",
+                i + 1,
+                class_name,
+                method_name,
+                stereotype
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1894,7 +1985,10 @@ fn enrich_route_flows(
              based solely on the provided call chain. Do not invent behavior not shown.",
         );
         if language != "en" {
-            system.push_str(&format!(" Write all documentation in language: {}.", language));
+            system.push_str(&format!(
+                " Write all documentation in language: {}.",
+                language
+            ));
         }
         let user = format!(
             r#"HTTP handler: "{name}"
@@ -1953,8 +2047,7 @@ Respond ONLY with this JSON object (no extra commentary):
                 }
                 Err(err) => {
                     if attempt < retries as usize {
-                        let delay =
-                            backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
+                        let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
                         tracing::debug!(
                             attempt = attempt + 1,
                             delay_ms = delay,
@@ -2008,9 +2101,16 @@ fn enrich_one_flow(
          based solely on the provided evidence. Do not invent behavior not shown.",
     );
     if language != "en" {
-        system.push_str(&format!(" Write all documentation in language: {}.", language));
+        system.push_str(&format!(
+            " Write all documentation in language: {}.",
+            language
+        ));
     }
-    let evidence_str = if evidence.trim().is_empty() { "none" } else { &evidence };
+    let evidence_str = if evidence.trim().is_empty() {
+        "none"
+    } else {
+        &evidence
+    };
     let user = format!(
         r#"Process: "{name}"
 
@@ -2061,7 +2161,10 @@ Respond ONLY with this JSON object (no extra commentary):
         .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
     let mut last_err = None;
     for attempt in 0..=(retries as usize) {
-        match adapter.call(api_key, &req).and_then(|r| parse_flow_summary(&r.text, step_count)) {
+        match adapter
+            .call(api_key, &req)
+            .and_then(|r| parse_flow_summary(&r.text, step_count))
+        {
             Ok(summary) => return Ok(summary),
             Err(err) => {
                 if attempt < retries as usize {
@@ -2086,7 +2189,11 @@ fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
         .trim_end_matches("```")
         .trim();
     let json_str = if let (Some(s), Some(e)) = (stripped.find('{'), stripped.rfind('}')) {
-        if s <= e { &stripped[s..=e] } else { stripped }
+        if s <= e {
+            &stripped[s..=e]
+        } else {
+            stripped
+        }
     } else {
         stripped
     };
@@ -2113,7 +2220,11 @@ fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
     if narrative.is_empty() && business_impact.is_empty() && descs.iter().all(|s| s.is_empty()) {
         bail!("flow LLM response did not contain any expected fields");
     }
-    Ok(FlowLlmSummary { narrative, business_impact, step_descriptions: descs })
+    Ok(FlowLlmSummary {
+        narrative,
+        business_impact,
+        step_descriptions: descs,
+    })
 }
 
 pub fn retain_matching_feature_groups(
@@ -2234,7 +2345,10 @@ pub fn enrich_one_feature(
         .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
     let mut last_err = None;
     for attempt in 0..=(retries as usize) {
-        match adapter.call(api_key, &req).and_then(|r| parse_feature_summary(&r.text)) {
+        match adapter
+            .call(api_key, &req)
+            .and_then(|r| parse_feature_summary(&r.text))
+        {
             Ok(summary) => return Ok(summary),
             Err(err) => {
                 if attempt < retries as usize {
@@ -2449,7 +2563,9 @@ fn build_file_dev_map(
         let id = node.id.as_str().to_string();
         let feature = feature_of(id.as_str(), node.file.as_str());
         by_feature.entry(feature).or_default().insert(id.clone());
-        id_to_name.entry(id.clone()).or_insert_with(|| node.name.clone());
+        id_to_name
+            .entry(id.clone())
+            .or_insert_with(|| node.name.clone());
         id_to_file.entry(id).or_insert_with(|| node.file.clone());
     }
 
@@ -2544,6 +2660,3 @@ fn replace_citations(text: &str, map: &HashMap<String, String>) -> String {
     }
     out
 }
-
-
-

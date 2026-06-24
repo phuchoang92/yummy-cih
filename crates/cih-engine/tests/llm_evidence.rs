@@ -24,8 +24,7 @@ fn node(id: &str, kind: NodeKind, name: &str, file: &str, line: u32) -> cih_core
 
 fn temp_repo() -> PathBuf {
     let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-    let root =
-        std::env::temp_dir().join(format!("cih-evidence-test-{}-{id}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("cih-evidence-test-{}-{id}", std::process::id()));
     std::fs::create_dir_all(root.join("src")).unwrap();
     root
 }

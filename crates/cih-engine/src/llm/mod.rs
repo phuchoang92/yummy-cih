@@ -127,6 +127,3 @@ pub fn require_api_key<'a>(api_key: Option<&'a str>, provider: &str) -> Result<&
         )
     })
 }
-
-
-

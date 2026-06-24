@@ -93,11 +93,7 @@ pub fn load_cached_parsed(cih_dir: &Path, file_hash: &str) -> Option<ParsedUnit>
     serde_json::from_str(&raw).ok()
 }
 
-pub fn save_cached_parsed(
-    cih_dir: &Path,
-    file_hash: &str,
-    parsed: &ParsedUnit,
-) -> Result<()> {
+pub fn save_cached_parsed(cih_dir: &Path, file_hash: &str, parsed: &ParsedUnit) -> Result<()> {
     let dir = cih_dir.join(PARSE_CACHE_DIR);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = cache_path(cih_dir, file_hash);
@@ -225,5 +221,3 @@ fn sorted_map(mut input: HashMap<String, HashSet<String>>) -> HashMap<String, Ve
         })
         .collect()
 }
-
-

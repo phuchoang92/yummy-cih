@@ -447,8 +447,22 @@ fn estimate_module_count(graph: &WikiGraph) -> usize {
             .and_then(|v| v.as_str())
         {
             // Exclude generic technical folder names
-            if !matches!(hint, "repo" | "service" | "services" | "dto" | "entity" | "entities"
-                | "util" | "utils" | "common" | "shared" | "config" | "mapper" | "mappers") {
+            if !matches!(
+                hint,
+                "repo"
+                    | "service"
+                    | "services"
+                    | "dto"
+                    | "entity"
+                    | "entities"
+                    | "util"
+                    | "utils"
+                    | "common"
+                    | "shared"
+                    | "config"
+                    | "mapper"
+                    | "mappers"
+            ) {
                 hints.insert(hint);
             }
         }
@@ -484,7 +498,9 @@ pub fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal
     for p in proposals.drain(..) {
         map.entry(p.slug.clone())
             .and_modify(|existing| {
-                existing.community_ids.extend(p.community_ids.iter().cloned());
+                existing
+                    .community_ids
+                    .extend(p.community_ids.iter().cloned());
             })
             .or_insert(p);
     }
@@ -592,5 +608,3 @@ pub fn parse_outline_response(text: &str) -> Result<Vec<OutlineModule>> {
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
-
-

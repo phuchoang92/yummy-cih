@@ -410,7 +410,8 @@ pub fn analyze_from_scope_with_options(
         );
 
         // Phase 2a — Spring/Blueprint DI resolution via registry (JavaResolver::extra_edges).
-        let (di_nodes, di_edges) = resolvers.extra_edges(Some(&repo_root), &parse_output.parsed_files);
+        let (di_nodes, di_edges) =
+            resolvers.extra_edges(Some(&repo_root), &parse_output.parsed_files);
         tracing::info!(
             di_bean_nodes = di_nodes.len(),
             di_calls_edges = di_edges.len(),
@@ -1034,7 +1035,11 @@ pub fn extract_integration_xml_in_repo(repo_root: &Path) -> (Vec<Node>, Vec<Edge
                         .and_then(|e| e.to_str())
                         .map(|e| e.eq_ignore_ascii_case("xml"))
                         .unwrap_or(false);
-                    if is_xml { Some(path) } else { None }
+                    if is_xml {
+                        Some(path)
+                    } else {
+                        None
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, "integration-xml: walk error — skipping");
@@ -1140,7 +1145,8 @@ fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
     }
     let mut result: Vec<Edge> = map.into_values().collect();
     result.sort_unstable_by(|a, b| {
-        a.src.as_str()
+        a.src
+            .as_str()
             .cmp(b.src.as_str())
             .then_with(|| a.dst.as_str().cmp(b.dst.as_str()))
             .then_with(|| a.kind.cypher_label().cmp(b.kind.cypher_label()))
@@ -1151,14 +1157,18 @@ fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
 /// Merge `call_sites` from `incoming` into `winner` (Gap 3).
 /// Caps total call-site records at 20 per edge.
 fn merge_call_sites(winner: &mut Edge, incoming: &Edge) {
-    let Some(incoming_props) = &incoming.props else { return };
+    let Some(incoming_props) = &incoming.props else {
+        return;
+    };
     let Some(incoming_arr) = incoming_props.get("call_sites").and_then(|v| v.as_array()) else {
         return;
     };
     if incoming_arr.is_empty() {
         return;
     }
-    let entry = winner.props.get_or_insert_with(|| serde_json::json!({"call_sites": []}));
+    let entry = winner
+        .props
+        .get_or_insert_with(|| serde_json::json!({"call_sites": []}));
     let existing = entry
         .get_mut("call_sites")
         .and_then(|v| v.as_array_mut())
@@ -1214,7 +1224,7 @@ mod combined_edges_tests {
             kind: EdgeKind::Calls,
             confidence: 0.7,
             reason: "first".into(),
-                props: None,
+            props: None,
         };
         let second = Edge {
             src: NodeId::new("A"),
@@ -1222,7 +1232,7 @@ mod combined_edges_tests {
             kind: EdgeKind::Calls,
             confidence: 0.7,
             reason: "second".into(),
-                props: None,
+            props: None,
         };
         let result = combined_edges(&[first], &[second]);
         assert_eq!(result.len(), 1);
@@ -1266,7 +1276,7 @@ mod combined_edges_tests {
                     kind: EdgeKind::Calls,
                     confidence: (d as f32) / (dup_factor as f32),
                     reason: String::new(),
-            props: None,
+                    props: None,
                 });
             }
         }

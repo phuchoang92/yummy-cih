@@ -2,11 +2,11 @@ mod analyze;
 mod db;
 mod discover;
 mod embed;
+mod feature_strategy;
 mod features_cmd;
 mod file_cache;
 mod group_cmd;
 mod group_sync;
-mod feature_strategy;
 mod llm;
 mod registry;
 mod scan;
@@ -464,8 +464,8 @@ fn main() -> Result<()> {
             println!();
             println!("  Running: {}", cmd_display);
             println!();
-            let exe = std::env::current_exe()
-                .unwrap_or_else(|_| std::path::PathBuf::from("cih-engine"));
+            let exe =
+                std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cih-engine"));
             let status = std::process::Command::new(&exe).args(&args).status()?;
             std::process::exit(status.code().unwrap_or(1));
         }
@@ -546,8 +546,9 @@ fn main() -> Result<()> {
                 } else {
                     feature_llm_model.clone()
                 };
-                let api_key =
-                    llm::resolve_api_key(feature_llm_api_key_env.as_deref()).ok().flatten();
+                let api_key = llm::resolve_api_key(feature_llm_api_key_env.as_deref())
+                    .ok()
+                    .flatten();
                 discover::FeatureLlmConfig {
                     provider,
                     base_url: feature_llm_base_url,
@@ -638,7 +639,11 @@ fn main() -> Result<()> {
                     });
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&StatusOutput { entry, stale, features })?
+                        serde_json::to_string_pretty(&StatusOutput {
+                            entry,
+                            stale,
+                            features
+                        })?
                     );
                 } else {
                     println!("name:          {}", entry.name);
@@ -657,9 +662,15 @@ fn main() -> Result<()> {
                     println!("communities:   {}", entry.stats.communities);
                     println!("processes:     {}", entry.stats.processes);
                     if let Some(fs) = feat_status {
-                        println!("features:      {} ({} nodes, strategy: {})", fs.feature_count, fs.node_count, fs.strategy);
+                        println!(
+                            "features:      {} ({} nodes, strategy: {})",
+                            fs.feature_count, fs.node_count, fs.strategy
+                        );
                         println!("pinned:        {}", fs.pinned_count);
-                        println!("feat_version:  {}", &fs.graph_version[..fs.graph_version.len().min(16)]);
+                        println!(
+                            "feat_version:  {}",
+                            &fs.graph_version[..fs.graph_version.len().min(16)]
+                        );
                     }
                 }
             } else {
@@ -827,8 +838,7 @@ fn run_artifact(command: ArtifactCommand) -> Result<()> {
             );
 
             // Bulk-load into FalkorDB.
-            let falkor_url =
-                falkor_url.unwrap_or_else(|| "redis://127.0.0.1:6380".to_string());
+            let falkor_url = falkor_url.unwrap_or_else(|| "redis://127.0.0.1:6380".to_string());
             let graph_key = graph_key.unwrap_or_else(|| "cih".to_string());
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
@@ -836,10 +846,19 @@ fn run_artifact(command: ArtifactCommand) -> Result<()> {
                 use cih_graph_store::GraphStore;
                 let store = FalkorStore::connect(&falkor_url, &graph_key)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                store.ensure_schema().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-                store.bulk_load(&artifacts).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                store
+                    .ensure_schema()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                store
+                    .bulk_load(&artifacts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 if let Some(comm) = community {
-                    store.bulk_load(&comm).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                    store
+                        .bulk_load(&comm)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 Ok::<(), anyhow::Error>(())
             })?;
@@ -882,8 +901,7 @@ fn register_repo_in_registry(
     use cih_core::{Registry, RegistryEntry, RegistryStats};
     let mut registry = if registry_path.exists() {
         let bytes = std::fs::read(registry_path)?;
-        serde_json::from_slice::<Registry>(&bytes)
-            .unwrap_or_default()
+        serde_json::from_slice::<Registry>(&bytes).unwrap_or_default()
     } else {
         Registry::default()
     };
@@ -920,8 +938,7 @@ fn register_repo_in_registry(
     if let Some(parent) = registry_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(&registry)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let json = serde_json::to_string_pretty(&registry).map_err(|e| anyhow::anyhow!("{e}"))?;
     std::fs::write(registry_path, json)?;
     println!("Registered repo '{}' in registry.", name);
     Ok(())

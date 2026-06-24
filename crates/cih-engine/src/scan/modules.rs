@@ -135,14 +135,18 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
                     .with_context(|| format!("failed to read {}", file.path))?;
                 let rel_path = parent_rel(&file.path);
                 let meta = parse_package_json(&content);
-                let name = meta
-                    .as_ref()
-                    .map(|m| m.artifact_id.clone())
+                let manifest_name = meta.as_ref().map(|m| {
+                    if m.group_id.is_empty() {
+                        m.artifact_id.clone()
+                    } else {
+                        format!("{}/{}", m.group_id, m.artifact_id)
+                    }
+                });
+                let name = manifest_name
+                    .clone()
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| fallback_module_name(root, &rel_path));
-                let module_key = meta
-                    .as_ref()
-                    .map(|m| if m.group_id.is_empty() { m.artifact_id.clone() } else { format!("{}/{}", m.group_id, m.artifact_id) });
+                let module_key = manifest_name;
                 let deps = meta.as_ref().map(|m| m.deps.clone()).unwrap_or_default();
 
                 tracing::debug!(module = %name, path = %rel_path, deps = deps.len(), "modules: Node module detected");
@@ -256,7 +260,9 @@ pub(super) fn detect_modules(root: &Path, files: &[ScannedFile]) -> Result<Vec<M
 }
 
 fn build_file_priority(file_name: Option<&str>) -> i32 {
-    let Some(f) = file_name else { return 0; };
+    let Some(f) = file_name else {
+        return 0;
+    };
     let name = f.rsplit('/').next().unwrap_or(f);
     match name {
         "pom.xml" | "build.gradle" | "build.gradle.kts" | "package.json" => 10,
@@ -276,7 +282,11 @@ pub(super) fn upsert_candidate(modules: &mut Vec<ModuleCandidate>, candidate: Mo
         let new_pri = build_file_priority(candidate.build_file.as_deref());
         let old_pri = build_file_priority(existing.build_file.as_deref());
 
-        if new_pri > old_pri || (new_pri == old_pri && candidate.build_file.is_some() && existing.build_file.is_none()) {
+        if new_pri > old_pri
+            || (new_pri == old_pri
+                && candidate.build_file.is_some()
+                && existing.build_file.is_none())
+        {
             existing.build_file = candidate.build_file;
             existing.name = candidate.name;
             existing.build_system = candidate.build_system;
