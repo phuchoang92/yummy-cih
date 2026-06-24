@@ -199,7 +199,7 @@ pub(crate) fn run_discover_core(
         process_cfg.min_trace_confidence = v;
     }
 
-    let entry_registry = cih_community::EntrypointRegistry::load(repo);
+    let entry_registry = cih_core::EntrypointRegistry::load(repo);
     tracing::info!(
         patterns = entry_registry.total_patterns(),
         "entry-point registry loaded"
@@ -537,16 +537,15 @@ fn write_entrypoints_sidecar(
     nodes: &[cih_core::Node],
     edges: &[cih_core::Edge],
     min_confidence: f32,
-    registry: &cih_community::EntrypointRegistry,
+    registry: &cih_core::EntrypointRegistry,
 ) {
-    let scored = cih_community::score_all_entry_points(nodes, edges, min_confidence, registry);
+    let scored = cih_core::score_all_entry_points(nodes, edges, min_confidence, registry);
     let records: Vec<EntrypointRecord> = scored
         .into_iter()
         .filter(|ep| {
             matches!(
                 ep.kind,
-                cih_community::EntrypointKind::Scheduled
-                    | cih_community::EntrypointKind::EventListener
+                cih_core::EntrypointKind::Scheduled | cih_core::EntrypointKind::EventListener
             )
         })
         .map(|ep| EntrypointRecord {

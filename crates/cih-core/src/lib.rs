@@ -8,11 +8,16 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod artifacts; // JSONL read/write helpers on GraphArtifacts (Phase 2)
+pub mod entrypoints;
 pub mod group;
 pub mod ir;
 pub mod registry;
 pub mod repo_map;
 
+pub use entrypoints::{
+    build_calls_digraph, score_all_entry_points, score_entry_points, to_legacy_pairs,
+    EntrypointKind, EntrypointRegistry, ScoredEntrypoint,
+};
 pub use group::{
     contracts_path, group_dir, normalize_contract_path, ContractMatch, ContractMatchKind,
     GroupEntry, GroupRegistry,

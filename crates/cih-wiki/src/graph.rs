@@ -977,6 +977,36 @@ impl WikiGraph {
             .unwrap_or(false)
     }
 
+    /// BFS from `start_id` through `calls_out`, limited to `max_depth` hops.
+    /// Only includes method IDs whose owning class exists in the graph.
+    pub fn build_call_chain(&self, start_id: &str, max_depth: usize) -> Vec<String> {
+        use std::collections::{HashSet, VecDeque};
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut chain: Vec<String> = Vec::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        queue.push_back((start_id.to_string(), 0));
+        while let Some((id, depth)) = queue.pop_front() {
+            if visited.contains(&id) || depth > max_depth {
+                continue;
+            }
+            visited.insert(id.clone());
+            let cls_id = crate::pages::api_flow::class_id_from_method_id(id.as_str(), self);
+            if self.nodes_by_id.contains_key(cls_id.as_str())
+                || self.methods_by_class.contains_key(cls_id.as_str())
+            {
+                chain.push(id.clone());
+            }
+            if let Some(callees) = self.calls_out.get(id.as_str()) {
+                for callee in callees {
+                    if !visited.contains(callee) {
+                        queue.push_back((callee.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+        chain
+    }
+
     pub fn processes_for_community(&self, community_id: &str, business_only: bool) -> Vec<String> {
         let mut result = Vec::new();
         for (proc_id, steps) in &self.process_steps {

@@ -12,9 +12,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use cih_core::{community_id, process_id, Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 use petgraph::graph::NodeIndex;
 
-pub use entry_points::{EntrypointKind, ScoredEntrypoint};
-pub use graph::{build_calls_digraph, build_community_graph, is_large_graph};
-pub use registry::EntrypointRegistry;
+pub use cih_core::{
+    build_calls_digraph, score_all_entry_points, EntrypointKind, EntrypointRegistry,
+    ScoredEntrypoint,
+};
+pub use graph::{build_community_graph, is_large_graph};
 
 const COLOR_PALETTE: [&str; 12] = [
     "#ef4444", "#f97316", "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#8b5cf6", "#d946ef",
@@ -421,15 +423,15 @@ pub fn trace_processes(
     cfg: &ProcessConfig,
     registry: &EntrypointRegistry,
 ) -> ProcessOutput {
-    let (digraph, node_index) = graph::build_calls_digraph(nodes, edges, cfg.min_trace_confidence);
+    let (digraph, node_index) = cih_core::build_calls_digraph(nodes, edges, cfg.min_trace_confidence);
     if digraph.node_count() == 0 {
         return ProcessOutput::default();
     }
 
     let membership_map: HashMap<NodeId, NodeId> = memberships.iter().cloned().collect();
-    let scored = entry_points::score_entry_points(nodes, edges, &digraph, &node_index, registry);
-    let legacy_pairs = entry_points::to_legacy_pairs(&scored);
-    let ep_by_id: HashMap<NodeId, &entry_points::ScoredEntrypoint> =
+    let scored = cih_core::score_entry_points(nodes, edges, &digraph, &node_index, registry);
+    let legacy_pairs = cih_core::to_legacy_pairs(&scored);
+    let ep_by_id: HashMap<NodeId, &cih_core::ScoredEntrypoint> =
         scored.iter().map(|s| (s.id.clone(), s)).collect();
     let traces = bfs::trace_process_paths(&digraph, &legacy_pairs, &membership_map, cfg);
     let node_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
@@ -759,22 +761,6 @@ fn slugify(name: &str) -> String {
     }
 }
 
-/// Convenience wrapper: build a calls digraph from raw nodes/edges, run
-/// `score_entry_points`, and return all scored entry points.  Used by
-/// `cih-engine discover` to write the entrypoints sidecar without duplicating
-/// the digraph-building logic.
-pub fn score_all_entry_points(
-    nodes: &[Node],
-    edges: &[Edge],
-    min_confidence: f32,
-    registry: &EntrypointRegistry,
-) -> Vec<ScoredEntrypoint> {
-    let (digraph, node_index) = graph::build_calls_digraph(nodes, edges, min_confidence);
-    if digraph.node_count() == 0 {
-        return Vec::new();
-    }
-    entry_points::score_entry_points(nodes, edges, &digraph, &node_index, registry)
-}
 
 #[cfg(test)]
 mod tests;

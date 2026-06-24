@@ -813,9 +813,13 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                 for (route_pos, (handler, route)) in routes.iter().enumerate() {
                     let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
                     let process_id = process_by_handler.get(handler.id.as_str());
-                    let flow_summary = process_id.and_then(|pid| {
-                        input.flow_llm_summaries.as_ref().and_then(|m| m.get(pid.as_str()))
-                    });
+                    let flow_summary = process_id
+                        .and_then(|pid| {
+                            input.flow_llm_summaries.as_ref()?.get(pid.as_str())
+                        })
+                        .or_else(|| {
+                            input.flow_llm_summaries.as_ref()?.get(handler.id.as_str())
+                        });
                     let flow_md = pages::api_flow::render_api_flow_page(
                         handler,
                         route,

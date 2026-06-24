@@ -881,6 +881,40 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             None
         };
 
+    // Per-route flow enrichment: one LLM call per HTTP handler, generates step descriptions.
+    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if let Some(mut map) = flow_llm_map {
+        if effective_run_llm && !llm_no_call {
+            let route_flows = enrich_route_flows(
+                &wiki_graph,
+                adapter.as_ref().unwrap().as_ref(),
+                api_key.as_deref(),
+                llm_model,
+                llm_max_tokens,
+                llm_timeout_secs,
+                llm_retries,
+                wiki_language,
+                llm_dry_run,
+            );
+            map.extend(route_flows);
+        }
+        Some(map)
+    } else if effective_run_llm && !llm_no_call {
+        let route_flows = enrich_route_flows(
+            &wiki_graph,
+            adapter.as_ref().unwrap().as_ref(),
+            api_key.as_deref(),
+            llm_model,
+            llm_max_tokens,
+            llm_timeout_secs,
+            llm_retries,
+            wiki_language,
+            llm_dry_run,
+        );
+        if route_flows.is_empty() { None } else { Some(route_flows) }
+    } else {
+        flow_llm_map
+    };
+
     // Collect evidence packs for --save-evidence
     let save_evidence_map: Option<HashMap<String, String>> = if save_evidence {
         let map: HashMap<String, String> = community_nodes
@@ -1756,6 +1790,170 @@ fn build_flow_evidence(process_node: &cih_core::Node, graph: &WikiGraph) -> Stri
     }
 
     out
+}
+
+fn chain_steps_text(chain: &[String], graph: &WikiGraph) -> String {
+    chain
+        .iter()
+        .enumerate()
+        .map(|(i, mid)| {
+            let (class_name, method_name) = mid
+                .split_once('#')
+                .map(|(prefix, method)| {
+                    let cls = prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:")
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(prefix);
+                    (cls, method)
+                })
+                .unwrap_or(("?", mid.as_str()));
+            let cls_id =
+                cih_wiki::pages::api_flow::class_id_from_method_id(mid.as_str(), graph);
+            let stereotype = graph
+                .nodes_by_id
+                .get(cls_id.as_str())
+                .and_then(cih_wiki::graph::node_stereotype)
+                .unwrap_or("?");
+            format!("[{}] {}.{}() ({})", i + 1, class_name, method_name, stereotype)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn enrich_route_flows(
+    graph: &WikiGraph,
+    adapter: &dyn LlmAdapter,
+    api_key: Option<&str>,
+    model: &str,
+    max_tokens: u32,
+    timeout_secs: u64,
+    retries: u32,
+    language: &str,
+    dry_run: bool,
+) -> HashMap<String, FlowLlmSummary> {
+    let handlers: Vec<(String, String)> = graph
+        .routes_by_controller
+        .values()
+        .flat_map(|routes| {
+            routes
+                .iter()
+                .map(|(handler, _route)| (handler.id.as_str().to_string(), handler.name.clone()))
+        })
+        .collect();
+
+    if handlers.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut ui = PhaseProgress::new();
+    ui.start_phase("Enriching route flows", Some(handlers.len() as u64));
+    let mut result = HashMap::new();
+
+    for (handler_id, handler_name) in &handlers {
+        ui.tick(handler_name.as_str());
+
+        let chain = graph.build_call_chain(handler_id.as_str(), 4);
+        if chain.is_empty() {
+            ui.inc_ok();
+            continue;
+        }
+        let step_count = chain.len();
+        let steps_text = chain_steps_text(&chain, graph);
+
+        let mut system = String::from(
+            "You are a code documentation assistant. Describe this HTTP request flow \
+             based solely on the provided call chain. Do not invent behavior not shown.",
+        );
+        if language != "en" {
+            system.push_str(&format!(" Write all documentation in language: {}.", language));
+        }
+        let user = format!(
+            r#"HTTP handler: "{name}"
+
+Call chain ({step_count} steps):
+{steps}
+
+Respond ONLY with this JSON object (no extra commentary):
+{{
+  "narrative": "<2-3 sentences describing this request flow for a business analyst>",
+  "business_impact": "<1-2 sentences describing the business value for a product owner>",
+  "step_descriptions": [<one quoted sentence per step, {step_count} total>]
+}}"#,
+            name = handler_name,
+            step_count = step_count,
+            steps = steps_text,
+        );
+
+        if dry_run {
+            result.insert(
+                handler_id.clone(),
+                FlowLlmSummary {
+                    narrative: format!("[dry-run] {}", handler_name),
+                    business_impact: String::new(),
+                    step_descriptions: vec!["[dry-run]".into(); step_count],
+                },
+            );
+            ui.inc_ok();
+            continue;
+        }
+
+        let req = LlmRequest {
+            system,
+            user,
+            model: model.to_string(),
+            max_tokens,
+            timeout_secs,
+        };
+        let jitter_seed: u64 = handler_id
+            .as_str()
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+
+        let mut success = false;
+        let mut last_err = None;
+        for attempt in 0..=(retries as usize) {
+            match adapter
+                .call(api_key, &req)
+                .and_then(|r| parse_flow_summary(&r.text, step_count))
+            {
+                Ok(summary) => {
+                    result.insert(handler_id.clone(), summary);
+                    ui.inc_ok();
+                    success = true;
+                    break;
+                }
+                Err(err) => {
+                    if attempt < retries as usize {
+                        let delay =
+                            backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
+                        tracing::debug!(
+                            attempt = attempt + 1,
+                            delay_ms = delay,
+                            error = %err,
+                            "route flow LLM call failed, retrying"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                        last_err = Some(err);
+                    } else {
+                        last_err = Some(err);
+                    }
+                }
+            }
+        }
+        if !success {
+            tracing::warn!(
+                handler = %handler_id,
+                error = %last_err.unwrap(),
+                "route flow LLM enrichment failed"
+            );
+            ui.inc_failed();
+        }
+    }
+
+    ui.finish_phase();
+    result
 }
 
 fn enrich_one_flow(

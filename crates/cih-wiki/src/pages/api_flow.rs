@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::mermaid;
@@ -60,7 +60,7 @@ fn class_simple_name_from_method_id(method_id: &str) -> &str {
     fqcn.rsplit('.').next().unwrap_or(fqcn)
 }
 
-fn class_id_from_method_id(method_id: &str, graph: &WikiGraph) -> String {
+pub fn class_id_from_method_id(method_id: &str, graph: &WikiGraph) -> String {
     let without_kind = method_id
         .strip_prefix("Method:")
         .or_else(|| method_id.strip_prefix("Constructor:"))
@@ -80,33 +80,6 @@ fn class_id_from_method_id(method_id: &str, graph: &WikiGraph) -> String {
 
 /// BFS from handler through calls_out, returning method node IDs in traversal order.
 /// Only includes methods whose class exists in the project graph.
-fn build_call_chain(start_id: &str, graph: &WikiGraph, max_depth: usize) -> Vec<String> {
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut chain: Vec<String> = Vec::new();
-    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-    queue.push_back((start_id.to_string(), 0));
-    while let Some((id, depth)) = queue.pop_front() {
-        if visited.contains(&id) || depth > max_depth {
-            continue;
-        }
-        visited.insert(id.clone());
-        // Only include methods whose class is known in the project graph.
-        let cls_id = class_id_from_method_id(id.as_str(), graph);
-        if graph.nodes_by_id.contains_key(cls_id.as_str())
-            || graph.methods_by_class.contains_key(cls_id.as_str())
-        {
-            chain.push(id.clone());
-        }
-        if let Some(callees) = graph.calls_out.get(id.as_str()) {
-            for callee in callees {
-                if !visited.contains(callee) {
-                    queue.push_back((callee.clone(), depth + 1));
-                }
-            }
-        }
-    }
-    chain
-}
 
 /// DB table access for a single method node ID.
 fn db_access(method_id: &str, graph: &WikiGraph) -> Vec<(String, bool, bool)> {
@@ -171,7 +144,7 @@ pub fn render_api_flow_page(
     }
 
     // Call chain via BFS from handler through calls_out.
-    let chain = build_call_chain(handler.id.as_str(), graph, 4);
+    let chain = graph.build_call_chain(handler.id.as_str(), 4);
 
     if !chain.is_empty() {
         // Sequence diagram — shown when multiple classes are involved.
@@ -355,7 +328,7 @@ fn render_entrypoint_body(
     method_desc: &HashMap<String, String>,
 ) -> String {
     let mut md = String::new();
-    let chain = build_call_chain(method_id, graph, 4);
+    let chain = graph.build_call_chain(method_id, 4);
     if chain.is_empty() {
         return md;
     }
