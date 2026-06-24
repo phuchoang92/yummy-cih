@@ -6,6 +6,7 @@ use cih_core::{Edge, ImportBinding, Node, ParsedFile, SymbolDef};
 use crate::common::index::CommonIndex;
 
 pub mod java;
+pub mod kotlin;
 pub mod python;
 pub mod typescript;
 

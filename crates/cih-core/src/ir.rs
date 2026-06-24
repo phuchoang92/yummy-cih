@@ -218,6 +218,57 @@ pub struct ComplexityRecord {
     pub loop_depth: u8,
     /// Set during transitive loop depth propagation pass.
     pub is_recursive: bool,
+    /// Control-flow statement counts used to build the class-level StructuralProfile.
+    /// All default to 0 so old serialised records remain valid.
+    #[serde(default)] pub if_count: u16,
+    #[serde(default)] pub for_count: u16,
+    #[serde(default)] pub while_count: u16,
+    #[serde(default)] pub switch_count: u16,
+    #[serde(default)] pub try_count: u16,
+    #[serde(default)] pub return_count: u16,
+    #[serde(default)] pub throw_count: u16,
+}
+
+/// 25-float structural fingerprint of a class node.
+///
+/// Features (fixed order — index = feature):
+///  0  method_count        1  field_count          2  constructor_count
+///  3  avg_cyclomatic      4  max_cyclomatic        5  avg_cognitive
+///  6  max_cognitive       7  avg_loop_depth        8  max_loop_depth
+///  9  if_count (sum)     10  for_count (sum)      11  while_count (sum)
+/// 12  switch_count (sum) 13  try_count (sum)      14  return_count (sum)
+/// 15  throw_count (sum)  16  annotation_count     17  has_spring_stereotype
+/// 18  is_interface       19  is_abstract          20  is_enum
+/// 21  implements_count   22  extends_count        23  is_test
+/// 24  loc_normalized (LOC/1000, clamped 1.0)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StructuralProfile {
+    pub features: [f32; 25],
+}
+
+impl StructuralProfile {
+    pub fn cosine_similarity(&self, other: &Self) -> f32 {
+        let dot: f32 = self.features.iter().zip(other.features.iter()).map(|(a, b)| a * b).sum();
+        let na: f32 = self.features.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = other.features.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 { 0.0 } else { (dot / (na * nb)).clamp(-1.0, 1.0) }
+    }
+
+    pub fn to_json_array(&self) -> serde_json::Value {
+        serde_json::Value::Array(self.features.iter().map(|&f| {
+            serde_json::Value::Number(serde_json::Number::from_f64(f as f64).unwrap_or(serde_json::Number::from(0)))
+        }).collect())
+    }
+
+    pub fn from_json_array(v: &serde_json::Value) -> Option<Self> {
+        let arr = v.as_array()?;
+        if arr.len() != 25 { return None; }
+        let mut features = [0f32; 25];
+        for (i, val) in arr.iter().enumerate() {
+            features[i] = val.as_f64()? as f32;
+        }
+        Some(Self { features })
+    }
 }
 
 /// Optional MinHash fingerprint for near-clone detection.

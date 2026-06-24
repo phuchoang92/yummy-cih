@@ -34,7 +34,11 @@ pub use db_access::emit_db_access;
 pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
 pub use lang::{
-    java::JavaResolver, python::PythonResolver, typescript::TypeScriptResolver, ResolverRegistry,
+    java::JavaResolver,
+    kotlin::KotlinResolver,
+    python::PythonResolver,
+    typescript::TypeScriptResolver,
+    ResolverRegistry,
 };
 pub use reports::write_unresolved_reports;
 
@@ -79,12 +83,13 @@ pub struct ResolveOptions<'a> {
     pub constant_resolver: Option<Box<dyn cih_lang::constant_resolver::ConstantResolver>>,
 }
 
-/// Build the default registry with Java, TypeScript, and Python resolvers.
+/// Build the default registry with Java, TypeScript, Python, and Kotlin resolvers.
 pub fn default_registry() -> ResolverRegistry {
     let mut r = ResolverRegistry::new();
     r.register(JavaResolver);
     r.register(TypeScriptResolver);
     r.register(PythonResolver);
+    r.register(KotlinResolver);
     r
 }
 

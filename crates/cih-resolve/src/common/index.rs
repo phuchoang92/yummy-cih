@@ -179,6 +179,43 @@ impl CommonIndex {
         }
     }
 
+    /// Like [`resolve_type`] but also returns the resolution confidence:
+    /// - `1.00` — already fully qualified
+    /// - `0.90` — matched an explicit (non-wildcard) import
+    /// - `0.85` — same-package local type
+    /// - `0.75` — wildcard import match
+    /// - `0.70` — workspace-unique simple name (no import, unique across all files)
+    pub fn resolve_type_with_confidence(&self, raw: &str, file: &str) -> Option<(String, f32)> {
+        let base = base_type_name(raw);
+        if base.is_empty() {
+            return None;
+        }
+        if base.contains('.') {
+            return Some((base, 1.00));
+        }
+        if let Some(ctx) = self.files.get(file) {
+            if let Some(fqcn) = ctx.import_map.get(base.as_str()) {
+                return Some((fqcn.clone(), 0.90));
+            }
+            if let Some(pkg) = &ctx.package {
+                let cand = format!("{pkg}.{base}");
+                if self.types_by_fqcn.contains_key(&cand) {
+                    return Some((cand, 0.85));
+                }
+            }
+            for prefix in &ctx.wildcard_prefixes {
+                let cand = format!("{prefix}.{base}");
+                if self.types_by_fqcn.contains_key(&cand) {
+                    return Some((cand, 0.75));
+                }
+            }
+        }
+        match self.simple_to_fqcns.get(&base) {
+            Some(fqcns) if fqcns.len() == 1 => Some((fqcns[0].clone(), 0.70)),
+            _ => None,
+        }
+    }
+
     /// Resolve a simple name to a qualified name, scoped to a specific language.
     /// Only returns a match if there is exactly one type with that simple name in the language.
     pub fn resolve_type_in_language(&self, simple: &str, _file: &str, language: &str) -> Option<String> {

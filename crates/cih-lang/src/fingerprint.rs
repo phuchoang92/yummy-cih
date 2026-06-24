@@ -80,6 +80,26 @@ pub fn normalize_leaf_token_typescript(kind: &str) -> &'static str {
     }
 }
 
+pub fn normalize_leaf_token_kotlin(kind: &str) -> &'static str {
+    match kind {
+        "simple_identifier" | "type_identifier" => "I",
+        "string_literal" | "multiline_string_literal" => "S",
+        "integer_literal" | "real_literal" | "long_literal" | "hex_literal"
+        | "bin_literal" | "unsigned_literal" => "N",
+        "user_type" | "nullable_type" | "not_nullable_type" => "T",
+        "fun" | "class" | "object" | "interface" | "val" | "var" | "return"
+        | "if" | "else" | "for" | "while" | "do" | "when" | "in" | "is" | "as"
+        | "break" | "continue" | "throw" | "try" | "catch" | "finally"
+        | "this" | "super" | "true" | "false" | "null" | "new"
+        | "override" | "open" | "abstract" | "sealed" | "data" | "inner"
+        | "companion" | "by" | "out" | "dynamic" | "typealias"
+        | "init" | "constructor" | "import" | "package" | "suspend"
+        | "crossinline" | "noinline" | "reified" | "external" | "expect" | "actual"
+        | "lateinit" | "const" | "enum" | "annotation" => "K",
+        _ => "O",
+    }
+}
+
 pub(crate) fn collect_leaf_tokens<'a>(
     node: TsNode<'a>,
     normalize: fn(&str) -> &'static str,

@@ -28,9 +28,10 @@ pub struct EdgeEmitter<'a> {
     skipped: u64,
     unresolved_external_fqcns: BTreeSet<String>,
     unresolved_refs: Vec<UnresolvedRef>,
-    /// Memoize `index.resolve_type(raw, file)` — same (raw, file) within an emit
-    /// run always returns the same FQCN, so we pay the lookup cost at most once.
-    resolve_cache: HashMap<(String, String), Option<String>>,
+    /// Memoize `index.resolve_type_with_confidence(raw, file)` — same (raw, file) within
+    /// an emit run always yields the same result, so we pay the lookup cost at most once.
+    /// Stores `(fqcn, confidence)` so callers that need either can share one cache.
+    resolve_cache: HashMap<(String, String), Option<(String, f32)>>,
 }
 
 impl<'a> EdgeEmitter<'a> {
@@ -50,16 +51,21 @@ impl<'a> EdgeEmitter<'a> {
         }
     }
 
-    /// Cached `index.resolve_type` — avoids re-resolving the same `(raw, file)` pair
-    /// within a single emit run. The index is read-only during emit so no invalidation needed.
-    fn resolve_type_cached(&mut self, raw: &str, file: &str) -> Option<String> {
+    /// Cached resolution returning `(fqcn, confidence)`. The index is read-only during
+    /// emit so no invalidation is needed.
+    fn resolve_with_confidence_cached(&mut self, raw: &str, file: &str) -> Option<(String, f32)> {
         let key = (raw.to_string(), file.to_string());
         if let Some(cached) = self.resolve_cache.get(&key) {
             return cached.clone();
         }
-        let result = self.index.resolve_type(raw, file);
+        let result = self.index.resolve_type_with_confidence(raw, file);
         self.resolve_cache.insert(key, result.clone());
         result
+    }
+
+    /// Convenience wrapper when only the FQCN is needed.
+    fn resolve_type_cached(&mut self, raw: &str, file: &str) -> Option<String> {
+        self.resolve_with_confidence_cached(raw, file).map(|(fqcn, _)| fqcn)
     }
 
     /// Replace the default no-op constant resolver with a real one (Gap 4).
@@ -200,7 +206,7 @@ impl<'a> EdgeEmitter<'a> {
                     self.push_calls_edge(
                         site.in_callable.clone(),
                         dst,
-                        0.8,
+                        0.70,
                         "free-call-fallback".to_string(),
                         site,
                         pf,
@@ -222,12 +228,12 @@ impl<'a> EdgeEmitter<'a> {
                     // Pass 1 (receiver-bound) and pass 2 (free-call) already tried every
                     // Call site. Any that reach here were unresolvable; don't retry.
                     RefKind::Call => None,
-                    RefKind::Ctor => self.resolve_constructor(pf, site).map(|dst| {
+                    RefKind::Ctor => self.resolve_constructor(pf, site).map(|(dst, conf)| {
                         (
                             site.in_callable.clone(),
                             dst,
                             EdgeKind::Calls,
-                            1.0,
+                            conf,
                             "constructor".to_string(),
                         )
                     }),
@@ -237,7 +243,7 @@ impl<'a> EdgeEmitter<'a> {
                                 site.in_callable.clone(),
                                 dst,
                                 EdgeKind::Accesses,
-                                1.0,
+                                1.0_f32,
                                 match site.kind {
                                     RefKind::FieldRead => "field-read",
                                     _ => "field-write",
@@ -246,12 +252,12 @@ impl<'a> EdgeEmitter<'a> {
                             )
                         })
                     }
-                    RefKind::TypeRef => self.resolve_type_node(pf, &site.name).map(|dst| {
+                    RefKind::TypeRef => self.resolve_type_node(pf, &site.name).map(|(dst, conf)| {
                         (
                             site.in_callable.clone(),
                             dst,
                             EdgeKind::Uses,
-                            1.0,
+                            conf,
                             "type-ref".to_string(),
                         )
                     }),
@@ -296,7 +302,7 @@ impl<'a> EdgeEmitter<'a> {
                     RefKind::Implements => EdgeKind::Implements,
                     _ => continue,
                 };
-                let Some(dst) = self.resolve_type_node(pf, &site.name) else {
+                let Some((dst, conf)) = self.resolve_type_node(pf, &site.name) else {
                     let ext = self
                         .resolve_type_cached(&site.name, &pf.file)
                         .filter(|f| f.contains('.') && !self.index.is_known_type(f));
@@ -307,7 +313,7 @@ impl<'a> EdgeEmitter<'a> {
                     site.in_callable.clone(),
                     dst,
                     kind,
-                    1.0,
+                    conf,
                     "heritage".to_string(),
                 );
             }
@@ -435,14 +441,12 @@ impl<'a> EdgeEmitter<'a> {
         None
     }
 
-    fn resolve_constructor(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<NodeId> {
-        let fqcn = self.resolve_type_cached(&site.name, &pf.file)?;
-        // constructor_name() returns Option<&'static str>, so no lifetime ties to self.
+    fn resolve_constructor(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<(NodeId, f32)> {
+        let (fqcn, conf) = self.resolve_with_confidence_cached(&site.name, &pf.file)?;
         let ctor_name = self.registry.for_language(effective_lang(pf)).constructor_name();
         let result = if let Some(ctor_name) = ctor_name {
             self.index.find_member(&fqcn, ctor_name, site.arity)
         } else {
-            // Language has no dedicated constructors (e.g. Go); try direct function lookup.
             self.index.find_member(&fqcn, &site.name, site.arity)
         };
         if result.is_none() {
@@ -450,7 +454,7 @@ impl<'a> EdgeEmitter<'a> {
                 self.unresolved_external_fqcns.insert(fqcn);
             }
         }
-        result
+        result.map(|id| (id, conf))
     }
 
     fn resolve_field_access(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<NodeId> {
@@ -461,13 +465,13 @@ impl<'a> EdgeEmitter<'a> {
         self.index.find_field_in_hierarchy(&owner, &site.name)
     }
 
-    fn resolve_type_node(&mut self, pf: &ParsedFile, raw: &str) -> Option<NodeId> {
-        let fqcn = self.resolve_type_cached(raw, &pf.file)?;
+    fn resolve_type_node(&mut self, pf: &ParsedFile, raw: &str) -> Option<(NodeId, f32)> {
+        let (fqcn, conf) = self.resolve_with_confidence_cached(raw, &pf.file)?;
         let id = self.index.type_node_id(&fqcn);
         if id.is_none() && fqcn.contains('.') {
             self.unresolved_external_fqcns.insert(fqcn);
         }
-        id
+        id.map(|n| (n, conf))
     }
 
     fn resolve_import_target(&self, pf: &ParsedFile, import: &RawImport) -> Option<NodeId> {

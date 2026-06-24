@@ -323,6 +323,7 @@ pub fn analyze_from_scope_with_options(
     resolvers.register(cih_resolve::JavaResolver);
     resolvers.register(cih_resolve::TypeScriptResolver);
     resolvers.register(cih_resolve::PythonResolver);
+    resolvers.register(cih_resolve::KotlinResolver);
 
     // Gap 4: build Java constant resolver from all parsed files.
     let java_const_resolver = cih_resolve::build_java_constant_resolver(&parse_output.parsed_files);

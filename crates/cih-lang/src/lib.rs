@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 pub mod constant_resolver;
 pub mod fingerprint;
 pub mod java;
+pub mod kotlin;
 pub mod python;
 pub mod typescript;
 

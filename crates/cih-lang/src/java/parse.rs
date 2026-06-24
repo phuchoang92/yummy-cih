@@ -5,7 +5,7 @@ use cih_core::{
     constructor_id, field_id, file_id, method_id, type_id, BindingKind, ComplexityRecord,
     ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
     Range, RawImport, RefKind, ReferenceSite, RouteSource, SqlConstant, SqlExecutionSite,
-    StringConstant, SymbolDef, TypeBinding,
+    StringConstant, StructuralProfile, SymbolDef, TypeBinding,
 };
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_java};
 use streaming_iterator::StreamingIterator;
@@ -81,6 +81,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
     collect_sql_constants(root, src, &mut builder);
     collect_sql_execution_sites(root, src, &mut builder);
     collect_static_string_constants(root, src, &mut builder);
+    attach_structural_profiles(&mut builder);
     normalize_builder(&mut builder);
 
     // Convert RawImports to ImportBindings
@@ -1019,16 +1020,36 @@ fn compute_complexity(body: TsNode<'_>) -> ComplexityRecord {
     let mut cyclomatic: u16 = 1; // base
     let mut cognitive: u16 = 0;
     let mut loop_depth: u8 = 0;
-    compute_complexity_inner(body, 0, 0, &mut cyclomatic, &mut cognitive, &mut loop_depth);
+    let mut counts = ControlFlowCounts::default();
+    compute_complexity_inner(body, 0, 0, &mut cyclomatic, &mut cognitive, &mut loop_depth, &mut counts);
     ComplexityRecord {
         provider: "java".to_string(),
         cyclomatic,
         cognitive,
         loop_depth,
         is_recursive: false, // set later in propagation pass
+        if_count: counts.if_count,
+        for_count: counts.for_count,
+        while_count: counts.while_count,
+        switch_count: counts.switch_count,
+        try_count: counts.try_count,
+        return_count: counts.return_count,
+        throw_count: counts.throw_count,
     }
 }
 
+#[derive(Default)]
+struct ControlFlowCounts {
+    if_count: u16,
+    for_count: u16,
+    while_count: u16,
+    switch_count: u16,
+    try_count: u16,
+    return_count: u16,
+    throw_count: u16,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compute_complexity_inner(
     node: TsNode<'_>,
     nesting: u16,
@@ -1036,6 +1057,7 @@ fn compute_complexity_inner(
     cyclomatic: &mut u16,
     cognitive: &mut u16,
     max_loop_depth: &mut u8,
+    counts: &mut ControlFlowCounts,
 ) {
     let kind = node.kind();
 
@@ -1043,11 +1065,13 @@ fn compute_complexity_inner(
         "if_statement" => {
             *cyclomatic = cyclomatic.saturating_add(1);
             *cognitive = cognitive.saturating_add(1 + nesting);
+            counts.if_count = counts.if_count.saturating_add(1);
             (nesting + 1, loop_nesting)
         }
         "while_statement" | "do_statement" => {
             *cyclomatic = cyclomatic.saturating_add(1);
             *cognitive = cognitive.saturating_add(1 + nesting);
+            counts.while_count = counts.while_count.saturating_add(1);
             let new_ld = loop_nesting + 1;
             if new_ld > *max_loop_depth {
                 *max_loop_depth = new_ld;
@@ -1057,6 +1081,7 @@ fn compute_complexity_inner(
         "for_statement" | "enhanced_for_statement" => {
             *cyclomatic = cyclomatic.saturating_add(1);
             *cognitive = cognitive.saturating_add(1 + nesting);
+            counts.for_count = counts.for_count.saturating_add(1);
             let new_ld = loop_nesting + 1;
             if new_ld > *max_loop_depth {
                 *max_loop_depth = new_ld;
@@ -1065,6 +1090,7 @@ fn compute_complexity_inner(
         }
         "switch_expression" | "switch_statement" => {
             *cognitive = cognitive.saturating_add(1 + nesting);
+            counts.switch_count = counts.switch_count.saturating_add(1);
             (nesting + 1, loop_nesting)
         }
         "switch_label" => {
@@ -1079,7 +1105,16 @@ fn compute_complexity_inner(
         }
         "try_statement" => {
             *cognitive = cognitive.saturating_add(1 + nesting);
+            counts.try_count = counts.try_count.saturating_add(1);
             (nesting + 1, loop_nesting)
+        }
+        "return_statement" => {
+            counts.return_count = counts.return_count.saturating_add(1);
+            (nesting, loop_nesting)
+        }
+        "throw_statement" => {
+            counts.throw_count = counts.throw_count.saturating_add(1);
+            (nesting, loop_nesting)
         }
         "conditional_expression" => {
             // ternary
@@ -1129,6 +1164,7 @@ fn compute_complexity_inner(
             cyclomatic,
             cognitive,
             max_loop_depth,
+            counts,
         );
     }
 }
@@ -2306,6 +2342,124 @@ fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
         .named_children(&mut cursor)
         .find(|child| child.kind() == kind);
     result
+}
+
+/// Build a 25-float StructuralProfile for every class/interface/enum node in the builder.
+/// Must be called after all defs are collected but before nodes are sorted/deduped.
+fn attach_structural_profiles(builder: &mut FileBuilder) {
+    use cih_core::NodeKind;
+
+    // Count extends/implements per class FQCN from reference_sites.
+    let mut extends_count: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
+    let mut implements_count: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
+    for site in &builder.reference_sites {
+        match site.kind {
+            cih_core::RefKind::Extends => {
+                *extends_count.entry(site.in_fqcn.as_str()).or_insert(0) += 1;
+            }
+            cih_core::RefKind::Implements => {
+                *implements_count.entry(site.in_fqcn.as_str()).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Collect method-level complexity by owner FQCN.
+    // For methods/constructors, def.fqcn == owner class FQCN.
+    let mut method_cx: std::collections::HashMap<&str, Vec<&ComplexityRecord>> =
+        std::collections::HashMap::new();
+    let mut method_counts: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
+    let mut field_counts: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
+    let mut ctor_counts: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
+    for def in &builder.defs {
+        match def.kind {
+            NodeKind::Method => {
+                *method_counts.entry(def.fqcn.as_str()).or_insert(0) += 1;
+                if let Some(cx) = &def.complexity {
+                    method_cx.entry(def.fqcn.as_str()).or_default().push(cx);
+                }
+            }
+            NodeKind::Field => {
+                *field_counts.entry(def.fqcn.as_str()).or_insert(0) += 1;
+            }
+            NodeKind::Constructor => {
+                *ctor_counts.entry(def.fqcn.as_str()).or_insert(0) += 1;
+                if let Some(cx) = &def.complexity {
+                    method_cx.entry(def.fqcn.as_str()).or_default().push(cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // For each class-like def, compute the profile and attach to its Node.
+    for def in &builder.defs {
+        let is_class_like = matches!(
+            def.kind,
+            NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Annotation
+        );
+        if !is_class_like {
+            continue;
+        }
+
+        let fqcn = def.fqcn.as_str();
+        let cxs = method_cx.get(fqcn).map(Vec::as_slice).unwrap_or(&[]);
+        let n = cxs.len() as f32;
+
+        let avg_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
+            if n == 0.0 { 0.0 } else { cxs.iter().map(|c| f(c)).sum::<f32>() / n }
+        };
+        let max_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
+            cxs.iter().map(|c| f(c)).fold(0f32, f32::max)
+        };
+        let sum_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
+            cxs.iter().map(|c| f(c)).sum::<f32>()
+        };
+
+        let loc = (def.range.end_line.saturating_sub(def.range.start_line)) as f32 / 1000.0;
+
+        let features: [f32; 25] = [
+            *method_counts.get(fqcn).unwrap_or(&0) as f32,           // 0 method_count
+            *field_counts.get(fqcn).unwrap_or(&0) as f32,            // 1 field_count
+            *ctor_counts.get(fqcn).unwrap_or(&0) as f32,             // 2 constructor_count
+            avg_of(|c| c.cyclomatic as f32),                          // 3 avg_cyclomatic
+            max_of(|c| c.cyclomatic as f32),                          // 4 max_cyclomatic
+            avg_of(|c| c.cognitive as f32),                           // 5 avg_cognitive
+            max_of(|c| c.cognitive as f32),                           // 6 max_cognitive
+            avg_of(|c| c.loop_depth as f32),                          // 7 avg_loop_depth
+            max_of(|c| c.loop_depth as f32),                          // 8 max_loop_depth
+            sum_of(|c| c.if_count as f32),                            // 9 if_count
+            sum_of(|c| c.for_count as f32),                           // 10 for_count
+            sum_of(|c| c.while_count as f32),                         // 11 while_count
+            sum_of(|c| c.switch_count as f32),                        // 12 switch_count
+            sum_of(|c| c.try_count as f32),                           // 13 try_count
+            sum_of(|c| c.return_count as f32),                        // 14 return_count
+            sum_of(|c| c.throw_count as f32),                         // 15 throw_count
+            def.stereotype.is_some() as u8 as f32,                    // 16 annotation_count (proxy)
+            def.stereotype.is_some() as u8 as f32,                    // 17 has_spring_stereotype
+            (def.kind == NodeKind::Interface) as u8 as f32,           // 18 is_interface
+            def.modifiers.iter().any(|m| m == "abstract") as u8 as f32, // 19 is_abstract
+            (def.kind == NodeKind::Enum) as u8 as f32,                // 20 is_enum
+            *implements_count.get(fqcn).unwrap_or(&0) as f32,         // 21 implements_count
+            *extends_count.get(fqcn).unwrap_or(&0) as f32,            // 22 extends_count
+            (def.stereotype.as_deref() == Some("test")) as u8 as f32, // 23 is_test
+            loc.min(1.0),                                              // 24 loc_normalized
+        ];
+
+        let profile = StructuralProfile { features };
+        let sp_json = profile.to_json_array();
+
+        // Find the matching node and attach the profile to its props.
+        for node in &mut builder.nodes {
+            if node.id == def.id {
+                let props = node.props.get_or_insert_with(|| serde_json::json!({}));
+                if let serde_json::Value::Object(ref mut map) = props {
+                    map.insert("sp".to_string(), sp_json);
+                }
+                break;
+            }
+        }
+    }
 }
 
 fn normalize_builder(builder: &mut FileBuilder) {

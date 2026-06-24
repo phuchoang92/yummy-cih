@@ -122,6 +122,7 @@ pub fn default_scan_registry() -> cih_parse::LanguageRegistry {
     r.register(cih_lang::java::JavaProvider::new());
     r.register(cih_lang::typescript::TypescriptProvider::new());
     r.register(cih_lang::python::PythonProvider::new());
+    r.register(cih_lang::kotlin::KotlinProvider::new());
     r
 }
 
