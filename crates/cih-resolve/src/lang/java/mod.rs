@@ -37,7 +37,12 @@ impl LanguageResolver for JavaResolver {
     }
 
     fn di_redirect(&self, type_qname: &str, index: &CommonIndex) -> Option<String> {
-        di::single_bean_impl(type_qname, index)
+        // Prefer Spring-annotated bean (requires stereotype metadata from DI XML or annotations).
+        if let Some(bean) = di::single_bean_impl(type_qname, index) {
+            return Some(bean);
+        }
+        // Fallback: single concrete implementor in the workspace (annotation-driven wiring).
+        index.single_programmatic_impl(type_qname, "java").map(str::to_string)
     }
 
     fn type_metadata(&self, def: &SymbolDef) -> Option<String> {

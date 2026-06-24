@@ -590,17 +590,33 @@ impl<'a> EdgeEmitter<'a> {
         confidence: f32,
         reason: String,
     ) {
+        const CONFIDENCE_FLOOR: f32 = 0.60;
         if src.as_str() == "Method:<unknown>" || dst.as_str().is_empty() {
             self.skipped += 1;
             return;
         }
+        if confidence < CONFIDENCE_FLOOR {
+            self.skipped += 1;
+            return;
+        }
+        let strategy: Option<&str> = match (&kind, reason.as_str()) {
+            (EdgeKind::Calls, "di-resolved")            => Some("di_xml"),
+            (EdgeKind::Calls, "interface_single_impl")  => Some("iface_single"),
+            (EdgeKind::Calls, "receiver-bound")         => Some("type_inferred"),
+            (EdgeKind::Calls, "self-receiver")          => Some("self_recv"),
+            (EdgeKind::Calls, "free-call-fallback")     => Some("free_call"),
+            (EdgeKind::Implements, _)                   => Some("heritage"),
+            (EdgeKind::Extends, _)                      => Some("heritage"),
+            _ => None,
+        };
+        let props = strategy.map(|s| serde_json::json!({ "rs": s }));
         self.edges.push(Edge {
             src,
             dst,
             kind,
             confidence,
             reason,
-            props: None,
+            props,
         });
     }
 

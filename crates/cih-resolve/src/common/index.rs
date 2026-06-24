@@ -33,6 +33,8 @@ pub struct CommonIndex {
     type_metadata: HashMap<String, String>,
     /// type FQCN → language it was declared in.
     pub(crate) language_of_type: HashMap<String, String>,
+    /// package QN → all type FQCNs declared in that package (for 0.72 wildcard tier).
+    package_to_fqcns: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -96,6 +98,12 @@ impl CommonIndex {
                         .entry(simple_of(&def.fqcn))
                         .or_default()
                         .push(def.fqcn.clone());
+                    if let Some(dot) = def.fqcn.rfind('.') {
+                        idx.package_to_fqcns
+                            .entry(def.fqcn[..dot].to_string())
+                            .or_default()
+                            .push(def.fqcn.clone());
+                    }
                     idx.file_of_type.insert(def.fqcn.clone(), pf.file.clone());
                 } else if matches!(def.kind, NodeKind::Method | NodeKind::Constructor) {
                     idx.methods
@@ -172,6 +180,22 @@ impl CommonIndex {
                     return Some(cand);
                 }
             }
+            // 0.72 tier: unique match within wildcard-imported packages
+            let mut pkg_hit: Option<String> = None;
+            let mut pkg_hit_count = 0usize;
+            for prefix in &ctx.wildcard_prefixes {
+                if let Some(fqcns) = self.package_to_fqcns.get(prefix.as_str()) {
+                    for fqcn in fqcns {
+                        if simple_of(fqcn) == base.as_str() {
+                            pkg_hit = Some(fqcn.clone());
+                            pkg_hit_count += 1;
+                        }
+                    }
+                }
+            }
+            if pkg_hit_count == 1 {
+                return pkg_hit;
+            }
         }
         match self.simple_to_fqcns.get(&base) {
             Some(fqcns) if fqcns.len() == 1 => Some(fqcns[0].clone()),
@@ -208,6 +232,22 @@ impl CommonIndex {
                 if self.types_by_fqcn.contains_key(&cand) {
                     return Some((cand, 0.75));
                 }
+            }
+            // 0.72 tier: unique match within wildcard-imported packages (CBM module-index technique)
+            let mut pkg_hit: Option<String> = None;
+            let mut pkg_hit_count = 0usize;
+            for prefix in &ctx.wildcard_prefixes {
+                if let Some(fqcns) = self.package_to_fqcns.get(prefix.as_str()) {
+                    for fqcn in fqcns {
+                        if simple_of(fqcn) == base.as_str() {
+                            pkg_hit = Some(fqcn.clone());
+                            pkg_hit_count += 1;
+                        }
+                    }
+                }
+            }
+            if pkg_hit_count == 1 {
+                return Some((pkg_hit.unwrap(), 0.72));
             }
         }
         match self.simple_to_fqcns.get(&base) {
@@ -469,6 +509,31 @@ impl CommonIndex {
             .get(fqcn)
             .map(|def| matches!(def.kind, NodeKind::Interface | NodeKind::Annotation))
             .unwrap_or(false)
+    }
+
+    /// Returns the sole concrete (non-interface, non-abstract) implementor of
+    /// `interface_fqcn` within `language`, or `None` if there are zero or more than one.
+    /// Used as a fallback in `di_redirect` for annotation-only Spring wiring.
+    pub fn single_programmatic_impl(&self, interface_fqcn: &str, language: &str) -> Option<&str> {
+        let mut hit: Option<&str> = None;
+        for fqcn in self.implementors(interface_fqcn) {
+            if self.language_of_type.get(fqcn.as_str()).map(String::as_str) != Some(language) {
+                continue;
+            }
+            if self.is_interface_type(fqcn) {
+                continue;
+            }
+            if let Some(def) = self.types_by_fqcn.get(fqcn.as_str()) {
+                if def.modifiers.iter().any(|m| m == "abstract") {
+                    continue;
+                }
+            }
+            if hit.is_some() {
+                return None; // more than one concrete impl
+            }
+            hit = Some(fqcn.as_str());
+        }
+        hit
     }
 
     /// Get per-language metadata for a type.
