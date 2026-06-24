@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use cih_core::{
@@ -28,6 +28,9 @@ pub struct EdgeEmitter<'a> {
     skipped: u64,
     unresolved_external_fqcns: BTreeSet<String>,
     unresolved_refs: Vec<UnresolvedRef>,
+    /// Memoize `index.resolve_type(raw, file)` — same (raw, file) within an emit
+    /// run always returns the same FQCN, so we pay the lookup cost at most once.
+    resolve_cache: HashMap<(String, String), Option<String>>,
 }
 
 impl<'a> EdgeEmitter<'a> {
@@ -43,7 +46,20 @@ impl<'a> EdgeEmitter<'a> {
             skipped: 0,
             unresolved_external_fqcns: BTreeSet::new(),
             unresolved_refs: Vec::new(),
+            resolve_cache: HashMap::new(),
         }
+    }
+
+    /// Cached `index.resolve_type` — avoids re-resolving the same `(raw, file)` pair
+    /// within a single emit run. The index is read-only during emit so no invalidation needed.
+    fn resolve_type_cached(&mut self, raw: &str, file: &str) -> Option<String> {
+        let key = (raw.to_string(), file.to_string());
+        if let Some(cached) = self.resolve_cache.get(&key) {
+            return cached.clone();
+        }
+        let result = self.index.resolve_type(raw, file);
+        self.resolve_cache.insert(key, result.clone());
+        result
     }
 
     /// Replace the default no-op constant resolver with a real one (Gap 4).
@@ -106,15 +122,13 @@ impl<'a> EdgeEmitter<'a> {
             }
             RefKind::Ctor => {
                 let ext = self
-                    .index
-                    .resolve_type(&site.name, &pf.file)
+                    .resolve_type_cached(&site.name, &pf.file)
                     .filter(|f| f.contains('.') && !self.index.is_known_type(f));
                 ("ctor_type_unknown", None, ext)
             }
             RefKind::TypeRef => {
                 let ext = self
-                    .index
-                    .resolve_type(&site.name, &pf.file)
+                    .resolve_type_cached(&site.name, &pf.file)
                     .filter(|f| f.contains('.') && !self.index.is_known_type(f));
                 ("type_ref_unknown", None, ext)
             }
@@ -284,8 +298,7 @@ impl<'a> EdgeEmitter<'a> {
                 };
                 let Some(dst) = self.resolve_type_node(pf, &site.name) else {
                     let ext = self
-                        .index
-                        .resolve_type(&site.name, &pf.file)
+                        .resolve_type_cached(&site.name, &pf.file)
                         .filter(|f| f.contains('.') && !self.index.is_known_type(f));
                     self.push_unresolved(pf, site, "heritage_type_unknown", None, ext);
                     continue;
@@ -423,7 +436,7 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn resolve_constructor(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<NodeId> {
-        let fqcn = self.index.resolve_type(&site.name, &pf.file)?;
+        let fqcn = self.resolve_type_cached(&site.name, &pf.file)?;
         // constructor_name() returns Option<&'static str>, so no lifetime ties to self.
         let ctor_name = self.registry.for_language(effective_lang(pf)).constructor_name();
         let result = if let Some(ctor_name) = ctor_name {
@@ -449,7 +462,7 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn resolve_type_node(&mut self, pf: &ParsedFile, raw: &str) -> Option<NodeId> {
-        let fqcn = self.index.resolve_type(raw, &pf.file)?;
+        let fqcn = self.resolve_type_cached(raw, &pf.file)?;
         let id = self.index.type_node_id(&fqcn);
         if id.is_none() && fqcn.contains('.') {
             self.unresolved_external_fqcns.insert(fqcn);
@@ -514,7 +527,7 @@ impl<'a> EdgeEmitter<'a> {
                 return self.index.receiver_type(&site.in_fqcn, receiver);
             }
             if starts_uppercase(receiver) {
-                if let Some(fqcn) = self.index.resolve_type(receiver, &pf.file) {
+                if let Some(fqcn) = self.resolve_type_cached(receiver, &pf.file) {
                     if self.index.is_known_type(&fqcn) {
                         return Some(fqcn);
                     }
@@ -531,7 +544,7 @@ impl<'a> EdgeEmitter<'a> {
                 .member_return_type_in_hierarchy(owner, call, None);
         }
 
-        if let Some(fqcn) = self.index.resolve_type(receiver, &pf.file) {
+        if let Some(fqcn) = self.resolve_type_cached(receiver, &pf.file) {
             if self.index.is_known_type(&fqcn) {
                 return Some(fqcn);
             }
@@ -539,7 +552,7 @@ impl<'a> EdgeEmitter<'a> {
 
         if let Some((left, right)) = split_last_dot_outside_parens(receiver) {
             if starts_uppercase(left) {
-                if let Some(fqcn) = self.index.resolve_type(left, &pf.file) {
+                if let Some(fqcn) = self.resolve_type_cached(left, &pf.file) {
                     if self.index.is_known_type(&fqcn) {
                         if right.ends_with(')') {
                             let name = call_name(right)?;

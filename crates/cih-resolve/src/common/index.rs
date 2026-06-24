@@ -38,7 +38,21 @@ pub struct CommonIndex {
 #[derive(Debug, Default)]
 struct FileContext {
     package: Option<String>,
-    imports: Vec<RawImport>,
+    /// simple_name → FQCN for non-wildcard, non-static imports — O(1) lookup.
+    import_map: HashMap<String, String>,
+    /// Package prefixes from wildcard imports (e.g. `java.util` from `java.util.*`).
+    wildcard_prefixes: Vec<String>,
+}
+
+fn build_import_map(imports: &[RawImport]) -> HashMap<String, String> {
+    imports
+        .iter()
+        .filter(|i| !i.is_wildcard && !i.is_static)
+        .filter_map(|i| {
+            let simple = i.raw.rsplit('.').next()?.to_string();
+            Some((simple, i.raw.clone()))
+        })
+        .collect()
 }
 
 impl CommonIndex {
@@ -48,11 +62,19 @@ impl CommonIndex {
 
         // Pass 1: defs, members, files, bindings.
         for pf in parsed {
+            let import_map = build_import_map(&pf.imports);
+            let wildcard_prefixes: Vec<String> = pf
+                .imports
+                .iter()
+                .filter(|i| i.is_wildcard)
+                .map(|i| i.raw.trim_end_matches(".*").to_string())
+                .collect();
             idx.files.insert(
                 pf.file.clone(),
                 FileContext {
                     package: pf.package.clone(),
-                    imports: pf.imports.clone(),
+                    import_map,
+                    wildcard_prefixes,
                 },
             );
             let inferred;
@@ -132,23 +154,22 @@ impl CommonIndex {
             return Some(base); // already qualified
         }
         if let Some(ctx) = self.files.get(file) {
-            for imp in &ctx.imports {
-                if !imp.is_wildcard && imp.raw.rsplit('.').next() == Some(base.as_str()) {
-                    return Some(imp.raw.clone());
-                }
+            // O(1): explicit non-wildcard import map
+            if let Some(fqcn) = ctx.import_map.get(base.as_str()) {
+                return Some(fqcn.clone());
             }
+            // Same-package local type
             if let Some(pkg) = &ctx.package {
                 let cand = format!("{pkg}.{base}");
                 if self.types_by_fqcn.contains_key(&cand) {
                     return Some(cand);
                 }
             }
-            for imp in &ctx.imports {
-                if imp.is_wildcard {
-                    let cand = format!("{}.{base}", imp.raw.trim_end_matches(".*"));
-                    if self.types_by_fqcn.contains_key(&cand) {
-                        return Some(cand);
-                    }
+            // Wildcard import scan (O(wildcard count), typically ≤5 per file)
+            for prefix in &ctx.wildcard_prefixes {
+                let cand = format!("{prefix}.{base}");
+                if self.types_by_fqcn.contains_key(&cand) {
+                    return Some(cand);
                 }
             }
         }

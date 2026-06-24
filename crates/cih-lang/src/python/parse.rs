@@ -2,6 +2,7 @@ use cih_core::{
     file_id, function_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
     Range, RawImport, RefKind, ReferenceSite, RouteSource, SymbolDef,
 };
+use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_python};
 use std::collections::HashMap;
 use tree_sitter::Node as TsNode;
 
@@ -307,11 +308,12 @@ impl Builder {
     fn emit_function(
         &mut self,
         node: TsNode<'_>,
-        _src: &str,
+        src: &str,
         name: &str,
         arity: u16,
         owner_fqn: Option<&str>,
     ) -> NodeId {
+        let _ = src; // retained for API consistency
         let container_fqn = owner_fqn.unwrap_or(&self.module);
         let id = function_id(container_fqn, name, arity);
         let range = range_of(node);
@@ -347,6 +349,9 @@ impl Builder {
             });
         }
 
+        let body_fingerprint = node
+            .child_by_field_name("body")
+            .and_then(|b| compute_body_fingerprint(b, "python", normalize_leaf_token_python));
         self.defs.push(SymbolDef {
             id: id.clone(),
             kind: NodeKind::Function,
@@ -360,7 +365,7 @@ impl Builder {
             declared_type: None,
             stereotype: None,
             complexity: None,
-            body_fingerprint: None,
+            body_fingerprint,
         });
         id
     }

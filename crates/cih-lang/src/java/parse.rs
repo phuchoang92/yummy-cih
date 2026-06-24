@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use cih_core::{
-    constructor_id, field_id, file_id, method_id, type_id, BindingKind, BodyFingerprint,
-    ComplexityRecord, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId, NodeKind,
-    ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource, SqlConstant,
-    SqlExecutionSite, StringConstant, SymbolDef, TypeBinding,
+    constructor_id, field_id, file_id, method_id, type_id, BindingKind, ComplexityRecord,
+    ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
+    Range, RawImport, RefKind, ReferenceSite, RouteSource, SqlConstant, SqlExecutionSite,
+    StringConstant, SymbolDef, TypeBinding,
 };
+use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_java};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, QueryCursor, Tree};
 
@@ -261,7 +262,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     // Gap 2: Body fingerprint
     let body_fingerprint = node
         .child_by_field_name("body")
-        .and_then(|body| compute_body_fingerprint(body, src));
+        .and_then(|body| java_body_fingerprint(body));
 
     let props = {
         let mut obj = serde_json::Map::new();
@@ -371,7 +372,7 @@ fn collect_constructor(
     // Gap 2: Body fingerprint
     let body_fingerprint = node
         .child_by_field_name("body")
-        .and_then(|body| compute_body_fingerprint(body, src));
+        .and_then(|body| java_body_fingerprint(body));
 
     let props = {
         let mut obj = serde_json::Map::new();
@@ -1132,101 +1133,10 @@ fn compute_complexity_inner(
     }
 }
 
-// ── Gap 2: Body fingerprint (MinHash) ────────────────────────────────────────
+// ── Body fingerprint delegated to crate::fingerprint ─────────────────────────
 
-const MINHASH_K: usize = 64;
-const MINHASH_MIN_TOKENS: u32 = 30;
-
-// Compile-time fixed seeds for K=64 MinHash (deterministic).
-const MINHASH_SEEDS: [u64; 64] = [
-    0x9e3779b97f4a7c15, 0x6c62272e07bb0142, 0x94d049bb133111eb, 0xbf58476d1ce4e5b9,
-    0x517cc1b727220a95, 0x4be98134a5976fd3, 0xa8c2fda8d01bcc3d, 0x0bc150392e34b12b,
-    0x3917bfda55c5b0a3, 0x7465fca80eceed01, 0xf17b2e68e95b4b63, 0x2e52d1d0c50a8471,
-    0xd97390e8e9cbb87b, 0x2abe1a8a8c8a1e2b, 0x6d2ee4a3c3cfb9c5, 0x84f8e5a9c8c7f5a1,
-    0x3c7f5d1b8e6a2f4c, 0xa1b2c3d4e5f60718, 0x192a3b4c5d6e7f80, 0x8f7e6d5c4b3a2918,
-    0xdeadbeefcafebabe, 0x0102030405060708, 0xf0e0d0c0b0a09080, 0x123456789abcdef0,
-    0xfedcba9876543210, 0xa5a5a5a5a5a5a5a5, 0x5a5a5a5a5a5a5a5a, 0xc3c3c3c3c3c3c3c3,
-    0x3c3c3c3c3c3c3c3c, 0xe7e7e7e7e7e7e7e7, 0x1818181818181818, 0xaaaa0000bbbb1111,
-    0xcccc2222dddd3333, 0xeeee4444ffff5555, 0x0000666677778888, 0x9999aaaabbbbcccc,
-    0xddddeeeeffff0000, 0x1111222233334444, 0x5555666677778888, 0x9999aaaabbbbdddd,
-    0xeeeeffff11112222, 0x3333444455556666, 0x7777888899990000, 0xaaaabbbbccccdddd,
-    0xeeeeffffaaaabbbb, 0xccccddddeeee0000, 0xffff000011112222, 0x4444333322221111,
-    0xbbbb0000aaaa9999, 0x8888777766665555, 0x4444333399998888, 0x7777666655554444,
-    0x3333222211110000, 0xffffeeeeddddcccc, 0xbbbbaaaa99998888, 0x7777666655554444,
-    0x3333222211110000, 0xffffeeeeddddcccc, 0xbbbbaaaa99998888, 0x7777666655554444,
-    0x3333222211110000, 0x0000111122223333, 0x4444555566667777, 0x8888999900001111,
-];
-
-fn normalize_leaf_token(kind: &str) -> &'static str {
-    match kind {
-        "identifier" => "I",
-        "string_literal" | "text_block" => "S",
-        "decimal_integer_literal" | "hex_integer_literal" | "octal_integer_literal"
-        | "binary_integer_literal" | "decimal_floating_point_literal"
-        | "hex_floating_point_literal" => "N",
-        "type_identifier" | "void_type" | "integral_type" | "floating_point_type"
-        | "boolean_type" | "array_type" | "generic_type" => "T",
-        "true" | "false" | "null_literal" | "if" | "else" | "for" | "while" | "do"
-        | "return" | "break" | "continue" | "throw" | "try" | "catch" | "finally"
-        | "switch" | "case" | "default" | "new" | "this" | "super" | "instanceof"
-        | "class" | "interface" | "enum" | "extends" | "implements" | "static"
-        | "final" | "public" | "private" | "protected" | "abstract" | "synchronized"
-        | "volatile" | "transient" | "native" => "K",
-        _ => "O",
-    }
-}
-
-fn collect_leaf_tokens<'a>(node: TsNode<'a>, tokens: &mut Vec<&'static str>) {
-    if node.child_count() == 0 {
-        let t = normalize_leaf_token(node.kind());
-        tokens.push(t);
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_leaf_tokens(child, tokens);
-    }
-}
-
-fn minhash_compute(tokens: &[&'static str]) -> [u32; 64] {
-    // Build trigrams from token sequence
-    let mut hashes = [u32::MAX; 64];
-    if tokens.len() < 3 {
-        return hashes;
-    }
-    for i in 0..=(tokens.len() - 3) {
-        // Create trigram string
-        let gram = format!("{}{}{}", tokens[i], tokens[i + 1], tokens[i + 2]);
-        let gram_bytes = gram.as_bytes();
-        for k in 0..MINHASH_K {
-            // Simple hash: FNV-1a-like with seed
-            let mut h: u64 = MINHASH_SEEDS[k];
-            for &b in gram_bytes {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            let v = (h >> 32) as u32;
-            if v < hashes[k] {
-                hashes[k] = v;
-            }
-        }
-    }
-    hashes
-}
-
-fn compute_body_fingerprint(body: TsNode<'_>, _src: &str) -> Option<BodyFingerprint> {
-    let mut tokens: Vec<&'static str> = Vec::new();
-    collect_leaf_tokens(body, &mut tokens);
-    let leaf_token_count = tokens.len() as u32;
-    if leaf_token_count < MINHASH_MIN_TOKENS {
-        return None;
-    }
-    let minhash = minhash_compute(&tokens);
-    Some(BodyFingerprint {
-        provider: "java".to_string(),
-        leaf_token_count,
-        minhash: minhash.to_vec(),
-    })
+fn java_body_fingerprint(body: TsNode<'_>) -> Option<cih_core::BodyFingerprint> {
+    compute_body_fingerprint(body, "java", normalize_leaf_token_java)
 }
 
 fn collect_sql_constants(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
