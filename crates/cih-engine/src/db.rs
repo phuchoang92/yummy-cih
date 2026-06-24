@@ -4,7 +4,7 @@ use cih_falkor::FalkorStore;
 use cih_graph_store::{GraphStore, LoadStats};
 
 /// Outcome of the FalkorDB load step — distinguishes a deliberate skip from a failure.
-pub(crate) enum LoadOutcome {
+pub enum LoadOutcome {
     Loaded(LoadStats),
     Reused,
     Skipped,
@@ -12,7 +12,7 @@ pub(crate) enum LoadOutcome {
 }
 
 impl LoadOutcome {
-    pub(crate) fn status(&self) -> &'static str {
+    pub fn status(&self) -> &'static str {
         match self {
             LoadOutcome::Loaded(_) => "loaded",
             LoadOutcome::Reused => "reused",
@@ -21,14 +21,14 @@ impl LoadOutcome {
         }
     }
 
-    pub(crate) fn stats(&self) -> Option<&LoadStats> {
+    pub fn stats(&self) -> Option<&LoadStats> {
         match self {
             LoadOutcome::Loaded(stats) => Some(stats),
             _ => None,
         }
     }
 
-    pub(crate) fn error(&self) -> Option<&str> {
+    pub fn error(&self) -> Option<&str> {
         match self {
             LoadOutcome::Failed(reason) => Some(reason.as_str()),
             _ => None,
@@ -38,7 +38,7 @@ impl LoadOutcome {
 
 /// Load multiple artifact sets into one staging graph, then publish atomically.
 /// Callers supply artifacts in the order they should be merged (analyze first, community second).
-pub(crate) fn load_many_to_falkor(
+pub fn load_many_to_falkor(
     url: &str,
     graph_key: &str,
     artifact_sets: &[&GraphArtifacts],
@@ -87,7 +87,7 @@ pub(crate) fn load_many_to_falkor(
     })
 }
 
-pub(crate) fn load_to_falkor(
+pub fn load_to_falkor(
     url: &str,
     graph_key: &str,
     artifacts: &GraphArtifacts,

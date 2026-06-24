@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
 use cih_grouping::{FeatureStrategy, PackageConfig, PackageStrategy};
-use cih_wiki::features::{group_communities_by_feature, pascal_to_kebab, FeatureGroup};
+use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::assign_class_slugs;
 use cih_wiki::graph::{route_http_method, route_path};
 use cih_wiki::{
@@ -187,7 +187,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let edges;
     let wiki_graph;
     let community_nodes: Vec<Node>;
-    let community_edges: Vec<cih_core::Edge>;
+    let community_edges: Vec<Edge>;
     let community_version: String;
     // Maps (node_id, file) to a feature slug; passed to WikiInput for generate_wiki.
     let feature_of: Box<dyn Fn(&str, &str) -> String + Send>;
@@ -1097,7 +1097,7 @@ fn latest_community_artifacts(repo: &Path) -> Result<GraphArtifacts> {
         .with_context(|| format!("no complete community artifacts under {}", parent.display()))
 }
 
-fn enrich_one_community(
+pub fn enrich_one_community(
     community: &Node,
     graph: &WikiGraph,
     repo: &Path,
@@ -1195,7 +1195,7 @@ Cite evidence IDs (R1, P1, T1, S1, B1, ...) inline when they support a claim.",
     prompt
 }
 
-fn build_enrich_prompt(name: &str, evidence: &str) -> String {
+pub fn build_enrich_prompt(name: &str, evidence: &str) -> String {
     let evidence = if evidence.trim().is_empty() {
         "none"
     } else {
@@ -1218,7 +1218,7 @@ Only output the JSON object. Do not add commentary."#
     )
 }
 
-fn parse_llm_summary(text: &str) -> Result<CommunityLlmSummary> {
+pub fn parse_llm_summary(text: &str) -> Result<CommunityLlmSummary> {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
         if let Some(summary) = summary_from_value(&val) {
             return Ok(summary);
@@ -1612,7 +1612,7 @@ fn is_transient_overload(err: &anyhow::Error) -> bool {
         || msg.contains("Too Many Requests")
 }
 
-fn is_circuit_open(consecutive: u32, threshold: u32) -> bool {
+pub fn is_circuit_open(consecutive: u32, threshold: u32) -> bool {
     consecutive >= threshold
 }
 
@@ -2116,7 +2116,7 @@ fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
     Ok(FlowLlmSummary { narrative, business_impact, step_descriptions: descs })
 }
 
-fn retain_matching_feature_groups(
+pub fn retain_matching_feature_groups(
     feature_groups: &mut Vec<FeatureGroup>,
     filter_feature: &[String],
 ) {
@@ -2132,7 +2132,7 @@ fn retain_matching_feature_groups(
 
 /// Build merged evidence text for a feature by concatenating evidence packs from all
 /// communities in the feature. Deduplicates route and table items; caps at 6 000 chars.
-fn build_feature_evidence(
+pub fn build_feature_evidence(
     community_ids: &[String],
     graph: &WikiGraph,
     repo: &Path,
@@ -2179,7 +2179,7 @@ fn build_feature_evidence(
 }
 
 /// Call the LLM once for a whole feature to get a cohesive PO/BA overview.
-fn enrich_one_feature(
+pub fn enrich_one_feature(
     feature: &str,
     evidence: &str,
     adapter: &dyn LlmAdapter,
@@ -2258,7 +2258,7 @@ fn build_feature_system_prompt() -> String {
         .to_string()
 }
 
-fn build_feature_user_prompt(feature: &str, evidence: &str) -> String {
+pub fn build_feature_user_prompt(feature: &str, evidence: &str) -> String {
     format!(
         r#"You are writing feature-level documentation for the "{feature}" module.
 
@@ -2275,7 +2275,7 @@ Respond ONLY with a JSON object:
     )
 }
 
-fn parse_feature_summary(text: &str) -> Result<FeatureLlmSummary> {
+pub fn parse_feature_summary(text: &str) -> Result<FeatureLlmSummary> {
     // Some models (e.g. Gemini) wrap JSON in ```json ... ``` fences.
     let stripped = text
         .trim()
@@ -2317,7 +2317,7 @@ fn parse_feature_summary(text: &str) -> Result<FeatureLlmSummary> {
     Ok(summary)
 }
 
-fn cached_feature_summary(
+pub fn cached_feature_summary(
     feature: &str,
     ev_hash: &str,
     meta: Option<&WikiMeta>,
@@ -2334,7 +2334,7 @@ fn cached_feature_summary(
     })
 }
 
-fn cached_summary(
+pub fn cached_summary(
     comm_id: &str,
     ev_hash: &str,
     meta: Option<&WikiMeta>,
@@ -2379,7 +2379,7 @@ fn first_meaningful_route_seg(path: &str) -> Option<String> {
 /// any of the `--filter-route` patterns. Used as a fast pre-filter before loading the
 /// main graph; false-positives are acceptable since the precise filter re-runs later.
 /// Returns true when props are absent (can't pre-filter → keep).
-fn community_matches_route_prefix(community: &Node, patterns: &[String]) -> bool {
+pub fn community_matches_route_prefix(community: &Node, patterns: &[String]) -> bool {
     if patterns.is_empty() {
         return true;
     }
@@ -2545,6 +2545,5 @@ fn replace_citations(text: &str, map: &HashMap<String, String>) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests;
+
 

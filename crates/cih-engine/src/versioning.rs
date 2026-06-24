@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, ParsedFile, VersionId};
 
 /// blake3 (first 16 hex) over deterministic nodes+edges+IR → graph version.
-pub(crate) fn content_version(
+pub fn content_version(
     nodes: &[Node],
     edges: &[Edge],
     parsed_files: &[ParsedFile],
@@ -25,7 +25,7 @@ pub(crate) fn content_version(
     hasher.finalize().to_hex()[..16].to_string()
 }
 
-pub(crate) fn latest_graph_artifacts(repo: &Path) -> Result<GraphArtifacts> {
+pub fn latest_graph_artifacts(repo: &Path) -> Result<GraphArtifacts> {
     let parent = repo.join(".cih").join("artifacts");
     let mut candidates = Vec::new();
     let entries = std::fs::read_dir(&parent).with_context(|| {
@@ -70,7 +70,7 @@ pub(crate) fn latest_graph_artifacts(repo: &Path) -> Result<GraphArtifacts> {
         .with_context(|| format!("no complete graph artifacts under {}", parent.display()))
 }
 
-pub(crate) fn discover_version(nodes: &[Node], edges: &[Edge]) -> String {
+pub fn discover_version(nodes: &[Node], edges: &[Edge]) -> String {
     let mut hasher = blake3::Hasher::new();
     let mut node_ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
     node_ids.sort_unstable();
@@ -99,7 +99,7 @@ pub(crate) fn discover_version(nodes: &[Node], edges: &[Edge]) -> String {
 
 /// Remove every direct child dir of `parent` except `keep`. Best-effort: failures to
 /// remove a stale dir are logged, not fatal.
-pub(crate) fn prune_other_versions(parent: &Path, keep: &str) -> Result<()> {
+pub fn prune_other_versions(parent: &Path, keep: &str) -> Result<()> {
     if !parent.exists() {
         return Ok(());
     }

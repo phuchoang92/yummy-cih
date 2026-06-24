@@ -4,17 +4,16 @@ mod discover;
 mod embed;
 mod features_cmd;
 mod file_cache;
-mod group;
 mod group_cmd;
-mod grouping;
+mod group_sync;
+mod feature_strategy;
 mod llm;
 mod registry;
 mod scan;
 mod scope;
 mod start;
 mod start_env;
-#[cfg(test)]
-mod tests;
+
 mod tui;
 mod ui;
 mod versioning;

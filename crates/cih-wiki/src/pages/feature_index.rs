@@ -70,6 +70,5 @@ pub fn render_feature_index(
     md
 }
 
-#[cfg(test)]
-mod tests;
+
 

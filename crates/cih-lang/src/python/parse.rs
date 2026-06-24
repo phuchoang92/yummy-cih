@@ -805,6 +805,3 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
     })
 }
 
-#[cfg(test)]
-mod tests;
-

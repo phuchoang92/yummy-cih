@@ -3,7 +3,7 @@ use tree_sitter::{Language, Node as TsNode, Query};
 
 use crate::{LanguageProvider, Stereotype};
 
-mod parse;
+pub mod parse;
 
 pub const PY_SCOPE_QUERY: &str = include_str!("query.scm");
 

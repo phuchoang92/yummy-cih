@@ -1076,6 +1076,4 @@ pub fn route_decorator(route: &Node) -> &str {
         .unwrap_or("")
 }
 
-#[cfg(test)]
-mod tests;
 

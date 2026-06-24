@@ -21,7 +21,8 @@ use crate::layout;
 use crate::search::{self, QueryResult, SearchState};
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
-const INDEX_HTML: &str = include_str!("../assets/graph/index.html");
+#[doc(hidden)]
+pub const INDEX_HTML: &str = include_str!("../assets/graph/index.html");
 const APP_JS: &str = include_str!("../assets/graph/app.js");
 const STYLES_CSS: &str = include_str!("../assets/graph/styles.css");
 
@@ -107,10 +108,14 @@ struct RoutesParams {
     limit: Option<usize>,
 }
 
-const OVERVIEW_DEFAULT_NODES: usize = 20_000;
-const OVERVIEW_MAX_NODES: usize = 50_000;
-const OVERVIEW_DEFAULT_EDGES: usize = 80_000;
-const OVERVIEW_MAX_EDGES: usize = 250_000;
+#[doc(hidden)]
+pub const OVERVIEW_DEFAULT_NODES: usize = 20_000;
+#[doc(hidden)]
+pub const OVERVIEW_MAX_NODES: usize = 50_000;
+#[doc(hidden)]
+pub const OVERVIEW_DEFAULT_EDGES: usize = 80_000;
+#[doc(hidden)]
+pub const OVERVIEW_MAX_EDGES: usize = 250_000;
 
 async fn graph_overview(
     State(state): State<BrowserState>,
@@ -256,7 +261,8 @@ async fn graph_routes(
     })))
 }
 
-fn render_flow_graph(
+#[doc(hidden)]
+pub fn render_flow_graph(
     entry_id: &NodeId,
     entry_node: Option<&Node>,
     hops: &[FlowHop],
@@ -331,7 +337,8 @@ fn node_id(raw: String) -> Result<NodeId, BrowserError> {
     }
 }
 
-fn parse_graph_direction(raw: Option<&str>) -> Direction {
+#[doc(hidden)]
+pub fn parse_graph_direction(raw: Option<&str>) -> Direction {
     match raw.unwrap_or("upstream").to_ascii_lowercase().as_str() {
         "downstream" => Direction::Downstream,
         "both" => Direction::Both,
@@ -339,15 +346,18 @@ fn parse_graph_direction(raw: Option<&str>) -> Direction {
     }
 }
 
-fn bounded_depth(raw: Option<u32>, default: u32, max: u32) -> u32 {
+#[doc(hidden)]
+pub fn bounded_depth(raw: Option<u32>, default: u32, max: u32) -> u32 {
     raw.unwrap_or(default).clamp(1, max)
 }
 
-fn limit_or_default(raw: Option<usize>, default: usize, max: usize) -> usize {
+#[doc(hidden)]
+pub fn limit_or_default(raw: Option<usize>, default: usize, max: usize) -> usize {
     raw.unwrap_or(default).clamp(1, max)
 }
 
-fn overview_limit(raw: Option<usize>, default: usize, max: usize) -> usize {
+#[doc(hidden)]
+pub fn overview_limit(raw: Option<usize>, default: usize, max: usize) -> usize {
     raw.unwrap_or(default).clamp(1, max)
 }
 
@@ -400,5 +410,3 @@ impl IntoResponse for BrowserError {
     }
 }
 
-#[cfg(test)]
-mod tests;

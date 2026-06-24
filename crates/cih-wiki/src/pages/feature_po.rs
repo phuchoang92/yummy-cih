@@ -399,6 +399,5 @@ fn handler_method_name(handler_id: &str) -> &str {
         .unwrap_or(handler_id)
 }
 
-#[cfg(test)]
-mod tests;
+
 

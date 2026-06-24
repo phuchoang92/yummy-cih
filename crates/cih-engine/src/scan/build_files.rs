@@ -10,7 +10,7 @@ use quick_xml::Reader;
 
 use super::BuildMeta;
 
-pub(super) fn parse_pom(content: &str) -> Option<BuildMeta> {
+pub fn parse_pom(content: &str) -> Option<BuildMeta> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
 
@@ -82,7 +82,7 @@ pub(super) fn parse_pom(content: &str) -> Option<BuildMeta> {
     })
 }
 
-pub(super) fn parse_gradle(content: &str, repo_path: &Path) -> Option<BuildMeta> {
+pub fn parse_gradle(content: &str, repo_path: &Path) -> Option<BuildMeta> {
     let group_id = find_gradle_group(content).unwrap_or_default();
     let artifact_id = repo_path
         .file_name()
@@ -124,7 +124,7 @@ pub(super) fn parse_gradle(content: &str, repo_path: &Path) -> Option<BuildMeta>
     })
 }
 
-pub(super) fn parse_gradle_includes(content: &str) -> Vec<String> {
+pub fn parse_gradle_includes(content: &str) -> Vec<String> {
     let mut includes = BTreeSet::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -183,6 +183,4 @@ fn all_quoted(s: &str) -> Vec<String> {
     out
 }
 
-#[cfg(test)]
-mod tests;
 

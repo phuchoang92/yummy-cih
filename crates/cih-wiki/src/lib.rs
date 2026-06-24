@@ -1151,3 +1151,4 @@ fn count_test_classes(graph: &WikiGraph) -> usize {
 #[cfg(test)]
 mod tests;
 
+

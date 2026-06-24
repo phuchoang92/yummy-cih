@@ -90,6 +90,5 @@ pub fn render_system_index(
     md
 }
 
-#[cfg(test)]
-mod tests;
+
 

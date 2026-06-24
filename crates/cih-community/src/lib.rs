@@ -1,4 +1,4 @@
-mod bfs;
+pub mod bfs;
 mod cohesion;
 mod entry_points;
 pub mod graph;

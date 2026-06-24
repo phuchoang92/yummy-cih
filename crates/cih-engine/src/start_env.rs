@@ -195,8 +195,5 @@ fn parse_env_line(line: &str) -> Option<(&str, &str)> {
     Some((key.trim(), rest))
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests;
 

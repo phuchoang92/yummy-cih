@@ -3,8 +3,11 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use cih_core::{NodeKind, ParsedFile, RawImport};
-use cih_parse::ParsedUnit;
+use cih_core::NodeKind;
+#[doc(hidden)]
+pub use cih_core::{ParsedFile, RawImport};
+#[doc(hidden)]
+pub use cih_parse::ParsedUnit;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -12,10 +15,10 @@ const FILE_HASHES: &str = "file-hashes.json";
 const PARSE_CACHE_DIR: &str = "parse-cache";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct FileHashIndex(HashMap<String, String>);
+pub struct FileHashIndex(HashMap<String, String>);
 
 impl FileHashIndex {
-    pub(crate) fn load(cih_dir: &Path) -> Self {
+    pub fn load(cih_dir: &Path) -> Self {
         let path = cih_dir.join(FILE_HASHES);
         let Ok(raw) = fs::read_to_string(&path) else {
             return Self::default();
@@ -23,11 +26,11 @@ impl FileHashIndex {
         serde_json::from_str(&raw).unwrap_or_default()
     }
 
-    pub(crate) fn from_map(map: HashMap<String, String>) -> Self {
+    pub fn from_map(map: HashMap<String, String>) -> Self {
         Self(map)
     }
 
-    pub(crate) fn save(&self, cih_dir: &Path) -> Result<()> {
+    pub fn save(&self, cih_dir: &Path) -> Result<()> {
         fs::create_dir_all(cih_dir)
             .with_context(|| format!("failed to create {}", cih_dir.display()))?;
         let path = cih_dir.join(FILE_HASHES);
@@ -38,7 +41,7 @@ impl FileHashIndex {
     }
 
     /// Returns keys in `current` whose value differs from `self` (new or changed files).
-    pub(crate) fn changed_files<'a>(&self, current: &'a HashMap<String, String>) -> Vec<&'a str> {
+    pub fn changed_files<'a>(&self, current: &'a HashMap<String, String>) -> Vec<&'a str> {
         let mut changed: Vec<&str> = current
             .iter()
             .filter_map(|(rel, hash)| match self.0.get(rel) {
@@ -50,17 +53,17 @@ impl FileHashIndex {
         changed
     }
 
-    pub(crate) fn same_file_set(&self, current: &HashMap<String, String>) -> bool {
+    pub fn same_file_set(&self, current: &HashMap<String, String>) -> bool {
         self.0.len() == current.len() && current.keys().all(|rel| self.0.contains_key(rel))
     }
 
-    pub(crate) fn get(&self, rel: &str) -> Option<&str> {
+    pub fn get(&self, rel: &str) -> Option<&str> {
         self.0.get(rel).map(String::as_str)
     }
 }
 
 /// blake3, first 16 hex chars. Reads file from disk.
-pub(crate) fn hash_file(repo_root: &Path, rel: &str) -> Result<String> {
+pub fn hash_file(repo_root: &Path, rel: &str) -> Result<String> {
     let path = repo_root.join(rel);
     let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(blake3::hash(&bytes).to_hex()[..16].to_string())
@@ -68,7 +71,7 @@ pub(crate) fn hash_file(repo_root: &Path, rel: &str) -> Result<String> {
 
 /// Hash all readable scope files in parallel. Unreadable files are omitted so
 /// the parse phase can preserve its existing "skip bad files" behavior.
-pub(crate) fn hash_all(repo_root: &Path, files: &[String]) -> HashMap<String, String> {
+pub fn hash_all(repo_root: &Path, files: &[String]) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = files
         .par_iter()
         .filter_map(|rel| match hash_file(repo_root, rel) {
@@ -84,13 +87,13 @@ pub(crate) fn hash_all(repo_root: &Path, files: &[String]) -> HashMap<String, St
     out
 }
 
-pub(crate) fn load_cached_parsed(cih_dir: &Path, file_hash: &str) -> Option<ParsedUnit> {
+pub fn load_cached_parsed(cih_dir: &Path, file_hash: &str) -> Option<ParsedUnit> {
     let path = cache_path(cih_dir, file_hash);
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
-pub(crate) fn save_cached_parsed(
+pub fn save_cached_parsed(
     cih_dir: &Path,
     file_hash: &str,
     parsed: &ParsedUnit,
@@ -111,13 +114,13 @@ fn cache_path(cih_dir: &Path, file_hash: &str) -> std::path::PathBuf {
 }
 
 /// Reverse import index used to reparse changed files plus their importers.
-pub(crate) struct ImporterIndex {
+pub struct ImporterIndex {
     importers_by_key: HashMap<String, Vec<String>>,
     keys_by_file: HashMap<String, Vec<String>>,
 }
 
 impl ImporterIndex {
-    pub(crate) fn build(parsed_files: &[ParsedFile]) -> Self {
+    pub fn build(parsed_files: &[ParsedFile]) -> Self {
         let mut importers_by_key: HashMap<String, HashSet<String>> = HashMap::new();
         let mut keys_by_file: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -145,7 +148,7 @@ impl ImporterIndex {
     }
 
     /// BFS from `changed`, expanding transitive importers up to `depth` hops.
-    pub(crate) fn expand(&self, changed: &[String], depth: usize) -> HashSet<String> {
+    pub fn expand(&self, changed: &[String], depth: usize) -> HashSet<String> {
         let mut seen: HashSet<String> = changed.iter().cloned().collect();
         let mut queue: VecDeque<(String, usize)> =
             changed.iter().cloned().map(|file| (file, 0)).collect();
@@ -223,6 +226,4 @@ fn sorted_map(mut input: HashMap<String, HashSet<String>>) -> HashMap<String, Ve
         .collect()
 }
 
-#[cfg(test)]
-mod tests;
 

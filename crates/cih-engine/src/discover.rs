@@ -9,7 +9,7 @@ use cih_grouping::{
     PackageConfig, StrategyInput,
 };
 
-use crate::grouping::{build_feature_strategy, FeatureLlmOptions};
+use crate::feature_strategy::{build_feature_strategy, FeatureLlmOptions};
 use serde::Serialize;
 
 use crate::db::{load_many_to_falkor, LoadOutcome};
@@ -17,7 +17,7 @@ use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_ve
 use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
 /// LLM provider config for the feature classification stage.
-pub(crate) struct FeatureLlmConfig {
+pub struct FeatureLlmConfig {
     pub provider: String,
     pub base_url: String,
     pub model: String,
@@ -28,7 +28,7 @@ pub(crate) struct FeatureLlmConfig {
 
 /// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
-pub(crate) struct DiscoverOverrides {
+pub struct DiscoverOverrides {
     pub resolution: Option<f64>,
     pub min_community_size: Option<usize>,
     pub max_trace_depth: Option<usize>,
@@ -41,7 +41,7 @@ pub(crate) struct DiscoverOverrides {
     pub feature_llm: Option<FeatureLlmConfig>,
 }
 
-pub(crate) fn run_discover(
+pub fn run_discover(
     repo: PathBuf,
     falkor_url: Option<String>,
     graph_key: Option<String>,
@@ -93,7 +93,7 @@ pub(crate) fn run_discover(
     Ok(())
 }
 
-pub(crate) fn run_discover_core(
+pub fn run_discover_core(
     repo: &Path,
     overrides: &DiscoverOverrides,
 ) -> Result<DiscoverOutcome> {
@@ -391,23 +391,23 @@ pub(crate) fn run_discover_core(
 }
 
 /// Everything `run_discover_core` produced (DB-free), used to load + report.
-pub(crate) struct DiscoverOutcome {
-    pub(crate) source_artifacts: GraphArtifacts,
-    pub(crate) artifacts: GraphArtifacts,
-    pub(crate) artifacts_dir: PathBuf,
-    pub(crate) version: String,
-    pub(crate) route_count: usize,
-    pub(crate) community_count: usize,
-    pub(crate) process_count: usize,
-    pub(crate) member_edge_count: usize,
-    pub(crate) step_edge_count: usize,
-    pub(crate) node_count: usize,
-    pub(crate) edge_count: usize,
-    pub(crate) feature_count: usize,
+pub struct DiscoverOutcome {
+    pub source_artifacts: GraphArtifacts,
+    pub artifacts: GraphArtifacts,
+    pub artifacts_dir: PathBuf,
+    pub version: String,
+    pub route_count: usize,
+    pub community_count: usize,
+    pub process_count: usize,
+    pub member_edge_count: usize,
+    pub step_edge_count: usize,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub feature_count: usize,
 }
 
 impl DiscoverOutcome {
-    pub(crate) fn artifact_sets_for_load(&self) -> [&GraphArtifacts; 2] {
+    pub fn artifact_sets_for_load(&self) -> [&GraphArtifacts; 2] {
         [&self.source_artifacts, &self.artifacts]
     }
 

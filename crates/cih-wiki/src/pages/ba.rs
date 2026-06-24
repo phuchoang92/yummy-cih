@@ -303,6 +303,5 @@ fn processes_for_community(graph: &WikiGraph, community_id: &str) -> Vec<String>
     result
 }
 
-#[cfg(test)]
-mod tests;
+
 

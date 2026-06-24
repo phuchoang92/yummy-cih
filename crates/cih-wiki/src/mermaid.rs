@@ -17,7 +17,8 @@ fn unescape_html(s: &str) -> String {
 /// Escape a label for use inside a Mermaid `["..."]` flowchart node.
 /// Angle brackets become parens — Mermaid's parser rejects `&lt;`/`&gt;` in node labels.
 /// HTML entities from the graph are unescaped first so `&lt;init&gt;` → `(init)`.
-fn sanitize(s: &str) -> String {
+#[doc(hidden)]
+pub fn sanitize(s: &str) -> String {
     let s = unescape_html(s);
     s.replace('"', "&quot;")
         .replace('<', "(")
@@ -589,6 +590,5 @@ pub fn call_sequence_diagram(
     Some(out)
 }
 
-#[cfg(test)]
-mod tests;
+
 

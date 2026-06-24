@@ -146,7 +146,7 @@ pub fn build_graph_module_tree(
                     slug: page_slug,
                     title: display_title,
                     description: Some(format!("Community {}", comm_id)),
-                    community_ids: vec![comm_id.clone()],
+                    community_ids: vec![comm_id.to_string()],
                     file_paths: sorted_member_files(graph, comm_id),
                     children: Vec::new(),
                 }
@@ -325,6 +325,5 @@ fn is_repo_relative(path: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-mod tests;
+
 

@@ -26,21 +26,19 @@ pub struct DiXmlOutput {
 
 /// A bean definition parsed from a DI XML file.
 #[derive(Clone, Debug)]
-struct BeanDef {
-    /// `id`/`name` of the bean (`None` when anonymous).
+#[doc(hidden)]
+pub struct BeanDef {
     #[allow(dead_code)]
-    id: Option<String>,
-    /// Fully-qualified class name (`com.acme.Foo`).
-    fqcn: String,
-    /// XML file the bean was declared in (repo-relative).
-    file: String,
+    pub id: Option<String>,
+    pub fqcn: String,
+    pub file: String,
 }
 
 /// A `<reference interface="...">` lookup parsed from Blueprint XML.
 #[derive(Clone, Debug)]
-struct ReferenceDef {
-    /// Fully-qualified interface name.
-    interface: String,
+#[doc(hidden)]
+pub struct ReferenceDef {
+    pub interface: String,
 }
 
 /// Returns true when the file content looks like a Spring / Blueprint DI config.
@@ -51,7 +49,8 @@ fn is_di_xml(content: &str) -> bool {
 
 /// Returns true when a repo-relative path matches one of the DI XML name patterns:
 /// `applicationContext*.xml`, `beans.xml`, `blueprint*.xml`, `OSGI-INF/blueprint/*.xml`.
-fn is_di_xml_path(rel: &str) -> bool {
+#[doc(hidden)]
+pub fn is_di_xml_path(rel: &str) -> bool {
     let file_name = rel.rsplit('/').next().unwrap_or(rel);
     if file_name.eq_ignore_ascii_case("beans.xml") {
         return true;
@@ -72,7 +71,8 @@ fn is_di_xml_path(rel: &str) -> bool {
 /// Extract `<bean … class="…">` and `<reference interface="…">` definitions from
 /// one DI XML document. (`<service>` declarations expose an existing bean and do
 /// not introduce a new wiring target, so they are not collected here.)
-fn parse_di_document(rel: &str, content: &str) -> (Vec<BeanDef>, Vec<ReferenceDef>) {
+#[doc(hidden)]
+pub fn parse_di_document(rel: &str, content: &str) -> (Vec<BeanDef>, Vec<ReferenceDef>) {
     let mut beans = Vec::new();
     let mut references = Vec::new();
 
@@ -126,7 +126,8 @@ fn parse_di_document(rel: &str, content: &str) -> (Vec<BeanDef>, Vec<ReferenceDe
 /// Simple (unqualified) name of a possibly-qualified type/raw type, with generics
 /// and array markers stripped: `List<Foo>` → `List`, `Foo[]` → `Foo`,
 /// `com.acme.Foo` → `Foo`.
-fn simple_name(raw: &str) -> &str {
+#[doc(hidden)]
+pub fn simple_name(raw: &str) -> &str {
     let raw = raw.trim();
     let before_generic = raw.split('<').next().unwrap_or(raw);
     let before_array = before_generic.split('[').next().unwrap_or(before_generic);
@@ -388,7 +389,8 @@ fn collect_di_definitions(repo_root: &Path) -> (Vec<BeanDef>, Vec<ReferenceDef>)
 /// Extract a named XML attribute value from a tag fragment. Handles single and
 /// double quoted values. Matches only at an attribute boundary so `class=` does
 /// not match a longer attribute like `myclass=`.
-fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
+#[doc(hidden)]
+pub fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
     let search_in = &tag_fragment[..tag_fragment.len().min(2000)];
     let needle = format!("{attr_name}=");
     let mut from = 0;
@@ -410,7 +412,4 @@ fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
         from = pos + needle.len();
     }
 }
-
-#[cfg(test)]
-mod tests;
 

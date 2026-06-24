@@ -362,6 +362,4 @@ where
     result
 }
 
-#[cfg(test)]
-mod tests;
 

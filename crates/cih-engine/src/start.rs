@@ -635,8 +635,5 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
     }
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests;
 

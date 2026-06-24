@@ -11,7 +11,7 @@ use crate::scan::OwnedSourceFile;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct ScopeRequest {
+pub struct ScopeRequest {
     pub all: bool,
     pub modules: Vec<String>,
     pub include: Vec<String>,
@@ -23,7 +23,7 @@ pub(crate) struct ScopeRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ScopeFile {
+pub struct ScopeFile {
     pub repo_root: String,
     pub version: String,
     pub selection: ScopeRequest,
@@ -33,18 +33,18 @@ pub(crate) struct ScopeFile {
 }
 
 impl ScopeRequest {
-    pub(crate) fn from_toml(path: &Path) -> Result<Self> {
+    pub fn from_toml(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
     }
 
-    pub(crate) fn has_selector(&self) -> bool {
+    pub fn has_selector(&self) -> bool {
         self.all || !self.modules.is_empty() || !self.include.is_empty()
     }
 }
 
-pub(crate) fn resolve(
+pub fn resolve(
     repo_map: &RepoMap,
     java_files: &[OwnedSourceFile],
     request: ScopeRequest,
@@ -106,7 +106,7 @@ pub(crate) fn resolve(
     })
 }
 
-pub(crate) fn write_scope_file(scope_file: &ScopeFile) -> Result<PathBuf> {
+pub fn write_scope_file(scope_file: &ScopeFile) -> Result<PathBuf> {
     let cih_dir = Path::new(&scope_file.repo_root).join(".cih");
     fs::create_dir_all(&cih_dir)
         .with_context(|| format!("failed to create {}", cih_dir.display()))?;
@@ -233,6 +233,4 @@ fn scope_version(files: &[String], request: &ScopeRequest) -> Result<String> {
     Ok(hasher.finalize().to_hex()[..16].to_string())
 }
 
-#[cfg(test)]
-mod tests;
 

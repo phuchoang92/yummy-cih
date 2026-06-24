@@ -400,6 +400,3 @@ fn push_unique(results: &mut Vec<TableAccess>, table: String, op: TableOp) {
     }
 }
 
-#[cfg(test)]
-mod tests;
-

@@ -153,7 +153,7 @@ fn reconstruct_path(states: &[TraceState], mut state_idx: usize) -> Vec<NodeInde
 /// longer retained trace, then keep only the longest trace per (entry, terminal) pair.
 ///
 /// Uses a window-set to detect sub-traces in O(N·L²) rather than O(N²·L).
-pub(crate) fn deduplicate_traces(
+pub fn deduplicate_traces(
     mut traces: Vec<Vec<NodeIndex>>,
     digraph: &DiGraph<NodeId, f32>,
 ) -> Vec<Vec<NodeIndex>> {
@@ -212,8 +212,8 @@ pub(crate) fn deduplicate_traces(
 /// Returns true when every `->` segment of `candidate` appears as a contiguous
 /// subsequence of segments in `of`. A plain string `contains` would also match
 /// if one node-ID string happened to be a substring of another.
-#[cfg(test)]
-pub(crate) fn is_subtrace_of(candidate: &str, of: &str) -> bool {
+#[doc(hidden)]
+pub fn is_subtrace_of(candidate: &str, of: &str) -> bool {
     let c: Vec<&str> = candidate.split("->").collect();
     let o: Vec<&str> = of.split("->").collect();
     if c.len() > o.len() {
@@ -236,13 +236,11 @@ fn trace_crosses_communities(
     seen.len() > 1
 }
 
-fn encode_trace(trace: &[NodeIndex], digraph: &DiGraph<NodeId, f32>) -> String {
+#[doc(hidden)]
+pub fn encode_trace(trace: &[NodeIndex], digraph: &DiGraph<NodeId, f32>) -> String {
     trace
         .iter()
         .map(|idx| digraph[*idx].as_str())
         .collect::<Vec<_>>()
         .join("->")
 }
-
-#[cfg(test)]
-mod tests;

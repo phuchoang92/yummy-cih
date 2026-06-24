@@ -35,7 +35,8 @@ fn is_integration_xml(content: &str) -> Option<&'static str> {
 /// Extract URI scheme and component name from a Camel endpoint URI.
 /// "jms:queue:my-queue" → ("jms", "my-queue")
 /// "direct:my-route" → ("direct", "my-route")
-fn parse_camel_uri(uri: &str) -> (&str, &str) {
+#[doc(hidden)]
+pub fn parse_camel_uri(uri: &str) -> (&str, &str) {
     let scheme = uri.split(':').next().unwrap_or("");
     let rest = if uri.len() > scheme.len() + 1 {
         let after_scheme = &uri[scheme.len() + 1..];
@@ -355,7 +356,4 @@ fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
         None
     }
 }
-
-#[cfg(test)]
-mod tests;
 

@@ -17,25 +17,25 @@ use crate::versioning::{content_version, latest_graph_artifacts, prune_other_ver
 use crate::{scan, DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
 #[derive(Debug)]
-pub(crate) struct AnalyzeFlags {
-    pub(crate) all: bool,
-    pub(crate) modules: Vec<String>,
-    pub(crate) include: Vec<String>,
-    pub(crate) exclude: Vec<String>,
-    pub(crate) include_decompiled: bool,
-    pub(crate) scope: Option<PathBuf>,
-    pub(crate) json: bool,
-    pub(crate) falkor_url: Option<String>,
-    pub(crate) graph_key: Option<String>,
-    pub(crate) no_load: bool,
-    pub(crate) no_cache: bool,
+pub struct AnalyzeFlags {
+    pub all: bool,
+    pub modules: Vec<String>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub include_decompiled: bool,
+    pub scope: Option<PathBuf>,
+    pub json: bool,
+    pub falkor_url: Option<String>,
+    pub graph_key: Option<String>,
+    pub no_load: bool,
+    pub no_cache: bool,
     /// Skip the integration + DI XML walk (faster on large repos).
-    pub(crate) skip_xml_integration: bool,
+    pub skip_xml_integration: bool,
     /// Language filter: only include files for these languages (empty = all).
-    pub(crate) languages: Vec<String>,
+    pub languages: Vec<String>,
 }
 
-pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
+pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
     let span = tracing::info_span!("analyze", repo = %repo.display());
     let _enter = span.enter();
 
@@ -115,7 +115,7 @@ pub(crate) fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_resolve(
+pub fn run_resolve(
     repo: PathBuf,
     falkor_url: Option<String>,
     graph_key: Option<String>,
@@ -182,8 +182,7 @@ pub(crate) fn run_resolve(
 
 /// DB-free core of `analyze`: resolve scope → parse → write IR + GraphArtifacts.
 /// Returns everything the caller needs to load and report. No process exits, no DB.
-#[cfg(test)]
-pub(crate) fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOutcome> {
+pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOutcome> {
     analyze_emit_with_options(
         scan,
         request,
@@ -195,7 +194,7 @@ pub(crate) fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Re
     )
 }
 
-pub(crate) fn analyze_emit_with_options(
+pub fn analyze_emit_with_options(
     scan: &scan::ScanResult,
     request: ScopeRequest,
     cache: AnalyzeCacheOptions,
@@ -208,8 +207,7 @@ pub(crate) fn analyze_emit_with_options(
 /// DB-free core shared by `analyze` and `resolve`: parse the files listed in
 /// `scope_file` → resolve → extract JAR API for unresolved types → write IR +
 /// GraphArtifacts.
-#[cfg(test)]
-pub(crate) fn analyze_from_scope(
+pub fn analyze_from_scope(
     scope_file: ScopeFile,
     scope_path: PathBuf,
     jars: &[JarInfo],
@@ -226,7 +224,7 @@ pub(crate) fn analyze_from_scope(
     )
 }
 
-pub(crate) fn analyze_from_scope_with_options(
+pub fn analyze_from_scope_with_options(
     scope_file: ScopeFile,
     scope_path: PathBuf,
     jars: &[JarInfo],
@@ -515,23 +513,23 @@ pub(crate) fn analyze_from_scope_with_options(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct AnalyzeCacheOptions {
-    pub(crate) use_cache: bool,
-    pub(crate) allow_noop: bool,
+pub struct AnalyzeCacheOptions {
+    pub use_cache: bool,
+    pub allow_noop: bool,
     /// Skip the integration + DI XML walk (faster on large repos).
-    pub(crate) skip_xml_integration: bool,
+    pub skip_xml_integration: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct CacheStats {
-    pub(crate) enabled: bool,
-    pub(crate) noop: bool,
-    pub(crate) cache_hits: usize,
-    pub(crate) changed_files: usize,
-    pub(crate) expanded_files: usize,
-    pub(crate) reparsed_files: usize,
+pub struct CacheStats {
+    pub enabled: bool,
+    pub noop: bool,
+    pub cache_hits: usize,
+    pub changed_files: usize,
+    pub expanded_files: usize,
+    pub reparsed_files: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) version: Option<String>,
+    pub version: Option<String>,
 }
 
 impl CacheStats {
@@ -779,29 +777,29 @@ fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts>
 }
 
 /// Everything `analyze_emit` produced (DB-free), used to load + report.
-pub(crate) struct EmitOutcome {
-    pub(crate) scope_file: scope::ScopeFile,
-    pub(crate) scope_path: PathBuf,
-    pub(crate) artifacts: GraphArtifacts,
-    pub(crate) parsed_files_path: PathBuf,
-    pub(crate) artifacts_dir: PathBuf,
-    pub(crate) version: String,
-    pub(crate) node_count: usize,
-    pub(crate) edge_count: usize,
-    pub(crate) resolved_edge_count: usize,
-    pub(crate) jar_node_count: usize,
-    pub(crate) jar_failed: usize,
-    pub(crate) unresolved_reference_count: u64,
-    pub(crate) unresolved_external_fqcns: Vec<String>,
-    pub(crate) unresolved_report_path: Option<PathBuf>,
-    pub(crate) parsed_file_count: usize,
-    pub(crate) skipped_count: usize,
-    pub(crate) reused_artifacts: bool,
-    pub(crate) cache_stats: CacheStats,
+pub struct EmitOutcome {
+    pub scope_file: scope::ScopeFile,
+    pub scope_path: PathBuf,
+    pub artifacts: GraphArtifacts,
+    pub parsed_files_path: PathBuf,
+    pub artifacts_dir: PathBuf,
+    pub version: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub resolved_edge_count: usize,
+    pub jar_node_count: usize,
+    pub jar_failed: usize,
+    pub unresolved_reference_count: u64,
+    pub unresolved_external_fqcns: Vec<String>,
+    pub unresolved_report_path: Option<PathBuf>,
+    pub parsed_file_count: usize,
+    pub skipped_count: usize,
+    pub reused_artifacts: bool,
+    pub cache_stats: CacheStats,
 }
 
 impl EmitOutcome {
-    pub(crate) fn summary<'a>(&'a self, load: &'a LoadOutcome) -> AnalyzeSummary<'a> {
+    pub fn summary<'a>(&'a self, load: &'a LoadOutcome) -> AnalyzeSummary<'a> {
         AnalyzeSummary {
             scope: &self.scope_file,
             version: &self.version,
@@ -826,7 +824,7 @@ impl EmitOutcome {
         }
     }
 
-    pub(crate) fn print_human(&self, load: &LoadOutcome) {
+    pub fn print_human(&self, load: &LoadOutcome) {
         println!(
             "Scope: {} .java files across {} modules -> {}.",
             self.scope_file.file_count,
@@ -903,7 +901,7 @@ impl EmitOutcome {
         }
     }
 
-    pub(crate) fn print_styled(&self, load: &LoadOutcome) {
+    pub fn print_styled(&self, load: &LoadOutcome) {
         let repo_name = Path::new(&self.scope_file.repo_root)
             .file_name()
             .and_then(|n| n.to_str())
@@ -961,37 +959,37 @@ impl EmitOutcome {
 }
 
 #[derive(Serialize)]
-pub(crate) struct AnalyzeSummary<'a> {
-    pub(crate) scope: &'a scope::ScopeFile,
-    pub(crate) version: &'a str,
-    pub(crate) scope_path: String,
-    pub(crate) parsed_files_path: String,
-    pub(crate) artifacts_path: String,
-    pub(crate) node_count: usize,
-    pub(crate) edge_count: usize,
-    pub(crate) resolved_edge_count: usize,
-    pub(crate) unresolved_reference_count: u64,
-    pub(crate) unresolved_external_fqcns: &'a [String],
-    pub(crate) parsed_file_count: usize,
-    pub(crate) skipped_count: usize,
-    pub(crate) jar_node_count: usize,
-    pub(crate) jar_failed: usize,
-    pub(crate) reused_artifacts: bool,
-    pub(crate) cache: &'a CacheStats,
+pub struct AnalyzeSummary<'a> {
+    pub scope: &'a scope::ScopeFile,
+    pub version: &'a str,
+    pub scope_path: String,
+    pub parsed_files_path: String,
+    pub artifacts_path: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub resolved_edge_count: usize,
+    pub unresolved_reference_count: u64,
+    pub unresolved_external_fqcns: &'a [String],
+    pub parsed_file_count: usize,
+    pub skipped_count: usize,
+    pub jar_node_count: usize,
+    pub jar_failed: usize,
+    pub reused_artifacts: bool,
+    pub cache: &'a CacheStats,
     /// "loaded" | "skipped" | "failed"
-    pub(crate) falkor_status: &'static str,
+    pub falkor_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) falkor_nodes: Option<u64>,
+    pub falkor_nodes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) falkor_edges: Option<u64>,
+    pub falkor_edges: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) falkor_error: Option<&'a str>,
+    pub falkor_error: Option<&'a str>,
 }
 
 /// Extract API-surface nodes+edges from `jars` for the given FQCN set.
 /// Demand-driven: passes `include` to [`JarApiExtractor::with_include`] so only
 /// classes matching an unresolved FQCN are parsed. Returns (nodes, edges, failed_jar_count).
-pub(crate) fn extract_jar_api(jars: &[JarInfo], fqcns: &[String]) -> (Vec<Node>, Vec<Edge>, usize) {
+pub fn extract_jar_api(jars: &[JarInfo], fqcns: &[String]) -> (Vec<Node>, Vec<Edge>, usize) {
     if fqcns.is_empty() || jars.is_empty() {
         return (Vec::new(), Vec::new(), 0);
     }
@@ -1018,7 +1016,7 @@ pub(crate) fn extract_jar_api(jars: &[JarInfo], fqcns: &[String]) -> (Vec<Node>,
 /// Scan the repo for `*.xml` files and run the integration-XML extractor on each.
 /// Best-effort: unreadable files are skipped with a warning, never fatal. Nodes
 /// are deduplicated by id (e.g. the same MessageDestination referenced twice).
-pub(crate) fn extract_integration_xml_in_repo(repo_root: &Path) -> (Vec<Node>, Vec<Edge>) {
+pub fn extract_integration_xml_in_repo(repo_root: &Path) -> (Vec<Node>, Vec<Edge>) {
     use rayon::prelude::*;
     use std::collections::HashSet;
 

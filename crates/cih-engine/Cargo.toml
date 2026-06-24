@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "cih_engine_lib"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cih-engine"
 path = "src/main.rs"

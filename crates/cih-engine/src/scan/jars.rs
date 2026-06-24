@@ -19,7 +19,7 @@ use cih_core::JarInfo;
 /// `repo_deps` — union of `group_id:artifact_id` pairs from build files.
 /// `own_prefix` — the project's own group prefix (e.g. `"com.example"`); used to
 /// set `is_own`. Empty string → nothing is marked own.
-pub(super) fn discover_jars(root: &Path, repo_deps: &[String], own_prefix: &str) -> Vec<JarInfo> {
+pub fn discover_jars(root: &Path, repo_deps: &[String], own_prefix: &str) -> Vec<JarInfo> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut jars: Vec<JarInfo> = Vec::new();
 
@@ -141,7 +141,7 @@ fn is_candidate_jar(path: &Path) -> bool {
 /// Gradle layout: `…/files-2.1/{group}/{artifact}/{version}/{hash}/{artifact}-{version}.jar`
 ///
 /// Falls back to (None, stem) for paths that don't match either pattern.
-fn group_artifact_from_path(path: &Path) -> (Option<String>, Option<String>) {
+pub fn group_artifact_from_path(path: &Path) -> (Option<String>, Option<String>) {
     let components: Vec<&str> = path
         .components()
         .filter_map(|c| c.as_os_str().to_str())
@@ -239,13 +239,13 @@ fn find_primary_jar_in(dir: &Path) -> Option<PathBuf> {
         .find(|p| is_candidate_jar(p))
 }
 
-fn is_own(group_id: &str, own_prefix: &str) -> bool {
+pub fn is_own(group_id: &str, own_prefix: &str) -> bool {
     !own_prefix.is_empty()
         && (group_id == own_prefix || group_id.starts_with(&format!("{own_prefix}.")))
 }
 
 /// Count `.class` entries inside a JAR (reads the ZIP central directory, no decompression).
-fn count_jar_classes(path: &Path) -> io::Result<u64> {
+pub fn count_jar_classes(path: &Path) -> io::Result<u64> {
     let file = fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(BufReader::new(file))?;
     let mut count = 0u64;
@@ -310,6 +310,4 @@ fn home_dir() -> Option<PathBuf> {
 
 // --- tests ---
 
-#[cfg(test)]
-mod tests;
 

@@ -41,7 +41,8 @@ pub fn render_mermaid_flow(entry_id: &NodeId, hops: &[FlowHop]) -> String {
 }
 
 /// Stable, Mermaid-safe identifier derived from a NodeId string.
-fn mermaid_key(id: &str) -> String {
+#[doc(hidden)]
+pub fn mermaid_key(id: &str) -> String {
     let sanitized: String = id
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
@@ -229,7 +230,4 @@ fn make_operation_id(method: &str, path: &str) -> String {
 }
 
 // ---- Tests ----
-
-#[cfg(test)]
-mod tests;
 

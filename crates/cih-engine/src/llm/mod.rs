@@ -51,7 +51,7 @@ pub fn make_adapter(
 }
 
 /// Require HTTPS for remote URLs; allow HTTP for localhost and loopback only.
-fn validate_base_url(url: &str) -> Result<()> {
+pub fn validate_base_url(url: &str) -> Result<()> {
     if url.starts_with("https://") {
         return Ok(());
     }
@@ -128,6 +128,5 @@ pub fn require_api_key<'a>(api_key: Option<&'a str>, provider: &str) -> Result<&
     })
 }
 
-#[cfg(test)]
-mod tests;
+
 

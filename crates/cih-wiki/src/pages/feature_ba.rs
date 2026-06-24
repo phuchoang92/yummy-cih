@@ -250,6 +250,5 @@ pub fn render_feature_ba(
     md
 }
 
-#[cfg(test)]
-mod tests;
+
 

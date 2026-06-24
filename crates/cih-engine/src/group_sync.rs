@@ -11,46 +11,47 @@ use cih_core::{
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct SyncSummary {
-    pub(crate) group: String,
-    pub(crate) repo_count: usize,
-    pub(crate) contract_count: usize,
-    pub(crate) output_path: String,
+pub struct SyncSummary {
+    pub group: String,
+    pub repo_count: usize,
+    pub contract_count: usize,
+    pub output_path: String,
 }
 
 #[derive(Clone, Debug)]
-struct RouteContract {
-    repo: String,
-    id: String,
-    method: String,
-    path: String,
+pub struct RouteContract {
+    pub repo: String,
+    pub id: String,
+    pub method: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug)]
-struct EndpointContract {
-    repo: String,
-    id: String,
-    method: String,
-    path: String,
+pub struct EndpointContract {
+    pub repo: String,
+    pub id: String,
+    pub method: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug)]
-struct EventContract {
-    repo: String,
-    caller_id: String,
-    topic: String,
-    reason: String,
+#[doc(hidden)]
+pub struct EventContract {
+    pub repo: String,
+    pub caller_id: String,
+    pub topic: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default)]
-struct RepoContracts {
-    routes: Vec<RouteContract>,
-    endpoints: Vec<EndpointContract>,
-    publishes: Vec<EventContract>,
-    listens: Vec<EventContract>,
+pub struct RepoContracts {
+    pub routes: Vec<RouteContract>,
+    pub endpoints: Vec<EndpointContract>,
+    pub publishes: Vec<EventContract>,
+    pub listens: Vec<EventContract>,
 }
 
-pub(crate) fn sync_group(name: &str) -> Result<SyncSummary> {
+pub fn sync_group(name: &str) -> Result<SyncSummary> {
     let group_registry = cih_core::GroupRegistry::load();
     let group = group_registry
         .find(name)
@@ -161,7 +162,7 @@ fn load_repo_contracts(entry: &RegistryEntry) -> Result<RepoContracts> {
     Ok(contracts)
 }
 
-fn match_contracts(repos: &[RepoContracts]) -> Vec<ContractMatch> {
+pub fn match_contracts(repos: &[RepoContracts]) -> Vec<ContractMatch> {
     let mut route_providers: BTreeMap<(String, String), Vec<&RouteContract>> = BTreeMap::new();
     let mut event_publishers: BTreeMap<String, Vec<&EventContract>> = BTreeMap::new();
     let mut event_listeners: BTreeMap<String, Vec<&EventContract>> = BTreeMap::new();
@@ -262,7 +263,7 @@ fn dedup_matches(matches: Vec<ContractMatch>) -> Vec<ContractMatch> {
     deduped.into_values().collect()
 }
 
-fn normalize_contract_path(path: &str) -> String {
+pub fn normalize_contract_path(path: &str) -> String {
     cih_core::normalize_contract_path(path)
 }
 
@@ -285,6 +286,4 @@ fn write_jsonl(path: &Path, matches: &[ContractMatch]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests;
 

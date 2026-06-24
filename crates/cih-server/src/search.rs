@@ -108,7 +108,8 @@ impl SearchState {
     }
 }
 
-pub(crate) fn query_limit(raw: Option<usize>) -> usize {
+#[doc(hidden)]
+pub fn query_limit(raw: Option<usize>) -> usize {
     raw.unwrap_or(10).clamp(1, 50)
 }
 
@@ -125,7 +126,8 @@ fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
     )
 }
 
-pub(crate) fn latest_graph_artifacts_in_dir(parent: &Path) -> Result<GraphArtifacts> {
+#[doc(hidden)]
+pub fn latest_graph_artifacts_in_dir(parent: &Path) -> Result<GraphArtifacts> {
     let entries = std::fs::read_dir(parent)
         .map_err(|err| anyhow!("no graph artifacts at {}: {err}", parent.display()))?;
     let mut candidates = Vec::new();
@@ -164,7 +166,4 @@ pub(crate) fn latest_graph_artifacts_in_dir(parent: &Path) -> Result<GraphArtifa
         .map(|(_, artifacts)| artifacts)
         .ok_or_else(|| anyhow!("no complete graph artifacts under {}", parent.display()))
 }
-
-#[cfg(test)]
-mod tests;
 

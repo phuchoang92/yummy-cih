@@ -68,6 +68,3 @@ fn is_trivial_getter_body(t: &str) -> bool {
         || t == "return this;"
 }
 
-#[cfg(test)]
-mod tests;
-

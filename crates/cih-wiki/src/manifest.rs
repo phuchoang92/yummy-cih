@@ -89,6 +89,5 @@ pub struct PageEntry {
     pub community_id: Option<String>,
 }
 
-#[cfg(test)]
-mod tests;
+
 

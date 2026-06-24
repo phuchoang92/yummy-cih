@@ -267,6 +267,5 @@ fn escape_html_attr(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-#[cfg(test)]
-mod tests;
+
 

@@ -131,6 +131,3 @@ impl GroupRegistry {
     }
 }
 
-#[cfg(test)]
-mod tests;
-

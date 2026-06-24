@@ -17,10 +17,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use cih_core::{auto_detect_architecture, BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
 
-mod build_files;
-mod ignore_rules;
-mod jars;
-mod java_scan;
+pub mod build_files;
+pub mod ignore_rules;
+pub mod jars;
+pub mod java_scan;
 mod modules;
 mod paths;
 mod report;
@@ -32,31 +32,31 @@ use modules::{
     upsert_candidate,
 };
 use paths::normalize_path;
-pub(crate) use report::print_summary;
+pub use report::print_summary;
 use walk::walk_repository_paths;
 
 // --- shared data model (used across the scan submodules) ---
 
 #[derive(Clone, Debug)]
-struct ScannedFile {
-    path: String,
-    size: u64,
+pub struct ScannedFile {
+    pub path: String,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug)]
-struct JavaFileInfo {
-    path: String,
-    loc: u64,
-    package: Option<String>,
-    spring: SpringSignal,
+pub struct JavaFileInfo {
+    pub path: String,
+    pub loc: u64,
+    pub package: Option<String>,
+    pub spring: SpringSignal,
 }
 
 #[derive(Clone, Debug)]
-struct BuildMeta {
-    group_id: String,
-    artifact_id: String,
-    deps: Vec<String>,
-    modules: Vec<String>,
+pub struct BuildMeta {
+    pub group_id: String,
+    pub artifact_id: String,
+    pub deps: Vec<String>,
+    pub modules: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,13 +78,13 @@ struct ModuleAggregate {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ScanResult {
+pub struct ScanResult {
     pub repo_map: RepoMap,
     pub source_files: Vec<OwnedSourceFile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnedSourceFile {
+pub struct OwnedSourceFile {
     pub rel: String,
     pub module_rel: Option<String>,
 }
@@ -102,7 +102,7 @@ pub fn run_scan(repo: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn write_repo_map(repo_map: &RepoMap) -> Result<PathBuf> {
+pub fn write_repo_map(repo_map: &RepoMap) -> Result<PathBuf> {
     let cih_dir = Path::new(&repo_map.root).join(".cih");
     fs::create_dir_all(&cih_dir)
         .with_context(|| format!("failed to create {}", cih_dir.display()))?;
@@ -113,7 +113,7 @@ pub(crate) fn write_repo_map(repo_map: &RepoMap) -> Result<PathBuf> {
     Ok(output_path)
 }
 
-pub(crate) fn scan_repo(repo: &Path) -> Result<ScanResult> {
+pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
     let root = repo
         .canonicalize()
         .with_context(|| format!("failed to resolve repo path {}", repo.display()))?;
@@ -434,6 +434,4 @@ fn annotate_frameworks(mut modules: Vec<ModuleInfo>, files: &[ScannedFile]) -> V
     modules
 }
 
-#[cfg(test)]
-mod tests;
 

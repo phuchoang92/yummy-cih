@@ -6,10 +6,10 @@ use cih_core::{Node, NodeKind};
 use cih_wiki::features::infer_community_feature;
 use cih_wiki::graph::{route_http_method, route_path, WikiGraph};
 
-const MAX_EVIDENCE_CHARS: usize = 3_000;
+pub const MAX_EVIDENCE_CHARS: usize = 3_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum EvidenceKind {
+pub enum EvidenceKind {
     Route,
     Process,
     CodeShape,
@@ -26,7 +26,7 @@ enum EvidenceKind {
 #[derive(Clone, Debug)]
 pub struct EvidenceItem {
     pub id: String,
-    kind: EvidenceKind,
+    pub kind: EvidenceKind,
     pub text: String,
 }
 
@@ -559,7 +559,7 @@ fn render_len(items: &[EvidenceItem]) -> usize {
         .sum::<usize>()
 }
 
-fn safe_repo_path(repo: &Path, rel: &str) -> Option<PathBuf> {
+pub fn safe_repo_path(repo: &Path, rel: &str) -> Option<PathBuf> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
         return None;
@@ -643,7 +643,7 @@ fn simple_class_from_callable(id: &str) -> Option<String> {
     fqcn.rsplit('.').next().map(|s| s.to_string())
 }
 
-fn split_chunks(text: &str) -> Vec<String> {
+pub fn split_chunks(text: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for para in text.split("\n\n") {
@@ -682,6 +682,4 @@ fn split_chunks(text: &str) -> Vec<String> {
     chunks
 }
 
-#[cfg(test)]
-mod tests;
 

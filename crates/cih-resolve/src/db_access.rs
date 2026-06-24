@@ -186,7 +186,8 @@ fn process_site(
 
 /// Derive owner FQCN from a method/constructor node id.
 /// Format: `Method:<fqcn>#name/arity` or `Constructor:<fqcn>#<init>/n` or `Field:<fqcn>#name`.
-fn owner_fqcn_of(id: &NodeId) -> &str {
+#[doc(hidden)]
+pub fn owner_fqcn_of(id: &NodeId) -> &str {
     let s = id.as_str();
     // Strip the kind prefix (up to first `:`).
     let after_colon = s.find(':').map(|i| &s[i + 1..]).unwrap_or(s);
@@ -216,7 +217,4 @@ fn detect_sql_op(sql: &str) -> &'static str {
         "UNKNOWN"
     }
 }
-
-#[cfg(test)]
-mod tests;
 

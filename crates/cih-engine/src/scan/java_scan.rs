@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use super::{JavaFileInfo, ScannedFile};
 
-pub(super) fn collect_java_files(root: &Path, files: &[ScannedFile]) -> Vec<JavaFileInfo> {
+pub fn collect_java_files(root: &Path, files: &[ScannedFile]) -> Vec<JavaFileInfo> {
     let java_count = files.iter().filter(|f| f.path.ends_with(".java")).count();
     tracing::debug!(
         java_files = java_count,
@@ -61,7 +61,7 @@ pub(super) fn collect_java_files(root: &Path, files: &[ScannedFile]) -> Vec<Java
     result
 }
 
-pub(super) fn collect_decompiled_dirs(files: &[ScannedFile]) -> Vec<String> {
+pub fn collect_decompiled_dirs(files: &[ScannedFile]) -> Vec<String> {
     let mut dirs = BTreeSet::new();
     for file in files {
         if file.path == ".workspace-dependencies"
@@ -73,7 +73,7 @@ pub(super) fn collect_decompiled_dirs(files: &[ScannedFile]) -> Vec<String> {
     dirs.into_iter().collect()
 }
 
-pub(super) fn add_spring_signal(target: &mut SpringSignal, signal: &SpringSignal) {
+pub fn add_spring_signal(target: &mut SpringSignal, signal: &SpringSignal) {
     target.controllers += signal.controllers;
     target.services += signal.services;
     target.repositories += signal.repositories;
@@ -83,7 +83,7 @@ pub(super) fn add_spring_signal(target: &mut SpringSignal, signal: &SpringSignal
     target.mappings += signal.mappings;
 }
 
-fn extract_package(content: &str) -> Option<String> {
+pub fn extract_package(content: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("package ") {
@@ -98,7 +98,7 @@ fn extract_package(content: &str) -> Option<String> {
     None
 }
 
-fn detect_spring_signal(content: &str) -> SpringSignal {
+pub fn detect_spring_signal(content: &str) -> SpringSignal {
     SpringSignal {
         controllers: contains_any(content, &["@RestController", "@Controller"]) as u32,
         services: content.contains("@Service") as u32,
@@ -124,6 +124,4 @@ fn contains_any(content: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| content.contains(needle))
 }
 
-#[cfg(test)]
-mod tests;
 

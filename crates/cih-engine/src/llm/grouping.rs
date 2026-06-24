@@ -16,11 +16,11 @@ struct GroupingResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct ModuleProposal {
-    slug: String,
-    title: String,
-    description: String,
-    community_ids: Vec<String>,
+pub struct ModuleProposal {
+    pub slug: String,
+    pub title: String,
+    pub description: String,
+    pub community_ids: Vec<String>,
 }
 
 // Phase 1: LLM proposes module outline only (no community assignments yet)
@@ -30,10 +30,10 @@ struct OutlineResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct OutlineModule {
-    slug: String,
-    title: String,
-    description: String,
+pub struct OutlineModule {
+    pub slug: String,
+    pub title: String,
+    pub description: String,
 }
 
 // Phase 2: LLM assigns communities to established module slugs
@@ -457,7 +457,7 @@ fn estimate_module_count(graph: &WikiGraph) -> usize {
     hints.len().max(8).min(40)
 }
 
-fn split_into_chunks(text: &str, max_chars: usize) -> Vec<String> {
+pub fn split_into_chunks(text: &str, max_chars: usize) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -479,7 +479,7 @@ fn split_into_chunks(text: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
-fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal> {
+pub fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal> {
     let mut map: HashMap<String, ModuleProposal> = HashMap::new();
     for p in proposals.drain(..) {
         map.entry(p.slug.clone())
@@ -557,7 +557,7 @@ fn proposals_to_tree(
 
 // ── Parsers ──────────────────────────────────────────────────────────────────
 
-fn parse_grouping_response(text: &str) -> Result<Vec<ModuleProposal>> {
+pub fn parse_grouping_response(text: &str) -> Result<Vec<ModuleProposal>> {
     if let Ok(resp) = serde_json::from_str::<GroupingResponse>(text.trim()) {
         return Ok(resp.modules);
     }
@@ -574,7 +574,7 @@ fn parse_grouping_response(text: &str) -> Result<Vec<ModuleProposal>> {
     )
 }
 
-fn parse_outline_response(text: &str) -> Result<Vec<OutlineModule>> {
+pub fn parse_outline_response(text: &str) -> Result<Vec<OutlineModule>> {
     if let Ok(resp) = serde_json::from_str::<OutlineResponse>(text.trim()) {
         return Ok(resp.modules);
     }
@@ -593,6 +593,4 @@ fn parse_outline_response(text: &str) -> Result<Vec<OutlineModule>> {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests;
 

@@ -1087,6 +1087,5 @@ pub fn render_dev_community_json(graph: &WikiGraph, community: &Node) -> serde_j
     })
 }
 
-#[cfg(test)]
-mod tests;
+
 

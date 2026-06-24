@@ -48,7 +48,8 @@ pub fn now_rfc3339() -> String {
     unix_secs_to_rfc3339(secs)
 }
 
-fn unix_secs_to_rfc3339(secs: u64) -> String {
+#[doc(hidden)]
+pub fn unix_secs_to_rfc3339(secs: u64) -> String {
     let tod = secs % 86400;
     let mut days = secs / 86400;
     let h = tod / 3600;
@@ -157,7 +158,4 @@ impl Registry {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;
 

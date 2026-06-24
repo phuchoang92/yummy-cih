@@ -100,6 +100,5 @@ fn make_operation_id(method: &str, path: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests;
+
 

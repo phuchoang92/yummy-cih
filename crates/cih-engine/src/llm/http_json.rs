@@ -18,7 +18,7 @@ pub struct HttpJsonConfig {
 
 #[derive(Debug)]
 pub struct HttpJsonAdapter {
-    config: HttpJsonConfig,
+    pub config: HttpJsonConfig,
 }
 
 impl HttpJsonAdapter {
@@ -40,7 +40,7 @@ impl HttpJsonAdapter {
         &self.config
     }
 
-    fn render_headers(&self, api_key: Option<&str>) -> Result<HashMap<String, String>> {
+    pub fn render_headers(&self, api_key: Option<&str>) -> Result<HashMap<String, String>> {
         let mut out = HashMap::new();
         for (k, v) in &self.config.headers {
             out.insert(k.clone(), render_string(v, api_key, None)?);
@@ -48,7 +48,7 @@ impl HttpJsonAdapter {
         Ok(out)
     }
 
-    fn render_body(&self, api_key: Option<&str>, req: &LlmRequest) -> Result<serde_json::Value> {
+    pub fn render_body(&self, api_key: Option<&str>, req: &LlmRequest) -> Result<serde_json::Value> {
         render_value(&self.config.body_template, api_key, Some(req))
     }
 }
@@ -127,7 +127,7 @@ fn render_string(s: &str, api_key: Option<&str>, req: Option<&LlmRequest>) -> Re
     replace_env_placeholders(&out)
 }
 
-fn replace_env_placeholders(input: &str) -> Result<String> {
+pub fn replace_env_placeholders(input: &str) -> Result<String> {
     let mut out = String::new();
     let mut rest = input;
     while let Some(start) = rest.find("{{env:") {
@@ -150,7 +150,7 @@ fn replace_env_placeholders(input: &str) -> Result<String> {
     Ok(out)
 }
 
-fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+pub fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut current = value;
     for segment in path.split('.') {
         if segment.is_empty() {
@@ -165,6 +165,4 @@ fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serd
     Some(current)
 }
 
-#[cfg(test)]
-mod tests;
 

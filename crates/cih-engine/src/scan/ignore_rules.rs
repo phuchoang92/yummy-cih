@@ -225,14 +225,14 @@ const IGNORED_FILES: &[&str] = &[
     ".env.example",
 ];
 
-pub(super) fn should_ignore_dir(path: &str) -> bool {
+pub fn should_ignore_dir(path: &str) -> bool {
     path.replace('\\', "/")
         .to_ascii_lowercase()
         .split('/')
         .any(|part| contains_ignore(DEFAULT_IGNORE_LIST, part))
 }
 
-pub(super) fn should_ignore_path(path: &str) -> bool {
+pub fn should_ignore_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let lower = normalized.to_ascii_lowercase();
     if lower.contains("/storage/framework/views/") || lower.starts_with("storage/framework/views/")
@@ -284,6 +284,4 @@ fn compound_extension_like(file_name: &str) -> Option<&str> {
     Some(&file_name[second..])
 }
 
-#[cfg(test)]
-mod tests;
 
