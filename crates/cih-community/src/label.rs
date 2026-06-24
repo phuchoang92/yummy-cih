@@ -26,6 +26,8 @@ pub fn heuristic_label(member_file_paths: &[&str], comm_idx: usize) -> String {
     format!("Cluster_{comm_idx}")
 }
 
+// Paths are expected to use Unix-style separators ('/').
+// Windows-style backslash paths will not parse correctly with Path::new on Unix hosts.
 fn folder_label(paths: &[&str]) -> Option<String> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for path in paths {

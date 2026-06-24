@@ -41,6 +41,7 @@ impl Partition {
     /// Get the community ID of a node.
     #[inline]
     pub fn community_of(&self, node: usize) -> usize {
+        debug_assert!(node < self.community.len(), "node {node} out of partition bounds");
         self.community[node]
     }
 

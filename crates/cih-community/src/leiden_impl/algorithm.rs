@@ -104,6 +104,7 @@ impl LocalMovingBuffers {
         if num_layers > self.two_m_values.len() {
             self.two_m_values.resize(num_layers, 0.0);
         }
+        self.two_m_values[..num_layers].fill(0.0);
 
         for &idx in &self.touched_list {
             if idx < self.touched_mark.len() {
@@ -259,7 +260,8 @@ pub(crate) struct NodeContribution<'a> {
 /// node weights are shared across layers.
 pub(crate) struct CommunityStats<'a> {
     pub total_degree_out: &'a mut [Vec<f64>],
-    pub in_degree_out: &'a mut [Vec<f64>],
+    /// Per-layer per-community total in-degree sigma: `[layer][comm]`.
+    pub sigma_in: &'a mut [Vec<f64>],
     pub size: &'a mut [f64],
 }
 
@@ -295,9 +297,9 @@ pub(crate) fn apply_move(
     for l in 0..contribution.k_v_out.len() {
         stats.total_degree_out[l][old_comm] -= contribution.k_v_out[l];
         stats.total_degree_out[l][new_comm] += contribution.k_v_out[l];
-        if !stats.in_degree_out[l].is_empty() {
-            stats.in_degree_out[l][old_comm] -= contribution.k_v_in[l];
-            stats.in_degree_out[l][new_comm] += contribution.k_v_in[l];
+        if !stats.sigma_in[l].is_empty() {
+            stats.sigma_in[l][old_comm] -= contribution.k_v_in[l];
+            stats.sigma_in[l][new_comm] += contribution.k_v_in[l];
         }
     }
     stats.size[old_comm] -= contribution.weight;
@@ -313,7 +315,7 @@ pub(crate) fn init_community_stats_into(
     layers: &[GraphData],
     community_of_fn: impl Fn(usize) -> usize,
     comm_total_degree_out: &mut [Vec<f64>],
-    comm_in_degree_out: &mut [Vec<f64>],
+    comm_sigma_in: &mut [Vec<f64>],
     comm_size_out: &mut [f64],
 ) {
     let n = comm_size_out.len();
@@ -325,7 +327,7 @@ pub(crate) fn init_community_stats_into(
         for node in 0..n {
             let comm = community_of_fn(node);
             comm_total_degree_out[l][comm] += layer.out_degree_of(node);
-            comm_in_degree_out[l][comm] += layer.in_degree_of(node);
+            comm_sigma_in[l][comm] += layer.in_degree_of(node);
         }
     }
 }
@@ -657,6 +659,8 @@ pub(crate) fn local_moving_generic(
         );
 
         for l in 0..num_layers {
+            // current_community was not added to touched_list (to avoid duplicate tracking),
+            // so clear it separately only when it actually received edge weight.
             if current_touched {
                 layer_out_weights[l][current_community] = 0.0;
                 layer_in_weights[l][current_community] = 0.0;
@@ -684,7 +688,7 @@ pub(crate) fn local_moving_generic(
                 },
                 &mut CommunityStats {
                     total_degree_out: comm_total_degree,
-                    in_degree_out: comm_in_degree,
+                    sigma_in: comm_in_degree,
                     size: &mut comm_size[..n],
                 },
             );
@@ -884,7 +888,7 @@ pub(crate) fn refine_community_generic(
                 },
                 &mut CommunityStats {
                     total_degree_out: comm_total_degree,
-                    in_degree_out: comm_in_degree,
+                    sigma_in: comm_in_degree,
                     size: &mut comm_size[..],
                 },
             );
@@ -1080,7 +1084,7 @@ mod per_layer_tests {
             },
             &mut CommunityStats {
                 total_degree_out: &mut total_degree,
-                in_degree_out: &mut in_degree,
+                sigma_in: &mut in_degree,
                 size: &mut size,
             },
         );
@@ -1117,7 +1121,7 @@ mod per_layer_tests {
             },
             &mut CommunityStats {
                 total_degree_out: &mut total_degree,
-                in_degree_out: &mut in_degree,
+                sigma_in: &mut in_degree,
                 size: &mut size,
             },
         );
@@ -1146,7 +1150,7 @@ mod per_layer_tests {
             },
             &mut CommunityStats {
                 total_degree_out: &mut total_degree,
-                in_degree_out: &mut in_degree,
+                sigma_in: &mut in_degree,
                 size: &mut size,
             },
         );

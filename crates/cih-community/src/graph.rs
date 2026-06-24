@@ -17,9 +17,12 @@ pub fn build_community_graph(
         .map(|n| n.id.clone())
         .collect();
 
+    // Collect once; reuse for both the degree pass (large mode) and graph build.
+    let comm_edges: Vec<&Edge> = community_edges(edges, min_confidence, large).collect();
+
     let mut degree: HashMap<NodeId, usize> = HashMap::new();
     if large {
-        for edge in community_edges(edges, min_confidence, true) {
+        for edge in &comm_edges {
             if edge.src != edge.dst && eligible.contains(&edge.src) && eligible.contains(&edge.dst)
             {
                 *degree.entry(edge.src.clone()).or_default() += 1;
@@ -38,7 +41,7 @@ pub fn build_community_graph(
         index.insert(node.id.clone(), idx);
     }
 
-    for edge in community_edges(edges, min_confidence, large) {
+    for edge in &comm_edges {
         if edge.src == edge.dst {
             continue;
         }

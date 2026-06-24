@@ -32,10 +32,22 @@ pub(crate) fn greedy_coloring(data: &GraphData, order: &[usize]) -> (Vec<usize>,
 
     for &node in order {
         let (targets, _) = data.out_neighbor_slices(node);
-        let max_neighbor_color = targets.iter().map(|&t| colors[t]).max().unwrap_or(0);
-        if used_colors.len() <= max_neighbor_color {
-            used_colors.resize(max_neighbor_color + 1, false);
+
+        // Compute the maximum color across ALL neighbors (out + in for directed)
+        // in a single pass before any marking, so the buffer is sized once.
+        let max_color = {
+            let max_out = targets.iter().map(|&t| colors[t]).max().unwrap_or(0);
+            if directed {
+                let (in_targets, _) = data.in_neighbor_slices(node);
+                max_out.max(in_targets.iter().map(|&t| colors[t]).max().unwrap_or(0))
+            } else {
+                max_out
+            }
+        };
+        if used_colors.len() <= max_color {
+            used_colors.resize(max_color + 1, false);
         }
+
         for &neighbor in targets {
             if neighbor == node {
                 continue;
@@ -44,10 +56,6 @@ pub(crate) fn greedy_coloring(data: &GraphData, order: &[usize]) -> (Vec<usize>,
         }
         if directed {
             let (in_targets, _) = data.in_neighbor_slices(node);
-            let max_in_color = in_targets.iter().map(|&t| colors[t]).max().unwrap_or(0);
-            if used_colors.len() <= max_in_color {
-                used_colors.resize(max_in_color + 1, false);
-            }
             for &neighbor in in_targets {
                 if neighbor == node {
                     continue;
@@ -333,7 +341,7 @@ pub(crate) fn local_moving_parallel(
                     },
                     &mut algorithm::CommunityStats {
                         total_degree_out: &mut community_total_degree,
-                        in_degree_out: &mut community_in_degree,
+                        sigma_in: &mut community_in_degree,
                         size: &mut community_size,
                     },
                 );

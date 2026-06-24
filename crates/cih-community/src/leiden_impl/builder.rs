@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use leiden_rs::graph::GraphDataBuilder;
+//! use cih_community::leiden_impl::builder::GraphDataBuilder;
 //!
 //! let mut b = GraphDataBuilder::new(4);
 //! b.add_edge(0, 1, 1.0).unwrap();

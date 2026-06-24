@@ -7,7 +7,7 @@ mod leiden;
 mod leiden_impl;
 pub mod registry;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cih_core::{community_id, process_id, Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 use petgraph::graph::NodeIndex;
@@ -37,9 +37,9 @@ impl Default for CommunityConfig {
     fn default() -> Self {
         Self {
             resolution: 1.0,
-            max_iterations: 0,
+            max_iterations: 10,
             seed: 0xc0de,
-            large_graph_threshold: 10_001,
+            large_graph_threshold: 10_000,
             min_confidence_large: 0.5,
             min_community_size: 2,
         }
@@ -61,7 +61,7 @@ impl ProcessConfig {
         Self {
             max_trace_depth: 10,
             max_branching: 4,
-            max_processes: 20.max(300.min(symbol_count / 10)),
+            max_processes: (symbol_count / 10).clamp(5, 300),
             min_steps: 3,
             min_trace_confidence: 0.5,
             max_states_per_entry: 50_000,
@@ -356,7 +356,7 @@ pub fn detect_communities(
             }
             stereo_counts
                 .into_iter()
-                .max_by(|(a_k, a_v), (b_k, b_v)| a_v.cmp(b_v).then(b_k.cmp(a_k)))
+                .max_by(|(a_k, a_v), (b_k, b_v)| a_v.cmp(b_v).then(b_k.cmp(a_k).reverse()))
                 .map(|(k, _)| k.to_string())
         };
 
@@ -437,7 +437,7 @@ pub fn trace_processes(
     let node_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
     // Track which semantic entrypoints produced at least one accepted trace
-    let mut covered_entries: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut covered_entries: HashSet<String> = HashSet::new();
 
     let mut out = ProcessOutput::default();
     for trace in traces {
@@ -455,10 +455,7 @@ pub fn trace_processes(
             continue;
         }
         covered_entries.insert(entry.as_str().to_string());
-        let entry_id = trace_ids
-            .first()
-            .cloned()
-            .unwrap_or_else(|| NodeId::new(""));
+        let entry_id = entry.clone();
         let terminal_id = trace_ids.last().cloned().unwrap_or_else(|| NodeId::new(""));
         let entry_name = display_name(&entry_id, &node_by_id);
         let terminal_name = display_name(&terminal_id, &node_by_id);
@@ -629,8 +626,11 @@ fn strip_event_suffix(name: &str) -> &str {
     name
 }
 
-/// Strip a leading role prefix word (Admin, Pos, Public, Private, Internal) from a PascalCase name.
+/// Strip a leading role prefix word from a PascalCase name.
 /// "AdminActivityLog" → "ActivityLog", "PosOrder" → "Order", "ActivityLog" → "ActivityLog"
+///
+/// The prefix list is intentionally domain-specific (POS/retail/multi-role app conventions).
+/// Move it into [`CommunityConfig`] if the calling domain changes.
 fn strip_role_prefix(name: &str) -> &str {
     const PREFIXES: &[&str] = &["Admin", "Pos", "Public", "Private", "Internal"];
     for prefix in PREFIXES {

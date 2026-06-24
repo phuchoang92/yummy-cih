@@ -14,6 +14,9 @@ pub fn cohesion_score(
     let member_set: HashSet<NodeIndex> = members.iter().copied().collect();
     let mut total = 0usize;
     let mut internal = 0usize;
+    // graph.neighbors() may yield duplicates for parallel edges, but
+    // build_community_graph merges multi-edges into a single weighted edge,
+    // so no parallel edges exist here in practice.
     for node in members.iter().take(sample_size).copied() {
         for neighbor in graph.neighbors(node) {
             total += 1;
