@@ -836,6 +836,29 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         None
     };
 
+    // Build handler-ID scope for route flow enrichment, filtered to the same features
+    // that page generation will use. Without this, all 200+ handlers would be enriched
+    // even when --filter-feature limits page output to a single module.
+    let route_flow_scope: Option<std::collections::HashSet<String>> = if !filter_feature.is_empty() {
+        let mut fg = group_communities_by_feature(&wiki_graph);
+        retain_matching_feature_groups(&mut fg, &filter_feature);
+        let ids: std::collections::HashSet<String> = fg
+            .iter()
+            .flat_map(|g| g.community_ids.iter())
+            .flat_map(|comm_id| {
+                wiki_graph
+                    .community_routes
+                    .get(comm_id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .map(|(handler, _)| handler.id.as_str().to_string())
+            })
+            .collect();
+        Some(ids)
+    } else {
+        None
+    };
+
     // Per-flow LLM enrichment: one LLM call per process trace.
     let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> =
         if effective_run_llm && !llm_no_call {
@@ -886,6 +909,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         if effective_run_llm && !llm_no_call {
             let route_flows = enrich_route_flows(
                 &wiki_graph,
+                route_flow_scope.as_ref(),
                 adapter.as_ref().unwrap().as_ref(),
                 api_key.as_deref(),
                 llm_model,
@@ -901,6 +925,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     } else if effective_run_llm && !llm_no_call {
         let route_flows = enrich_route_flows(
             &wiki_graph,
+            route_flow_scope.as_ref(),
             adapter.as_ref().unwrap().as_ref(),
             api_key.as_deref(),
             llm_model,
@@ -1824,6 +1849,7 @@ fn chain_steps_text(chain: &[String], graph: &WikiGraph) -> String {
 
 fn enrich_route_flows(
     graph: &WikiGraph,
+    scope: Option<&std::collections::HashSet<String>>,
     adapter: &dyn LlmAdapter,
     api_key: Option<&str>,
     model: &str,
@@ -1841,6 +1867,7 @@ fn enrich_route_flows(
                 .iter()
                 .map(|(handler, _route)| (handler.id.as_str().to_string(), handler.name.clone()))
         })
+        .filter(|(id, _)| scope.map_or(true, |s| s.contains(id.as_str())))
         .collect();
 
     if handlers.is_empty() {

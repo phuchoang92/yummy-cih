@@ -991,8 +991,16 @@ impl WikiGraph {
             }
             visited.insert(id.clone());
             let cls_id = crate::pages::api_flow::class_id_from_method_id(id.as_str(), self);
-            if self.nodes_by_id.contains_key(cls_id.as_str())
-                || self.methods_by_class.contains_key(cls_id.as_str())
+            let is_exception_ctor = id.starts_with("Constructor:") && {
+                let simple = id
+                    .strip_prefix("Constructor:").unwrap_or("")
+                    .split('#').next().unwrap_or("")
+                    .rsplit('.').next().unwrap_or("");
+                simple.ends_with("Exception") || simple.ends_with("Error")
+            };
+            if !is_exception_ctor
+                && (self.nodes_by_id.contains_key(cls_id.as_str())
+                    || self.methods_by_class.contains_key(cls_id.as_str()))
             {
                 chain.push(id.clone());
             }
