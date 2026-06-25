@@ -198,6 +198,106 @@ pub fn owner_fqcn_of(id: &NodeId) -> &str {
         .unwrap_or(after_colon)
 }
 
+/// Emit `DbTable` nodes (and linking edges) derived from JPA `@Entity` class nodes.
+///
+/// The Java parser records `props["tableName"]` on every `@Entity` class that also
+/// has an `@Table(name=…)` annotation.  For entities without `@Table`, the JPA
+/// default convention (`CamelCase → snake_case`, no prefix) is used — callers that
+/// know the project's table prefix can refine this by inspecting the output.
+///
+/// Each entity gets a synthetic `DbQuery` node so that the existing WikiGraph
+/// aggregation path (`member → executes_query → reads/writes_table`) picks it up
+/// without any changes to `cih-wiki`.
+pub fn emit_jpa_tables(nodes: &[Node]) -> (Vec<Node>, Vec<Edge>) {
+    let mut out_nodes: Vec<Node> = Vec::new();
+    let mut out_edges: Vec<Edge> = Vec::new();
+    let mut seen_tables: HashSet<String> = HashSet::new();
+
+    for node in nodes {
+        if !matches!(node.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Record) {
+            continue;
+        }
+        let Some(props) = &node.props else { continue };
+        if props.get("stereotype").and_then(|v| v.as_str()) != Some("entity") {
+            continue;
+        }
+
+        let table_name: String = props
+            .get("tableName")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| camel_to_snake(&node.name));
+
+        if table_name.is_empty() || seen_tables.contains(&table_name) {
+            continue;
+        }
+        seen_tables.insert(table_name.clone());
+
+        let table_id = db_table_id(&table_name);
+        out_nodes.push(Node {
+            id: table_id.clone(),
+            kind: NodeKind::DbTable,
+            name: table_name.clone(),
+            qualified_name: None,
+            file: String::new(),
+            range: Range::default(),
+            props: None,
+        });
+
+        // Synthetic DbQuery node so the wiki graph aggregation path works unchanged.
+        let query_id = NodeId::new(format!("DbQuery:jpa:{}", node.id.as_str()));
+        out_nodes.push(Node {
+            id: query_id.clone(),
+            kind: NodeKind::DbQuery,
+            name: format!("jpa:{}", node.name),
+            qualified_name: None,
+            file: node.file.clone(),
+            range: node.range,
+            props: None,
+        });
+
+        // entity class → synthetic query
+        out_edges.push(Edge {
+            src: node.id.clone(),
+            dst: query_id.clone(),
+            kind: EdgeKind::ExecutesQuery,
+            confidence: 1.0,
+            reason: "jpa-entity".into(),
+            props: None,
+        });
+        // synthetic query → table (both read and write; JPA entities are typically both)
+        out_edges.push(Edge {
+            src: query_id.clone(),
+            dst: table_id.clone(),
+            kind: EdgeKind::ReadsTable,
+            confidence: 1.0,
+            reason: "jpa-entity".into(),
+            props: None,
+        });
+        out_edges.push(Edge {
+            src: query_id,
+            dst: table_id,
+            kind: EdgeKind::WritesTable,
+            confidence: 1.0,
+            reason: "jpa-entity".into(),
+            props: None,
+        });
+    }
+
+    (out_nodes, out_edges)
+}
+
+fn camel_to_snake(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
 /// Detect the top-level SQL operation keyword.
 fn detect_sql_op(sql: &str) -> &'static str {
     let upper = sql.trim_start().to_ascii_uppercase();

@@ -2328,12 +2328,64 @@ fn build_class_props(node: TsNode<'_>, src: &str, simple_name: &str) -> Option<s
     let stereotype = class_stereotype(node, src, simple_name);
     let (is_jpa, entity_opt) = jpa_repository_props(node, src);
     let effective_stereotype = stereotype.or(if is_jpa { Some("repository") } else { None });
-    match (effective_stereotype, entity_opt) {
-        (None, None) => None,
-        (Some(s), None) => Some(serde_json::json!({ "stereotype": s })),
-        (None, Some(e)) => Some(serde_json::json!({ "entityType": e })),
-        (Some(s), Some(e)) => Some(serde_json::json!({ "stereotype": s, "entityType": e })),
+
+    // For @Entity classes, extract @Table(name=...) so the DB-access emit pass can
+    // produce DbTable nodes without needing a traceable SQL call chain.
+    // We scan the raw source text of the class node header rather than walking the
+    // annotation AST, because annotation_argument_list field names vary across
+    // tree-sitter grammar versions.
+    let table_name: Option<String> = if effective_stereotype == Some("entity") {
+        let start = node.start_byte();
+        // The class keyword can be a few hundred bytes after the opening annotation.
+        // Grab up to 512 bytes from the node start to capture @Table before `class`.
+        let header = &src[start..src.len().min(start + 512)];
+        // Match @Table( ... name = "tablename" ... ) — name attribute first or anywhere
+        extract_table_annotation_name(header)
+    } else {
+        None
+    };
+
+    let mut obj = serde_json::Map::new();
+    if let Some(s) = effective_stereotype { obj.insert("stereotype".into(), s.into()); }
+    if let Some(e) = entity_opt           { obj.insert("entityType".into(), e.into()); }
+    if let Some(t) = table_name           { obj.insert("tableName".into(), t.into()); }
+    if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
+}
+
+/// Extract the `name` attribute value from an `@Table(name = "…")` annotation in raw
+/// source text.  Handles multi-line annotations and quoted identifiers.
+fn extract_table_annotation_name(text: &str) -> Option<String> {
+    // Find @Table followed by '('
+    let at_table = text.find("@Table")?;
+    let after = &text[at_table + "@Table".len()..];
+    let paren = after.find('(')?;
+    let args = &after[paren + 1..];
+    // Find 'name' key (not inside a nested annotation's name attribute — stop at class keyword)
+    let class_pos = args.find("class ").unwrap_or(args.len());
+    let search_area = &args[..class_pos.min(args.len())];
+    // Look for:  name   =   "value"
+    let mut pos = 0;
+    while pos < search_area.len() {
+        if let Some(rel) = search_area[pos..].find("name") {
+            let abs = pos + rel;
+            let after_name = search_area[abs + 4..].trim_start();
+            if after_name.starts_with('=') {
+                let after_eq = after_name[1..].trim_start();
+                if after_eq.starts_with('"') {
+                    let value_start = after_eq[1..].to_string();
+                    let end = value_start.find('"')?;
+                    let name = value_start[..end].to_string();
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+            pos = abs + 4;
+        } else {
+            break;
+        }
     }
+    None
 }
 
 fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {

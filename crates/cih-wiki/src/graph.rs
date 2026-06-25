@@ -818,6 +818,27 @@ impl WikiGraph {
                 }
             }
         }
+        // Class/Record/Interface nodes (e.g. JPA @Entity classes) are not community
+        // members in package mode, but they can carry ExecutesQuery edges via the
+        // synthetic DbQuery pattern emitted by emit_jpa_tables. Walk them separately
+        // so their tables are captured without adding class nodes to members_by_community.
+        for node in nodes {
+            if !matches!(node.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Record) {
+                continue;
+            }
+            let Some(query_ids) = executes_query.get(node.id.as_str()) else { continue };
+            let comm_id = format!("Pkg:{}", feature_of(node.id.as_str(), &node.file));
+            for qid in query_ids {
+                for tid in query_reads_table.get(qid.as_str()).into_iter().flatten() {
+                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                    raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().0 = true;
+                }
+                for tid in query_writes_table.get(qid.as_str()).into_iter().flatten() {
+                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
+                    raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().1 = true;
+                }
+            }
+        }
         let community_db_tables: BTreeMap<String, Vec<DbTableAccess>> = raw_db
             .into_iter()
             .map(|(comm_id, tables)| {

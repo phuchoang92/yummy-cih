@@ -30,7 +30,7 @@ pub use complexity::propagate_loop_depths;
 pub use constant_propagation::build_java_constant_resolver;
 pub use similarity::emit_similar_to_edges;
 pub use contracts::resolve_contract_edges;
-pub use db_access::emit_db_access;
+pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
 pub use lang::{

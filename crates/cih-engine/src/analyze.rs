@@ -383,7 +383,10 @@ pub fn analyze_from_scope_with_options(
     // ── DB access + XML integration + artifact write ──────────────────────────
     ui.spin("Writing artifacts");
 
-    let (db_nodes, db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
+    let (mut db_nodes, mut db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
+    let (jpa_nodes, jpa_edges) = cih_resolve::emit_jpa_tables(&parse_output.nodes);
+    db_nodes.extend(jpa_nodes);
+    db_edges.extend(jpa_edges);
     tracing::info!(
         db_query_nodes = db_nodes
             .iter()
