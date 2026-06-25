@@ -1924,11 +1924,14 @@ Respond ONLY with this JSON object (no extra commentary):
             continue;
         }
 
+        // Scale token budget with chain length: ~100 tokens per step for step_descriptions
+        // plus ~500 overhead for narrative/business_impact/JSON framing.
+        let effective_max_tokens = max_tokens.max(step_count as u32 * 100 + 500).max(2000);
         let req = LlmRequest {
             system,
             user,
             model: model.to_string(),
-            max_tokens: max_tokens.max(2000),
+            max_tokens: effective_max_tokens,
             timeout_secs,
         };
         let jitter_seed: u64 = handler_id
