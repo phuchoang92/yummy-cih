@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::route_path;
 use cih_wiki::{
     generate_wiki, ClassCacheEntry, ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary,
-    ControllerLlmSummary, FeatureLlmSummary, FeatureMetaEntry, FlowLlmSummary,
+    ControllerLlmSummary, FeatureLlmSummary, FeatureMetaEntry, FlowCacheEntry, FlowLlmSummary,
     WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo, WikiMeta, WikiModuleCacheEntry,
     WikiModuleTree,
 };
@@ -669,6 +669,13 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     // Feature-level LLM enrichment: one call per wiki feature for PO/BA pages.
     // Runs after community enrichment so community evidence is already computed.
     let mut feature_cache_updates: Vec<(String, String, FeatureLlmSummary)> = Vec::new();
+    let prev_flow_cache: BTreeMap<String, FlowCacheEntry> = if incremental {
+        load_wiki_meta(&out_dir)
+            .map(|m| m.flow_cache)
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
     let feature_llm_map: Option<HashMap<String, FeatureLlmSummary>> = if effective_run_llm {
         let mut feature_groups = group_communities_by_feature(&wiki_graph);
         retain_matching_feature_groups(&mut feature_groups, &filter_feature);
@@ -683,67 +690,88 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             .filter(|g| !g.community_ids.is_empty())
             .collect();
 
-        let mut ui_feat = PhaseProgress::new();
-        if json {
-            ui_feat.hide();
+        let ui_feat = std::sync::Arc::new(std::sync::Mutex::new(PhaseProgress::new()));
+        {
+            let mut locked = ui_feat.lock().unwrap();
+            if json {
+                locked.hide();
+            }
+            locked.start_phase("Enriching features", Some(active_features.len() as u64));
         }
-        ui_feat.start_phase("Enriching features", Some(active_features.len() as u64));
+
+        // Parallel feature enrichment: one LLM call per feature, independent of each other.
+        // Returns (feature_name, summary, ev_hash); None on LLM failure (warning already logged).
+        let raw_features: Vec<(String, FeatureLlmSummary, String)> =
+            pool.as_ref().unwrap().install(|| {
+                active_features
+                    .par_iter()
+                    .filter_map(|group| {
+                        let merged_ev = build_feature_evidence(
+                            &group.community_ids,
+                            &wiki_graph,
+                            repo,
+                            &evidence_corpus,
+                        );
+                        let ev_hash = fnv64(&merged_ev);
+                        let citation_map = build_feature_citation_map(
+                            &group.community_ids,
+                            &wiki_graph,
+                            repo,
+                            &evidence_corpus,
+                            &file_dev_map,
+                        );
+
+                        // Cache hit? Post-process cached summaries too so links stay current.
+                        if let Some(mut cached) = cached_feature_summary(
+                            &group.feature,
+                            &ev_hash,
+                            prev_meta_for_features.as_ref(),
+                        ) {
+                            resolve_feature_citations(&mut cached, &citation_map);
+                            ui_feat
+                                .lock()
+                                .unwrap()
+                                .tick_skipped(format!("{} (cached)", &group.feature));
+                            return Some((group.feature.clone(), cached, ev_hash));
+                        }
+
+                        ui_feat.lock().unwrap().tick(group.feature.as_str());
+                        tracing::info!(feature = %group.feature, "calling LLM for feature enrichment");
+                        match enrich_one_feature(
+                            &group.feature,
+                            &merged_ev,
+                            adapter.as_ref().unwrap().as_ref(),
+                            api_key.as_deref(),
+                            llm_model,
+                            llm_max_tokens,
+                            llm_timeout_secs,
+                            llm_retries,
+                            llm_debug_evidence,
+                            llm_dry_run,
+                        ) {
+                            Ok(mut summary) => {
+                                resolve_feature_citations(&mut summary, &citation_map);
+                                ui_feat.lock().unwrap().inc_ok();
+                                Some((group.feature.clone(), summary, ev_hash))
+                            }
+                            Err(err) => {
+                                tracing::warn!(feature = %group.feature, error = %err, "feature LLM enrichment failed");
+                                ui_feat.lock().unwrap().inc_failed();
+                                None
+                            }
+                        }
+                    })
+                    .collect()
+            });
+
+        ui_feat.lock().unwrap().finish_phase();
 
         let mut map: HashMap<String, FeatureLlmSummary> = HashMap::new();
-
-        for group in &active_features {
-            let merged_ev =
-                build_feature_evidence(&group.community_ids, &wiki_graph, repo, &evidence_corpus);
-            let ev_hash = fnv64(&merged_ev);
-
-            // Build citation map for this feature (used to resolve [C1-S2] → links).
-            let citation_map = build_feature_citation_map(
-                &group.community_ids,
-                &wiki_graph,
-                repo,
-                &evidence_corpus,
-                &file_dev_map,
-            );
-
-            // Cache hit? Post-process cached summaries too so links stay current.
-            if let Some(mut cached) =
-                cached_feature_summary(&group.feature, &ev_hash, prev_meta_for_features.as_ref())
-            {
-                resolve_feature_citations(&mut cached, &citation_map);
-                feature_cache_updates.push((group.feature.clone(), ev_hash, cached.clone()));
-                map.insert(group.feature.clone(), cached);
-                ui_feat.tick_skipped(format!("{} (cached)", &group.feature));
-                continue;
-            }
-
-            ui_feat.tick(group.feature.as_str());
-            tracing::info!(feature = %group.feature, "calling LLM for feature enrichment");
-            match enrich_one_feature(
-                &group.feature,
-                &merged_ev,
-                adapter.as_ref().unwrap().as_ref(),
-                api_key.as_deref(),
-                llm_model,
-                llm_max_tokens,
-                llm_timeout_secs,
-                llm_retries,
-                llm_debug_evidence,
-                llm_dry_run,
-            ) {
-                Ok(mut summary) => {
-                    resolve_feature_citations(&mut summary, &citation_map);
-                    feature_cache_updates.push((group.feature.clone(), ev_hash, summary.clone()));
-                    map.insert(group.feature.clone(), summary);
-                    ui_feat.inc_ok();
-                }
-                Err(err) => {
-                    tracing::warn!(feature = %group.feature, error = %err, "feature LLM enrichment failed");
-                    ui_feat.inc_failed();
-                }
-            }
+        for (feature, summary, ev_hash) in raw_features {
+            feature_cache_updates.push((feature.clone(), ev_hash, summary.clone()));
+            map.insert(feature, summary);
         }
 
-        ui_feat.finish_phase();
         tracing::info!(features = map.len(), "feature LLM enrichment complete");
         if map.is_empty() {
             None
@@ -844,10 +872,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     };
 
     // Per-route flow enrichment: one LLM call per HTTP handler, generates step descriptions.
+    let mut flow_cache_updates: Vec<(String, String, FlowLlmSummary)> = Vec::new();
     let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if let Some(mut map) = flow_llm_map
     {
         if effective_run_llm && !llm_no_call {
-            let route_flows = enrich_route_flows(
+            let (route_flows, updates) = enrich_route_flows(
                 &wiki_graph,
                 route_flow_scope.as_ref(),
                 adapter.as_ref().unwrap().as_ref(),
@@ -858,12 +887,15 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 llm_retries,
                 wiki_language,
                 llm_dry_run,
+                &prev_flow_cache,
+                concurrency,
             );
+            flow_cache_updates = updates;
             map.extend(route_flows);
         }
         Some(map)
     } else if effective_run_llm && !llm_no_call {
-        let route_flows = enrich_route_flows(
+        let (route_flows, updates) = enrich_route_flows(
             &wiki_graph,
             route_flow_scope.as_ref(),
             adapter.as_ref().unwrap().as_ref(),
@@ -874,7 +906,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             llm_retries,
             wiki_language,
             llm_dry_run,
+            &prev_flow_cache,
+            concurrency,
         );
+        flow_cache_updates = updates;
         if route_flows.is_empty() {
             None
         } else {
@@ -961,7 +996,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "wiki generation complete"
     );
 
-    persist_wiki_meta_caches(&out_dir, &summaries_for_cache, &feature_cache_updates)?;
+    persist_wiki_meta_caches(&out_dir, &summaries_for_cache, &feature_cache_updates, &flow_cache_updates)?;
 
     if let Some(store) = &class_enrichment_store {
         let cih_dir = repo.join(".cih");
@@ -1592,8 +1627,9 @@ fn persist_wiki_meta_caches(
     out_dir: &Path,
     community_updates: &[(String, String, CommunityLlmSummary)],
     feature_updates: &[(String, String, FeatureLlmSummary)],
+    flow_updates: &[(String, String, FlowLlmSummary)],
 ) -> Result<()> {
-    if community_updates.is_empty() && feature_updates.is_empty() {
+    if community_updates.is_empty() && feature_updates.is_empty() && flow_updates.is_empty() {
         return Ok(());
     }
 
@@ -1630,6 +1666,16 @@ fn persist_wiki_meta_caches(
                 po_capabilities: summary.po_capabilities.clone(),
                 ba_process_overview: summary.ba_process_overview.clone(),
                 ba_business_rules: summary.ba_business_rules.clone(),
+            },
+        );
+    }
+
+    for (handler_id, ev_hash, summary) in flow_updates {
+        meta.flow_cache.insert(
+            handler_id.clone(),
+            FlowCacheEntry {
+                evidence_hash: ev_hash.clone(),
+                summary: summary.clone(),
             },
         );
     }
@@ -1851,7 +1897,9 @@ fn enrich_route_flows(
     retries: u32,
     language: &str,
     dry_run: bool,
-) -> HashMap<String, FlowLlmSummary> {
+    flow_cache: &BTreeMap<String, FlowCacheEntry>,
+    concurrency: usize,
+) -> (HashMap<String, FlowLlmSummary>, Vec<(String, String, FlowLlmSummary)>) {
     let handlers: Vec<(String, String)> = graph
         .routes_by_controller
         .values()
@@ -1864,38 +1912,69 @@ fn enrich_route_flows(
         .collect();
 
     if handlers.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), Vec::new());
     }
 
-    let mut ui = PhaseProgress::new();
-    ui.start_phase("Enriching route flows", Some(handlers.len() as u64));
-    let mut result = HashMap::new();
+    let ui = std::sync::Arc::new(std::sync::Mutex::new(PhaseProgress::new()));
+    ui.lock()
+        .unwrap()
+        .start_phase("Enriching route flows", Some(handlers.len() as u64));
 
-    for (handler_id, handler_name) in &handlers {
-        ui.tick(handler_name.as_str());
+    let effective_concurrency = concurrency.max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(effective_concurrency)
+        .build()
+        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
-        let chain = graph.build_call_chain(handler_id.as_str(), 4);
-        if chain.is_empty() {
-            ui.inc_ok();
-            continue;
-        }
-        let step_count = chain.len();
-        let steps_text = chain_steps_text(&chain, graph);
+    // Each item: (handler_id, summary, Option<evidence_hash>)
+    // evidence_hash is Some only for fresh LLM results; None for cache hits or dry-run.
+    let raw: Vec<(String, FlowLlmSummary, Option<String>)> = pool.install(|| {
+        handlers
+            .par_iter()
+            .filter_map(|(handler_id, handler_name)| {
+                let chain = graph.build_call_chain(handler_id.as_str(), 4);
+                if chain.is_empty() {
+                    ui.lock().unwrap().inc_ok();
+                    return None;
+                }
+                let step_count = chain.len();
+                let steps_text = chain_steps_text(&chain, graph);
+                let evidence_hash = fnv64(&steps_text);
 
-        let mut system = String::from(
-            "You are a code documentation assistant. Describe this HTTP request flow \
-             based solely on the provided call chain. Do not invent behavior not shown. \
-             Each step description must start with an action verb and must not repeat \
-             the class name, method name, or arity notation (e.g. /2()).",
-        );
-        if language != "en" {
-            system.push_str(&format!(
-                " Write all documentation in language: {}.",
-                language
-            ));
-        }
-        let user = format!(
-            r#"HTTP handler: "{name}"
+                // Cache hit: chain unchanged since last run.
+                if let Some(cached) = flow_cache.get(handler_id.as_str()) {
+                    if cached.evidence_hash == evidence_hash {
+                        ui.lock().unwrap().inc_ok();
+                        return Some((handler_id.clone(), cached.summary.clone(), None));
+                    }
+                }
+
+                ui.lock().unwrap().tick(handler_name.as_str());
+
+                if dry_run {
+                    let summary = FlowLlmSummary {
+                        narrative: format!("[dry-run] {}", handler_name),
+                        business_impact: String::new(),
+                        step_descriptions: vec!["[dry-run]".into(); step_count],
+                    };
+                    ui.lock().unwrap().inc_ok();
+                    return Some((handler_id.clone(), summary, None));
+                }
+
+                let mut system = String::from(
+                    "You are a code documentation assistant. Describe this HTTP request flow \
+                     based solely on the provided call chain. Do not invent behavior not shown. \
+                     Each step description must start with an action verb and must not repeat \
+                     the class name, method name, or arity notation (e.g. /2()).",
+                );
+                if language != "en" {
+                    system.push_str(&format!(
+                        " Write all documentation in language: {}.",
+                        language
+                    ));
+                }
+                let user = format!(
+                    r#"HTTP handler: "{name}"
 
 Call chain ({step_count} steps):
 {steps}
@@ -1906,81 +1985,75 @@ Respond ONLY with this JSON object (no extra commentary):
   "business_impact": "<1-2 sentences describing the business value for a product owner>",
   "step_descriptions": [<one quoted sentence per step, {step_count} total>]
 }}"#,
-            name = handler_name,
-            step_count = step_count,
-            steps = steps_text,
-        );
+                    name = handler_name,
+                    step_count = step_count,
+                    steps = steps_text,
+                );
+                let effective_max_tokens = route_flow_token_budget(step_count, max_tokens);
+                let req = LlmRequest {
+                    system,
+                    user,
+                    model: model.to_string(),
+                    max_tokens: effective_max_tokens,
+                    timeout_secs,
+                };
+                let jitter_seed: u64 = handler_id
+                    .as_str()
+                    .bytes()
+                    .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
 
-        if dry_run {
-            result.insert(
-                handler_id.clone(),
-                FlowLlmSummary {
-                    narrative: format!("[dry-run] {}", handler_name),
-                    business_impact: String::new(),
-                    step_descriptions: vec!["[dry-run]".into(); step_count],
-                },
-            );
-            ui.inc_ok();
-            continue;
-        }
-
-        // Scale token budget with chain length: ~100 tokens per step for step_descriptions
-        // plus ~500 overhead for narrative/business_impact/JSON framing.
-        let effective_max_tokens = max_tokens.max(step_count as u32 * 100 + 500).max(2000);
-        let req = LlmRequest {
-            system,
-            user,
-            model: model.to_string(),
-            max_tokens: effective_max_tokens,
-            timeout_secs,
-        };
-        let jitter_seed: u64 = handler_id
-            .as_str()
-            .bytes()
-            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-
-        let mut success = false;
-        let mut last_err = None;
-        for attempt in 0..=(retries as usize) {
-            match adapter
-                .call(api_key, &req)
-                .and_then(|r| parse_flow_summary(&r.text, step_count))
-            {
-                Ok(summary) => {
-                    result.insert(handler_id.clone(), summary);
-                    ui.inc_ok();
-                    success = true;
-                    break;
-                }
-                Err(err) => {
-                    if attempt < retries as usize {
-                        let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
-                        tracing::debug!(
-                            attempt = attempt + 1,
-                            delay_ms = delay,
-                            error = %err,
-                            "route flow LLM call failed, retrying"
-                        );
-                        std::thread::sleep(std::time::Duration::from_millis(delay));
-                        last_err = Some(err);
-                    } else {
-                        last_err = Some(err);
+                let mut last_err = None;
+                for attempt in 0..=(retries as usize) {
+                    match adapter
+                        .call(api_key, &req)
+                        .and_then(|r| parse_flow_summary(&r.text, step_count))
+                    {
+                        Ok(summary) => {
+                            ui.lock().unwrap().inc_ok();
+                            return Some((
+                                handler_id.clone(),
+                                summary,
+                                Some(evidence_hash),
+                            ));
+                        }
+                        Err(err) => {
+                            if attempt < retries as usize {
+                                let delay =
+                                    backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
+                                tracing::debug!(
+                                    attempt = attempt + 1,
+                                    delay_ms = delay,
+                                    error = %err,
+                                    "route flow LLM call failed, retrying"
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(delay));
+                            }
+                            last_err = Some(err);
+                        }
                     }
                 }
-            }
-        }
-        if !success {
-            tracing::warn!(
-                handler = %handler_id,
-                error = %last_err.unwrap(),
-                "route flow LLM enrichment failed"
-            );
-            ui.inc_failed();
-        }
-    }
+                tracing::warn!(
+                    handler = %handler_id,
+                    error = %last_err.unwrap(),
+                    "route flow LLM enrichment failed"
+                );
+                ui.lock().unwrap().inc_failed();
+                None
+            })
+            .collect()
+    });
 
-    ui.finish_phase();
-    result
+    ui.lock().unwrap().finish_phase();
+
+    let mut result = HashMap::with_capacity(raw.len());
+    let mut cache_updates = Vec::new();
+    for (handler_id, summary, maybe_hash) in raw {
+        if let Some(ev_hash) = maybe_hash {
+            cache_updates.push((handler_id.clone(), ev_hash, summary.clone()));
+        }
+        result.insert(handler_id, summary);
+    }
+    (result, cache_updates)
 }
 
 fn enrich_one_flow(
@@ -2088,7 +2161,89 @@ Respond ONLY with this JSON object (no extra commentary):
     Err(last_err.unwrap())
 }
 
-fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
+/// Token budget for route-flow enrichment: ~100 tokens per step for step_descriptions
+/// plus ~500 overhead for narrative/business_impact/JSON framing; floor at 2 000.
+fn route_flow_token_budget(step_count: usize, base: u32) -> u32 {
+    base.max(step_count as u32 * 100 + 500).max(2000)
+}
+
+/// Scan truncated JSON text and extract whatever flow fields are present.
+/// Mirrors `extract_summary_from_partial` used for class enrichment.
+fn extract_flow_partial(text: &str, step_count: usize) -> Option<FlowLlmSummary> {
+    fn extract_string_value(text: &str, key: &str) -> Option<String> {
+        let needle = format!("\"{}\":", key);
+        let start = text.find(needle.as_str())?;
+        let after = text[start + needle.len()..].trim_start();
+        if !after.starts_with('"') {
+            return None;
+        }
+        let mut out = String::new();
+        let mut chars = after[1..].chars().peekable();
+        loop {
+            match chars.next() {
+                Some('\\') => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some(c) => out.push(c),
+                    None => break,
+                },
+                Some('"') => break,
+                Some(c) => out.push(c),
+                None => break,
+            }
+        }
+        if out.trim().is_empty() { None } else { Some(out.trim().to_string()) }
+    }
+
+    let narrative = extract_string_value(text, "narrative").unwrap_or_default();
+    let business_impact = extract_string_value(text, "business_impact").unwrap_or_default();
+
+    if narrative.is_empty() && business_impact.is_empty() {
+        return None;
+    }
+
+    let mut descs = Vec::new();
+    if let Some(arr_start) = text.find("\"step_descriptions\"") {
+        let after = &text[arr_start..];
+        if let Some(bracket) = after.find('[') {
+            let content = &after[bracket + 1..];
+            let mut in_str = false;
+            let mut current = String::new();
+            let mut chars = content.chars();
+            loop {
+                match chars.next() {
+                    None | Some(']') => {
+                        if in_str && !current.trim().is_empty() {
+                            descs.push(current.trim().to_string());
+                        }
+                        break;
+                    }
+                    Some('"') if !in_str => { in_str = true; }
+                    Some('"') if in_str => {
+                        descs.push(current.trim().to_string());
+                        current = String::new();
+                        in_str = false;
+                    }
+                    Some('\\') if in_str => {
+                        match chars.next() {
+                            Some('n') => current.push('\n'),
+                            Some('t') => current.push('\t'),
+                            Some(c) => current.push(c),
+                            None => break,
+                        }
+                    }
+                    Some(c) if in_str => current.push(c),
+                    _ => {}
+                }
+            }
+        }
+    }
+    descs.resize(step_count, String::new());
+
+    Some(FlowLlmSummary { narrative, business_impact, step_descriptions: descs })
+}
+
+pub fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
     let stripped = text
         .trim()
         .trim_start_matches("```json")
@@ -2096,42 +2251,37 @@ fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
         .trim_end_matches("```")
         .trim();
     let json_str = if let (Some(s), Some(e)) = (stripped.find('{'), stripped.rfind('}')) {
-        if s <= e {
-            &stripped[s..=e]
-        } else {
-            stripped
-        }
+        if s <= e { &stripped[s..=e] } else { stripped }
     } else {
         stripped
     };
-    let val: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to parse flow LLM response: {e}: {:?}",
-            &text[..text.len().min(200)]
-        )
-    })?;
-    let narrative = val["narrative"].as_str().unwrap_or("").to_string();
-    let business_impact = val["business_impact"].as_str().unwrap_or("").to_string();
-    let step_descriptions: Vec<String> = val["step_descriptions"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|v| v.as_str().unwrap_or("").to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    // Pad to step_count if LLM returned fewer
-    let mut descs = step_descriptions;
-    descs.resize(step_count, String::new());
+    match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(val) => {
+            let narrative = val["narrative"].as_str().unwrap_or("").to_string();
+            let business_impact = val["business_impact"].as_str().unwrap_or("").to_string();
+            let mut descs: Vec<String> = val["step_descriptions"]
+                .as_array()
+                .map(|arr| arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+                .unwrap_or_default();
+            descs.resize(step_count, String::new());
 
-    if narrative.is_empty() && business_impact.is_empty() && descs.iter().all(|s| s.is_empty()) {
-        bail!("flow LLM response did not contain any expected fields");
+            if narrative.is_empty() && business_impact.is_empty() && descs.iter().all(|s| s.is_empty()) {
+                bail!("flow LLM response did not contain any expected fields");
+            }
+            Ok(FlowLlmSummary { narrative, business_impact, step_descriptions: descs })
+        }
+        Err(parse_err) => {
+            // Truncated JSON — try partial recovery before giving up.
+            if let Some(partial) = extract_flow_partial(stripped, step_count) {
+                tracing::debug!("flow enrichment: partial JSON recovered (narrative/impact only)");
+                return Ok(partial);
+            }
+            bail!(
+                "failed to parse flow LLM response: {parse_err}: {:?}",
+                &text[..text.len().min(200)]
+            )
+        }
     }
-    Ok(FlowLlmSummary {
-        narrative,
-        business_impact,
-        step_descriptions: descs,
-    })
 }
 
 pub fn retain_matching_feature_groups(
@@ -2551,4 +2701,187 @@ fn replace_citations(text: &str, map: &HashMap<String, String>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{LlmRequest, LlmResponse};
+    use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering as AOrdering},
+        Mutex,
+    };
+    use std::collections::VecDeque;
+
+    struct MockLlm {
+        responses: Mutex<VecDeque<Result<String>>>,
+        pub calls: AtomicUsize,
+    }
+    impl MockLlm {
+        fn new(responses: Vec<Result<String>>) -> Self {
+            Self { responses: Mutex::new(responses.into()), calls: AtomicUsize::new(0) }
+        }
+    }
+    impl LlmAdapter for MockLlm {
+        fn call(&self, _key: Option<&str>, _req: &LlmRequest) -> Result<LlmResponse> {
+            self.calls.fetch_add(1, AOrdering::SeqCst);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(anyhow::anyhow!("no more mock responses")))
+                .map(|text| LlmResponse { text })
+        }
+    }
+
+    fn node(id: &str, kind: NodeKind, name: &str) -> Node {
+        Node {
+            id: NodeId::new(id.to_string()),
+            kind,
+            name: name.to_string(),
+            qualified_name: None,
+            file: "com/example/modules/orders/OrderController.java".to_string(),
+            range: Range::default(),
+            props: None,
+        }
+    }
+
+    fn edge(src: &str, dst: &str, kind: EdgeKind) -> Edge {
+        Edge {
+            src: NodeId::new(src.to_string()),
+            dst: NodeId::new(dst.to_string()),
+            kind,
+            confidence: 1.0,
+            reason: String::new(),
+            props: None,
+        }
+    }
+
+    fn flow_json(narrative: &str) -> String {
+        format!(
+            r#"{{"narrative": "{narrative}", "business_impact": "Important.", "step_descriptions": ["Queries the service"]}}"#
+        )
+    }
+
+    #[test]
+    fn flow_cache_hit_skips_llm_on_second_call() {
+        let handler_id = "Method:com.example.modules.orders.OrderController#list/0";
+        let ctrl_cls = "Class:com.example.modules.orders.OrderController";
+        let service_id = "Method:com.example.modules.orders.OrderService#findAll/0";
+        let svc_cls = "Class:com.example.modules.orders.OrderService";
+        let route_id = "Route:GET:/orders";
+
+        let nodes = vec![
+            node(ctrl_cls, NodeKind::Class, "OrderController"),
+            node(handler_id, NodeKind::Method, "list"),
+            node(svc_cls, NodeKind::Class, "OrderService"),
+            node(service_id, NodeKind::Method, "findAll"),
+            node(route_id, NodeKind::Route, "GET /orders"),
+        ];
+        let edges = vec![
+            edge(ctrl_cls, handler_id, EdgeKind::HasMethod),
+            edge(svc_cls, service_id, EdgeKind::HasMethod),
+            edge(handler_id, route_id, EdgeKind::HandlesRoute),
+            edge(handler_id, service_id, EdgeKind::Calls),
+        ];
+        let graph = WikiGraph::build(&nodes, &edges, &[], &[]);
+
+        let flow_response = flow_json("Lists all orders for the customer.");
+
+        // First run: LLM should be called once.
+        let adapter1 = MockLlm::new(vec![Ok(flow_response.clone())]);
+        let empty_cache = BTreeMap::new();
+        let (summaries1, updates1) = enrich_route_flows(
+            &graph, None, &adapter1, None, "model", 1000, 30, 0, "en", false,
+            &empty_cache, 1,
+        );
+        assert_eq!(adapter1.calls.load(AOrdering::SeqCst), 1, "first run must call LLM");
+        assert!(summaries1.contains_key(handler_id));
+        assert_eq!(updates1.len(), 1);
+
+        // Build flow_cache from the first run's updates.
+        let mut flow_cache: BTreeMap<String, FlowCacheEntry> = BTreeMap::new();
+        for (id, ev_hash, summary) in updates1 {
+            flow_cache.insert(id, FlowCacheEntry { evidence_hash: ev_hash, summary });
+        }
+
+        // Second run: same graph + populated cache → cache hit, LLM must NOT be called.
+        let adapter2 = MockLlm::new(vec![]); // empty — any call panics via "no more mock responses"
+        let (summaries2, updates2) = enrich_route_flows(
+            &graph, None, &adapter2, None, "model", 1000, 30, 0, "en", false,
+            &flow_cache, 1,
+        );
+        assert_eq!(adapter2.calls.load(AOrdering::SeqCst), 0, "second run must hit cache");
+        assert!(summaries2.contains_key(handler_id));
+        assert_eq!(summaries2[handler_id].narrative, summaries1[handler_id].narrative);
+        assert!(updates2.is_empty(), "cache hit must not produce new updates");
+    }
+
+    #[test]
+    fn flow_cache_miss_on_changed_call_chain() {
+        let handler_id = "Method:com.example.modules.orders.OrderController#list/0";
+        let ctrl_cls = "Class:com.example.modules.orders.OrderController";
+        let service_id = "Method:com.example.modules.orders.OrderService#findAll/0";
+        let svc_cls = "Class:com.example.modules.orders.OrderService";
+        let extra_id = "Method:com.example.modules.orders.OrderRepo#count/0";
+        let repo_cls = "Class:com.example.modules.orders.OrderRepo";
+        let route_id = "Route:GET:/orders";
+
+        // Graph v1: handler → service
+        let nodes_v1 = vec![
+            node(ctrl_cls, NodeKind::Class, "OrderController"),
+            node(handler_id, NodeKind::Method, "list"),
+            node(svc_cls, NodeKind::Class, "OrderService"),
+            node(service_id, NodeKind::Method, "findAll"),
+            node(route_id, NodeKind::Route, "GET /orders"),
+        ];
+        let edges_v1 = vec![
+            edge(ctrl_cls, handler_id, EdgeKind::HasMethod),
+            edge(svc_cls, service_id, EdgeKind::HasMethod),
+            edge(handler_id, route_id, EdgeKind::HandlesRoute),
+            edge(handler_id, service_id, EdgeKind::Calls),
+        ];
+        let graph_v1 = WikiGraph::build(&nodes_v1, &edges_v1, &[], &[]);
+
+        let adapter1 = MockLlm::new(vec![Ok(flow_json("Lists orders."))]);
+        let empty_cache = BTreeMap::new();
+        let (_, updates1) = enrich_route_flows(
+            &graph_v1, None, &adapter1, None, "model", 1000, 30, 0, "en", false,
+            &empty_cache, 1,
+        );
+        let mut flow_cache: BTreeMap<String, FlowCacheEntry> = BTreeMap::new();
+        for (id, ev_hash, summary) in updates1 {
+            flow_cache.insert(id, FlowCacheEntry { evidence_hash: ev_hash, summary });
+        }
+
+        // Graph v2: handler → service → extra (deeper chain)
+        let nodes_v2 = vec![
+            node(ctrl_cls, NodeKind::Class, "OrderController"),
+            node(handler_id, NodeKind::Method, "list"),
+            node(svc_cls, NodeKind::Class, "OrderService"),
+            node(service_id, NodeKind::Method, "findAll"),
+            node(repo_cls, NodeKind::Class, "OrderRepo"),
+            node(extra_id, NodeKind::Method, "count"),
+            node(route_id, NodeKind::Route, "GET /orders"),
+        ];
+        let edges_v2 = vec![
+            edge(ctrl_cls, handler_id, EdgeKind::HasMethod),
+            edge(svc_cls, service_id, EdgeKind::HasMethod),
+            edge(repo_cls, extra_id, EdgeKind::HasMethod),
+            edge(handler_id, route_id, EdgeKind::HandlesRoute),
+            edge(handler_id, service_id, EdgeKind::Calls),
+            edge(service_id, extra_id, EdgeKind::Calls),
+        ];
+        let graph_v2 = WikiGraph::build(&nodes_v2, &edges_v2, &[], &[]);
+
+        // Cache from v1 should not match v2's chain; LLM called once.
+        let adapter2 = MockLlm::new(vec![Ok(flow_json("Lists orders with count."))]);
+        let (summaries2, _) = enrich_route_flows(
+            &graph_v2, None, &adapter2, None, "model", 1000, 30, 0, "en", false,
+            &flow_cache, 1,
+        );
+        assert_eq!(adapter2.calls.load(AOrdering::SeqCst), 1, "cache miss must call LLM");
+        assert!(summaries2.contains_key(handler_id));
+    }
 }

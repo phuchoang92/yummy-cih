@@ -4,15 +4,8 @@ use cih_core::Node;
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::slugify::slugify;
-use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
+use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
-fn capitalize(s: &str) -> String {
-    let mut out = s.to_string();
-    if let Some(first) = out.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    out
-}
 
 /// Render the feature-level PO (business overview) page.
 /// Aggregates routes, tables, and LLM summaries from all communities in the feature.

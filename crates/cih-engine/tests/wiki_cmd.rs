@@ -56,6 +56,8 @@ fn class_enrichment_dry_run_returns_placeholder_descriptions() {
         "en",
         true, // dry_run
         false,
+        &[],
+        8,
     );
     assert!(result.is_ok());
     assert_eq!(adapter.calls(), 0, "dry-run should not call the adapter");
@@ -90,6 +92,7 @@ fn cached_feature_summary_returns_some_on_hash_match() {
         prompt_version: "1".to_string(),
         module_cache: Default::default(),
         feature_cache: cache,
+        flow_cache: Default::default(),
     };
 
     let hit = cached_feature_summary("payments", "ev1", Some(&meta));
@@ -291,6 +294,8 @@ fn class_enrichment_cache_hit_skips_llm_call() {
         "en",
         false,
         false,
+        &[],
+        8,
     )
     .unwrap();
     assert_eq!(adapter.calls(), 0);
@@ -365,4 +370,44 @@ fn route_prefix_filter_empty_prefixes_drops_community() {
 fn route_prefix_filter_empty_patterns_keeps_all() {
     let c = make_community(Some(vec!["orders"]));
     assert!(community_matches_route_prefix(&c, &[]));
+}
+
+#[test]
+fn flow_summary_parser_happy_path() {
+    let json = r#"{
+        "narrative": "The handler validates the loan and returns results.",
+        "business_impact": "Enables fast loan decisions.",
+        "step_descriptions": ["Validates input", "Queries database", "Returns result"]
+    }"#;
+    let result = parse_flow_summary(json, 3).unwrap();
+    assert_eq!(result.narrative, "The handler validates the loan and returns results.");
+    assert_eq!(result.business_impact, "Enables fast loan decisions.");
+    assert_eq!(result.step_descriptions.len(), 3);
+    assert_eq!(result.step_descriptions[0], "Validates input");
+}
+
+#[test]
+fn flow_summary_parser_handles_fenced_json() {
+    let fenced = "```json\n{\"narrative\": \"Processes payment.\", \"business_impact\": \"Completes sale.\", \"step_descriptions\": [\"Charges card\"]}\n```";
+    let result = parse_flow_summary(fenced, 1).unwrap();
+    assert_eq!(result.narrative, "Processes payment.");
+    assert_eq!(result.step_descriptions.len(), 1);
+    assert_eq!(result.step_descriptions[0], "Charges card");
+}
+
+#[test]
+fn flow_summary_parser_partial_recovery_on_truncated_json() {
+    // Simulates a DeepSeek truncation: valid narrative + business_impact but JSON is cut short.
+    let truncated = r#"{"narrative": "Retrieves loan details.", "business_impact": "Enables loan management.", "step_descriptions": ["#;
+    let result = parse_flow_summary(truncated, 2).unwrap();
+    assert_eq!(result.narrative, "Retrieves loan details.");
+    assert_eq!(result.business_impact, "Enables loan management.");
+    assert_eq!(result.step_descriptions.len(), 2);
+}
+
+#[test]
+fn flow_summary_parser_rejects_all_empty_response() {
+    assert!(parse_flow_summary("{}", 2).is_err());
+    assert!(parse_flow_summary("not json at all", 2).is_err());
+    assert!(parse_flow_summary("", 2).is_err());
 }

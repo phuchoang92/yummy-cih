@@ -2,14 +2,7 @@ use std::collections::HashSet;
 
 use crate::features::FeatureGroup;
 use crate::graph::WikiGraph;
-
-fn capitalize(s: &str) -> String {
-    let mut out = s.to_string();
-    if let Some(first) = out.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    out
-}
+use crate::capitalize;
 
 /// Render the top-level system index page (pages/index.md).
 /// Lists all features with their module, route, and table counts.

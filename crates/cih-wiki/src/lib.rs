@@ -15,8 +15,8 @@ pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
 pub use module_tree::{
     build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
-    ClassCacheEntry, ClassEnrichmentStore, FeatureMetaEntry, ModuleTreeSource, WikiMeta,
-    WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
+    ClassCacheEntry, ClassEnrichmentStore, FeatureMetaEntry, FlowCacheEntry, ModuleTreeSource,
+    WikiMeta, WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
 };
 
 use std::collections::{BTreeMap, HashMap};
@@ -79,7 +79,7 @@ pub struct FeatureLlmSummary {
 
 /// LLM-generated summary for a single process trace (flow).
 /// One per process_id; produced by the per-flow enrichment pass in `cih-engine`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FlowLlmSummary {
     /// 2-3 sentence narrative of the full flow for BA pages.
     pub narrative: String,
@@ -1205,7 +1205,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
     })
 }
 
-fn capitalize(s: &str) -> String {
+pub(crate) fn capitalize(s: &str) -> String {
     let mut out = s.to_string();
     if let Some(first) = out.get_mut(0..1) {
         first.make_ascii_uppercase();

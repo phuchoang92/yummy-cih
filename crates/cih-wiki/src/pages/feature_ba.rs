@@ -2,15 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::WikiGraph;
 use crate::mermaid;
-use crate::{CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
+use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
-fn capitalize(s: &str) -> String {
-    let mut out = s.to_string();
-    if let Some(first) = out.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    out
-}
 
 /// Render the feature-level BA (business analysis) page.
 /// Aggregates workflows, cross-module calls, and LLM summaries.

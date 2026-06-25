@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::features::{build_dev_page_paths, group_communities_by_feature};
 use crate::graph::WikiGraph;
 use crate::slugify::slugify;
+use crate::FlowLlmSummary;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WikiModuleTree {
@@ -62,6 +63,10 @@ pub struct WikiMeta {
     /// `#[serde(default)]` makes existing wiki_meta.json files (without this field) still load.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_cache: BTreeMap<String, FeatureMetaEntry>,
+    /// Cached route-flow and process-flow LLM summaries (keyed by handler/process id).
+    /// Added in schema v3; `#[serde(default)]` keeps existing files loadable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flow_cache: BTreeMap<String, FlowCacheEntry>,
 }
 
 /// Cached LLM enrichment for one class (keyed by FQCN in `ClassEnrichmentStore`).
@@ -86,6 +91,15 @@ pub struct ClassEnrichmentStore {
     /// FQCN → enrichment entry.
     #[serde(default)]
     pub entries: BTreeMap<String, ClassCacheEntry>,
+}
+
+/// Cached route-flow enrichment for one HTTP handler (keyed by handler_id in `WikiMeta.flow_cache`).
+/// Invalidated when the call-chain text changes (FNV-1a hash of `chain_steps_text` output).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowCacheEntry {
+    /// FNV-1a 64-bit hash of the chain_steps_text used to build the LLM prompt.
+    pub evidence_hash: String,
+    pub summary: FlowLlmSummary,
 }
 
 /// Cached feature-level LLM summary for one wiki feature.
@@ -294,6 +308,7 @@ pub fn build_wiki_meta(
         prompt_version: "phase10c-1".to_string(),
         module_cache: BTreeMap::new(),
         feature_cache: BTreeMap::new(),
+        flow_cache: BTreeMap::new(),
     }
 }
 

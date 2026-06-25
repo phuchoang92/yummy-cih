@@ -1,14 +1,7 @@
 use std::collections::HashMap;
 
 use crate::graph::WikiGraph;
-
-fn capitalize(s: &str) -> String {
-    let mut out = s.to_string();
-    if let Some(first) = out.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    out
-}
+use crate::capitalize;
 
 /// Render the feature landing page that links to po/ba pages and lists dev modules.
 pub fn render_feature_index(
