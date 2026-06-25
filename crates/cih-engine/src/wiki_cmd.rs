@@ -215,6 +215,27 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let pkg_cfg = PackageConfig::load_or_default(repo);
         let pkg_strategy: Arc<dyn FeatureStrategy> = Arc::new(PackageStrategy::new(pkg_cfg));
 
+        // Derive a fallback feature slug from the repo directory name so that
+        // single-module projects (where all files land in "shared") get a
+        // meaningful URL like /docs/loan instead of /docs/shared.
+        let repo_default_feature: Arc<String> = Arc::new({
+            let raw = repo
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("shared")
+                .to_lowercase();
+            // Strip common Maven suffixes/prefixes to keep it tidy
+            let mut s = raw.as_str();
+            for suf in &["-api", "-service", "-impl", "-core", "-module", "-web", "-rest"] {
+                s = s.strip_suffix(suf).unwrap_or(s);
+            }
+            for pfx in &["banking-", "payment-", "finance-", "base-", "common-", "core-",
+                          "shared-", "platform-", "infra-", "app-", "service-"] {
+                s = s.strip_prefix(pfx).unwrap_or(s);
+            }
+            if s.is_empty() || s == "shared" { raw } else { s.to_string() }
+        });
+
         // Load pre-computed feature artifact if available (written by `discover`).
         let feature_lookup: Arc<std::collections::HashMap<String, String>> = Arc::new(
             cih_grouping::find_feature_artifact_dir(repo, &graph_artifacts.version.0)
@@ -232,8 +253,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         {
             let s = pkg_strategy.clone();
             let lk = feature_lookup.clone();
+            let df = repo_default_feature.clone();
             wiki_graph = WikiGraph::build_package_grouped(&nodes, &edges, &|node_id, f| {
-                lk.get(node_id).cloned().unwrap_or_else(|| s.feature_of(f))
+                let feat = lk.get(node_id).cloned().unwrap_or_else(|| s.feature_of(f));
+                if feat == "shared" { df.as_ref().clone() } else { feat }
             });
         }
         let all_pkg_nodes: Vec<Node> = wiki_graph.community_nodes.clone();
@@ -245,10 +268,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         community_edges = Vec::new();
         community_version = graph_artifacts.version.0.clone();
         feature_of = Box::new(move |node_id: &str, f: &str| {
-            feature_lookup
+            let feat = feature_lookup
                 .get(node_id)
                 .cloned()
-                .unwrap_or_else(|| pkg_strategy.feature_of(f))
+                .unwrap_or_else(|| pkg_strategy.feature_of(f));
+            if feat == "shared" { repo_default_feature.as_ref().clone() } else { feat }
         });
     } else {
         // ── 1. Community nodes first (fast JSONL read, no source I/O) ─────────
@@ -630,7 +654,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                         adapter.as_ref().unwrap().as_ref(),
                         api_key.as_deref(),
                         llm_model,
-                        llm_max_tokens,
+                        llm_max_tokens.max(1200),
                         llm_timeout_secs,
                         llm_retries,
                         wiki_language,
@@ -1452,7 +1476,7 @@ fn enrich_one_community_full(
     Err(last_err.unwrap())
 }
 
-const CONTROLLER_BATCH_SIZE: usize = 10;
+const CONTROLLER_BATCH_SIZE: usize = 1;
 const MAX_ROUTES_PER_CONTROLLER: usize = 15;
 
 fn enrich_controllers(

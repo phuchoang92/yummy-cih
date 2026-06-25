@@ -36,6 +36,16 @@ impl PackageStrategy {
             }
         }
 
+        // Normalize path to always have a leading slash so src_root markers (which all
+        // start with '/') can match root-relative paths like "src/main/java/…".
+        let normalized;
+        let file = if file.starts_with('/') {
+            file
+        } else {
+            normalized = format!("/{}", file);
+            normalized.as_str()
+        };
+
         // Strategy 2: Maven multi-module directory before src root marker
         if let Some(marker_pos) = self.config.src_roots.iter().find_map(|m| file.find(m.as_str())) {
             let module_dir = &file[..marker_pos];

@@ -246,6 +246,12 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
 
     let dev_paths = build_dev_page_paths(&feature_groups, &graph);
 
+    // Pre-collect known feature names so the controller filter below can validate
+    // LLM-suggested feature slugs — prevents controllers from being silently dropped
+    // when DeepSeek/Gemini returns a slug that doesn't match any real wiki feature.
+    let known_features: std::collections::HashSet<String> =
+        feature_groups.iter().map(|g| g.feature.clone()).collect();
+
     // Flat method_id → description lookup built once from flow_llm_summaries.
     let mut method_flow_desc: HashMap<String, String> = {
         let mut map = HashMap::new();
@@ -744,14 +750,23 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                     .get(*ctrl)
                     .map(|f| f.as_str())
                     .unwrap_or("shared");
-                // Apply LLM feature override only when file-path heuristic gives "shared"
+                // Apply LLM feature override only when file-path heuristic gives "shared",
+                // AND only when the LLM-suggested slug actually exists as a wiki feature.
+                // Without the existence check, LLMs often return domain-specific slugs
+                // ("delinquency", "rescheduling") that don't match any feature group,
+                // silently dropping all route flow pages for the module.
                 let effective_feature = if graph_feature == "shared" {
-                    input
+                    let llm_feat = input
                         .controller_summaries
                         .as_ref()
                         .and_then(|m| m.get(*ctrl))
                         .and_then(|s| s.feature.as_deref())
-                        .unwrap_or("shared")
+                        .unwrap_or("shared");
+                    if known_features.contains(llm_feat) {
+                        llm_feat
+                    } else {
+                        graph_feature
+                    }
                 } else {
                     graph_feature
                 };

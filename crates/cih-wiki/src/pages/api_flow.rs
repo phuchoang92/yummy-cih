@@ -346,13 +346,27 @@ fn render_entrypoint_body(
     let step_dbs: Vec<Vec<(String, bool, bool)>> =
         chain.iter().map(|id| db_access(id.as_str(), graph)).collect();
     let has_db = step_dbs.iter().any(|v| !v.is_empty());
+    let has_desc = chain.iter().any(|mid| {
+        method_desc.get(mid.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+    });
 
-    if has_db {
-        md.push_str("| # | Class | Method | What it does | DB access |\n");
-        md.push_str("|---|---|---|---|---|\n");
-    } else {
-        md.push_str("| # | Class | Method | What it does |\n");
-        md.push_str("|---|---|---|---|\n");
+    match (has_desc, has_db) {
+        (true, true) => {
+            md.push_str("| # | Class | Method | What it does | DB access |\n");
+            md.push_str("|---|---|---|---|---|\n");
+        }
+        (true, false) => {
+            md.push_str("| # | Class | Method | What it does |\n");
+            md.push_str("|---|---|---|\n");
+        }
+        (false, true) => {
+            md.push_str("| # | Class | Method | DB access |\n");
+            md.push_str("|---|---|---|---|\n");
+        }
+        (false, false) => {
+            md.push_str("| # | Class | Method |\n");
+            md.push_str("|---|---|---|\n");
+        }
     }
 
     let mut seen_class_ids: Vec<String> = Vec::new();
@@ -363,7 +377,11 @@ fn render_entrypoint_body(
         if !seen_class_ids.contains(&cls_id) {
             seen_class_ids.push(cls_id);
         }
-        let desc = method_desc.get(mid.as_str()).map(|s| s.as_str()).unwrap_or("");
+        let desc = if has_desc {
+            method_desc.get(mid.as_str()).map(|s| s.as_str()).filter(|s| !s.is_empty()).unwrap_or("—")
+        } else {
+            ""
+        };
         if has_db {
             let db_str = if step_dbs[i].is_empty() {
                 "—".to_string()
@@ -379,15 +397,27 @@ fn render_entrypoint_body(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            md.push_str(&format!(
-                "| {} | `{}` | `{}` | {} | {} |\n",
-                i + 1, cls, meth, desc, db_str
-            ));
+            match (has_desc, true) {
+                (true, _) => md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} | {} |\n",
+                    i + 1, cls, meth, desc, db_str
+                )),
+                (false, _) => md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} |\n",
+                    i + 1, cls, meth, db_str
+                )),
+            }
         } else {
-            md.push_str(&format!(
-                "| {} | `{}` | `{}` | {} |\n",
-                i + 1, cls, meth, desc
-            ));
+            match has_desc {
+                true => md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} |\n",
+                    i + 1, cls, meth, desc
+                )),
+                false => md.push_str(&format!(
+                    "| {} | `{}` | `{}` |\n",
+                    i + 1, cls, meth
+                )),
+            }
         }
     }
     md.push('\n');
