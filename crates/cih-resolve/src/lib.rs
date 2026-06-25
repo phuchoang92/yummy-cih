@@ -38,6 +38,15 @@ pub use lang::{
     kotlin::KotlinResolver,
     python::PythonResolver,
     typescript::TypeScriptResolver,
+    go::GoResolver,
+    rust_lang::RustResolver,
+    csharp::CSharpResolver,
+    ruby::RubyResolver,
+    php::PhpResolver,
+    scala::ScalaResolver,
+    cpp::CppResolver,
+    bash::BashResolver,
+    elixir::ElixirResolver,
     ResolverRegistry,
 };
 pub use reports::write_unresolved_reports;
@@ -90,6 +99,15 @@ pub fn default_registry() -> ResolverRegistry {
     r.register(TypeScriptResolver);
     r.register(PythonResolver);
     r.register(KotlinResolver);
+    r.register(GoResolver);
+    r.register(RustResolver);
+    r.register(CSharpResolver);
+    r.register(RubyResolver);
+    r.register(PhpResolver);
+    r.register(ScalaResolver);
+    r.register(CppResolver);
+    r.register(BashResolver);
+    r.register(ElixirResolver);
     r
 }
 

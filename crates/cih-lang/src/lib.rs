@@ -2,10 +2,20 @@ use std::collections::BTreeSet;
 
 pub mod constant_resolver;
 pub mod fingerprint;
+pub mod generic_parse;
 pub mod java;
 pub mod kotlin;
 pub mod python;
 pub mod typescript;
+pub mod go;
+pub mod rust_lang;
+pub mod csharp;
+pub mod ruby;
+pub mod php;
+pub mod cpp;
+pub mod scala;
+pub mod bash;
+pub mod elixir;
 
 pub use constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 

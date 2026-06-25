@@ -9,6 +9,15 @@ pub mod java;
 pub mod kotlin;
 pub mod python;
 pub mod typescript;
+pub mod go;
+pub mod rust_lang;
+pub mod csharp;
+pub mod ruby;
+pub mod php;
+pub mod scala;
+pub mod cpp;
+pub mod bash;
+pub mod elixir;
 
 /// Per-language resolution strategy. All methods have safe defaults (None/false/empty)
 /// so a new language implementation starts minimal and opts into what it needs.
