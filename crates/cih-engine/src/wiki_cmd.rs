@@ -1928,7 +1928,7 @@ Respond ONLY with this JSON object (no extra commentary):
             system,
             user,
             model: model.to_string(),
-            max_tokens,
+            max_tokens: max_tokens.max(2000),
             timeout_secs,
         };
         let jitter_seed: u64 = handler_id
