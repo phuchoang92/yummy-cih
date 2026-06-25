@@ -1048,8 +1048,21 @@ impl WikiGraph {
                 // show only the impl. If there are multiple impls, include the
                 // interface step so the chain doesn't silently branch.
                 let impls = self.impl_methods.get(id.as_str());
-                let skip_interface_stub = is_interface_method
-                    && impls.map(|v| v.len()).unwrap_or(0) == 1;
+                let impl_count = impls.map(|v| v.len()).unwrap_or(0);
+                let skip_interface_stub = is_interface_method && impl_count == 1;
+                if skip_interface_stub {
+                    tracing::debug!(
+                        interface_method = %id,
+                        impl_method = %impls.unwrap()[0],
+                        "interface→impl: skipping interface stub (single impl)"
+                    );
+                } else if is_interface_method && impl_count > 1 {
+                    tracing::debug!(
+                        interface_method = %id,
+                        impl_count,
+                        "interface→impl: keeping stub (multiple impls)"
+                    );
+                }
                 if !skip_interface_stub {
                     chain.push(id.clone());
                 }
@@ -1068,6 +1081,12 @@ impl WikiGraph {
                 if let Some(impls) = self.impl_methods.get(id.as_str()) {
                     for impl_id in impls {
                         if !visited.contains(impl_id) {
+                            tracing::debug!(
+                                interface_method = %id,
+                                impl_method = %impl_id,
+                                depth,
+                                "interface→impl: queuing impl"
+                            );
                             // Same depth: the impl IS the step, not an extra hop.
                             queue.push_back((impl_id.clone(), depth));
                         }

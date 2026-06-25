@@ -545,6 +545,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             wiki_language,
             llm_dry_run || llm_debug_evidence,
             json,
+            &filter_route[..],
+            concurrency,
         )?;
 
         tracing::info!(
@@ -1191,6 +1193,8 @@ pub fn enrich_classes_for_chains(
     language: &str,
     dry_run: bool,
     json_output: bool,
+    filter_route: &[String],
+    concurrency: usize,
 ) -> Result<(
     HashMap<String, ControllerLlmSummary>,
     HashMap<String, CommunityLlmSummary>,
@@ -1198,10 +1202,17 @@ pub fn enrich_classes_for_chains(
 )> {
     use std::collections::BTreeMap;
 
-    // Collect method IDs per FQCN by walking all route handler call chains.
+    // Collect method IDs per FQCN by walking filtered route handler call chains.
     let mut class_methods: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for routes in wiki_graph.routes_by_controller.values() {
-        for (handler, _route) in routes {
+        for (handler, route) in routes {
+            if !filter_route.is_empty() && {
+                let path = cih_wiki::graph::route_path(route);
+                !filter_route.iter().any(|f| path.contains(f.as_str()))
+            }
+            {
+                continue;
+            }
             let chain = wiki_graph.build_call_chain(handler.id.as_str(), 4);
             for method_id in chain {
                 let fqcn = method_id
@@ -1228,118 +1239,151 @@ pub fn enrich_classes_for_chains(
     let node_by_id: HashMap<&str, &cih_core::Node> =
         all_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
-    let mut updated_entries: BTreeMap<String, ClassCacheEntry> = prev_store.entries.clone();
+    // Snapshot prev entries for cache checks (read-only, shared across threads).
+    let prev_entries = prev_store.entries.clone();
 
-    let mut ui = PhaseProgress::new();
-    if json_output {
-        ui.hide();
-    }
-    ui.start_phase("Enriching classes", Some(total as u64));
-
-    for (fqcn, method_ids) in &class_methods {
-        let simple_name = fqcn.rsplit('.').next().unwrap_or(fqcn.as_str());
-
-        // Collect method nodes to read source bodies.
-        let method_nodes: Vec<cih_core::Node> = method_ids
-            .iter()
-            .filter_map(|id| node_by_id.get(id.as_str()).copied().cloned())
-            .collect();
-
-        let bodies = cih_wiki::source_bodies(&method_nodes, repo);
-
-        // Sort method IDs so hash is stable regardless of discovery order.
-        let mut sorted_bodies: Vec<(&str, &str)> = method_ids
-            .iter()
-            .filter_map(|id| {
-                bodies
-                    .get(id.as_str())
-                    .map(|b| (id.as_str(), b.stripped.as_str()))
-            })
-            .collect();
-        sorted_bodies.sort_by_key(|(id, _)| *id);
-
-        let combined = sorted_bodies
-            .iter()
-            .map(|(_, b)| *b)
-            .collect::<Vec<_>>()
-            .join("\n---\n");
-        let content_hash = fnv64(&combined);
-
-        // Cache hit — same source, reuse existing entry.
-        if let Some(cached) = prev_store.entries.get(fqcn.as_str()) {
-            if cached.content_hash == content_hash {
-                ui.tick_skipped(format!("{} (cached)", simple_name));
-                continue;
-            }
+    let ui = std::sync::Arc::new(std::sync::Mutex::new(PhaseProgress::new()));
+    {
+        let mut locked = ui.lock().unwrap();
+        if json_output {
+            locked.hide();
         }
+        locked.start_phase("Enriching classes", Some(total as u64));
+    }
 
-        ui.tick(simple_name);
+    let effective_concurrency = concurrency.max(1);
+    let class_list: Vec<(&String, &Vec<String>)> = class_methods.iter().collect();
 
-        let entry = if dry_run {
-            println!("--- [dry-run] class: {} ---", fqcn);
-            ClassCacheEntry {
-                content_hash,
-                method_descriptions: method_ids
-                    .iter()
-                    .filter_map(|id| {
-                        let m = id
-                            .split('#')
-                            .nth(1)
-                            .and_then(|x| x.split('/').next())?;
-                        Some((m.to_string(), format!("[dry-run] {}", m)))
-                    })
-                    .collect(),
-                class_summary: format!("[dry-run] {}", simple_name),
-            }
-        } else {
-            let system = build_class_system_prompt(language);
-            let user = build_class_enrich_prompt(fqcn, &sorted_bodies);
-            let request = LlmRequest {
-                system,
-                user,
-                model: model.to_string(),
-                max_tokens: max_tokens.max(800),
-                timeout_secs,
-            };
-            let jitter: u64 = fqcn
-                .bytes()
-                .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-            let mut ok = None;
-            for attempt in 0..=(retries as usize) {
-                match adapter
-                    .call(api_key, &request)
-                    .and_then(|r| parse_class_enrich_response(&r.text))
-                {
-                    Ok((summary, method_descs)) => {
-                        ok = Some(ClassCacheEntry {
-                            content_hash: content_hash.clone(),
-                            method_descriptions: method_descs,
-                            class_summary: summary,
-                        });
-                        break;
-                    }
-                    Err(err) => {
-                        if attempt < retries as usize {
-                            let delay =
-                                backoff_ms(attempt, jitter.wrapping_add(attempt as u64));
-                            std::thread::sleep(std::time::Duration::from_millis(delay));
-                        } else {
-                            tracing::warn!(class = %fqcn, error = %err, "class enrichment failed");
+    // Build per-class entries in parallel; each entry is (fqcn, ClassCacheEntry | None-if-cached).
+    let new_entries: Vec<(String, ClassCacheEntry)> = {
+        use rayon::prelude::*;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(effective_concurrency)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+        pool.install(|| {
+            class_list
+                .par_iter()
+                .filter_map(|(fqcn, method_ids)| {
+                    let simple_name = fqcn.rsplit('.').next().unwrap_or(fqcn.as_str());
+
+                    let method_nodes: Vec<cih_core::Node> = method_ids
+                        .iter()
+                        .filter_map(|id| node_by_id.get(id.as_str()).copied().cloned())
+                        .collect();
+
+                    let bodies = cih_wiki::source_bodies(&method_nodes, repo);
+
+                    let mut sorted_bodies: Vec<(&str, &str)> = method_ids
+                        .iter()
+                        .filter_map(|id| {
+                            bodies
+                                .get(id.as_str())
+                                .map(|b| (id.as_str(), b.stripped.as_str()))
+                        })
+                        .collect();
+                    sorted_bodies.sort_by_key(|(id, _)| *id);
+
+                    let combined = sorted_bodies
+                        .iter()
+                        .map(|(_, b)| *b)
+                        .collect::<Vec<_>>()
+                        .join("\n---\n");
+                    let content_hash = fnv64(&combined);
+
+                    // Cache hit — same source, skip LLM call.
+                    if let Some(cached) = prev_entries.get(fqcn.as_str()) {
+                        if cached.content_hash == content_hash {
+                            ui.lock().unwrap().tick_skipped(format!("{} (cached)", simple_name));
+                            return None;
                         }
                     }
-                }
-            }
-            ok.unwrap_or_else(|| ClassCacheEntry {
-                content_hash,
-                method_descriptions: HashMap::new(),
-                class_summary: String::new(),
-            })
-        };
 
-        updated_entries.insert(fqcn.clone(), entry);
+                    ui.lock().unwrap().tick(simple_name);
+
+                    let entry = if dry_run {
+                        println!("--- [dry-run] class: {} ---", fqcn);
+                        ClassCacheEntry {
+                            content_hash,
+                            method_descriptions: method_ids
+                                .iter()
+                                .filter_map(|id| {
+                                    let m = id
+                                        .split('#')
+                                        .nth(1)
+                                        .and_then(|x| x.split('/').next())?;
+                                    Some((m.to_string(), format!("[dry-run] {}", m)))
+                                })
+                                .collect(),
+                            class_summary: format!("[dry-run] {}", simple_name),
+                        }
+                    } else {
+                        let system = build_class_system_prompt(language);
+                        let user = build_class_enrich_prompt(fqcn, &sorted_bodies);
+                        let request = LlmRequest {
+                            system,
+                            user,
+                            model: model.to_string(),
+                            max_tokens: max_tokens.max(2000),
+                            timeout_secs,
+                        };
+                        let jitter: u64 = fqcn
+                            .bytes()
+                            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                        let mut ok = None;
+                        for attempt in 0..=(retries as usize) {
+                            match adapter
+                                .call(api_key, &request)
+                                .and_then(|r| parse_class_enrich_response(&r.text))
+                            {
+                                Ok((summary, method_descs)) => {
+                                    ok = Some(ClassCacheEntry {
+                                        content_hash: content_hash.clone(),
+                                        method_descriptions: method_descs,
+                                        class_summary: summary,
+                                    });
+                                    break;
+                                }
+                                Err(err) => {
+                                    if attempt < retries as usize {
+                                        let delay = backoff_ms(
+                                            attempt,
+                                            jitter.wrapping_add(attempt as u64),
+                                        );
+                                        std::thread::sleep(std::time::Duration::from_millis(
+                                            delay,
+                                        ));
+                                    } else {
+                                        tracing::warn!(
+                                            class = %fqcn,
+                                            error = %err,
+                                            "class enrichment failed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        ok.unwrap_or_else(|| ClassCacheEntry {
+                            content_hash,
+                            method_descriptions: HashMap::new(),
+                            class_summary: String::new(),
+                        })
+                    };
+
+                    Some(((*fqcn).clone(), entry))
+                })
+                .collect()
+        })
+    };
+
+    // Merge parallel results into the entry map (start from prev_entries for cached ones).
+    let mut updated_entries: BTreeMap<String, ClassCacheEntry> = prev_entries;
+    for (fqcn, entry) in new_entries {
+        updated_entries.insert(fqcn, entry);
     }
 
-    ui.finish_phase();
+    ui.lock().unwrap().finish_phase();
 
     // Build ControllerLlmSummary keyed by simple class name — covers all classes in chains.
     let mut ctrl_map: HashMap<String, ControllerLlmSummary> = HashMap::new();
@@ -1442,6 +1486,41 @@ fn build_class_enrich_prompt(fqcn: &str, bodies: &[(&str, &str)]) -> String {
     s
 }
 
+/// Scan for `"summary": "..."` in a truncated/invalid JSON string without a full parser.
+/// Returns the summary value if found, None otherwise.
+fn extract_summary_from_partial(text: &str) -> Option<String> {
+    let key = "\"summary\":";
+    let start = text.find(key)?;
+    let after_key = text[start + key.len()..].trim_start();
+    if !after_key.starts_with('"') {
+        return None;
+    }
+    let s = &after_key[1..]; // skip opening quote
+    let mut summary = String::new();
+    let mut chars = s.chars().peekable();
+    loop {
+        match chars.next() {
+            Some('\\') => {
+                // Escaped character — include it decoded
+                match chars.next() {
+                    Some('n') => summary.push('\n'),
+                    Some('t') => summary.push('\t'),
+                    Some(c) => summary.push(c),
+                    None => break,
+                }
+            }
+            Some('"') => break, // closing quote
+            Some(c) => summary.push(c),
+            None => break, // truncated mid-string, use what we got
+        }
+    }
+    if summary.trim().is_empty() {
+        None
+    } else {
+        Some(summary.trim().to_string())
+    }
+}
+
 fn parse_class_enrich_response(text: &str) -> Result<(String, HashMap<String, String>)> {
     let cleaned = text
         .trim()
@@ -1481,6 +1560,13 @@ fn parse_class_enrich_response(text: &str) -> Result<(String, HashMap<String, St
                 }
             }
         }
+    }
+    // Fallback: truncated JSON — try to extract at least the summary by string scanning.
+    if let Some(summary) = extract_summary_from_partial(cleaned) {
+        tracing::debug!(
+            "class enrichment: partial JSON recovered (summary only), methods lost"
+        );
+        return Ok((summary, HashMap::new()));
     }
     bail!(
         "failed to extract class JSON from LLM response: {:?}",
