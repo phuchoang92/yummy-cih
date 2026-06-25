@@ -168,34 +168,49 @@ pub struct WikiOutcome {
 
 /// Strip redundant class/method references that the LLM sometimes prepends to descriptions.
 /// Handles patterns like `ClassName.methodName/N()`, "The ClassName ...", `` `methodName` ``.
-fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
+pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
     let mut s = desc.trim().to_string();
 
-    // Strip ClassName.methodName/N() or ClassName.methodName/N() style prefix (with optional backticks)
-    // e.g. "`DelinquencyApiResource`.updateDelinquencyBucket/2() processes..."
-    // e.g. "DelinquencyApiResource.updateDelinquencyBucket/2() processes..."
-    let prefix_dot = format!("{}.", cls);
-    let prefix_bt = format!("`{}`.", cls);
-    for prefix in &[prefix_bt.as_str(), prefix_dot.as_str()] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            // consume methodName/N() or just methodName
-            let after = rest
-                .find(|c: char| c == ' ' || c == '\n')
-                .map(|i| rest[i..].trim_start())
+    // General scan: if ClassName.method or `ClassName`.method appears anywhere in the
+    // first 80 chars of the text, strip from the start up to and including that
+    // signature (ends after the first ')' or after the signature word).
+    // This handles patterns like:
+    //   "ClassName.method/N() verb..."
+    //   "The ClassName.method/N() verb..."
+    //   "The resource method ClassName.method/N() is called..."
+    let sig_needle = format!("{}.", cls);
+    let sig_needle_bt = format!("`{}`.", cls);
+    let scan_window = s.len().min(100);
+    let sig_pos_len = s[..scan_window]
+        .find(sig_needle_bt.as_str())
+        .map(|p| (p, sig_needle_bt.len()))
+        .or_else(|| s[..scan_window].find(sig_needle.as_str()).map(|p| (p, sig_needle.len())));
+    if let Some((pos, needle_len)) = sig_pos_len {
+        // Find the end of the signature: scan past `()` and any trailing space/punctuation
+        let after_start = (pos + needle_len).min(s.len());
+        let after_sig = &s[after_start..];
+        // Find closing ')' — the signature ends there; take everything after it
+        if let Some(paren_close) = after_sig.find(')') {
+            let rest = after_sig[paren_close + 1..].trim_start_matches(|c: char| c == ' ' || c == '\n');
+            if !rest.is_empty() {
+                // Drop connective phrases like "is called to", "is invoked to", "resource method"
+                let rest = rest
+                    .strip_prefix("is called to ")
+                    .or_else(|| rest.strip_prefix("is invoked to "))
+                    .or_else(|| rest.strip_prefix("resource method "))
+                    .unwrap_or(rest);
+                s = rest.trim_start().to_string();
+            }
+        } else {
+            // No closing paren — just take everything after the class name
+            let rest = after_sig
+                .find(|c: char| c == ' ')
+                .map(|i| after_sig[i..].trim_start())
                 .unwrap_or("");
-            if !after.is_empty() {
-                s = after.to_string();
-                break;
+            if !rest.is_empty() {
+                s = rest.to_string();
             }
         }
-    }
-
-    // Strip "The ClassName " at start (e.g. "The DelinquencyApiResource resource handles...")
-    let the_cls = format!("The {} ", cls);
-    if let Some(rest) = s.strip_prefix(&the_cls) {
-        // Lowercase first char since we removed the "The ClassName " subject
-        // Only do this if the remainder looks like a predicate (starts lowercase or verb)
-        s = rest.to_string();
     }
 
     // Strip leading backtick-quoted method name (e.g. "`createDelinquencyBucket` is called to...")
@@ -308,7 +323,20 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                         let idx = (step.step_number as usize).saturating_sub(1);
                         if let Some(desc) = summary.step_descriptions.get(idx) {
                             if !desc.is_empty() {
-                                map.insert(step.symbol.id.as_str().to_string(), desc.clone());
+                                let id = step.symbol.id.as_str();
+                                let cleaned = if let Some((prefix, meth_arity)) = id.split_once('#') {
+                                    let cls = prefix
+                                        .trim_start_matches("Method:")
+                                        .trim_start_matches("Constructor:")
+                                        .rsplit('.')
+                                        .next()
+                                        .unwrap_or("");
+                                    let meth = meth_arity.split('/').next().unwrap_or("");
+                                    clean_method_desc(desc, cls, meth)
+                                } else {
+                                    desc.clone()
+                                };
+                                map.insert(id.to_string(), cleaned);
                             }
                         }
                     }

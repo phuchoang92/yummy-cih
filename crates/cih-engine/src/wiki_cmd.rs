@@ -754,9 +754,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         None
     };
 
-    // Build handler-ID scope for route flow enrichment, filtered to the same features
+    // Build handler-ID scope for route flow enrichment, filtered to the same features/routes
     // that page generation will use. Without this, all 200+ handlers would be enriched
-    // even when --filter-feature limits page output to a single module.
+    // even when --filter-feature or --filter-route limits page output to a single module.
     let route_flow_scope: Option<std::collections::HashSet<String>> = if !filter_feature.is_empty()
     {
         let mut fg = group_communities_by_feature(&wiki_graph);
@@ -774,6 +774,20 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             })
             .collect();
         Some(ids)
+    } else if !filter_route.is_empty() {
+        // --filter-route was given: restrict route flow enrichment to handlers whose route
+        // path actually matches the filter patterns. Using the community set would include
+        // every route in the package, not just the matching ones.
+        let ids: std::collections::HashSet<String> = wiki_graph
+            .routes
+            .iter()
+            .filter(|(_, route)| {
+                let path = cih_wiki::graph::route_path(route);
+                filter_route.iter().any(|f| path.contains(f.as_str()))
+            })
+            .map(|(handler, _)| handler.id.as_str().to_string())
+            .collect();
+        if ids.is_empty() { None } else { Some(ids) }
     } else {
         None
     };
@@ -1870,7 +1884,9 @@ fn enrich_route_flows(
 
         let mut system = String::from(
             "You are a code documentation assistant. Describe this HTTP request flow \
-             based solely on the provided call chain. Do not invent behavior not shown.",
+             based solely on the provided call chain. Do not invent behavior not shown. \
+             Each step description must start with an action verb and must not repeat \
+             the class name, method name, or arity notation (e.g. /2()).",
         );
         if language != "en" {
             system.push_str(&format!(

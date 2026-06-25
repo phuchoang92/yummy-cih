@@ -207,7 +207,7 @@ pub fn render_api_flow_page(
                 seen_class_ids.push(cls_id.clone());
             }
 
-            let desc = if has_desc {
+            let raw_desc = if has_desc {
                 flow_summary
                     .and_then(|fs| fs.step_descriptions.get(i))
                     .map(|s| s.as_str())
@@ -217,6 +217,13 @@ pub fn render_api_flow_page(
                     .unwrap_or("—")
             } else {
                 ""
+            };
+            let cleaned_desc;
+            let desc = if has_desc && raw_desc != "—" {
+                cleaned_desc = crate::clean_method_desc(raw_desc, &cls, &meth);
+                cleaned_desc.as_str()
+            } else {
+                raw_desc
             };
 
             if has_desc && has_db {
@@ -377,10 +384,17 @@ fn render_entrypoint_body(
         if !seen_class_ids.contains(&cls_id) {
             seen_class_ids.push(cls_id);
         }
-        let desc = if has_desc {
+        let raw_desc2 = if has_desc {
             method_desc.get(mid.as_str()).map(|s| s.as_str()).filter(|s| !s.is_empty()).unwrap_or("—")
         } else {
             ""
+        };
+        let cleaned_desc2;
+        let desc = if has_desc && raw_desc2 != "—" {
+            cleaned_desc2 = crate::clean_method_desc(raw_desc2, &cls, &meth);
+            cleaned_desc2.as_str()
+        } else {
+            raw_desc2
         };
         if has_db {
             let db_str = if step_dbs[i].is_empty() {
