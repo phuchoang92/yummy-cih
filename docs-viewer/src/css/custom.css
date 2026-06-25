@@ -175,7 +175,9 @@
   margin-bottom: 1.25rem;
   border: 1px solid var(--ifm-toc-border-color);
   border-radius: var(--ifm-global-radius);
-  overflow: hidden;
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .theme-doc-markdown table thead tr {

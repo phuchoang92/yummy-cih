@@ -357,7 +357,7 @@ fn render_entrypoint_body(
         }
         (true, false) => {
             md.push_str("| # | Class | Method | What it does |\n");
-            md.push_str("|---|---|---|\n");
+            md.push_str("|---|---|---|---|\n");
         }
         (false, true) => {
             md.push_str("| # | Class | Method | DB access |\n");
