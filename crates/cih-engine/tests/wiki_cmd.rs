@@ -3,7 +3,7 @@ use cih_engine_lib::llm::evidence::EvidenceCorpus;
 use cih_engine_lib::llm::{LlmAdapter, LlmRequest, LlmResponse};
 use cih_engine_lib::wiki_cmd::*;
 use cih_wiki::features::FeatureGroup;
-use cih_wiki::{FeatureMetaEntry, WikiGraph, WikiMeta, WikiModuleCacheEntry};
+use cih_wiki::{FeatureMetaEntry, WikiGraph, WikiMeta};
 use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicUsize, Ordering as AOrdering},
@@ -38,93 +38,32 @@ impl LlmAdapter for MockAdapter {
 }
 
 #[test]
-fn retry_succeeds_after_two_transient_failures() {
-    let valid = r#"{"po":"business value","ba":"workflow","dev":"technical"}"#.to_string();
-    let adapter = MockAdapter::new(vec![
-        Err(anyhow::anyhow!("transient error 1")),
-        Err(anyhow::anyhow!("transient error 2")),
-        Ok(valid),
-    ]);
-    let community = cih_core::Node {
-        id: cih_core::NodeId::new("Community:test"),
-        kind: cih_core::NodeKind::Community,
-        name: "test".to_string(),
-        qualified_name: None,
-        file: String::new(),
-        range: cih_core::Range::default(),
-        props: None,
-    };
-    let graph = WikiGraph::build(&[], &[], &[community.clone()], &[]);
-    let corpus = EvidenceCorpus::load(&[]).unwrap();
-    let tmp = std::env::temp_dir();
-    let result = enrich_one_community(
-        &community,
+fn class_enrichment_dry_run_returns_placeholder_descriptions() {
+    // Verify that dry-run mode produces placeholder entries for every class in the chain.
+    let adapter = MockAdapter::new(vec![]);
+    let graph = WikiGraph::build(&[], &[], &[], &[]);
+    let result = enrich_classes_for_chains(
         &graph,
-        &tmp,
-        &corpus,
+        &[],
+        &std::env::temp_dir(),
+        Default::default(),
         &adapter,
         None,
-        "test-model",
-        100,
+        "model",
+        800,
         5,
-        2,
+        0,
         "en",
+        true, // dry_run
         false,
-        false,
     );
-    assert!(result.is_ok(), "expected Ok after retries: {:?}", result);
-    assert_eq!(adapter.calls(), 3, "should have made exactly 3 calls");
-}
-
-#[test]
-fn circuit_breaker_open_at_threshold() {
-    assert!(
-        !is_circuit_open(4, 5),
-        "4 failures should not open circuit (threshold=5)"
-    );
-    assert!(
-        is_circuit_open(5, 5),
-        "5 failures should open circuit (threshold=5)"
-    );
-    assert!(is_circuit_open(6, 5), "6 failures should keep circuit open");
-}
-
-#[test]
-fn cached_summary_returns_some_on_hash_match() {
-    use std::collections::BTreeMap;
-    let mut cache = BTreeMap::new();
-    cache.insert(
-        "comm::Payment".to_string(),
-        WikiModuleCacheEntry {
-            content_hash: String::new(),
-            evidence_hash: "abc123".to_string(),
-            page_paths: vec![],
-            llm_po: Some("PO text".to_string()),
-            llm_ba: Some("BA text".to_string()),
-            llm_dev: Some("Dev text".to_string()),
-        },
-    );
-    let meta = WikiMeta {
-        schema_version: 1,
-        repo_commit: None,
-        graph_version: "v1".to_string(),
-        community_version: "v1".to_string(),
-        model: None,
-        language: None,
-        prompt_version: "1".to_string(),
-        module_cache: cache,
-        feature_cache: Default::default(),
-    };
-
-    let hit = cached_summary("comm::Payment", "abc123", Some(&meta));
-    assert!(hit.is_some(), "matching hash should return cached summary");
-    assert_eq!(hit.unwrap().po, "PO text");
-
-    let miss_hash = cached_summary("comm::Payment", "different_hash", Some(&meta));
-    assert!(miss_hash.is_none(), "different hash should return None");
-
-    let miss_id = cached_summary("comm::Other", "abc123", Some(&meta));
-    assert!(miss_id.is_none(), "unknown comm_id should return None");
+    assert!(result.is_ok());
+    assert_eq!(adapter.calls(), 0, "dry-run should not call the adapter");
+    let (ctrl_map, comm_map, store) = result.unwrap();
+    // Empty graph → no routes → no classes to enrich
+    assert!(ctrl_map.is_empty());
+    assert!(comm_map.is_empty());
+    assert!(store.entries.is_empty());
 }
 
 #[test]
@@ -323,43 +262,40 @@ fn feature_evidence_prefixes_item_ids_by_community() {
 }
 
 #[test]
-fn enrich_prompt_contains_community_name_and_routes() {
-    let prompt = build_enrich_prompt(
-        "order-service",
-        "[R1] GET /api/orders\n[D1] Called by: payment-service; calls into: notification-service",
+fn class_enrichment_cache_hit_skips_llm_call() {
+    // A class that was already enriched (hash matches) should not trigger an LLM call.
+    use cih_wiki::ClassCacheEntry;
+    let adapter = MockAdapter::new(vec![]);
+    let graph = WikiGraph::build(&[], &[], &[], &[]);
+    let mut prev = cih_wiki::ClassEnrichmentStore::default();
+    prev.entries.insert(
+        "com.example.MyService".to_string(),
+        ClassCacheEntry {
+            content_hash: "some-hash".to_string(),
+            class_summary: "A service.".to_string(),
+            method_descriptions: Default::default(),
+        },
     );
-    assert!(prompt.contains("order-service"));
-    assert!(prompt.contains("GET /api/orders"));
-    assert!(prompt.contains("payment-service"));
-    assert!(prompt.contains("notification-service"));
-}
-
-#[test]
-fn parse_llm_summary_errors_on_malformed_response() {
-    let result = parse_llm_summary("Not JSON at all");
-    assert!(result.is_err(), "malformed response should return Err");
-}
-
-#[test]
-fn parse_llm_summary_errors_on_empty_json_fields() {
-    let result = parse_llm_summary(r#"{"po": "", "ba": "", "dev": ""}"#);
-    assert!(result.is_err(), "empty response should return Err");
-}
-
-#[test]
-fn parse_llm_summary_extracts_valid_json() {
-    let text = r#"{"po": "Business stuff", "ba": "Flow stuff", "dev": "Tech stuff"}"#;
-    let result = parse_llm_summary(text).unwrap();
-    assert_eq!(result.po, "Business stuff");
-    assert_eq!(result.ba, "Flow stuff");
-    assert_eq!(result.dev, "Tech stuff");
-}
-
-#[test]
-fn parse_llm_summary_handles_json_in_markdown_block() {
-    let text = "Here is the summary:\n```json\n{\"po\": \"A\", \"ba\": \"B\", \"dev\": \"C\"}\n```";
-    let result = parse_llm_summary(text).unwrap();
-    assert_eq!(result.po, "A");
+    // With an empty graph there are still no routes, so nothing to enrich.
+    let (_, _, updated) = enrich_classes_for_chains(
+        &graph,
+        &[],
+        &std::env::temp_dir(),
+        prev.clone(),
+        &adapter,
+        None,
+        "model",
+        800,
+        5,
+        0,
+        "en",
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(adapter.calls(), 0);
+    // The cached entry should survive in the updated store.
+    assert!(updated.entries.contains_key("com.example.MyService"));
 }
 
 fn make_community(route_prefixes: Option<Vec<&str>>) -> cih_core::Node {

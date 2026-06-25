@@ -15,8 +15,8 @@ pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
 pub use module_tree::{
     build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
-    FeatureMetaEntry, ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode,
-    WikiModuleTree,
+    ClassCacheEntry, ClassEnrichmentStore, FeatureMetaEntry, ModuleTreeSource, WikiMeta,
+    WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
 };
 
 use std::collections::{BTreeMap, HashMap};
@@ -166,6 +166,52 @@ pub struct WikiOutcome {
     pub llm_enriched: bool,
 }
 
+/// Strip redundant class/method references that the LLM sometimes prepends to descriptions.
+/// Handles patterns like `ClassName.methodName/N()`, "The ClassName ...", `` `methodName` ``.
+fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
+    let mut s = desc.trim().to_string();
+
+    // Strip ClassName.methodName/N() or ClassName.methodName/N() style prefix (with optional backticks)
+    // e.g. "`DelinquencyApiResource`.updateDelinquencyBucket/2() processes..."
+    // e.g. "DelinquencyApiResource.updateDelinquencyBucket/2() processes..."
+    let prefix_dot = format!("{}.", cls);
+    let prefix_bt = format!("`{}`.", cls);
+    for prefix in &[prefix_bt.as_str(), prefix_dot.as_str()] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            // consume methodName/N() or just methodName
+            let after = rest
+                .find(|c: char| c == ' ' || c == '\n')
+                .map(|i| rest[i..].trim_start())
+                .unwrap_or("");
+            if !after.is_empty() {
+                s = after.to_string();
+                break;
+            }
+        }
+    }
+
+    // Strip "The ClassName " at start (e.g. "The DelinquencyApiResource resource handles...")
+    let the_cls = format!("The {} ", cls);
+    if let Some(rest) = s.strip_prefix(&the_cls) {
+        // Lowercase first char since we removed the "The ClassName " subject
+        // Only do this if the remainder looks like a predicate (starts lowercase or verb)
+        s = rest.to_string();
+    }
+
+    // Strip leading backtick-quoted method name (e.g. "`createDelinquencyBucket` is called to...")
+    let bt_meth = format!("`{}` ", meth);
+    if let Some(rest) = s.strip_prefix(&bt_meth) {
+        s = rest.to_string();
+    }
+
+    // Capitalise first letter
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome> {
     let graph = if input.grouping == "package" {
         WikiGraph::build_package_grouped(input.nodes, input.edges, &*input.feature_of)
@@ -297,7 +343,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
                         if let Some(desc) = ctrl_summary.method_descriptions.get(meth) {
                             method_flow_desc
                                 .entry(method_id.to_string())
-                                .or_insert_with(|| desc.clone());
+                                .or_insert_with(|| clean_method_desc(desc, cls, meth));
                         }
                     }
                 }

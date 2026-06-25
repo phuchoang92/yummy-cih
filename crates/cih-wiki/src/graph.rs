@@ -53,6 +53,10 @@ pub struct WikiGraph {
     /// class_id → method/constructor nodes (from HasMethod edges), sorted by start_line
     pub methods_by_class: BTreeMap<String, Vec<Node>>,
 
+    /// interface_method_id → [impl_method_ids] (reverse of MethodImplements edges)
+    /// Used in `build_call_chain` to continue traversal through interface boundaries.
+    pub impl_methods: BTreeMap<String, Vec<String>>,
+
     /// method_id → [dbquery_id]
     pub executes_query: BTreeMap<String, Vec<String>>,
     /// dbquery_id → [dbtable_id]
@@ -331,6 +335,7 @@ impl WikiGraph {
         let mut executes_query: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut query_reads_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut query_writes_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut impl_methods: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for e in edges {
             let src = e.src.as_str().to_string();
@@ -367,6 +372,11 @@ impl WikiGraph {
                             .or_default()
                             .push(method_node.clone());
                     }
+                }
+                // MethodImplements: src=impl_method, dst=interface_method.
+                // Build the reverse map so BFS can hop from interface → impl.
+                EdgeKind::MethodImplements => {
+                    impl_methods.entry(dst).or_default().push(src);
                 }
                 EdgeKind::ExecutesQuery => {
                     executes_query.entry(src).or_default().push(dst);
@@ -549,6 +559,7 @@ impl WikiGraph {
             community_stereotypes,
             inter_community_calls,
             methods_by_class,
+            impl_methods,
             executes_query,
             query_reads_table,
             query_writes_table,
@@ -588,6 +599,7 @@ impl WikiGraph {
         let mut executes_query: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut query_reads_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut query_writes_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut impl_methods: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for e in edges {
             let src = e.src.as_str().to_string();
@@ -624,6 +636,11 @@ impl WikiGraph {
                             .or_default()
                             .push(method_node.clone());
                     }
+                }
+                // MethodImplements: src=impl_method, dst=interface_method.
+                // Build the reverse map so BFS can hop from interface → impl.
+                EdgeKind::MethodImplements => {
+                    impl_methods.entry(dst).or_default().push(src);
                 }
                 EdgeKind::ExecutesQuery => {
                     executes_query.entry(src).or_default().push(dst);
@@ -877,6 +894,7 @@ impl WikiGraph {
             community_stereotypes,
             inter_community_calls,
             methods_by_class,
+            impl_methods,
             executes_query,
             query_reads_table,
             query_writes_table,
@@ -999,7 +1017,8 @@ impl WikiGraph {
     }
 
     /// BFS from `start_id` through `calls_out`, limited to `max_depth` hops.
-    /// Only includes method IDs whose owning class exists in the graph.
+    /// When the chain hits an interface method, follows `MethodImplements` edges
+    /// to the concrete implementation so the chain shows actual code, not stubs.
     pub fn build_call_chain(&self, start_id: &str, max_depth: usize) -> Vec<String> {
         use std::collections::{HashSet, VecDeque};
         let mut visited: HashSet<String> = HashSet::new();
@@ -1019,16 +1038,39 @@ impl WikiGraph {
                     .rsplit('.').next().unwrap_or("");
                 simple.ends_with("Exception") || simple.ends_with("Error")
             };
+            let is_interface_method = cls_id.starts_with("Interface:");
             if !is_exception_ctor
                 && (self.nodes_by_id.contains_key(cls_id.as_str())
                     || self.methods_by_class.contains_key(cls_id.as_str()))
             {
-                chain.push(id.clone());
+                // Prefer the concrete impl: if this is an interface method that has
+                // exactly one known implementation, skip the interface stub and
+                // show only the impl. If there are multiple impls, include the
+                // interface step so the chain doesn't silently branch.
+                let impls = self.impl_methods.get(id.as_str());
+                let skip_interface_stub = is_interface_method
+                    && impls.map(|v| v.len()).unwrap_or(0) == 1;
+                if !skip_interface_stub {
+                    chain.push(id.clone());
+                }
             }
+            // Follow normal call edges
             if let Some(callees) = self.calls_out.get(id.as_str()) {
                 for callee in callees {
                     if !visited.contains(callee) {
                         queue.push_back((callee.clone(), depth + 1));
+                    }
+                }
+            }
+            // When on an interface method, also follow MethodImplements edges so
+            // the concrete impl body (and its callees) appear in the chain.
+            if is_interface_method {
+                if let Some(impls) = self.impl_methods.get(id.as_str()) {
+                    for impl_id in impls {
+                        if !visited.contains(impl_id) {
+                            // Same depth: the impl IS the step, not an extra hop.
+                            queue.push_back((impl_id.clone(), depth));
+                        }
                     }
                 }
             }

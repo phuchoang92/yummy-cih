@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use anyhow::{bail, Result};
@@ -62,6 +62,30 @@ pub struct WikiMeta {
     /// `#[serde(default)]` makes existing wiki_meta.json files (without this field) still load.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_cache: BTreeMap<String, FeatureMetaEntry>,
+}
+
+/// Cached LLM enrichment for one class (keyed by FQCN in `ClassEnrichmentStore`).
+/// Stored at `.cih/class-enrichment.json`, not inside the wiki `--out` dir,
+/// so the cache survives wiki re-runs and `--out` relocations.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ClassCacheEntry {
+    /// FNV-1a 64-bit hash of sorted method source bodies; used for invalidation.
+    pub content_hash: String,
+    /// Simple method name → one-sentence business description.
+    #[serde(default)]
+    pub method_descriptions: HashMap<String, String>,
+    /// One-paragraph plain-text summary of what this class does.
+    #[serde(default)]
+    pub class_summary: String,
+}
+
+/// Top-level container serialized to `.cih/class-enrichment.json`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ClassEnrichmentStore {
+    pub schema_version: u32,
+    /// FQCN → enrichment entry.
+    #[serde(default)]
+    pub entries: BTreeMap<String, ClassCacheEntry>,
 }
 
 /// Cached feature-level LLM summary for one wiki feature.

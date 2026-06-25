@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -8,16 +7,17 @@ use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
 use cih_grouping::{FeatureStrategy, PackageConfig, PackageStrategy};
 use cih_wiki::assign_class_slugs;
 use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
-use cih_wiki::graph::{route_http_method, route_path};
+use cih_wiki::graph::route_path;
 use cih_wiki::{
-    generate_wiki, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary,
-    FeatureMetaEntry, FlowLlmSummary, WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo,
-    WikiMeta, WikiModuleCacheEntry, WikiModuleTree,
+    generate_wiki, ClassCacheEntry, ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary,
+    ControllerLlmSummary, FeatureLlmSummary, FeatureMetaEntry, FlowLlmSummary,
+    WikiGenerationInfo, WikiGraph, WikiInput, WikiLlmInfo, WikiMeta, WikiModuleCacheEntry,
+    WikiModuleTree,
 };
 use rayon::prelude::*;
 
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
-use crate::llm::{backoff_ms, make_adapter, redact_key, resolve_api_key, LlmAdapter, LlmRequest};
+use crate::llm::{backoff_ms, make_adapter, resolve_api_key, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
 
 /// FNV-1a 64-bit hash (no external dependency).
@@ -35,6 +35,23 @@ fn load_wiki_meta(out_dir: &Path) -> Option<WikiMeta> {
     let path = out_dir.join("wiki_meta.json");
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn load_class_enrichment(cih_dir: &Path) -> ClassEnrichmentStore {
+    let path = cih_dir.join("class-enrichment.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return ClassEnrichmentStore::default(),
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn save_class_enrichment(cih_dir: &Path, store: &ClassEnrichmentStore) -> Result<()> {
+    std::fs::create_dir_all(cih_dir)?;
+    let tmp = cih_dir.join("class-enrichment.json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(store)?)?;
+    std::fs::rename(&tmp, cih_dir.join("class-enrichment.json"))?;
+    Ok(())
 }
 
 pub struct WikiConfig {
@@ -406,36 +423,6 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         feature_of = Box::new(|_, _| "shared".to_string());
     }
 
-    // Derive controller scope from filtered communities.
-    // Package mode: no scope restriction (all controllers are in scope).
-    let controller_scope: Option<std::collections::HashSet<String>> = if grouping == "package"
-        || (filter_route.is_empty() && filter_community.is_empty() && max_communities.is_none())
-    {
-        None
-    } else {
-        let names: std::collections::HashSet<String> = community_nodes
-            .iter()
-            .flat_map(|c| {
-                wiki_graph
-                    .community_routes
-                    .get(c.id.as_str())
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|(handler, _route)| {
-                        handler
-                            .id
-                            .as_str()
-                            .strip_prefix("Method:")
-                            .or_else(|| handler.id.as_str().strip_prefix("Constructor:"))
-                            .and_then(|s| s.split('#').next())
-                            .and_then(|fqcn| fqcn.rsplit('.').next())
-                            .map(|s| s.to_string())
-                    })
-            })
-            .collect();
-        Some(names)
-    };
-
     // ── 9. source_bodies deferred: only read source files for filtered members ─
     // Avoids reading thousands of Java files when only a few communities survive.
     let bodies = {
@@ -524,199 +511,61 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let file_dev_map = build_file_dev_map(&nodes, &*feature_of);
 
     let mut llm_info: Option<WikiLlmInfo> = None;
-    let mut summaries_for_cache: Vec<(String, String, CommunityLlmSummary)> = Vec::new();
+    let summaries_for_cache: Vec<(String, String, CommunityLlmSummary)> = Vec::new();
+    let mut class_enrichment_store: Option<ClassEnrichmentStore> = None;
     let (llm_summaries, controller_summaries): (
         Option<HashMap<String, CommunityLlmSummary>>,
         Option<HashMap<String, ControllerLlmSummary>>,
     ) = if effective_run_llm {
-        // Incremental: load previous wiki_meta.json to find unchanged communities.
-        let prev_meta: Option<WikiMeta> = if incremental {
-            load_wiki_meta(&out_dir)
+        let cih_dir = repo.join(".cih");
+        let prev_store = if incremental {
+            load_class_enrichment(&cih_dir)
         } else {
-            None
+            ClassEnrichmentStore::default()
         };
 
-        if llm_debug_evidence {
-            println!(
-                "[llm-debug] {} communities to enrich, provider={}, model={}, base_url={}, evidence_files={}",
-                community_nodes.len(),
-                llm_provider,
-                llm_model,
-                llm_base_url,
-                evidence_corpus.file_count
-            );
-        }
-
-        const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
-        let consecutive_failures = AtomicU32::new(0);
-        let total = community_nodes.len();
-
         tracing::info!(
-            communities = total,
             concurrency = concurrency,
             model = llm_model,
             provider = llm_provider,
-            "starting LLM community enrichment"
+            "starting class-traversal LLM enrichment"
         );
 
-        let mut ui = PhaseProgress::new();
-        if json {
-            ui.hide();
-        }
-        ui.start_phase("Enriching communities", Some(total as u64));
+        let (ctrl_map, comm_map, updated_store) = enrich_classes_for_chains(
+            &wiki_graph,
+            &nodes,
+            repo,
+            prev_store,
+            adapter.as_ref().unwrap().as_ref(),
+            api_key.as_deref(),
+            llm_model,
+            llm_max_tokens,
+            llm_timeout_secs,
+            llm_retries,
+            wiki_language,
+            llm_dry_run || llm_debug_evidence,
+            json,
+        )?;
 
-        // community enrichment (par) + controller enrichment (sequential) run concurrently
-        let (community_raw, ctrl): (
-            Vec<(String, String, Result<CommunityLlmSummary>)>,
-            Option<HashMap<String, ControllerLlmSummary>>,
-        ) = pool.as_ref().unwrap().install(|| {
-            rayon::join(
-                || {
-                    let result = community_nodes
-                        .par_iter()
-                        .map(|comm| {
-                            let comm_id = comm.id.as_str().to_string();
-                            let pack = build_evidence_pack(
-                                Some(repo),
-                                &wiki_graph,
-                                comm,
-                                &evidence_corpus,
-                            );
-                            let ev_hash = fnv64(&pack.render());
-
-                            // Incremental: check evidence hash against previous run.
-                            if let Some(summary) =
-                                cached_summary(&comm_id, &ev_hash, prev_meta.as_ref())
-                            {
-                                ui.tick_skipped(format!("{} (cached)", &comm.name));
-                                return (comm_id, ev_hash, Ok(summary));
-                            }
-
-                            if is_circuit_open(
-                                consecutive_failures.load(Ordering::Relaxed),
-                                CIRCUIT_BREAKER_THRESHOLD,
-                            ) {
-                                ui.tick_failed(format!("{} (circuit open)", &comm.name));
-                                return (
-                                    comm_id,
-                                    ev_hash,
-                                    Err(anyhow::anyhow!(
-                                        "CIRCUIT_OPEN: skipped after consecutive failures"
-                                    )),
-                                );
-                            }
-
-                            ui.tick(comm.name.as_str());
-                            let r = enrich_one_community(
-                                comm,
-                                &wiki_graph,
-                                repo,
-                                &evidence_corpus,
-                                adapter.as_ref().unwrap().as_ref(),
-                                api_key.as_deref(),
-                                llm_model,
-                                llm_max_tokens,
-                                llm_timeout_secs,
-                                llm_retries,
-                                wiki_language,
-                                llm_debug_evidence,
-                                llm_dry_run,
-                            );
-                            match &r {
-                                Err(e) if is_transient_overload(e) => {
-                                    // 503/overload is not a circuit-breaker event — don't count
-                                    ui.inc_failed();
-                                }
-                                Err(_) => {
-                                    consecutive_failures.fetch_add(1, Ordering::Relaxed);
-                                    ui.inc_failed();
-                                }
-                                Ok(_) => {
-                                    consecutive_failures.store(0, Ordering::Relaxed);
-                                    ui.inc_ok();
-                                }
-                            }
-                            (comm_id, ev_hash, r)
-                        })
-                        .collect::<Vec<_>>();
-                    ui.finish_phase();
-                    result
-                },
-                || {
-                    tracing::info!(
-                        controllers = wiki_graph.routes_by_controller.len(),
-                        scoped_to = controller_scope.as_ref().map(|s| s.len()),
-                        "starting LLM controller enrichment"
-                    );
-                    let r = enrich_controllers(
-                        &wiki_graph,
-                        controller_scope.as_ref(),
-                        adapter.as_ref().unwrap().as_ref(),
-                        api_key.as_deref(),
-                        llm_model,
-                        llm_max_tokens.max(1200),
-                        llm_timeout_secs,
-                        llm_retries,
-                        wiki_language,
-                        llm_dry_run || llm_debug_evidence,
-                    );
-                    tracing::info!(enriched = r.len(), "LLM controller enrichment complete");
-                    Some(r)
-                },
-            )
-        });
-
-        let mut map: HashMap<String, CommunityLlmSummary> = HashMap::new();
-        // evidence_hash_map: community_id -> hash (for cache write)
-        let mut ev_hash_map: HashMap<String, String> = HashMap::new();
-        let mut failed_community_ids = Vec::new();
-        let mut circuit_open = false;
-        for (id, ev_hash, result) in community_raw {
-            ev_hash_map.insert(id.clone(), ev_hash);
-            match result {
-                Ok(summary) => {
-                    map.insert(id, summary);
-                }
-                Err(err) => {
-                    let err_str = err.to_string();
-                    if err_str.contains("CIRCUIT_OPEN") {
-                        circuit_open = true;
-                    }
-                    let redacted = redact_key(&err_str, api_key.as_deref());
-                    tracing::warn!(community = %id, error = %redacted, "LLM enrichment failed");
-                    failed_community_ids.push(id);
-                }
-            }
-        }
-        failed_community_ids.sort();
         tracing::info!(
-            enriched = map.len(),
-            failed = failed_community_ids.len(),
-            circuit_open = circuit_open,
-            "LLM community enrichment complete"
+            classes_in_cache = updated_store.entries.len(),
+            comm_summaries = comm_map.len(),
+            ctrl_entries = ctrl_map.len(),
+            "class-traversal enrichment complete"
         );
-        if circuit_open {
-            tracing::warn!("LLM circuit breaker opened after {} consecutive failures; remaining communities skipped", CIRCUIT_BREAKER_THRESHOLD);
-        }
-        // Stash summaries + hashes for post-generation wiki_meta update.
-        summaries_for_cache = map
-            .iter()
-            .filter_map(|(id, s)| {
-                ev_hash_map
-                    .get(id)
-                    .map(|h| (id.clone(), h.clone(), s.clone()))
-            })
-            .collect();
+
         llm_info = Some(WikiLlmInfo {
             provider: llm_provider.to_string(),
             model: llm_model.to_string(),
             language: wiki_language.to_string(),
             evidence_file_count: evidence_corpus.file_count,
-            enriched_community_count: map.len(),
-            failed_community_count: failed_community_ids.len(),
-            failed_community_ids,
+            enriched_community_count: comm_map.len(),
+            failed_community_count: 0,
+            failed_community_ids: vec![],
         });
-        (Some(map), ctrl)
+
+        class_enrichment_store = Some(updated_store);
+        (Some(comm_map), Some(ctrl_map))
     } else {
         (None, None)
     };
@@ -1098,6 +947,13 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     persist_wiki_meta_caches(&out_dir, &summaries_for_cache, &feature_cache_updates)?;
 
+    if let Some(store) = &class_enrichment_store {
+        let cih_dir = repo.join(".cih");
+        if let Err(e) = save_class_enrichment(&cih_dir, store) {
+            tracing::warn!(error = %e, "failed to save class enrichment cache");
+        }
+    }
+
     if json {
         println!(
             "{}",
@@ -1182,162 +1038,6 @@ fn latest_community_artifacts(repo: &Path) -> Result<GraphArtifacts> {
         .with_context(|| format!("no complete community artifacts under {}", parent.display()))
 }
 
-pub fn enrich_one_community(
-    community: &Node,
-    graph: &WikiGraph,
-    repo: &Path,
-    evidence_corpus: &EvidenceCorpus,
-    adapter: &dyn LlmAdapter,
-    api_key: Option<&str>,
-    model: &str,
-    max_tokens: u32,
-    timeout_secs: u64,
-    retries: u32,
-    language: &str,
-    debug_evidence: bool,
-    dry_run: bool,
-) -> Result<CommunityLlmSummary> {
-    let evidence_pack = build_evidence_pack(Some(repo), graph, community, evidence_corpus);
-    let evidence = evidence_pack.render();
-    let system = build_system_prompt(language);
-    let user = build_enrich_prompt(&community.name, &evidence);
-
-    if debug_evidence {
-        println!(
-            "--- [evidence] community: {} ({}) ---",
-            evidence_pack.community_name, evidence_pack.community_id
-        );
-        println!("{}", evidence);
-        return Ok(CommunityLlmSummary {
-            po: format!("[debug-evidence] {}", community.name),
-            ba: String::new(),
-            dev: String::new(),
-        });
-    }
-
-    if dry_run {
-        println!("--- [dry-run] community: {} ---", community.name);
-        println!("System:\n{}\n", system);
-        println!("User:\n{}", user);
-        return Ok(CommunityLlmSummary {
-            po: format!("[dry-run] {}", community.name),
-            ba: String::new(),
-            dev: String::new(),
-        });
-    }
-
-    let request = LlmRequest {
-        system,
-        user,
-        model: model.to_string(),
-        max_tokens,
-        timeout_secs,
-    };
-
-    // Jitter seed derived from community name (deterministic, no thread-rng).
-    let jitter_seed: u64 = community
-        .id
-        .as_str()
-        .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-
-    let mut last_err = None;
-    for attempt in 0..=(retries as usize) {
-        match adapter
-            .call(api_key, &request)
-            .and_then(|response| parse_llm_summary(&response.text))
-        {
-            Ok(summary) => return Ok(summary),
-            Err(err) => {
-                if attempt < retries as usize {
-                    let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
-                    tracing::debug!(
-                        attempt = attempt + 1,
-                        delay_ms = delay,
-                        error = %err,
-                        "LLM call failed, retrying"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
-                    last_err = Some(err);
-                } else {
-                    return Err(err);
-                }
-            }
-        }
-    }
-    Err(last_err.unwrap())
-}
-
-fn build_system_prompt(language: &str) -> String {
-    let mut prompt = String::from(
-        "You are a code documentation assistant. Write only from the provided evidence.\n\
-Do not invent behavior, routes, tables, or class names not in the evidence.\n\
-Cite evidence IDs (R1, P1, T1, S1, B1, ...) inline when they support a claim.",
-    );
-    if language != "en" {
-        prompt.push_str(&format!(
-            "\nWrite all documentation in language: {}.",
-            language
-        ));
-    }
-    prompt
-}
-
-pub fn build_enrich_prompt(name: &str, evidence: &str) -> String {
-    let evidence = if evidence.trim().is_empty() {
-        "none"
-    } else {
-        evidence
-    };
-    format!(
-        r#"You are writing documentation summaries from a code analysis graph.
-Module: "{name}"
-
-Evidence:
-{evidence}
-
-Write exactly three JSON fields:
-{{
-  "po": "<2-3 sentences, plain business language, cite evidence IDs like [R1],[P1]>",
-  "ba": "<2-3 sentences, workflows and contracts, cite evidence IDs like [R1],[P1]>",
-  "dev": "<2-3 sentences, technical structure, cite evidence IDs like [R1],[P1]>"
-}}
-Only output the JSON object. Do not add commentary."#
-    )
-}
-
-pub fn parse_llm_summary(text: &str) -> Result<CommunityLlmSummary> {
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
-        if let Some(summary) = summary_from_value(&val) {
-            return Ok(summary);
-        }
-    }
-    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
-        if start < end {
-            let json_str = &text[start..=end];
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if let Some(summary) = summary_from_value(&val) {
-                    return Ok(summary);
-                }
-            }
-        }
-    }
-    bail!(
-        "failed to extract JSON from LLM response: {:?}",
-        &text[..text.len().min(200)]
-    )
-}
-
-fn summary_from_value(val: &serde_json::Value) -> Option<CommunityLlmSummary> {
-    let po = val["po"].as_str().unwrap_or("").to_string();
-    let ba = val["ba"].as_str().unwrap_or("").to_string();
-    let dev = val["dev"].as_str().unwrap_or("").to_string();
-    if po.is_empty() && ba.is_empty() && dev.is_empty() {
-        None
-    } else {
-        Some(CommunityLlmSummary { po, ba, dev })
-    }
-}
 
 fn build_full_prompt(name: &str, evidence: &str) -> String {
     let evidence = if evidence.trim().is_empty() {
@@ -1384,27 +1084,22 @@ fn parse_llm_full(text: &str) -> Result<CommunityLlmFull> {
             dev_key_classes: f("dev_key_classes"),
             dev_entry_points: f("dev_entry_points"),
         };
-        let all_empty = full.po_summary.is_empty()
-            && full.po_capabilities.is_empty()
-            && full.ba_process_overview.is_empty()
-            && full.dev_responsibility.is_empty();
-        if all_empty {
+        if full.po_summary.is_empty() && full.ba_process_overview.is_empty() {
             None
         } else {
             Some(full)
         }
     };
-
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
-        if let Some(full) = try_extract(&val) {
-            return Ok(full);
+        if let Some(r) = try_extract(&val) {
+            return Ok(r);
         }
     }
-    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
-        if start < end {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text[start..=end]) {
-                if let Some(full) = try_extract(&val) {
-                    return Ok(full);
+    if let (Some(s), Some(e)) = (text.find('{'), text.rfind('}')) {
+        if s < e {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text[s..=e]) {
+                if let Some(r) = try_extract(&val) {
+                    return Ok(r);
                 }
             }
         }
@@ -1419,7 +1114,7 @@ fn enrich_one_community_full(
     community: &cih_core::Node,
     graph: &WikiGraph,
     repo: &Path,
-    evidence_corpus: &EvidenceCorpus,
+    evidence_corpus: &crate::llm::evidence::EvidenceCorpus,
     adapter: &dyn LlmAdapter,
     api_key: Option<&str>,
     model: &str,
@@ -1428,19 +1123,18 @@ fn enrich_one_community_full(
     retries: u32,
     language: &str,
 ) -> Result<CommunityLlmFull> {
+    use crate::llm::evidence::build_evidence_pack;
     let evidence_pack = build_evidence_pack(Some(repo), graph, community, evidence_corpus);
     let evidence = evidence_pack.render();
-    let mut system = String::from(
-        "You are a code documentation assistant. Write only from the provided evidence.\n\
-         Do not invent behavior, routes, tables, or class names not in the evidence.\n\
-         Cite evidence IDs (R1, T1, S1, B1, ...) when they support a claim.",
+    let system = format!(
+        "You are a code documentation assistant. Write only from the provided evidence. \
+         Do not invent behavior not in the evidence.{}",
+        if language != "en" {
+            format!(" Write all documentation in language: {}.", language)
+        } else {
+            String::new()
+        }
     );
-    if language != "en" {
-        system.push_str(&format!(
-            "\nWrite all documentation in language: {}.",
-            language
-        ));
-    }
     let user = build_full_prompt(&community.name, &evidence);
     let request = LlmRequest {
         system,
@@ -1449,7 +1143,7 @@ fn enrich_one_community_full(
         max_tokens,
         timeout_secs,
     };
-    let jitter_seed: u64 = community
+    let jitter: u64 = community
         .id
         .as_str()
         .bytes()
@@ -1463,8 +1157,7 @@ fn enrich_one_community_full(
             Ok(full) => return Ok(full),
             Err(err) => {
                 if attempt < retries as usize {
-                    let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
-                    tracing::debug!(attempt = attempt + 1, delay_ms = delay, error = %err, "llm-full call failed, retrying");
+                    let delay = backoff_ms(attempt, jitter.wrapping_add(attempt as u64));
                     std::thread::sleep(std::time::Duration::from_millis(delay));
                     last_err = Some(err);
                 } else {
@@ -1476,12 +1169,19 @@ fn enrich_one_community_full(
     Err(last_err.unwrap())
 }
 
-const CONTROLLER_BATCH_SIZE: usize = 1;
-const MAX_ROUTES_PER_CONTROLLER: usize = 15;
-
-fn enrich_controllers(
-    graph: &WikiGraph,
-    scope: Option<&std::collections::HashSet<String>>,
+/// Walk call chains from every route handler, enrich each unique class once,
+/// cache results in `.cih/class-enrichment.json`.
+///
+/// Returns:
+/// - `ctrl_map`: simple class name → `ControllerLlmSummary` (covers ALL classes in chains,
+///   not just controllers; `generate_wiki` resolves method descriptions from this map)
+/// - `comm_map`: community_id → synthesized `CommunityLlmSummary` (aggregated class summaries)
+/// - `ClassEnrichmentStore`: updated cache to persist after wiki generation
+pub fn enrich_classes_for_chains(
+    wiki_graph: &WikiGraph,
+    all_nodes: &[cih_core::Node],
+    repo: &Path,
+    prev_store: ClassEnrichmentStore,
     adapter: &dyn LlmAdapter,
     api_key: Option<&str>,
     model: &str,
@@ -1490,156 +1190,259 @@ fn enrich_controllers(
     retries: u32,
     language: &str,
     dry_run: bool,
-) -> HashMap<String, ControllerLlmSummary> {
-    let mut controllers: Vec<(&String, &Vec<(cih_core::Node, cih_core::Node)>)> = graph
-        .routes_by_controller
-        .iter()
-        .filter(|(name, _)| scope.map_or(true, |s| s.contains(*name)))
-        .collect();
-    controllers.sort_by_key(|(name, _)| name.as_str());
+    json_output: bool,
+) -> Result<(
+    HashMap<String, ControllerLlmSummary>,
+    HashMap<String, CommunityLlmSummary>,
+    ClassEnrichmentStore,
+)> {
+    use std::collections::BTreeMap;
 
-    if controllers.is_empty() {
-        return HashMap::new();
+    // Collect method IDs per FQCN by walking all route handler call chains.
+    let mut class_methods: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for routes in wiki_graph.routes_by_controller.values() {
+        for (handler, _route) in routes {
+            let chain = wiki_graph.build_call_chain(handler.id.as_str(), 4);
+            for method_id in chain {
+                let fqcn = method_id
+                    .strip_prefix("Method:")
+                    .or_else(|| method_id.strip_prefix("Constructor:"))
+                    .and_then(|s| s.split('#').next())
+                    .unwrap_or("")
+                    .to_string();
+                if fqcn.is_empty() {
+                    continue;
+                }
+                let methods = class_methods.entry(fqcn).or_default();
+                if !methods.contains(&method_id) {
+                    methods.push(method_id);
+                }
+            }
+        }
     }
 
-    let n_batches = controllers.chunks(CONTROLLER_BATCH_SIZE).count();
-    let mut ui_ctrl = PhaseProgress::new();
-    ui_ctrl.start_phase("Enriching controllers", Some(n_batches as u64));
+    let total = class_methods.len();
+    tracing::info!(classes = total, "class-traversal: enriching {} unique classes", total);
 
-    let mut result = HashMap::new();
+    // Quick node lookup for source body reading.
+    let node_by_id: HashMap<&str, &cih_core::Node> =
+        all_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
-    for batch in controllers.chunks(CONTROLLER_BATCH_SIZE) {
-        let batch_names: Vec<&str> = batch.iter().map(|(n, _)| n.as_str()).collect();
-        ui_ctrl.tick(batch_names.first().copied().unwrap_or("batch"));
+    let mut updated_entries: BTreeMap<String, ClassCacheEntry> = prev_store.entries.clone();
 
-        let user_prompt = build_controller_batch_prompt(batch, language);
+    let mut ui = PhaseProgress::new();
+    if json_output {
+        ui.hide();
+    }
+    ui.start_phase("Enriching classes", Some(total as u64));
 
-        if dry_run {
-            println!("--- [dry-run] controller batch ---\n{}", user_prompt);
-            for (name, _) in batch {
-                result.insert(
-                    name.to_string(),
-                    ControllerLlmSummary {
-                        description: format!("[dry-run] {}", name),
-                        feature: None,
-                        method_descriptions: HashMap::new(),
-                    },
-                );
+    for (fqcn, method_ids) in &class_methods {
+        let simple_name = fqcn.rsplit('.').next().unwrap_or(fqcn.as_str());
+
+        // Collect method nodes to read source bodies.
+        let method_nodes: Vec<cih_core::Node> = method_ids
+            .iter()
+            .filter_map(|id| node_by_id.get(id.as_str()).copied().cloned())
+            .collect();
+
+        let bodies = cih_wiki::source_bodies(&method_nodes, repo);
+
+        // Sort method IDs so hash is stable regardless of discovery order.
+        let mut sorted_bodies: Vec<(&str, &str)> = method_ids
+            .iter()
+            .filter_map(|id| {
+                bodies
+                    .get(id.as_str())
+                    .map(|b| (id.as_str(), b.stripped.as_str()))
+            })
+            .collect();
+        sorted_bodies.sort_by_key(|(id, _)| *id);
+
+        let combined = sorted_bodies
+            .iter()
+            .map(|(_, b)| *b)
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        let content_hash = fnv64(&combined);
+
+        // Cache hit — same source, reuse existing entry.
+        if let Some(cached) = prev_store.entries.get(fqcn.as_str()) {
+            if cached.content_hash == content_hash {
+                ui.tick_skipped(format!("{} (cached)", simple_name));
+                continue;
             }
-            ui_ctrl.inc_ok();
-            continue;
         }
 
-        let request = LlmRequest {
-            system: build_controller_system_prompt(language),
-            user: user_prompt,
-            model: model.to_string(),
-            max_tokens,
-            timeout_secs,
-        };
+        ui.tick(simple_name);
 
-        let jitter_seed: u64 = batch_names
-            .first()
-            .copied()
-            .unwrap_or("")
-            .bytes()
-            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        let mut last_err = None;
-        let mut batch_ok = false;
-        for attempt in 0..=(retries as usize) {
-            match adapter.call(api_key, &request) {
-                Ok(response) => {
-                    let batch_result = parse_controller_batch(&response.text);
-                    result.extend(batch_result);
-                    ui_ctrl.inc_ok();
-                    batch_ok = true;
-                    break;
-                }
-                Err(err) => {
-                    if attempt < retries as usize {
-                        let delay = backoff_ms(attempt, jitter_seed.wrapping_add(attempt as u64));
-                        tracing::debug!(attempt = attempt + 1, delay_ms = delay, error = %err, "controller batch failed, retrying");
-                        std::thread::sleep(std::time::Duration::from_millis(delay));
-                        last_err = Some(err);
-                    } else {
-                        last_err = Some(err);
+        let entry = if dry_run {
+            println!("--- [dry-run] class: {} ---", fqcn);
+            ClassCacheEntry {
+                content_hash,
+                method_descriptions: method_ids
+                    .iter()
+                    .filter_map(|id| {
+                        let m = id
+                            .split('#')
+                            .nth(1)
+                            .and_then(|x| x.split('/').next())?;
+                        Some((m.to_string(), format!("[dry-run] {}", m)))
+                    })
+                    .collect(),
+                class_summary: format!("[dry-run] {}", simple_name),
+            }
+        } else {
+            let system = build_class_system_prompt(language);
+            let user = build_class_enrich_prompt(fqcn, &sorted_bodies);
+            let request = LlmRequest {
+                system,
+                user,
+                model: model.to_string(),
+                max_tokens: max_tokens.max(800),
+                timeout_secs,
+            };
+            let jitter: u64 = fqcn
+                .bytes()
+                .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            let mut ok = None;
+            for attempt in 0..=(retries as usize) {
+                match adapter
+                    .call(api_key, &request)
+                    .and_then(|r| parse_class_enrich_response(&r.text))
+                {
+                    Ok((summary, method_descs)) => {
+                        ok = Some(ClassCacheEntry {
+                            content_hash: content_hash.clone(),
+                            method_descriptions: method_descs,
+                            class_summary: summary,
+                        });
+                        break;
+                    }
+                    Err(err) => {
+                        if attempt < retries as usize {
+                            let delay =
+                                backoff_ms(attempt, jitter.wrapping_add(attempt as u64));
+                            std::thread::sleep(std::time::Duration::from_millis(delay));
+                        } else {
+                            tracing::warn!(class = %fqcn, error = %err, "class enrichment failed");
+                        }
                     }
                 }
             }
-        }
-        if !batch_ok {
-            tracing::warn!(error = %last_err.unwrap(), "controller enrichment batch failed — continuing");
-            ui_ctrl.inc_failed();
+            ok.unwrap_or_else(|| ClassCacheEntry {
+                content_hash,
+                method_descriptions: HashMap::new(),
+                class_summary: String::new(),
+            })
+        };
+
+        updated_entries.insert(fqcn.clone(), entry);
+    }
+
+    ui.finish_phase();
+
+    // Build ControllerLlmSummary keyed by simple class name — covers all classes in chains.
+    let mut ctrl_map: HashMap<String, ControllerLlmSummary> = HashMap::new();
+    for (fqcn, _) in &class_methods {
+        let simple_name = fqcn.rsplit('.').next().unwrap_or(fqcn.as_str()).to_string();
+        if let Some(entry) = updated_entries.get(fqcn.as_str()) {
+            ctrl_map.insert(
+                simple_name,
+                ControllerLlmSummary {
+                    description: entry.class_summary.clone(),
+                    feature: None,
+                    method_descriptions: entry.method_descriptions.clone(),
+                },
+            );
         }
     }
 
-    ui_ctrl.finish_phase();
-    result
+    // Synthesize CommunityLlmSummary: aggregate class summaries by community.
+    let mut comm_texts: HashMap<String, Vec<String>> = HashMap::new();
+    for (fqcn, method_ids) in &class_methods {
+        let Some(entry) = updated_entries.get(fqcn.as_str()) else {
+            continue;
+        };
+        if entry.class_summary.is_empty() {
+            continue;
+        }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for mid in method_ids {
+            if let Some(comm_id) = wiki_graph.community_by_member.get(mid.as_str()) {
+                if seen.insert(comm_id.as_str()) {
+                    comm_texts
+                        .entry(comm_id.clone())
+                        .or_default()
+                        .push(entry.class_summary.clone());
+                }
+            }
+        }
+    }
+    let comm_map: HashMap<String, CommunityLlmSummary> = comm_texts
+        .into_iter()
+        .map(|(id, summaries)| {
+            let text = summaries.join(" ");
+            (
+                id,
+                CommunityLlmSummary {
+                    po: text.clone(),
+                    ba: text,
+                    dev: String::new(),
+                },
+            )
+        })
+        .collect();
+
+    Ok((
+        ctrl_map,
+        comm_map,
+        ClassEnrichmentStore {
+            schema_version: 1,
+            entries: updated_entries,
+        },
+    ))
 }
 
-fn build_controller_system_prompt(language: &str) -> String {
+fn build_class_system_prompt(language: &str) -> String {
     let mut s = String::from(
-        "You are a code documentation assistant. Write concise business descriptions \
-         from the provided API route signatures. Do not invent behavior not implied by \
-         the route paths and method names.",
+        "You are a code documentation assistant. Describe Java class methods in one sentence \
+         each for a business analyst. Return JSON only. Do not invent behavior. \
+         Start each method description with an action verb. \
+         Do not mention the class name, method name, or arity (e.g. /2()) in the description.",
     );
     if language != "en" {
-        s.push_str(&format!(
-            " Write all descriptions in language: {}.",
-            language
-        ));
+        s.push_str(&format!(" Write all descriptions in language: {}.", language));
     }
     s
 }
 
-fn build_controller_batch_prompt(
-    batch: &[(&String, &Vec<(cih_core::Node, cih_core::Node)>)],
-    _language: &str,
-) -> String {
-    let mut s = String::from(
-        "Document these REST API controllers for business stakeholders.\n\
-         For each controller provide:\n\
-         - \"description\": 1-2 sentences in plain business language\n\
-         - \"feature\": business domain slug (e.g. \"payment\", \"auth\", \"order\") \
-           inferred from the class name and routes\n\
-         - \"methods\": object mapping each handler name to a one-sentence business description\n\n\
-         Respond with a single JSON object only:\n\
-         { \"ControllerName\": { \"description\": \"...\", \"feature\": \"slug\", \
-         \"methods\": { \"handlerName\": \"one sentence\", ... } }, ... }\n\n\
-         Controllers:\n\n",
+fn build_class_enrich_prompt(fqcn: &str, bodies: &[(&str, &str)]) -> String {
+    let simple = fqcn.rsplit('.').next().unwrap_or(fqcn);
+    let mut s = format!("Class: {simple}\n\nMethods:\n");
+    for (i, (method_id, body)) in bodies.iter().enumerate() {
+        let method_name = method_id
+            .split('#')
+            .nth(1)
+            .and_then(|x| x.split('/').next())
+            .unwrap_or("unknown");
+        let truncated = if body.len() > 600 { &body[..600] } else { body };
+        s.push_str(&format!("{}. {}\n{}\n\n", i + 1, method_name, truncated));
+    }
+    s.push_str(
+        "Return exactly this JSON:\n\
+         {\n\
+           \"summary\": \"one paragraph: what this class does in the system\",\n\
+           \"methods\": {\n\
+             \"methodName\": \"Validates the request payload and delegates to the write service.\"\n\
+           }\n\
+         }\n\
+         Each method value must start with a verb and must not repeat the class or method name.\n\
+         Output only the JSON object.",
     );
-
-    for (ctrl_name, routes) in batch {
-        s.push_str(ctrl_name);
-        s.push_str(":\n");
-        for (handler, route) in routes.iter().take(MAX_ROUTES_PER_CONTROLLER) {
-            let method = route_http_method(route);
-            let path = route_path(route);
-            let handler_name = handler
-                .id
-                .as_str()
-                .split('#')
-                .nth(1)
-                .and_then(|x| x.split('/').next())
-                .unwrap_or("handler");
-            s.push_str(&format!("  {} {} — {}\n", method, path, handler_name));
-        }
-        if routes.len() > MAX_ROUTES_PER_CONTROLLER {
-            s.push_str(&format!(
-                "  ... and {} more routes\n",
-                routes.len() - MAX_ROUTES_PER_CONTROLLER
-            ));
-        }
-        s.push('\n');
-    }
-
     s
 }
 
-fn parse_controller_batch(text: &str) -> HashMap<String, ControllerLlmSummary> {
-    let mut result = HashMap::new();
-
-    // Strip markdown code fences that some models (e.g. Gemini) add
+fn parse_class_enrich_response(text: &str) -> Result<(String, HashMap<String, String>)> {
     let cleaned = text
         .trim()
         .trim_start_matches("```json")
@@ -1647,32 +1450,10 @@ fn parse_controller_batch(text: &str) -> HashMap<String, ControllerLlmSummary> {
         .trim_end_matches("```")
         .trim();
 
-    let val: serde_json::Value = if let Ok(v) = serde_json::from_str(cleaned) {
-        v
-    } else if let (Some(s), Some(e)) = (cleaned.find('{'), cleaned.rfind('}')) {
-        if s < e {
-            match serde_json::from_str(&cleaned[s..=e]) {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to parse controller batch JSON");
-                    return result;
-                }
-            }
-        } else {
-            return result;
-        }
-    } else {
-        return result;
-    };
-
-    if let Some(obj) = val.as_object() {
-        for (ctrl_name, ctrl_val) in obj {
-            let description = ctrl_val["description"].as_str().unwrap_or("").to_string();
-            let feature = ctrl_val["feature"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-            let method_descriptions: HashMap<String, String> = ctrl_val["methods"]
+    let extract =
+        |val: &serde_json::Value| -> Option<(String, HashMap<String, String>)> {
+            let summary = val["summary"].as_str().unwrap_or("").to_string();
+            let methods: HashMap<String, String> = val["methods"]
                 .as_object()
                 .map(|m| {
                     m.iter()
@@ -1680,34 +1461,31 @@ fn parse_controller_batch(text: &str) -> HashMap<String, ControllerLlmSummary> {
                         .collect()
                 })
                 .unwrap_or_default();
-            if !description.is_empty() || feature.is_some() || !method_descriptions.is_empty() {
-                result.insert(
-                    ctrl_name.clone(),
-                    ControllerLlmSummary {
-                        description,
-                        feature,
-                        method_descriptions,
-                    },
-                );
+            if summary.is_empty() && methods.is_empty() {
+                None
+            } else {
+                Some((summary, methods))
+            }
+        };
+
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(cleaned) {
+        if let Some(r) = extract(&val) {
+            return Ok(r);
+        }
+    }
+    if let (Some(s), Some(e)) = (cleaned.find('{'), cleaned.rfind('}')) {
+        if s < e {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cleaned[s..=e]) {
+                if let Some(r) = extract(&val) {
+                    return Ok(r);
+                }
             }
         }
     }
-
-    result
-}
-
-fn is_transient_overload(err: &anyhow::Error) -> bool {
-    let msg = err.to_string();
-    msg.contains("HTTP 503")
-        || msg.contains("HTTP 429")
-        || msg.contains("high demand")
-        || msg.contains("UNAVAILABLE")
-        || msg.contains("rate limit")
-        || msg.contains("Too Many Requests")
-}
-
-pub fn is_circuit_open(consecutive: u32, threshold: u32) -> bool {
-    consecutive >= threshold
+    bail!(
+        "failed to extract class JSON from LLM response: {:?}",
+        &text[..text.len().min(200)]
+    )
 }
 
 fn persist_wiki_meta_caches(
@@ -2470,21 +2248,6 @@ pub fn cached_feature_summary(
         ba_process_overview: entry.ba_process_overview.clone(),
         ba_business_rules: entry.ba_business_rules.clone(),
     })
-}
-
-pub fn cached_summary(
-    comm_id: &str,
-    ev_hash: &str,
-    meta: Option<&WikiMeta>,
-) -> Option<CommunityLlmSummary> {
-    let cached = meta?.module_cache.get(comm_id)?;
-    if cached.evidence_hash != ev_hash {
-        return None;
-    }
-    let po = cached.llm_po.clone()?;
-    let ba = cached.llm_ba.clone()?;
-    let dev = cached.llm_dev.clone()?;
-    Some(CommunityLlmSummary { po, ba, dev })
 }
 
 /// Extract the first meaningful (non-generic) path segment from a route pattern,
