@@ -227,7 +227,612 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
     }
 }
 
-pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome> {
+/// Collected page output from one generation phase (pages + nav entries).
+struct PageBatch {
+    pages: Vec<PageEntry>,
+    nav: BTreeMap<String, Vec<NavEntry>>,
+}
+
+impl PageBatch {
+    fn new() -> Self {
+        Self { pages: Vec::new(), nav: BTreeMap::new() }
+    }
+}
+
+/// Shared immutable context threaded through all per-phase generation helpers.
+struct PageGenCtx<'a> {
+    graph: &'a WikiGraph,
+    input: &'a WikiInput<'a>,
+    out_dir: &'a Path,
+    method_flow_desc: &'a HashMap<String, String>,
+    known_features: &'a std::collections::HashSet<String>,
+    process_by_handler: &'a HashMap<String, String>,
+    class_primary_feature: &'a HashMap<String, String>,
+    feature_scheduled_counts: &'a HashMap<String, usize>,
+    feature_listener_counts: &'a HashMap<String, usize>,
+}
+
+/// Write the system-level global pages: system index + shared routes.
+fn emit_global_pages(
+    feature_groups: &[FeatureGroup],
+    graph: &WikiGraph,
+    repo_name: &str,
+    out_dir: &Path,
+) -> Result<PageBatch> {
+    let mut batch = PageBatch::new();
+
+    let system_md = pages::system_index::render_system_index(feature_groups, graph, repo_name);
+    std::fs::write(out_dir.join("pages/index.md"), &system_md)?;
+    batch.pages.push(PageEntry {
+        slug: "index".into(),
+        role: "system".into(),
+        title: repo_name.to_string(),
+        kind: "index".into(),
+        path: "pages/index.md".into(),
+        json_path: None,
+        community_id: None,
+    });
+
+    let routes_md = pages::shared::render_routes_page(graph);
+    let routes_json = pages::shared::render_routes_json(graph);
+    std::fs::write(out_dir.join("pages/routes.md"), &routes_md)?;
+    std::fs::write(
+        out_dir.join("pages/routes.json"),
+        serde_json::to_string_pretty(&routes_json)?,
+    )?;
+    batch.pages.push(PageEntry {
+        slug: "routes".into(),
+        role: "shared".into(),
+        title: "API Routes".into(),
+        kind: "routes".into(),
+        path: "pages/routes.md".into(),
+        json_path: Some("pages/routes.json".into()),
+        community_id: None,
+    });
+
+    Ok(batch)
+}
+
+/// Write all pages for one feature: index, PO, BA, per-class dev, and per-route API flow.
+/// `class_dev_slugs` is populated during dev-class generation and read by API-flow generation.
+fn emit_feature_section(
+    group: &FeatureGroup,
+    ctx: &PageGenCtx<'_>,
+    class_dev_slugs: &mut HashMap<String, String>,
+    dev_paths: &HashMap<String, String>,
+) -> Result<PageBatch> {
+    let feature = &group.feature;
+    let cids = &group.community_ids;
+    let mut batch = PageBatch::new();
+
+    // D1 — Feature landing index
+    let idx_md = pages::feature_index::render_feature_index(feature, cids, dev_paths, ctx.graph);
+    std::fs::write(ctx.out_dir.join(format!("pages/{}/index.md", feature)), &idx_md)?;
+    batch.nav.entry(feature.clone()).or_default().push(NavEntry {
+        slug: format!("{}/index", feature),
+        title: format!("{} Overview", capitalize(feature)),
+        kind: "index".into(),
+    });
+    batch.pages.push(PageEntry {
+        slug: format!("{}/index", feature),
+        role: feature.clone(),
+        title: format!("{} Overview", capitalize(feature)),
+        kind: "index".into(),
+        path: format!("pages/{}/index.md", feature),
+        json_path: None,
+        community_id: None,
+    });
+
+    // D2 — Feature PO
+    let feature_llm = ctx.input
+        .feature_llm_summaries
+        .as_ref()
+        .and_then(|m| m.get(feature.as_str()));
+    let po_md = pages::feature_po::render_feature_po(
+        feature,
+        cids,
+        ctx.graph,
+        ctx.input.llm_summaries.as_ref(),
+        ctx.input.llm_full.as_ref(),
+        feature_llm,
+        ctx.input.flow_llm_summaries.as_ref(),
+        ctx.feature_scheduled_counts.get(feature.as_str()).copied().unwrap_or(0),
+        ctx.feature_listener_counts.get(feature.as_str()).copied().unwrap_or(0),
+    );
+    std::fs::write(ctx.out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
+    batch.nav.entry(feature.clone()).or_default().push(NavEntry {
+        slug: format!("{}/po", feature),
+        title: format!("{} — Business Overview", capitalize(feature)),
+        kind: "po".into(),
+    });
+    batch.pages.push(PageEntry {
+        slug: format!("{}/po", feature),
+        role: feature.clone(),
+        title: format!("{} — Business Overview", capitalize(feature)),
+        kind: "po".into(),
+        path: format!("pages/{}/po.md", feature),
+        json_path: None,
+        community_id: None,
+    });
+
+    // D3 — Feature BA
+    let ba_md = pages::feature_ba::render_feature_ba(
+        feature,
+        cids,
+        ctx.graph,
+        ctx.input.llm_summaries.as_ref(),
+        ctx.input.llm_full.as_ref(),
+        feature_llm,
+        ctx.input.flow_llm_summaries.as_ref(),
+    );
+    std::fs::write(ctx.out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
+    batch.nav.entry(feature.clone()).or_default().push(NavEntry {
+        slug: format!("{}/ba", feature),
+        title: format!("{} — Business Analysis", capitalize(feature)),
+        kind: "ba".into(),
+    });
+    batch.pages.push(PageEntry {
+        slug: format!("{}/ba", feature),
+        role: feature.clone(),
+        title: format!("{} — Business Analysis", capitalize(feature)),
+        kind: "ba".into(),
+        path: format!("pages/{}/ba.md", feature),
+        json_path: None,
+        community_id: None,
+    });
+
+    // D4 — Per-class dev pages
+    let mut feature_class_set: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for comm_id in cids {
+        if let Some(members) = ctx.graph.members_by_community.get(comm_id) {
+            for m in members {
+                if !matches!(
+                    m.kind,
+                    NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+                ) {
+                    continue;
+                }
+                if let Some(cls_id) =
+                    m.id.as_str().split_once('#').map(|(prefix, _)| {
+                        let fqcn = prefix
+                            .trim_start_matches("Method:")
+                            .trim_start_matches("Constructor:")
+                            .trim_start_matches("Function:");
+                        ["Class:", "Interface:", "Enum:", "Record:"]
+                            .iter()
+                            .map(|pfx| format!("{}{}", pfx, fqcn))
+                            .find(|id| {
+                                ctx.graph.nodes_by_id.contains_key(id.as_str())
+                                    || ctx.graph.methods_by_class.contains_key(id.as_str())
+                            })
+                            .unwrap_or_else(|| format!("Class:{}", fqcn))
+                    })
+                {
+                    if ctx.class_primary_feature
+                        .get(&cls_id)
+                        .map(|f| f == feature)
+                        .unwrap_or(true)
+                    {
+                        feature_class_set.insert(cls_id);
+                    }
+                }
+            }
+        }
+    }
+
+    let slug_for = features::assign_class_slugs(&feature_class_set, |id| {
+        ctx.graph
+            .nodes_by_id
+            .get(id)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| {
+                id.trim_start_matches("Class:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string()
+            })
+    });
+
+    for class_id in &feature_class_set {
+        let slug = slug_for
+            .get(class_id.as_str())
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let page_path = format!("{}/dev/{}", feature, slug);
+        class_dev_slugs.insert(class_id.clone(), slug.clone());
+
+        let synthesized;
+        let cls_node: &Node = match ctx.graph.nodes_by_id.get(class_id.as_str()) {
+            Some(n) => n,
+            None => {
+                let simple_name = class_id
+                    .trim_start_matches("Class:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let file = ctx.graph
+                    .methods_by_class
+                    .get(class_id.as_str())
+                    .and_then(|ms| ms.first())
+                    .map(|m| m.file.clone())
+                    .unwrap_or_default();
+                synthesized = Node {
+                    id: NodeId::new(class_id.clone()),
+                    kind: NodeKind::Class,
+                    name: simple_name,
+                    qualified_name: None,
+                    file,
+                    range: Range::default(),
+                    props: None,
+                };
+                &synthesized
+            }
+        };
+        let md = pages::dev::render_dev_class(
+            ctx.graph, cls_node, &ctx.input.bodies, ctx.method_flow_desc,
+        );
+        let json_val = pages::dev::render_dev_class_json(ctx.graph, cls_node);
+        std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
+        std::fs::write(
+            ctx.out_dir.join(format!("pages/{}.json", page_path)),
+            serde_json::to_string_pretty(&json_val)?,
+        )?;
+        let dev_title = cls_node.name.clone();
+        batch.nav.entry(feature.clone()).or_default().push(NavEntry {
+            slug: page_path.clone(),
+            title: dev_title.clone(),
+            kind: "dev".into(),
+        });
+        batch.pages.push(PageEntry {
+            slug: page_path.clone(),
+            role: feature.clone(),
+            title: dev_title,
+            kind: "dev".into(),
+            path: format!("pages/{}.md", page_path),
+            json_path: Some(format!("pages/{}.json", page_path)),
+            community_id: None,
+        });
+    }
+
+    // D5 — Per-route API-flow pages
+    let mut feature_controllers: Vec<(&str, &Vec<(Node, Node)>)> = ctx.graph
+        .routes_by_controller
+        .iter()
+        .filter(|(ctrl, _)| {
+            let graph_feature = ctx.graph
+                .controller_feature
+                .get(*ctrl)
+                .map(|f| f.as_str())
+                .unwrap_or("shared");
+            let effective_feature = if graph_feature == "shared" {
+                let llm_feat = ctx.input
+                    .controller_summaries
+                    .as_ref()
+                    .and_then(|m| m.get(*ctrl))
+                    .and_then(|s| s.feature.as_deref())
+                    .unwrap_or("shared");
+                if ctx.known_features.contains(llm_feat) { llm_feat } else { graph_feature }
+            } else {
+                graph_feature
+            };
+            effective_feature == feature.as_str()
+        })
+        .map(|(ctrl, routes)| (ctrl.as_str(), routes))
+        .collect();
+    feature_controllers.sort_by_key(|(ctrl, _)| *ctrl);
+
+    if !feature_controllers.is_empty() {
+        let api_dir = ctx.out_dir.join(format!("pages/{}/api", feature));
+        std::fs::create_dir_all(&api_dir)?;
+        std::fs::write(
+            api_dir.join("_category_.json"),
+            "{\"position\": 3, \"label\": \"API Surface\"}\n",
+        )?;
+        for (ctrl_pos, (ctrl_name, routes)) in feature_controllers.iter().enumerate() {
+            let ctrl_slug = slugify(ctrl_name);
+            let display_title = pages::feature_po::controller_display_name(ctrl_name);
+            let ctrl_summary = ctx.input
+                .controller_summaries
+                .as_ref()
+                .and_then(|m| m.get(*ctrl_name));
+            let description = ctrl_summary
+                .map(|s| s.description.as_str())
+                .filter(|s| !s.is_empty());
+            let empty_methods = HashMap::new();
+            let method_descriptions = ctrl_summary
+                .map(|s| &s.method_descriptions)
+                .unwrap_or(&empty_methods);
+
+            let stale = api_dir.join(format!("{}.md", ctrl_slug));
+            let _ = std::fs::remove_file(&stale);
+
+            let ctrl_dir = api_dir.join(&ctrl_slug);
+            std::fs::create_dir_all(&ctrl_dir)?;
+            std::fs::write(
+                ctrl_dir.join("_category_.json"),
+                format!(
+                    "{{\"position\": {}, \"label\": \"{}\", \"collapsible\": true, \"collapsed\": false}}\n",
+                    ctrl_pos + 1,
+                    display_title
+                ),
+            )?;
+
+            let ctrl_md = pages::feature_po::render_controller_page(
+                ctrl_name,
+                routes,
+                description,
+                method_descriptions,
+            );
+            std::fs::write(ctrl_dir.join("index.md"), &ctrl_md)?;
+
+            for (route_pos, (handler, route)) in routes.iter().enumerate() {
+                let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
+                let process_id = ctx.process_by_handler.get(handler.id.as_str());
+                let flow_summary = process_id
+                    .and_then(|pid| {
+                        ctx.input.flow_llm_summaries.as_ref()?.get(pid.as_str())
+                    })
+                    .or_else(|| {
+                        ctx.input.flow_llm_summaries.as_ref()?.get(handler.id.as_str())
+                    });
+                let flow_md = pages::api_flow::render_api_flow_page(
+                    handler,
+                    route,
+                    route_pos + 1,
+                    flow_summary,
+                    ctx.graph,
+                    class_dev_slugs,
+                    ctx.method_flow_desc,
+                );
+                let page_path = format!("{}/api/{}/{}", feature, ctrl_slug, handler_slug);
+                std::fs::write(
+                    ctx.out_dir.join(format!("pages/{}.md", page_path)),
+                    &flow_md,
+                )?;
+                let flow_title = pages::api_flow::handler_title(handler.id.as_str());
+                batch.nav.entry(feature.clone()).or_default().push(NavEntry {
+                    slug: page_path.clone(),
+                    title: flow_title.clone(),
+                    kind: "api-flow".into(),
+                });
+                batch.pages.push(PageEntry {
+                    slug: page_path.clone(),
+                    role: feature.clone(),
+                    title: flow_title,
+                    kind: "api-flow".into(),
+                    path: format!("pages/{}.md", page_path),
+                    json_path: None,
+                    community_id: None,
+                });
+            }
+        }
+    }
+
+    Ok(batch)
+}
+
+/// Write scheduled-job and event-listener pages for all features.
+fn emit_entrypoint_section(
+    ctx: &PageGenCtx<'_>,
+    class_dev_slugs: &HashMap<String, String>,
+) -> Result<PageBatch> {
+    let mut batch = PageBatch::new();
+    if ctx.input.entrypoints.is_empty() {
+        return Ok(batch);
+    }
+
+    let all_method_desc: HashMap<String, String> = ctx.input
+        .controller_summaries
+        .iter()
+        .flat_map(|m| m.values())
+        .flat_map(|s| s.method_descriptions.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let mut by_feature_scheduled: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
+        BTreeMap::new();
+    let mut by_feature_events: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
+        BTreeMap::new();
+
+    for ep in &ctx.input.entrypoints {
+        let file = ctx.graph
+            .nodes_by_id
+            .get(ep.method_id.as_str())
+            .map(|n| n.file.as_str())
+            .unwrap_or("");
+        let feature = (ctx.input.feature_of)(ep.method_id.as_str(), file);
+        match ep.kind.as_str() {
+            "scheduled" => by_feature_scheduled.entry(feature).or_default().push(ep),
+            "event_listener" => by_feature_events.entry(feature).or_default().push(ep),
+            _ => {}
+        }
+    }
+
+    for (feature, entries) in &by_feature_scheduled {
+        let api_dir = ctx.out_dir.join(format!("pages/{}/api", feature));
+        std::fs::create_dir_all(&api_dir)?;
+        let cat_path = api_dir.join("_category_.json");
+        if !cat_path.exists() {
+            std::fs::write(&cat_path, "{\"position\": 3, \"label\": \"API Surface\"}\n")?;
+        }
+        let sched_dir = api_dir.join("scheduled");
+        std::fs::create_dir_all(&sched_dir)?;
+        std::fs::write(
+            sched_dir.join("_category_.json"),
+            "{\"label\": \"Scheduled Jobs\", \"collapsible\": true, \"collapsed\": false}\n",
+        )?;
+        for (pos, ep) in entries.iter().enumerate() {
+            let slug = pages::api_flow::handler_slug(ep.method_id.as_str());
+            let md = pages::api_flow::render_scheduled_flow_page(
+                ep.method_id.as_str(),
+                pos + 1,
+                ctx.graph,
+                class_dev_slugs,
+                &all_method_desc,
+            );
+            let page_path = format!("{}/api/scheduled/{}", feature, slug);
+            std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
+            let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
+            batch.nav.entry(feature.clone()).or_default().push(NavEntry {
+                slug: page_path.clone(),
+                title: flow_title.clone(),
+                kind: "scheduled-flow".into(),
+            });
+            batch.pages.push(PageEntry {
+                slug: page_path.clone(),
+                role: feature.clone(),
+                title: flow_title,
+                kind: "scheduled-flow".into(),
+                path: format!("pages/{}.md", page_path),
+                json_path: None,
+                community_id: None,
+            });
+        }
+    }
+
+    for (feature, entries) in &by_feature_events {
+        let api_dir = ctx.out_dir.join(format!("pages/{}/api", feature));
+        std::fs::create_dir_all(&api_dir)?;
+        let cat_path = api_dir.join("_category_.json");
+        if !cat_path.exists() {
+            std::fs::write(&cat_path, "{\"position\": 3, \"label\": \"API Surface\"}\n")?;
+        }
+        let events_dir = api_dir.join("events");
+        std::fs::create_dir_all(&events_dir)?;
+        std::fs::write(
+            events_dir.join("_category_.json"),
+            "{\"label\": \"Event Listeners\", \"collapsible\": true, \"collapsed\": false}\n",
+        )?;
+        for (pos, ep) in entries.iter().enumerate() {
+            let slug = pages::api_flow::handler_slug(ep.method_id.as_str());
+            let md = pages::api_flow::render_listener_flow_page(
+                ep.method_id.as_str(),
+                ep.topics.as_slice(),
+                pos + 1,
+                ctx.graph,
+                class_dev_slugs,
+                &all_method_desc,
+            );
+            let page_path = format!("{}/api/events/{}", feature, slug);
+            std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
+            let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
+            batch.nav.entry(feature.clone()).or_default().push(NavEntry {
+                slug: page_path.clone(),
+                title: flow_title.clone(),
+                kind: "listener-flow".into(),
+            });
+            batch.pages.push(PageEntry {
+                slug: page_path.clone(),
+                role: feature.clone(),
+                title: flow_title,
+                kind: "listener-flow".into(),
+                path: format!("pages/{}.md", page_path),
+                json_path: None,
+                community_id: None,
+            });
+        }
+    }
+
+    Ok(batch)
+}
+
+/// Write community-level pages: community index and per-community detail/PO/BA pages.
+fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
+    let mut batch = PageBatch::new();
+    let comm_slug_map = slugify::build_slug_map(&ctx.graph.community_nodes);
+    std::fs::create_dir_all(ctx.out_dir.join("pages/communities"))?;
+
+    let comm_idx = pages::community::render_community_index(
+        &ctx.graph.community_nodes,
+        &comm_slug_map,
+        ctx.graph,
+    );
+    std::fs::write(ctx.out_dir.join("pages/communities/index.md"), &comm_idx)?;
+    batch.pages.push(PageEntry {
+        slug: "communities/index".into(),
+        role: "communities".into(),
+        title: "Communities".into(),
+        kind: "index".into(),
+        path: "pages/communities/index.md".into(),
+        json_path: None,
+        community_id: None,
+    });
+
+    for comm in &ctx.graph.community_nodes {
+        let comm_id = comm.id.as_str().to_string();
+        let dir_name = comm_slug_map
+            .get(&comm_id)
+            .cloned()
+            .unwrap_or_else(|| slugify(comm.id.as_str()));
+        let dir = ctx.out_dir.join(format!("pages/communities/{dir_name}"));
+        std::fs::create_dir_all(&dir)?;
+
+        let processes_here: Vec<&Node> = ctx.graph
+            .process_nodes
+            .iter()
+            .filter(|p| {
+                p.props
+                    .as_ref()
+                    .and_then(|props| props.get("communities"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().any(|x| x.as_str() == Some(comm_id.as_str())))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let llm = ctx.input.llm_summaries.as_ref().and_then(|m| m.get(&comm_id));
+        let llm_full = ctx.input.llm_full.as_ref().and_then(|m| m.get(&comm_id));
+
+        let detail_md = pages::community::render_community_detail(
+            comm, ctx.graph, &processes_here, llm,
+        );
+        std::fs::write(dir.join("index.md"), &detail_md)?;
+        batch.pages.push(PageEntry {
+            slug: format!("communities/{dir_name}/index"),
+            role: "communities".into(),
+            title: comm.name.clone(),
+            kind: "index".into(),
+            path: format!("pages/communities/{dir_name}/index.md"),
+            json_path: None,
+            community_id: Some(comm_id.clone()),
+        });
+
+        if let Some(full) = llm_full {
+            let po_md = pages::community::render_community_po(comm, ctx.graph, full);
+            std::fs::write(dir.join("po.md"), &po_md)?;
+            batch.pages.push(PageEntry {
+                slug: format!("communities/{dir_name}/po"),
+                role: "communities".into(),
+                title: format!("{} — Business Overview", comm.name),
+                kind: "po".into(),
+                path: format!("pages/communities/{dir_name}/po.md"),
+                json_path: None,
+                community_id: Some(comm_id.clone()),
+            });
+
+            let ba_md = pages::community::render_community_ba(
+                comm, ctx.graph, &processes_here, full,
+            );
+            std::fs::write(dir.join("ba.md"), &ba_md)?;
+            batch.pages.push(PageEntry {
+                slug: format!("communities/{dir_name}/ba"),
+                role: "communities".into(),
+                title: format!("{} — Business Analysis", comm.name),
+                kind: "ba".into(),
+                path: format!("pages/communities/{dir_name}/ba.md"),
+                json_path: None,
+                community_id: Some(comm_id.clone()),
+            });
+        }
+    }
+
+    Ok(batch)
+}
+
+pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome> {
     let graph = if input.grouping == "package" {
         WikiGraph::build_package_grouped(input.nodes, input.edges, &*input.feature_of)
     } else {
@@ -379,7 +984,7 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         }
     }
 
-    let module_tree = input.module_tree.unwrap_or_else(|| {
+    let module_tree = input.module_tree.take().unwrap_or_else(|| {
         build_graph_module_tree(
             &graph,
             input.repo_map.as_ref(),
@@ -486,39 +1091,10 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         });
     }
 
-    // System index
-    let system_md =
-        pages::system_index::render_system_index(&feature_groups, &graph, &input.repo_name);
-    std::fs::write(out_dir.join("pages/index.md"), &system_md)?;
-    all_pages.push(PageEntry {
-        slug: "index".into(),
-        role: "system".into(),
-        title: input.repo_name.clone(),
-        kind: "index".into(),
-        path: "pages/index.md".into(),
-        json_path: None,
-        community_id: None,
-    });
-    page_count += 1;
-
-    // Shared routes (global aggregation)
-    let routes_md = pages::shared::render_routes_page(&graph);
-    let routes_json = pages::shared::render_routes_json(&graph);
-    std::fs::write(out_dir.join("pages/routes.md"), &routes_md)?;
-    std::fs::write(
-        out_dir.join("pages/routes.json"),
-        serde_json::to_string_pretty(&routes_json)?,
-    )?;
-    all_pages.push(PageEntry {
-        slug: "routes".into(),
-        role: "shared".into(),
-        title: "API Routes".into(),
-        kind: "routes".into(),
-        path: "pages/routes.md".into(),
-        json_path: Some("pages/routes.json".into()),
-        community_id: None,
-    });
-    page_count += 1;
+    let global_batch = emit_global_pages(&feature_groups, &graph, &input.repo_name, out_dir)?;
+    page_count += global_batch.pages.len();
+    all_pages.extend(global_batch.pages);
+    nav.extend(global_batch.nav);
 
     // Pre-pass: for each class, determine its primary feature (the one with the most methods).
     // This prevents a class from appearing as a page in multiple features when its methods are
@@ -607,569 +1183,40 @@ pub fn generate_wiki(input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOutcome
         }
     }
 
+    let ctx = PageGenCtx {
+        graph: &graph,
+        input: &input,
+        out_dir,
+        method_flow_desc: &method_flow_desc,
+        known_features: &known_features,
+        process_by_handler: &process_by_handler,
+        class_primary_feature: &class_primary_feature,
+        feature_scheduled_counts: &feature_scheduled_counts,
+        feature_listener_counts: &feature_listener_counts,
+    };
+
     // Per-feature pages
     for group in &feature_groups {
-        let feature = &group.feature;
-        let cids = &group.community_ids;
-
-        // Feature landing index
-        let idx_md = pages::feature_index::render_feature_index(feature, cids, &dev_paths, &graph);
-        std::fs::write(out_dir.join(format!("pages/{}/index.md", feature)), &idx_md)?;
-        nav.entry(feature.clone()).or_default().push(NavEntry {
-            slug: format!("{}/index", feature),
-            title: format!("{} Overview", capitalize(feature)),
-            kind: "index".into(),
-        });
-        all_pages.push(PageEntry {
-            slug: format!("{}/index", feature),
-            role: feature.clone(),
-            title: format!("{} Overview", capitalize(feature)),
-            kind: "index".into(),
-            path: format!("pages/{}/index.md", feature),
-            json_path: None,
-            community_id: None,
-        });
-        page_count += 1;
-
-        // Feature PO
-        let feature_llm = input
-            .feature_llm_summaries
-            .as_ref()
-            .and_then(|m| m.get(feature.as_str()));
-        let po_md = pages::feature_po::render_feature_po(
-            feature,
-            cids,
-            &graph,
-            input.llm_summaries.as_ref(),
-            input.llm_full.as_ref(),
-            feature_llm,
-            input.flow_llm_summaries.as_ref(),
-            feature_scheduled_counts.get(feature.as_str()).copied().unwrap_or(0),
-            feature_listener_counts.get(feature.as_str()).copied().unwrap_or(0),
-        );
-        std::fs::write(out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
-        nav.entry(feature.clone()).or_default().push(NavEntry {
-            slug: format!("{}/po", feature),
-            title: format!("{} — Business Overview", capitalize(feature)),
-            kind: "po".into(),
-        });
-        all_pages.push(PageEntry {
-            slug: format!("{}/po", feature),
-            role: feature.clone(),
-            title: format!("{} — Business Overview", capitalize(feature)),
-            kind: "po".into(),
-            path: format!("pages/{}/po.md", feature),
-            json_path: None,
-            community_id: None,
-        });
-        page_count += 1;
-
-        // Feature BA
-        let ba_md = pages::feature_ba::render_feature_ba(
-            feature,
-            cids,
-            &graph,
-            input.llm_summaries.as_ref(),
-            input.llm_full.as_ref(),
-            feature_llm,
-            input.flow_llm_summaries.as_ref(),
-        );
-        std::fs::write(out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
-        nav.entry(feature.clone()).or_default().push(NavEntry {
-            slug: format!("{}/ba", feature),
-            title: format!("{} — Business Analysis", capitalize(feature)),
-            kind: "ba".into(),
-        });
-        all_pages.push(PageEntry {
-            slug: format!("{}/ba", feature),
-            role: feature.clone(),
-            title: format!("{} — Business Analysis", capitalize(feature)),
-            kind: "ba".into(),
-            path: format!("pages/{}/ba.md", feature),
-            json_path: None,
-            community_id: None,
-        });
-        page_count += 1;
-
-        // Per-class dev pages (one page per class, replacing per-community pages)
-        // Collect distinct classes that have methods in any community of this feature.
-        let mut feature_class_set: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        for comm_id in cids {
-            if let Some(members) = graph.members_by_community.get(comm_id) {
-                for m in members {
-                    if !matches!(
-                        m.kind,
-                        NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-                    ) {
-                        continue;
-                    }
-                    if let Some(cls_id) =
-                        m.id.as_str().split_once('#').map(|(prefix, _)| {
-                            let fqcn = prefix
-                                .trim_start_matches("Method:")
-                                .trim_start_matches("Constructor:")
-                                .trim_start_matches("Function:");
-                            // The class node may be Class:, Interface:, Enum:, or Record: —
-                            // resolve against the actual graph rather than always guessing Class:.
-                            ["Class:", "Interface:", "Enum:", "Record:"]
-                                .iter()
-                                .map(|pfx| format!("{}{}", pfx, fqcn))
-                                .find(|id| {
-                                    graph.nodes_by_id.contains_key(id.as_str())
-                                        || graph.methods_by_class.contains_key(id.as_str())
-                                })
-                                .unwrap_or_else(|| format!("Class:{}", fqcn))
-                        })
-                    {
-                        // Only include this class if this feature is its primary owner.
-                        if class_primary_feature
-                            .get(&cls_id)
-                            .map(|f| f == feature)
-                            .unwrap_or(true)
-                        {
-                            feature_class_set.insert(cls_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Assign dev-page slugs using the shared two-pass collision counter.
-        let slug_for = features::assign_class_slugs(&feature_class_set, |id| {
-            graph
-                .nodes_by_id
-                .get(id)
-                .map(|n| n.name.clone())
-                .unwrap_or_else(|| {
-                    id.trim_start_matches("Class:")
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or("Unknown")
-                        .to_string()
-                })
-        });
-
-        for class_id in &feature_class_set {
-            let slug = slug_for
-                .get(class_id.as_str())
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            let page_path = format!("{}/dev/{}", feature, slug);
-            // Capture slug for use in flow page Technical Reference links.
-            class_dev_slugs.insert(class_id.clone(), slug.clone());
-
-            // Build or synthesize the class node (class nodes may be absent when only
-            // method nodes are present in the raw graph — synthesize a stub in that case)
-            let synthesized;
-            let cls_node: &Node = match graph.nodes_by_id.get(class_id.as_str()) {
-                Some(n) => n,
-                None => {
-                    let simple_name = class_id
-                        .trim_start_matches("Class:")
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or("Unknown")
-                        .to_string();
-                    let file = graph
-                        .methods_by_class
-                        .get(class_id.as_str())
-                        .and_then(|ms| ms.first())
-                        .map(|m| m.file.clone())
-                        .unwrap_or_default();
-                    synthesized = Node {
-                        id: NodeId::new(class_id.clone()),
-                        kind: NodeKind::Class,
-                        name: simple_name,
-                        qualified_name: None,
-                        file,
-                        range: Range::default(),
-                        props: None,
-                    };
-                    &synthesized
-                }
-            };
-            let md = pages::dev::render_dev_class(&graph, cls_node, &input.bodies, &method_flow_desc);
-            let json_val = pages::dev::render_dev_class_json(&graph, cls_node);
-            std::fs::write(out_dir.join(format!("pages/{}.md", page_path)), &md)?;
-            std::fs::write(
-                out_dir.join(format!("pages/{}.json", page_path)),
-                serde_json::to_string_pretty(&json_val)?,
-            )?;
-            let dev_title = cls_node.name.clone();
-            nav.entry(feature.clone()).or_default().push(NavEntry {
-                slug: page_path.clone(),
-                title: dev_title.clone(),
-                kind: "dev".into(),
-            });
-            all_pages.push(PageEntry {
-                slug: page_path.clone(),
-                role: feature.clone(),
-                title: dev_title,
-                kind: "dev".into(),
-                path: format!("pages/{}.md", page_path),
-                json_path: Some(format!("pages/{}.json", page_path)),
-                community_id: None,
-            });
-            page_count += 1;
-        }
-
-        // Controller pages for this feature
-        let mut feature_controllers: Vec<(&str, &Vec<(Node, Node)>)> = graph
-            .routes_by_controller
-            .iter()
-            .filter(|(ctrl, _)| {
-                let graph_feature = graph
-                    .controller_feature
-                    .get(*ctrl)
-                    .map(|f| f.as_str())
-                    .unwrap_or("shared");
-                // Apply LLM feature override only when file-path heuristic gives "shared",
-                // AND only when the LLM-suggested slug actually exists as a wiki feature.
-                // Without the existence check, LLMs often return domain-specific slugs
-                // ("delinquency", "rescheduling") that don't match any feature group,
-                // silently dropping all route flow pages for the module.
-                let effective_feature = if graph_feature == "shared" {
-                    let llm_feat = input
-                        .controller_summaries
-                        .as_ref()
-                        .and_then(|m| m.get(*ctrl))
-                        .and_then(|s| s.feature.as_deref())
-                        .unwrap_or("shared");
-                    if known_features.contains(llm_feat) {
-                        llm_feat
-                    } else {
-                        graph_feature
-                    }
-                } else {
-                    graph_feature
-                };
-                effective_feature == feature.as_str()
-            })
-            .map(|(ctrl, routes)| (ctrl.as_str(), routes))
-            .collect();
-        feature_controllers.sort_by_key(|(ctrl, _)| *ctrl);
-
-        if !feature_controllers.is_empty() {
-            let api_dir = out_dir.join(format!("pages/{}/api", feature));
-            std::fs::create_dir_all(&api_dir)?;
-            std::fs::write(
-                api_dir.join("_category_.json"),
-                "{\"position\": 3, \"label\": \"API Surface\"}\n",
-            )?;
-            for (ctrl_pos, (ctrl_name, routes)) in feature_controllers.iter().enumerate() {
-                let ctrl_slug = slugify(ctrl_name);
-                let display_title = pages::feature_po::controller_display_name(ctrl_name);
-                let ctrl_summary = input
-                    .controller_summaries
-                    .as_ref()
-                    .and_then(|m| m.get(*ctrl_name));
-                let description = ctrl_summary
-                    .map(|s| s.description.as_str())
-                    .filter(|s| !s.is_empty());
-                let empty_methods = HashMap::new();
-                let method_descriptions = ctrl_summary
-                    .map(|s| &s.method_descriptions)
-                    .unwrap_or(&empty_methods);
-
-                // Remove any stale top-level controller .md files left from Phase 1.
-                let stale = api_dir.join(format!("{}.md", ctrl_slug));
-                let _ = std::fs::remove_file(&stale);
-
-                // Subdirectory for this controller's flow pages.
-                let ctrl_dir = api_dir.join(&ctrl_slug);
-                std::fs::create_dir_all(&ctrl_dir)?;
-                // Docusaurus 3.5+ auto-links index.md as the category page — no `link` needed.
-                std::fs::write(
-                    ctrl_dir.join("_category_.json"),
-                    format!(
-                        "{{\"position\": {}, \"label\": \"{}\", \"collapsible\": true, \"collapsed\": false}}\n",
-                        ctrl_pos + 1,
-                        display_title
-                    ),
-                )?;
-
-                // index.md — controller overview (route table + descriptions).
-                let ctrl_md = pages::feature_po::render_controller_page(
-                    ctrl_name,
-                    routes,
-                    description,
-                    method_descriptions,
-                );
-                std::fs::write(ctrl_dir.join("index.md"), &ctrl_md)?;
-
-                // One flow page per route handler.
-                for (route_pos, (handler, route)) in routes.iter().enumerate() {
-                    let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
-                    let process_id = process_by_handler.get(handler.id.as_str());
-                    let flow_summary = process_id
-                        .and_then(|pid| {
-                            input.flow_llm_summaries.as_ref()?.get(pid.as_str())
-                        })
-                        .or_else(|| {
-                            input.flow_llm_summaries.as_ref()?.get(handler.id.as_str())
-                        });
-                    let flow_md = pages::api_flow::render_api_flow_page(
-                        handler,
-                        route,
-                        route_pos + 1,
-                        flow_summary,
-                        &graph,
-                        &class_dev_slugs,
-                        &method_flow_desc,
-                    );
-                    let page_path = format!("{}/api/{}/{}", feature, ctrl_slug, handler_slug);
-                    std::fs::write(
-                        out_dir.join(format!("pages/{}.md", page_path)),
-                        &flow_md,
-                    )?;
-                    let flow_title = pages::api_flow::handler_title(handler.id.as_str());
-                    nav.entry(feature.clone()).or_default().push(NavEntry {
-                        slug: page_path.clone(),
-                        title: flow_title.clone(),
-                        kind: "api-flow".into(),
-                    });
-                    all_pages.push(PageEntry {
-                        slug: page_path.clone(),
-                        role: feature.clone(),
-                        title: flow_title,
-                        kind: "api-flow".into(),
-                        path: format!("pages/{}.md", page_path),
-                        json_path: None,
-                        community_id: None,
-                    });
-                    page_count += 1;
-                }
-            }
-        }
+        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths)?;
+        page_count += batch.pages.len();
+        all_pages.extend(batch.pages);
+        nav.extend(batch.nav);
     }
 
     // ── Scheduled jobs & event listeners ────────────────────────────────────
-    if !input.entrypoints.is_empty() {
-        // Build a flat method-desc map from all controller LLM summaries.
-        let all_method_desc: HashMap<String, String> = input
-            .controller_summaries
-            .iter()
-            .flat_map(|m| m.values())
-            .flat_map(|s| s.method_descriptions.iter())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        // Group by feature
-        let mut by_feature_scheduled: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
-            BTreeMap::new();
-        let mut by_feature_events: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
-            BTreeMap::new();
-
-        for ep in &input.entrypoints {
-            let file = graph
-                .nodes_by_id
-                .get(ep.method_id.as_str())
-                .map(|n| n.file.as_str())
-                .unwrap_or("");
-            let feature = (input.feature_of)(ep.method_id.as_str(), file);
-            match ep.kind.as_str() {
-                "scheduled" => by_feature_scheduled.entry(feature).or_default().push(ep),
-                "event_listener" => by_feature_events.entry(feature).or_default().push(ep),
-                _ => {}
-            }
-        }
-
-        // Write pages for each feature's scheduled jobs
-        for (feature, entries) in &by_feature_scheduled {
-            let api_dir = out_dir.join(format!("pages/{}/api", feature));
-            std::fs::create_dir_all(&api_dir)?;
-            // Ensure api/_category_.json exists (may not if no HTTP controllers).
-            let cat_path = api_dir.join("_category_.json");
-            if !cat_path.exists() {
-                std::fs::write(&cat_path, "{\"position\": 3, \"label\": \"API Surface\"}\n")?;
-            }
-            let sched_dir = api_dir.join("scheduled");
-            std::fs::create_dir_all(&sched_dir)?;
-            std::fs::write(
-                sched_dir.join("_category_.json"),
-                "{\"label\": \"Scheduled Jobs\", \"collapsible\": true, \"collapsed\": false}\n",
-            )?;
-            for (pos, ep) in entries.iter().enumerate() {
-                let slug = pages::api_flow::handler_slug(ep.method_id.as_str());
-                let md = pages::api_flow::render_scheduled_flow_page(
-                    ep.method_id.as_str(),
-                    pos + 1,
-                    &graph,
-                    &class_dev_slugs,
-                    &all_method_desc,
-                );
-                let page_path = format!("{}/api/scheduled/{}", feature, slug);
-                std::fs::write(
-                    out_dir.join(format!("pages/{}.md", page_path)),
-                    &md,
-                )?;
-                let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
-                nav.entry(feature.clone()).or_default().push(NavEntry {
-                    slug: page_path.clone(),
-                    title: flow_title.clone(),
-                    kind: "scheduled-flow".into(),
-                });
-                all_pages.push(PageEntry {
-                    slug: page_path.clone(),
-                    role: feature.clone(),
-                    title: flow_title,
-                    kind: "scheduled-flow".into(),
-                    path: format!("pages/{}.md", page_path),
-                    json_path: None,
-                    community_id: None,
-                });
-                page_count += 1;
-            }
-        }
-
-        // Write pages for each feature's event listeners
-        for (feature, entries) in &by_feature_events {
-            let api_dir = out_dir.join(format!("pages/{}/api", feature));
-            std::fs::create_dir_all(&api_dir)?;
-            let cat_path = api_dir.join("_category_.json");
-            if !cat_path.exists() {
-                std::fs::write(&cat_path, "{\"position\": 3, \"label\": \"API Surface\"}\n")?;
-            }
-            let events_dir = api_dir.join("events");
-            std::fs::create_dir_all(&events_dir)?;
-            std::fs::write(
-                events_dir.join("_category_.json"),
-                "{\"label\": \"Event Listeners\", \"collapsible\": true, \"collapsed\": false}\n",
-            )?;
-            for (pos, ep) in entries.iter().enumerate() {
-                let slug = pages::api_flow::handler_slug(ep.method_id.as_str());
-                let md = pages::api_flow::render_listener_flow_page(
-                    ep.method_id.as_str(),
-                    ep.topics.as_slice(),
-                    pos + 1,
-                    &graph,
-                    &class_dev_slugs,
-                    &all_method_desc,
-                );
-                let page_path = format!("{}/api/events/{}", feature, slug);
-                std::fs::write(
-                    out_dir.join(format!("pages/{}.md", page_path)),
-                    &md,
-                )?;
-                let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
-                nav.entry(feature.clone()).or_default().push(NavEntry {
-                    slug: page_path.clone(),
-                    title: flow_title.clone(),
-                    kind: "listener-flow".into(),
-                });
-                all_pages.push(PageEntry {
-                    slug: page_path.clone(),
-                    role: feature.clone(),
-                    title: flow_title,
-                    kind: "listener-flow".into(),
-                    path: format!("pages/{}.md", page_path),
-                    json_path: None,
-                    community_id: None,
-                });
-                page_count += 1;
-            }
-        }
+    {
+        let ep_batch = emit_entrypoint_section(&ctx, &class_dev_slugs)?;
+        page_count += ep_batch.pages.len();
+        all_pages.extend(ep_batch.pages);
+        nav.extend(ep_batch.nav);
     }
 
     // ── Community pages ──────────────────────────────────────────────────────
     {
-        let comm_slug_map = slugify::build_slug_map(&graph.community_nodes);
-        std::fs::create_dir_all(out_dir.join("pages/communities"))?;
-
-        let comm_idx = pages::community::render_community_index(
-            &graph.community_nodes,
-            &comm_slug_map,
-            &graph,
-        );
-        std::fs::write(out_dir.join("pages/communities/index.md"), &comm_idx)?;
-        all_pages.push(PageEntry {
-            slug: "communities/index".into(),
-            role: "communities".into(),
-            title: "Communities".into(),
-            kind: "index".into(),
-            path: "pages/communities/index.md".into(),
-            json_path: None,
-            community_id: None,
-        });
-        page_count += 1;
-
-        for comm in &graph.community_nodes {
-            let comm_id = comm.id.as_str().to_string();
-            let dir_name = comm_slug_map
-                .get(&comm_id)
-                .cloned()
-                .unwrap_or_else(|| slugify(comm.id.as_str()));
-            let dir = out_dir.join(format!("pages/communities/{dir_name}"));
-            std::fs::create_dir_all(&dir)?;
-
-            let processes_here: Vec<&Node> = graph
-                .process_nodes
-                .iter()
-                .filter(|p| {
-                    p.props
-                        .as_ref()
-                        .and_then(|props| props.get("communities"))
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().any(|x| x.as_str() == Some(comm_id.as_str())))
-                        .unwrap_or(false)
-                })
-                .collect();
-
-            let llm = input.llm_summaries.as_ref().and_then(|m| m.get(&comm_id));
-            let llm_full = input.llm_full.as_ref().and_then(|m| m.get(&comm_id));
-
-            let detail_md = pages::community::render_community_detail(
-                comm,
-                &graph,
-                &processes_here,
-                llm,
-            );
-            std::fs::write(dir.join("index.md"), &detail_md)?;
-            all_pages.push(PageEntry {
-                slug: format!("communities/{dir_name}/index"),
-                role: "communities".into(),
-                title: comm.name.clone(),
-                kind: "index".into(),
-                path: format!("pages/communities/{dir_name}/index.md"),
-                json_path: None,
-                community_id: Some(comm_id.clone()),
-            });
-            page_count += 1;
-
-            if let Some(full) = llm_full {
-                let po_md = pages::community::render_community_po(comm, &graph, full);
-                std::fs::write(dir.join("po.md"), &po_md)?;
-                all_pages.push(PageEntry {
-                    slug: format!("communities/{dir_name}/po"),
-                    role: "communities".into(),
-                    title: format!("{} — Business Overview", comm.name),
-                    kind: "po".into(),
-                    path: format!("pages/communities/{dir_name}/po.md"),
-                    json_path: None,
-                    community_id: Some(comm_id.clone()),
-                });
-                page_count += 1;
-
-                let ba_md = pages::community::render_community_ba(
-                    comm,
-                    &graph,
-                    &processes_here,
-                    full,
-                );
-                std::fs::write(dir.join("ba.md"), &ba_md)?;
-                all_pages.push(PageEntry {
-                    slug: format!("communities/{dir_name}/ba"),
-                    role: "communities".into(),
-                    title: format!("{} — Business Analysis", comm.name),
-                    kind: "ba".into(),
-                    path: format!("pages/communities/{dir_name}/ba.md"),
-                    json_path: None,
-                    community_id: Some(comm_id.clone()),
-                });
-                page_count += 1;
-            }
-        }
+        let comm_batch = emit_community_section(&ctx)?;
+        page_count += comm_batch.pages.len();
+        all_pages.extend(comm_batch.pages);
+        nav.extend(comm_batch.nav);
     }
 
     let manifest = WikiManifest {

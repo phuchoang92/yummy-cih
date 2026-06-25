@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
-use cih_grouping::{FeatureStrategy, PackageConfig, PackageStrategy};
 use cih_wiki::assign_class_slugs;
 use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::route_path;
@@ -118,6 +117,424 @@ impl Default for WikiConfig {
     }
 }
 
+/// Bundled LLM run parameters — avoids repeating 10 fields across helper functions.
+struct LlmRunParams<'a> {
+    adapter: &'a dyn LlmAdapter,
+    api_key: Option<&'a str>,
+    model: &'a str,
+    max_tokens: u32,
+    timeout_secs: u64,
+    retries: u32,
+    dry_run: bool,
+    language: &'a str,
+    debug_evidence: bool,
+}
+
+/// Output of `load_wiki_artifacts` — fully-built graph and derived metadata for a wiki run.
+struct WikiArtifacts {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    wiki_graph: WikiGraph,
+    community_nodes: Vec<Node>,
+    community_edges: Vec<Edge>,
+    community_version: String,
+    graph_version: String,
+    repo_map: Option<RepoMap>,
+    unresolved_report: Option<String>,
+    out_dir: PathBuf,
+    repo_name: String,
+    bodies: HashMap<String, cih_wiki::BodyEntry>,
+    file_dev_map: HashMap<String, String>,
+    feature_of: Box<dyn Fn(&str, &str) -> String + Send>,
+}
+
+/// Load graph artifacts, build WikiGraph, and collect all static metadata for a wiki run.
+/// Returns `None` when `--filter-route` matches nothing (fast early exit, no pages to generate).
+fn load_wiki_artifacts(
+    repo: &Path,
+    out: Option<PathBuf>,
+    grouping: &str,
+    filter_community: &[String],
+    max_communities: Option<usize>,
+    filter_route: &[String],
+) -> Result<Option<WikiArtifacts>> {
+    let graph_artifacts;
+    let nodes;
+    let edges;
+    let wiki_graph;
+    let community_nodes: Vec<Node>;
+    let community_edges: Vec<Edge>;
+    let community_version: String;
+    let feature_of: Box<dyn Fn(&str, &str) -> String + Send>;
+
+    if grouping == "package" {
+        graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
+        nodes = graph_artifacts.read_nodes().with_context(|| {
+            format!(
+                "failed to read nodes from {}",
+                graph_artifacts.nodes_path.display()
+            )
+        })?;
+        edges = graph_artifacts.read_edges().with_context(|| {
+            format!(
+                "failed to read edges from {}",
+                graph_artifacts.edges_path.display()
+            )
+        })?;
+        tracing::info!(
+            graph_version = %graph_artifacts.version.0,
+            nodes = nodes.len(),
+            edges = edges.len(),
+            "graph artifacts loaded (package mode)"
+        );
+        let pkg_cfg = cih_grouping::PackageConfig::load_or_default(repo);
+        let pkg_strategy: Arc<dyn cih_grouping::FeatureStrategy> =
+            Arc::new(cih_grouping::PackageStrategy::new(pkg_cfg));
+
+        let repo_default_feature: Arc<String> = Arc::new({
+            let raw = repo
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("shared")
+                .to_lowercase();
+            let mut s = raw.as_str();
+            for suf in &["-api", "-service", "-impl", "-core", "-module", "-web", "-rest"] {
+                s = s.strip_suffix(suf).unwrap_or(s);
+            }
+            for pfx in &[
+                "banking-", "payment-", "finance-", "base-", "common-", "core-",
+                "shared-", "platform-", "infra-", "app-", "service-",
+            ] {
+                s = s.strip_prefix(pfx).unwrap_or(s);
+            }
+            if s.is_empty() || s == "shared" { raw } else { s.to_string() }
+        });
+
+        let feature_lookup: Arc<std::collections::HashMap<String, String>> = Arc::new(
+            cih_grouping::find_feature_artifact_dir(repo, &graph_artifacts.version.0)
+                .and_then(|dir| cih_grouping::read_feature_artifact(&dir).ok())
+                .map(|entries| entries.into_iter().map(|e| (e.node_id, e.name)).collect())
+                .unwrap_or_default(),
+        );
+        if !feature_lookup.is_empty() {
+            tracing::info!(entries = feature_lookup.len(), "loaded pre-computed feature artifact");
+        }
+
+        {
+            let s = pkg_strategy.clone();
+            let lk = feature_lookup.clone();
+            let df = repo_default_feature.clone();
+            wiki_graph = WikiGraph::build_package_grouped(&nodes, &edges, &|node_id, f| {
+                let feat = lk.get(node_id).cloned().unwrap_or_else(|| s.feature_of(f));
+                if feat == "shared" { df.as_ref().clone() } else { feat }
+            });
+        }
+        let all_pkg_nodes: Vec<Node> = wiki_graph.community_nodes.clone();
+        community_nodes = filter_communities_by_route(all_pkg_nodes, &wiki_graph, filter_route);
+        if !filter_route.is_empty() && community_nodes.is_empty() {
+            eprintln!("info: --filter-route matched 0 packages; nothing to generate.");
+            return Ok(None);
+        }
+        community_edges = Vec::new();
+        community_version = graph_artifacts.version.0.clone();
+        feature_of = Box::new(move |node_id: &str, f: &str| {
+            let feat = feature_lookup
+                .get(node_id)
+                .cloned()
+                .unwrap_or_else(|| pkg_strategy.feature_of(f));
+            if feat == "shared" { repo_default_feature.as_ref().clone() } else { feat }
+        });
+    } else {
+        let community_artifact = latest_community_artifacts(repo).ok();
+        let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
+            Some(a) => {
+                let ns = a.read_nodes().with_context(|| {
+                    format!(
+                        "failed to read community nodes from {}",
+                        a.nodes_path.display()
+                    )
+                })?;
+                let ver = a.version.0.clone();
+                tracing::info!(
+                    community_version = %ver,
+                    communities = ns.len(),
+                    "community artifacts loaded"
+                );
+                (ns, ver)
+            }
+            None => {
+                tracing::info!(
+                    "no community artifacts found — generating wiki without feature grouping; \
+                     run `discover` first for richer docs"
+                );
+                eprintln!(
+                    "info: no community artifacts found — generating wiki without feature grouping. \
+                     Run `discover` first for richer docs."
+                );
+                (Vec::new(), String::new())
+            }
+        };
+
+        let community_nodes_pre: Vec<Node> = {
+            let before = pre_community_nodes.len();
+            let mut filtered = pre_community_nodes;
+            if !filter_community.is_empty() {
+                let filters_lower: Vec<String> =
+                    filter_community.iter().map(|f| f.to_lowercase()).collect();
+                filtered.retain(|n| {
+                    let name_lower = n.name.to_lowercase();
+                    filters_lower.iter().any(|f| name_lower.contains(f.as_str()))
+                });
+            }
+            if let Some(max) = max_communities {
+                filtered.truncate(max);
+            }
+            if filtered.len() != before {
+                tracing::info!(
+                    before = before,
+                    after = filtered.len(),
+                    filter_community = ?filter_community,
+                    max_communities = ?max_communities,
+                    "community filter applied"
+                );
+            }
+            filtered
+        };
+
+        let community_nodes_pre: Vec<Node> = if !filter_route.is_empty() {
+            community_nodes_pre
+                .into_iter()
+                .filter(|n| community_matches_route_prefix(n, filter_route))
+                .collect()
+        } else {
+            community_nodes_pre
+        };
+
+        if !filter_route.is_empty()
+            && community_artifact.is_some()
+            && community_nodes_pre.is_empty()
+        {
+            eprintln!(
+                "info: --filter-route matched 0 communities (pre-filter); nothing to generate."
+            );
+            return Ok(None);
+        }
+
+        graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
+        nodes = graph_artifacts.read_nodes().with_context(|| {
+            format!(
+                "failed to read nodes from {}",
+                graph_artifacts.nodes_path.display()
+            )
+        })?;
+        edges = graph_artifacts.read_edges().with_context(|| {
+            format!(
+                "failed to read edges from {}",
+                graph_artifacts.edges_path.display()
+            )
+        })?;
+        tracing::info!(
+            graph_version = %graph_artifacts.version.0,
+            nodes = nodes.len(),
+            edges = edges.len(),
+            "graph artifacts loaded"
+        );
+
+        let (community_nodes_loaded, community_edges_loaded, cv) = match community_artifact {
+            Some(a) => {
+                let comm_edges = a.read_edges().with_context(|| {
+                    format!(
+                        "failed to read community edges from {}",
+                        a.edges_path.display()
+                    )
+                })?;
+                (community_nodes_pre, comm_edges, community_version_raw)
+            }
+            None => (Vec::new(), Vec::new(), String::new()),
+        };
+        community_version = cv;
+
+        wiki_graph = WikiGraph::build(
+            &nodes,
+            &edges,
+            &community_nodes_loaded,
+            &community_edges_loaded,
+        );
+        community_edges = community_edges_loaded;
+        community_nodes =
+            filter_communities_by_route(community_nodes_loaded, &wiki_graph, filter_route);
+        feature_of = Box::new(|_, _| "shared".to_string());
+    }
+
+    let bodies = {
+        let member_ids: std::collections::HashSet<&str> = community_nodes
+            .iter()
+            .flat_map(|c| {
+                wiki_graph
+                    .members_by_community
+                    .get(c.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .map(|n| n.id.as_str())
+            })
+            .collect();
+        let body_nodes: Vec<Node> = nodes
+            .iter()
+            .filter(|n| member_ids.contains(n.id.as_str()))
+            .cloned()
+            .collect();
+        cih_wiki::source_bodies(&body_nodes, repo)
+    };
+
+    let repo_map_path = repo.join(".cih").join("repo-map.json");
+    let repo_map: Option<RepoMap> = if repo_map_path.is_file() {
+        let content = std::fs::read_to_string(&repo_map_path)
+            .with_context(|| format!("failed to read {}", repo_map_path.display()))?;
+        Some(
+            serde_json::from_str(&content)
+                .with_context(|| format!("failed to parse {}", repo_map_path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    let unresolved_path = graph_artifacts
+        .nodes_path
+        .parent()
+        .map(|p| p.join("unresolved-refs.md"));
+    let unresolved_report: Option<String> = unresolved_path
+        .and_then(|p| if p.is_file() { std::fs::read_to_string(&p).ok() } else { None });
+
+    let out_dir = out.unwrap_or_else(|| repo.join(".cih").join("wiki"));
+    let repo_name = std::fs::canonicalize(repo)
+        .unwrap_or_else(|_| repo.to_path_buf())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let file_dev_map = build_file_dev_map(&nodes, &*feature_of);
+
+    Ok(Some(WikiArtifacts {
+        nodes,
+        edges,
+        wiki_graph,
+        community_nodes,
+        community_edges,
+        community_version,
+        graph_version: graph_artifacts.version.0,
+        repo_map,
+        unresolved_report,
+        out_dir,
+        repo_name,
+        bodies,
+        file_dev_map,
+        feature_of,
+    }))
+}
+
+/// Run the LLM-full parallel enrichment phase (deep PO/BA content per community).
+fn run_community_full_enrichment(
+    community_nodes: &[Node],
+    graph: &WikiGraph,
+    repo: &Path,
+    evidence_corpus: &EvidenceCorpus,
+    pool: &rayon::ThreadPool,
+    llm: &LlmRunParams<'_>,
+    json: bool,
+) -> Option<HashMap<String, CommunityLlmFull>> {
+    let total_full = community_nodes.len();
+    tracing::info!(communities = total_full, "starting LLM full enrichment");
+
+    let mut ui_full = PhaseProgress::new();
+    if json {
+        ui_full.hide();
+    }
+    ui_full.start_phase("Deep enrichment (PO/BA)", Some(total_full as u64));
+
+    let results: Vec<(String, Result<CommunityLlmFull>)> = pool.install(|| {
+        community_nodes
+            .par_iter()
+            .map(|comm| {
+                ui_full.tick(comm.name.as_str());
+                let r = enrich_one_community_full(
+                    comm,
+                    graph,
+                    repo,
+                    evidence_corpus,
+                    llm.adapter,
+                    llm.api_key,
+                    llm.model,
+                    llm.max_tokens,
+                    llm.timeout_secs,
+                    llm.retries,
+                    llm.language,
+                );
+                if r.is_ok() { ui_full.inc_ok(); } else { ui_full.inc_failed(); }
+                (comm.id.as_str().to_string(), r)
+            })
+            .collect()
+    });
+    ui_full.finish_phase();
+
+    let mut map = HashMap::new();
+    for (id, result) in results {
+        match result {
+            Ok(full) => { map.insert(id, full); }
+            Err(err) => tracing::warn!(community = %id, error = %err, "LLM full enrichment failed"),
+        }
+    }
+    tracing::info!(enriched = map.len(), "LLM full enrichment complete");
+    if map.is_empty() { None } else { Some(map) }
+}
+
+/// Run the process-flow enrichment phase (one LLM call per process trace node).
+fn run_process_flow_enrichment(
+    graph: &WikiGraph,
+    llm: &LlmRunParams<'_>,
+    json: bool,
+) -> HashMap<String, FlowLlmSummary> {
+    let total_flows = graph.process_nodes.len();
+    if total_flows == 0 {
+        return HashMap::new();
+    }
+    tracing::info!(flows = total_flows, "starting per-flow LLM enrichment");
+    let mut ui_flow = PhaseProgress::new();
+    if json {
+        ui_flow.hide();
+    }
+    ui_flow.start_phase("Enriching flows", Some(total_flows as u64));
+    let mut map = HashMap::new();
+    for proc in &graph.process_nodes {
+        ui_flow.tick(proc.name.as_str());
+        match enrich_one_flow(
+            proc,
+            graph,
+            llm.adapter,
+            llm.api_key,
+            llm.model,
+            llm.max_tokens,
+            llm.timeout_secs,
+            llm.retries,
+            llm.language,
+            llm.debug_evidence,
+            llm.dry_run,
+        ) {
+            Ok(summary) => {
+                map.insert(proc.id.as_str().to_string(), summary);
+                ui_flow.inc_ok();
+            }
+            Err(err) => {
+                tracing::warn!(flow = %proc.id, error = %err, "flow LLM enrichment failed");
+                ui_flow.inc_failed();
+            }
+        }
+    }
+    ui_flow.finish_phase();
+    tracing::info!(enriched = map.len(), "per-flow LLM enrichment complete");
+    map
+}
+
 pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let WikiConfig {
         repo,
@@ -198,252 +615,16 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "starting wiki"
     );
 
-    // ── Build WikiGraph: package mode skips community artifacts ─────────────
-    let graph_artifacts;
-    let nodes;
-    let edges;
-    let wiki_graph;
-    let community_nodes: Vec<Node>;
-    let community_edges: Vec<Edge>;
-    let community_version: String;
-    // Maps (node_id, file) to a feature slug; passed to WikiInput for generate_wiki.
-    let feature_of: Box<dyn Fn(&str, &str) -> String + Send>;
-
-    if grouping == "package" {
-        graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
-        nodes = graph_artifacts.read_nodes().with_context(|| {
-            format!(
-                "failed to read nodes from {}",
-                graph_artifacts.nodes_path.display()
-            )
-        })?;
-        edges = graph_artifacts.read_edges().with_context(|| {
-            format!(
-                "failed to read edges from {}",
-                graph_artifacts.edges_path.display()
-            )
-        })?;
-        tracing::info!(
-            graph_version = %graph_artifacts.version.0,
-            nodes = nodes.len(),
-            edges = edges.len(),
-            "graph artifacts loaded (package mode)"
-        );
-        let pkg_cfg = PackageConfig::load_or_default(repo);
-        let pkg_strategy: Arc<dyn FeatureStrategy> = Arc::new(PackageStrategy::new(pkg_cfg));
-
-        // Derive a fallback feature slug from the repo directory name so that
-        // single-module projects (where all files land in "shared") get a
-        // meaningful URL like /docs/loan instead of /docs/shared.
-        let repo_default_feature: Arc<String> = Arc::new({
-            let raw = repo
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("shared")
-                .to_lowercase();
-            // Strip common Maven suffixes/prefixes to keep it tidy
-            let mut s = raw.as_str();
-            for suf in &["-api", "-service", "-impl", "-core", "-module", "-web", "-rest"] {
-                s = s.strip_suffix(suf).unwrap_or(s);
-            }
-            for pfx in &["banking-", "payment-", "finance-", "base-", "common-", "core-",
-                          "shared-", "platform-", "infra-", "app-", "service-"] {
-                s = s.strip_prefix(pfx).unwrap_or(s);
-            }
-            if s.is_empty() || s == "shared" { raw } else { s.to_string() }
-        });
-
-        // Load pre-computed feature artifact if available (written by `discover`).
-        let feature_lookup: Arc<std::collections::HashMap<String, String>> = Arc::new(
-            cih_grouping::find_feature_artifact_dir(repo, &graph_artifacts.version.0)
-                .and_then(|dir| cih_grouping::read_feature_artifact(&dir).ok())
-                .map(|entries| entries.into_iter().map(|e| (e.node_id, e.name)).collect())
-                .unwrap_or_default(),
-        );
-        if !feature_lookup.is_empty() {
-            tracing::info!(
-                entries = feature_lookup.len(),
-                "loaded pre-computed feature artifact"
-            );
-        }
-
-        {
-            let s = pkg_strategy.clone();
-            let lk = feature_lookup.clone();
-            let df = repo_default_feature.clone();
-            wiki_graph = WikiGraph::build_package_grouped(&nodes, &edges, &|node_id, f| {
-                let feat = lk.get(node_id).cloned().unwrap_or_else(|| s.feature_of(f));
-                if feat == "shared" { df.as_ref().clone() } else { feat }
-            });
-        }
-        let all_pkg_nodes: Vec<Node> = wiki_graph.community_nodes.clone();
-        community_nodes = filter_communities_by_route(all_pkg_nodes, &wiki_graph, &filter_route);
-        if !filter_route.is_empty() && community_nodes.is_empty() {
-            eprintln!("info: --filter-route matched 0 packages; nothing to generate.");
-            return Ok(());
-        }
-        community_edges = Vec::new();
-        community_version = graph_artifacts.version.0.clone();
-        feature_of = Box::new(move |node_id: &str, f: &str| {
-            let feat = feature_lookup
-                .get(node_id)
-                .cloned()
-                .unwrap_or_else(|| pkg_strategy.feature_of(f));
-            if feat == "shared" { repo_default_feature.as_ref().clone() } else { feat }
-        });
-    } else {
-        // ── 1. Community nodes first (fast JSONL read, no source I/O) ─────────
-        let community_artifact = latest_community_artifacts(repo).ok();
-        let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
-            Some(a) => {
-                let ns = a.read_nodes().with_context(|| {
-                    format!(
-                        "failed to read community nodes from {}",
-                        a.nodes_path.display()
-                    )
-                })?;
-                let ver = a.version.0.clone();
-                tracing::info!(
-                    community_version = %ver,
-                    communities = ns.len(),
-                    "community artifacts loaded"
-                );
-                (ns, ver)
-            }
-            None => {
-                tracing::info!("no community artifacts found — generating wiki without feature grouping; run `discover` first for richer docs");
-                eprintln!(
-                    "info: no community artifacts found — generating wiki without feature grouping. \
-                         Run `discover` first for richer docs."
-                );
-                (Vec::new(), String::new())
-            }
-        };
-
-        // ── 2. --filter-community + --max-communities ─────────────────────────
-        let community_nodes_pre: Vec<Node> = {
-            let before = pre_community_nodes.len();
-            let mut filtered = pre_community_nodes;
-            if !filter_community.is_empty() {
-                let filters_lower: Vec<String> =
-                    filter_community.iter().map(|f| f.to_lowercase()).collect();
-                filtered.retain(|n| {
-                    let name_lower = n.name.to_lowercase();
-                    filters_lower
-                        .iter()
-                        .any(|f| name_lower.contains(f.as_str()))
-                });
-            }
-            if let Some(max) = max_communities {
-                filtered.truncate(max);
-            }
-            if filtered.len() != before {
-                tracing::info!(
-                    before = before,
-                    after = filtered.len(),
-                    filter_community = ?filter_community,
-                    max_communities = ?max_communities,
-                    "community filter applied"
-                );
-            }
-            filtered
-        };
-
-        // ── 3. Route-prefix pre-filter using props["route_prefixes"] ─────────
-        let community_nodes_pre: Vec<Node> = if !filter_route.is_empty() {
-            community_nodes_pre
-                .into_iter()
-                .filter(|n| community_matches_route_prefix(n, &filter_route))
-                .collect()
-        } else {
-            community_nodes_pre
-        };
-
-        // ── 4. Early bailout ──────────────────────────────────────────────────
-        if !filter_route.is_empty()
-            && community_artifact.is_some()
-            && community_nodes_pre.is_empty()
-        {
-            eprintln!(
-                "info: --filter-route matched 0 communities (pre-filter); nothing to generate."
-            );
-            return Ok(());
-        }
-
-        // ── 5. Load heavy graph data ──────────────────────────────────────────
-        graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
-        nodes = graph_artifacts.read_nodes().with_context(|| {
-            format!(
-                "failed to read nodes from {}",
-                graph_artifacts.nodes_path.display()
-            )
-        })?;
-        edges = graph_artifacts.read_edges().with_context(|| {
-            format!(
-                "failed to read edges from {}",
-                graph_artifacts.edges_path.display()
-            )
-        })?;
-        tracing::info!(
-            graph_version = %graph_artifacts.version.0,
-            nodes = nodes.len(),
-            edges = edges.len(),
-            "graph artifacts loaded"
-        );
-
-        // ── 6. Load community edges ───────────────────────────────────────────
-        let (community_nodes_loaded, community_edges_loaded, cv) = match community_artifact {
-            Some(a) => {
-                let comm_edges = a.read_edges().with_context(|| {
-                    format!(
-                        "failed to read community edges from {}",
-                        a.edges_path.display()
-                    )
-                })?;
-                (community_nodes_pre, comm_edges, community_version_raw)
-            }
-            None => (Vec::new(), Vec::new(), String::new()),
-        };
-        community_version = cv;
-
-        // ── 7. Build WikiGraph ────────────────────────────────────────────────
-        wiki_graph = WikiGraph::build(
-            &nodes,
-            &edges,
-            &community_nodes_loaded,
-            &community_edges_loaded,
-        );
-        community_edges = community_edges_loaded;
-
-        // ── 8. Precise route filter ───────────────────────────────────────────
-        community_nodes =
-            filter_communities_by_route(community_nodes_loaded, &wiki_graph, &filter_route);
-        // In community/Leiden mode feature_of is never called (generate_wiki uses build() not
-        // build_package_grouped), but WikiInput requires the field — supply a no-op default.
-        feature_of = Box::new(|_, _| "shared".to_string());
-    }
-
-    // ── 9. source_bodies deferred: only read source files for filtered members ─
-    // Avoids reading thousands of Java files when only a few communities survive.
-    let bodies = {
-        let member_ids: std::collections::HashSet<&str> = community_nodes
-            .iter()
-            .flat_map(|c| {
-                wiki_graph
-                    .members_by_community
-                    .get(c.id.as_str())
-                    .into_iter()
-                    .flatten()
-                    .map(|n| n.id.as_str())
-            })
-            .collect();
-        let body_nodes: Vec<Node> = nodes
-            .iter()
-            .filter(|n| member_ids.contains(n.id.as_str()))
-            .cloned()
-            .collect();
-        cih_wiki::source_bodies(&body_nodes, repo)
+    let art = match load_wiki_artifacts(repo, out, grouping, &filter_community, max_communities, &filter_route)? {
+        Some(a) => a,
+        None => return Ok(()),
     };
+    let WikiArtifacts {
+        nodes, edges, wiki_graph, community_nodes, community_edges,
+        community_version, graph_version, repo_map, unresolved_report,
+        out_dir, repo_name, bodies, file_dev_map, feature_of,
+    } = art;
+    let repo_name_display = repo_name.clone();
 
     // Create adapter + API key once for all LLM paths.
     let (adapter, api_key): (Option<Box<dyn LlmAdapter>>, Option<String>) =
@@ -474,41 +655,17 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         (None, 0usize)
     };
 
-    let repo_map_path = repo.join(".cih").join("repo-map.json");
-    let repo_map: Option<RepoMap> = if repo_map_path.is_file() {
-        let content = std::fs::read_to_string(&repo_map_path)
-            .with_context(|| format!("failed to read {}", repo_map_path.display()))?;
-        Some(
-            serde_json::from_str(&content)
-                .with_context(|| format!("failed to parse {}", repo_map_path.display()))?,
-        )
-    } else {
-        None
-    };
-
-    let unresolved_path = graph_artifacts
-        .nodes_path
-        .parent()
-        .map(|p| p.join("unresolved-refs.md"));
-    let unresolved_report: Option<String> = unresolved_path.and_then(|p| {
-        if p.is_file() {
-            std::fs::read_to_string(&p).ok()
-        } else {
-            None
-        }
+    let llm_params: Option<LlmRunParams<'_>> = adapter.as_ref().map(|a| LlmRunParams {
+        adapter: a.as_ref(),
+        api_key: api_key.as_deref(),
+        model: llm_model,
+        max_tokens: llm_max_tokens,
+        timeout_secs: llm_timeout_secs,
+        retries: llm_retries,
+        dry_run: llm_dry_run,
+        language: wiki_language,
+        debug_evidence: llm_debug_evidence,
     });
-
-    let out_dir = out.unwrap_or_else(|| repo.join(".cih").join("wiki"));
-    let repo_name = std::fs::canonicalize(&repo)
-        .unwrap_or_else(|_| repo.to_path_buf())
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let repo_name_display = repo_name.clone();
-
-    // Pre-compute file → dev URL map for citation resolution (Phase 4).
-    let file_dev_map = build_file_dev_map(&nodes, &*feature_of);
 
     let mut llm_info: Option<WikiLlmInfo> = None;
     let summaries_for_cache: Vec<(String, String, CommunityLlmSummary)> = Vec::new();
@@ -578,58 +735,15 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             tracing::info!("skipping llm-full enrichment because dry-run/debug mode is enabled");
             None
         } else if wiki_mode == "llm-full" {
-            let total_full = community_nodes.len();
-            tracing::info!(communities = total_full, "starting LLM full enrichment");
-
-            let mut ui_full = PhaseProgress::new();
-            if json {
-                ui_full.hide();
-            }
-            ui_full.start_phase("Deep enrichment (PO/BA)", Some(total_full as u64));
-
-            let results: Vec<(String, Result<CommunityLlmFull>)> =
-                pool.as_ref().unwrap().install(|| {
-                    community_nodes
-                        .par_iter()
-                        .map(|comm| {
-                            ui_full.tick(comm.name.as_str());
-                            let r = enrich_one_community_full(
-                                comm,
-                                &wiki_graph,
-                                repo,
-                                &evidence_corpus,
-                                adapter.as_ref().unwrap().as_ref(),
-                                api_key.as_deref(),
-                                llm_model,
-                                llm_max_tokens,
-                                llm_timeout_secs,
-                                llm_retries,
-                                wiki_language,
-                            );
-                            if r.is_ok() {
-                                ui_full.inc_ok();
-                            } else {
-                                ui_full.inc_failed();
-                            }
-                            (comm.id.as_str().to_string(), r)
-                        })
-                        .collect()
-                });
-            ui_full.finish_phase();
-
-            let mut map = HashMap::new();
-            for (id, result) in results {
-                match result {
-                    Ok(full) => {
-                        map.insert(id, full);
-                    }
-                    Err(err) => {
-                        tracing::warn!(community = %id, error = %err, "LLM full enrichment failed")
-                    }
-                }
-            }
-            tracing::info!(enriched = map.len(), "LLM full enrichment complete");
-            Some(map)
+            run_community_full_enrichment(
+                &community_nodes,
+                &wiki_graph,
+                repo,
+                &evidence_corpus,
+                pool.as_ref().unwrap(),
+                llm_params.as_ref().unwrap(),
+                json,
+            )
         } else {
             None
         };
@@ -646,7 +760,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             llm_model,
             llm_max_tokens,
             llm_timeout_secs,
-            &graph_artifacts.version.0,
+            &graph_version,
             &community_version,
         ) {
             Ok(tree) => {
@@ -821,52 +935,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     };
 
     // Per-flow LLM enrichment: one LLM call per process trace.
-    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if effective_run_llm && !llm_no_call
-    {
-        let total_flows = wiki_graph.process_nodes.len();
-        if total_flows > 0 {
-            tracing::info!(flows = total_flows, "starting per-flow LLM enrichment");
-            let mut ui_flow = PhaseProgress::new();
-            if json {
-                ui_flow.hide();
-            }
-            ui_flow.start_phase("Enriching flows", Some(total_flows as u64));
-            let mut map = HashMap::new();
-            for proc in &wiki_graph.process_nodes {
-                ui_flow.tick(proc.name.as_str());
-                match enrich_one_flow(
-                    proc,
-                    &wiki_graph,
-                    adapter.as_ref().unwrap().as_ref(),
-                    api_key.as_deref(),
-                    llm_model,
-                    llm_max_tokens,
-                    llm_timeout_secs,
-                    llm_retries,
-                    &wiki_language,
-                    llm_debug_evidence,
-                    llm_dry_run,
-                ) {
-                    Ok(summary) => {
-                        map.insert(proc.id.as_str().to_string(), summary);
-                        ui_flow.inc_ok();
-                    }
-                    Err(err) => {
-                        tracing::warn!(flow = %proc.id, error = %err, "flow LLM enrichment failed");
-                        ui_flow.inc_failed();
-                    }
-                }
-            }
-            ui_flow.finish_phase();
-            tracing::info!(enriched = map.len(), "per-flow LLM enrichment complete");
-            if map.is_empty() {
-                None
-            } else {
-                Some(map)
-            }
-        } else {
-            None
-        }
+    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if effective_run_llm && !llm_no_call {
+        let map = run_process_flow_enrichment(&wiki_graph, llm_params.as_ref().unwrap(), json);
+        if map.is_empty() { None } else { Some(map) }
     } else {
         None
     };
@@ -951,7 +1022,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         community_nodes: &community_nodes,
         community_edges: &community_edges,
         repo_name,
-        graph_version: graph_artifacts.version.0.clone(),
+        graph_version,
         community_version,
         unresolved_report,
         repo_map,
