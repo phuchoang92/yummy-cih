@@ -569,13 +569,5 @@ pub(crate) type ResolveIndex = CommonIndex;
 /// Infer language from file extension for ParsedFiles with empty `language` field
 /// (parse-cache artifacts produced before language tracking was added).
 fn infer_language_from_path(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    match ext {
-        "java" => "java",
-        "ts" | "tsx" => "typescript",
-        "py" => "python",
-        "go" => "go",
-        "kt" | "kts" => "kotlin",
-        _ => "",
-    }
+    cih_lang::lang_for_path(path)
 }

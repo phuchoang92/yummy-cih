@@ -57,4 +57,8 @@ impl LanguageProvider for RubyProvider {
         }
         Ok(SourceScan { loc, package: None, frameworks })
     }
+
+    fn comment_prefix(&self) -> &'static str {
+        "#"
+    }
 }

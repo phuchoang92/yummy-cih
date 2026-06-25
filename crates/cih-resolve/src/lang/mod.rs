@@ -5,19 +5,33 @@ use cih_core::{Edge, ImportBinding, Node, ParsedFile, SymbolDef};
 
 use crate::common::index::CommonIndex;
 
-pub mod java;
-pub mod kotlin;
-pub mod python;
-pub mod typescript;
-pub mod go;
-pub mod rust_lang;
-pub mod csharp;
-pub mod ruby;
-pub mod php;
-pub mod scala;
-pub mod cpp;
-pub mod bash;
-pub mod elixir;
+/// Declares all resolver modules and generates `all_resolvers()`.
+/// To add a new language: add one line here (plus the implementation file).
+macro_rules! resolvers {
+    ($($lang:ident : $resolver:ident),* $(,)?) => {
+        $(pub mod $lang;)*
+
+        pub fn all_resolvers() -> Vec<Box<dyn LanguageResolver>> {
+            vec![$(Box::new($lang::$resolver)),*]
+        }
+    }
+}
+
+resolvers! {
+    java: JavaResolver,
+    kotlin: KotlinResolver,
+    python: PythonResolver,
+    typescript: TypeScriptResolver,
+    go: GoResolver,
+    rust_lang: RustResolver,
+    csharp: CSharpResolver,
+    ruby: RubyResolver,
+    php: PhpResolver,
+    scala: ScalaResolver,
+    cpp: CppResolver,
+    bash: BashResolver,
+    elixir: ElixirResolver,
+}
 
 /// Per-language resolution strategy. All methods have safe defaults (None/false/empty)
 /// so a new language implementation starts minimal and opts into what it needs.
@@ -118,6 +132,10 @@ impl ResolverRegistry {
 
     pub fn register(&mut self, r: impl LanguageResolver + 'static) {
         self.resolvers.insert(r.language_id(), Box::new(r));
+    }
+
+    pub fn register_boxed(&mut self, r: Box<dyn LanguageResolver>) {
+        self.resolvers.insert(r.language_id(), r);
     }
 
     pub fn for_language(&self, language: &str) -> &dyn LanguageResolver {

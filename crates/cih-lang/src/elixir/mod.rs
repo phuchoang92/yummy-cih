@@ -54,4 +54,8 @@ impl LanguageProvider for ElixirProvider {
         }
         Ok(SourceScan { loc, package: None, frameworks })
     }
+
+    fn comment_prefix(&self) -> &'static str {
+        "#"
+    }
 }

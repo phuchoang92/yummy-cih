@@ -58,6 +58,10 @@ impl LanguageRegistry {
         self.providers.push(Box::new(p));
     }
 
+    pub fn register_boxed(&mut self, p: Box<dyn LanguageProvider>) {
+        self.providers.push(p);
+    }
+
     pub fn provider_for(&self, path: &str) -> Option<&dyn LanguageProvider> {
         self.providers
             .iter()

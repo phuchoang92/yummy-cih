@@ -700,11 +700,5 @@ fn effective_lang(pf: &ParsedFile) -> &str {
     if !pf.language.is_empty() {
         return &pf.language;
     }
-    let ext = pf.file.rsplit('.').next().unwrap_or("");
-    match ext {
-        "java" => "java",
-        "ts" | "tsx" => "typescript",
-        "py" => "python",
-        _ => "",
-    }
+    cih_lang::lang_for_path(&pf.file)
 }

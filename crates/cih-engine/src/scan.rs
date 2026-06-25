@@ -119,19 +119,9 @@ pub fn write_repo_map(repo_map: &RepoMap) -> Result<PathBuf> {
 /// Shared registry builder — used by both scan and analyze.
 pub fn default_scan_registry() -> cih_parse::LanguageRegistry {
     let mut r = cih_parse::LanguageRegistry::new();
-    r.register(cih_lang::java::JavaProvider::new());
-    r.register(cih_lang::typescript::TypescriptProvider::new());
-    r.register(cih_lang::python::PythonProvider::new());
-    r.register(cih_lang::kotlin::KotlinProvider::new());
-    r.register(cih_lang::go::GoProvider::new());
-    r.register(cih_lang::rust_lang::RustProvider::new());
-    r.register(cih_lang::csharp::CSharpProvider::new());
-    r.register(cih_lang::ruby::RubyProvider::new());
-    r.register(cih_lang::php::PhpProvider::new());
-    r.register(cih_lang::scala::ScalaProvider::new());
-    r.register(cih_lang::cpp::CppProvider::new());
-    r.register(cih_lang::bash::BashProvider::new());
-    r.register(cih_lang::elixir::ElixirProvider::new());
+    for p in cih_lang::all_providers() {
+        r.register_boxed(p);
+    }
     r
 }
 

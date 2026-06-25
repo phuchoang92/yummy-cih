@@ -255,13 +255,8 @@ pub fn community_display_title(graph: &WikiGraph, community: &Node, page_path: &
     }
 }
 
-fn lang_tag(file: &str) -> &str {
-    match file.rfind('.').map(|i| &file[i + 1..]).unwrap_or("") {
-        "java" => "java",
-        "ts" | "tsx" => "typescript",
-        "py" => "python",
-        _ => "",
-    }
+fn lang_tag(file: &str) -> &'static str {
+    cih_lang::lang_for_path(file)
 }
 
 /// Encode `<` and `>` so MDX/JSX doesn't treat Java generics as JSX tags.
@@ -472,7 +467,7 @@ pub fn render_dev_community(
                     // Path A: short method — show stripped body, header only when lines removed
                     let stripped_lines = body.stripped.trim().lines().count();
                     let code_content = if stripped_lines < body.original_lines {
-                        let comment_prefix = if lang == "python" { "#" } else { "//" };
+                        let comment_prefix = cih_lang::comment_prefix_for_lang(lang);
                         format!(
                             "{} stripped · {} of {} lines shown\n{}",
                             comment_prefix, stripped_lines, body.original_lines, body.stripped.trim()
@@ -494,7 +489,7 @@ pub fn render_dev_community(
                     // Path B: god function — show first 30 stripped lines so the flow is visible
                     let preview: Vec<&str> = body.stripped.lines().take(30).collect();
                     if !preview.is_empty() {
-                        let comment_prefix = if lang == "python" { "#" } else { "//" };
+                        let comment_prefix = cih_lang::comment_prefix_for_lang(lang);
                         let code_content = format!(
                             "{} god function · {} lines — first 30 stripped lines shown\n{}",
                             comment_prefix,
@@ -733,7 +728,7 @@ pub fn render_dev_class(
                     if body.original_lines <= 80 {
                         let stripped_lines = body.stripped.trim().lines().count();
                         let code_content = if stripped_lines < body.original_lines {
-                            let comment_prefix = if lang == "python" { "#" } else { "//" };
+                            let comment_prefix = cih_lang::comment_prefix_for_lang(lang);
                             format!(
                                 "{} stripped · {} of {} lines shown\n{}",
                                 comment_prefix,
@@ -757,7 +752,7 @@ pub fn render_dev_class(
                     } else {
                         let preview: Vec<&str> = body.stripped.lines().take(30).collect();
                         if !preview.is_empty() {
-                            let comment_prefix = if lang == "python" { "#" } else { "//" };
+                            let comment_prefix = cih_lang::comment_prefix_for_lang(lang);
                             let code_content = format!(
                                 "{} god function · {} lines — first 30 stripped lines shown\n{}",
                                 comment_prefix,

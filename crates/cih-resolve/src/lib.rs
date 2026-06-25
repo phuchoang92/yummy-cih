@@ -33,22 +33,7 @@ pub use contracts::resolve_contract_edges;
 pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
-pub use lang::{
-    java::JavaResolver,
-    kotlin::KotlinResolver,
-    python::PythonResolver,
-    typescript::TypeScriptResolver,
-    go::GoResolver,
-    rust_lang::RustResolver,
-    csharp::CSharpResolver,
-    ruby::RubyResolver,
-    php::PhpResolver,
-    scala::ScalaResolver,
-    cpp::CppResolver,
-    bash::BashResolver,
-    elixir::ElixirResolver,
-    ResolverRegistry,
-};
+pub use lang::{all_resolvers, ResolverRegistry};
 pub use reports::write_unresolved_reports;
 
 /// Per-site diagnostic record for a reference that could not be resolved.
@@ -92,22 +77,12 @@ pub struct ResolveOptions<'a> {
     pub constant_resolver: Option<Box<dyn cih_lang::constant_resolver::ConstantResolver>>,
 }
 
-/// Build the default registry with Java, TypeScript, Python, and Kotlin resolvers.
+/// Build the default registry with all supported language resolvers.
 pub fn default_registry() -> ResolverRegistry {
     let mut r = ResolverRegistry::new();
-    r.register(JavaResolver);
-    r.register(TypeScriptResolver);
-    r.register(PythonResolver);
-    r.register(KotlinResolver);
-    r.register(GoResolver);
-    r.register(RustResolver);
-    r.register(CSharpResolver);
-    r.register(RubyResolver);
-    r.register(PhpResolver);
-    r.register(ScalaResolver);
-    r.register(CppResolver);
-    r.register(BashResolver);
-    r.register(ElixirResolver);
+    for resolver in lang::all_resolvers() {
+        r.register_boxed(resolver);
+    }
     r
 }
 

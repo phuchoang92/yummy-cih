@@ -50,4 +50,8 @@ impl LanguageProvider for BashProvider {
         let loc = src.bytes().filter(|b| *b == b'\n').count() as u64;
         Ok(SourceScan { loc, package: None, frameworks: BTreeSet::new() })
     }
+
+    fn comment_prefix(&self) -> &'static str {
+        "#"
+    }
 }

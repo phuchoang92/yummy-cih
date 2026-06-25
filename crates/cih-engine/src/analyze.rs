@@ -319,20 +319,7 @@ pub fn analyze_from_scope_with_options(
     ));
     ui.spin("Resolving");
 
-    let mut resolvers = cih_resolve::ResolverRegistry::new();
-    resolvers.register(cih_resolve::JavaResolver);
-    resolvers.register(cih_resolve::TypeScriptResolver);
-    resolvers.register(cih_resolve::PythonResolver);
-    resolvers.register(cih_resolve::KotlinResolver);
-    resolvers.register(cih_resolve::GoResolver);
-    resolvers.register(cih_resolve::RustResolver);
-    resolvers.register(cih_resolve::CSharpResolver);
-    resolvers.register(cih_resolve::RubyResolver);
-    resolvers.register(cih_resolve::PhpResolver);
-    resolvers.register(cih_resolve::ScalaResolver);
-    resolvers.register(cih_resolve::CppResolver);
-    resolvers.register(cih_resolve::BashResolver);
-    resolvers.register(cih_resolve::ElixirResolver);
+    let resolvers = cih_resolve::default_registry();
 
     // Gap 4: build Java constant resolver from all parsed files.
     let java_const_resolver = cih_resolve::build_java_constant_resolver(&parse_output.parsed_files);

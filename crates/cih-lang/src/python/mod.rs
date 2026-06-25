@@ -87,6 +87,10 @@ impl LanguageProvider for PythonProvider {
             frameworks,
         })
     }
+
+    fn comment_prefix(&self) -> &'static str {
+        "#"
+    }
 }
 
 #[cfg(test)]
