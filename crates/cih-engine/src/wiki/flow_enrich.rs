@@ -165,7 +165,7 @@ pub(super) fn enrich_route_flows(
     language: &str,
     dry_run: bool,
     flow_cache: &BTreeMap<String, FlowCacheEntry>,
-    concurrency: usize,
+    pool: &rayon::ThreadPool,
 ) -> (HashMap<String, FlowLlmSummary>, Vec<(String, String, FlowLlmSummary)>) {
     let handlers: Vec<(String, String)> = graph
         .routes_by_controller
@@ -186,12 +186,6 @@ pub(super) fn enrich_route_flows(
     ui.lock()
         .expect("UI progress mutex poisoned")
         .start_phase("Enriching route flows", Some(handlers.len() as u64));
-
-    let effective_concurrency = concurrency.max(1);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(effective_concurrency)
-        .build()
-        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().expect("failed to build default rayon thread pool"));
 
     let raw: Vec<(String, FlowLlmSummary, Option<String>)> = pool.install(|| {
         handlers

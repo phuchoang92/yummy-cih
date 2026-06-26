@@ -42,6 +42,7 @@ fn class_enrichment_dry_run_returns_placeholder_descriptions() {
     // Verify that dry-run mode produces placeholder entries for every class in the chain.
     let adapter = MockAdapter::new(vec![]);
     let graph = WikiGraph::build(&[], &[], &[], &[]);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     let result = enrich_classes_for_chains(
         &graph,
         &[],
@@ -57,7 +58,7 @@ fn class_enrichment_dry_run_returns_placeholder_descriptions() {
         true, // dry_run
         false,
         &[],
-        8,
+        &pool,
     );
     assert!(result.is_ok());
     assert_eq!(adapter.calls(), 0, "dry-run should not call the adapter");
@@ -280,6 +281,7 @@ fn class_enrichment_cache_hit_skips_llm_call() {
         },
     );
     // With an empty graph there are still no routes, so nothing to enrich.
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     let (_, _, updated) = enrich_classes_for_chains(
         &graph,
         &[],
@@ -295,7 +297,7 @@ fn class_enrichment_cache_hit_skips_llm_call() {
         false,
         false,
         &[],
-        8,
+        &pool,
     )
     .unwrap();
     assert_eq!(adapter.calls(), 0);

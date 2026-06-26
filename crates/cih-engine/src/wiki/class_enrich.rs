@@ -27,7 +27,7 @@ pub fn enrich_classes_for_chains(
     dry_run: bool,
     json_output: bool,
     filter_route: &[String],
-    concurrency: usize,
+    pool: &rayon::ThreadPool,
 ) -> Result<(
     HashMap<String, ControllerLlmSummary>,
     HashMap<String, CommunityLlmSummary>,
@@ -79,15 +79,9 @@ pub fn enrich_classes_for_chains(
         locked.start_phase("Enriching classes", Some(total as u64));
     }
 
-    let effective_concurrency = concurrency.max(1);
     let class_list: Vec<(&String, &Vec<String>)> = class_methods.iter().collect();
 
     let new_entries: Vec<(String, ClassCacheEntry)> = {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(effective_concurrency)
-            .build()
-            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().expect("failed to build default rayon thread pool"));
-
         pool.install(|| {
             class_list
                 .par_iter()

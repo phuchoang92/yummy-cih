@@ -186,7 +186,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             llm_dry_run || llm_debug_evidence,
             json,
             &filter_route[..],
-            concurrency,
+            pool.as_ref().expect("thread pool set when run_llm is active"),
         )?;
 
         tracing::info!(
@@ -428,7 +428,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 wiki_language,
                 llm_dry_run,
                 &prev_flow_cache,
-                concurrency,
+                pool.as_ref().expect("thread pool set when run_llm is active"),
             );
             flow_cache_updates = updates;
             map.extend(route_flows);
@@ -447,7 +447,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             wiki_language,
             llm_dry_run,
             &prev_flow_cache,
-            concurrency,
+            pool.as_ref().expect("thread pool set when run_llm is active"),
         );
         flow_cache_updates = updates;
         if route_flows.is_empty() {

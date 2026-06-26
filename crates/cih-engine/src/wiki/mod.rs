@@ -108,9 +108,10 @@ mod tests {
 
         let adapter1 = MockLlm::new(vec![Ok(flow_response.clone())]);
         let empty_cache = BTreeMap::new();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let (summaries1, updates1) = enrich_route_flows(
             &graph, None, &adapter1, None, "model", 1000, 30, 0, "en", false,
-            &empty_cache, 1,
+            &empty_cache, &pool,
         );
         assert_eq!(adapter1.calls.load(AOrdering::SeqCst), 1, "first run must call LLM");
         assert!(summaries1.contains_key(handler_id));
@@ -124,7 +125,7 @@ mod tests {
         let adapter2 = MockLlm::new(vec![]);
         let (summaries2, updates2) = enrich_route_flows(
             &graph, None, &adapter2, None, "model", 1000, 30, 0, "en", false,
-            &flow_cache, 1,
+            &flow_cache, &pool,
         );
         assert_eq!(adapter2.calls.load(AOrdering::SeqCst), 0, "second run must hit cache");
         assert!(summaries2.contains_key(handler_id));
@@ -159,9 +160,10 @@ mod tests {
 
         let adapter1 = MockLlm::new(vec![Ok(flow_json("Lists orders."))]);
         let empty_cache = BTreeMap::new();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let (_, updates1) = enrich_route_flows(
             &graph_v1, None, &adapter1, None, "model", 1000, 30, 0, "en", false,
-            &empty_cache, 1,
+            &empty_cache, &pool,
         );
         let mut flow_cache: BTreeMap<String, FlowCacheEntry> = BTreeMap::new();
         for (id, ev_hash, summary) in updates1 {
@@ -190,7 +192,7 @@ mod tests {
         let adapter2 = MockLlm::new(vec![Ok(flow_json("Lists orders with count."))]);
         let (summaries2, _) = enrich_route_flows(
             &graph_v2, None, &adapter2, None, "model", 1000, 30, 0, "en", false,
-            &flow_cache, 1,
+            &flow_cache, &pool,
         );
         assert_eq!(adapter2.calls.load(AOrdering::SeqCst), 1, "cache miss must call LLM");
         assert!(summaries2.contains_key(handler_id));
