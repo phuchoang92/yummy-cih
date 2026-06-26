@@ -34,6 +34,7 @@ pub struct AgentRunner {
     llm_base_url: String,
     llm_api_key: String,
     llm_model: String,
+    client: reqwest::Client,
 }
 
 impl AgentRunner {
@@ -44,14 +45,14 @@ impl AgentRunner {
         llm_api_key: String,
         llm_model: String,
     ) -> Self {
-        Self { search, store, llm_base_url, llm_api_key, llm_model }
-    }
-
-    pub async fn ask(&self, question: &str, codebase_description: &str) -> Result<AgentAnswer> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .unwrap_or_default();
+        Self { search, store, llm_base_url, llm_api_key, llm_model, client }
+    }
+
+    pub async fn ask(&self, question: &str, codebase_description: &str) -> Result<AgentAnswer> {
         let system = format!(
             "You are a code intelligence assistant. The codebase is: {codebase_description}\n\
              Answer questions by calling the available tools to look up real code facts. \
@@ -79,7 +80,7 @@ impl AgentRunner {
             });
 
             let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
-            let resp = client
+            let resp = self.client
                 .post(&url)
                 .bearer_auth(&self.llm_api_key)
                 .json(&body)

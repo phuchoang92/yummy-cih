@@ -10,21 +10,12 @@ use cih_grouping::{
 };
 
 use crate::feature_strategy::{build_feature_strategy, FeatureLlmOptions};
+use crate::llm::LlmCallConfig;
 use serde::Serialize;
 
 use crate::db::{load_many_to_falkor, LoadOutcome};
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
 use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
-
-/// LLM provider config for the feature classification stage.
-pub struct FeatureLlmConfig {
-    pub provider: String,
-    pub base_url: String,
-    pub model: String,
-    pub api_key: Option<String>,
-    pub max_tokens: u32,
-    pub timeout_secs: u64,
-}
 
 /// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
@@ -41,7 +32,7 @@ pub struct DiscoverOverrides {
     /// Feature classification strategy: "package" (default), "structural", "hybrid", "llm".
     pub feature_strategy: String,
     /// LLM config — required when feature_strategy is "llm" or "hybrid".
-    pub feature_llm: Option<FeatureLlmConfig>,
+    pub feature_llm: Option<LlmCallConfig>,
 }
 
 pub fn run_discover(
@@ -309,9 +300,12 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
                     .filter(|e| e.strategy == "llm")
                     .cloned()
                     .collect();
+                let api_key = crate::llm::resolve_api_key(llm_cfg.api_key_env.as_deref())
+                    .ok()
+                    .flatten();
                 Some(FeatureLlmOptions {
                     adapter,
-                    api_key: llm_cfg.api_key.clone(),
+                    api_key,
                     model: llm_cfg.model.clone(),
                     max_tokens: llm_cfg.max_tokens,
                     timeout_secs: llm_cfg.timeout_secs,

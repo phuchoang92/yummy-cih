@@ -454,11 +454,14 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
     wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
         repo: root.clone(),
         run_llm: true,
-        llm_model: "dry-model".into(),
-        llm_api_key_env: Some(format!(
-            "CIH_TEST_MISSING_KEY_{}",
-            TEST_ID.load(Ordering::Relaxed)
-        )),
+        llm: wiki_cmd::LlmCallConfig {
+            model: "dry-model".into(),
+            api_key_env: Some(format!(
+                "CIH_TEST_MISSING_KEY_{}",
+                TEST_ID.load(Ordering::Relaxed)
+            )),
+            ..Default::default()
+        },
         llm_dry_run: true,
         wiki_language: "vi".into(),
         wiki_mode: "llm-summary".into(),
@@ -484,11 +487,14 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
     wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
         repo: root.clone(),
         run_llm: true,
-        llm_model: "dry-model".into(),
-        llm_api_key_env: Some(format!(
-            "CIH_TEST_MISSING_KEY_{}",
-            TEST_ID.load(Ordering::Relaxed)
-        )),
+        llm: wiki_cmd::LlmCallConfig {
+            model: "dry-model".into(),
+            api_key_env: Some(format!(
+                "CIH_TEST_MISSING_KEY_{}",
+                TEST_ID.load(Ordering::Relaxed)
+            )),
+            ..Default::default()
+        },
         llm_dry_run: true,
         wiki_language: "vi".into(),
         wiki_mode: "llm-summary".into(),
@@ -513,9 +519,12 @@ fn wiki_command_http_json_requires_provider_config() {
     let err = wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
         repo: root.clone(),
         run_llm: true,
-        llm_provider: "http-json".into(),
-        llm_base_url: "http://localhost".into(),
-        llm_model: "local".into(),
+        llm: wiki_cmd::LlmCallConfig {
+            provider: "http-json".into(),
+            base_url: "http://localhost".into(),
+            model: "local".into(),
+            ..Default::default()
+        },
         llm_dry_run: true,
         wiki_mode: "llm-summary".into(),
         ..wiki_cmd::WikiConfig::default()

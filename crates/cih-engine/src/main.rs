@@ -543,16 +543,14 @@ fn main() -> Result<()> {
                 } else {
                     feature_llm_model.clone()
                 };
-                let api_key = llm::resolve_api_key(feature_llm_api_key_env.as_deref())
-                    .ok()
-                    .flatten();
-                discover::FeatureLlmConfig {
+                llm::LlmCallConfig {
                     provider,
                     base_url: feature_llm_base_url,
                     model,
-                    api_key,
+                    api_key_env: feature_llm_api_key_env,
                     max_tokens: feature_llm_max_tokens,
                     timeout_secs: feature_llm_timeout_secs,
+                    retries: 0,
                 }
             });
             discover::run_discover(
@@ -731,15 +729,17 @@ fn main() -> Result<()> {
             repo,
             out,
             run_llm: llm || llm_enrich,
-            llm_provider,
+            llm: llm::LlmCallConfig {
+                provider: llm_provider,
+                base_url: llm_base_url,
+                model: llm_model,
+                api_key_env: llm_api_key_env,
+                max_tokens: llm_max_tokens,
+                timeout_secs: llm_timeout_secs,
+                retries: llm_retries,
+            },
             llm_provider_config,
-            llm_api_key_env,
             evidence_paths: evidence,
-            llm_base_url,
-            llm_model,
-            llm_max_tokens,
-            llm_timeout_secs,
-            llm_retries,
             llm_concurrency,
             llm_debug_evidence,
             llm_dry_run,

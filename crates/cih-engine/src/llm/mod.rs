@@ -8,6 +8,31 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 
+/// Shared LLM call configuration used by WikiConfig and the feature-classification stage.
+pub struct LlmCallConfig {
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: Option<String>,
+    pub max_tokens: u32,
+    pub timeout_secs: u64,
+    pub retries: u32,
+}
+
+impl Default for LlmCallConfig {
+    fn default() -> Self {
+        Self {
+            provider: "openai-compatible".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: String::new(),
+            api_key_env: None,
+            max_tokens: 1024,
+            timeout_secs: 30,
+            retries: 2,
+        }
+    }
+}
+
 pub struct LlmRequest {
     pub system: String,
     pub user: String,

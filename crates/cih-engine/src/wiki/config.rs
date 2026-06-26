@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use cih_core::{Edge, Node, RepoMap};
 use cih_wiki::{ClassEnrichmentStore, WikiGraph, WikiMeta};
 
-use crate::llm::LlmAdapter;
+use crate::llm::{LlmAdapter, LlmCallConfig};
 
 pub(super) fn fnv64(s: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
@@ -43,15 +43,9 @@ pub struct WikiConfig {
     pub repo: PathBuf,
     pub out: Option<PathBuf>,
     pub run_llm: bool,
-    pub llm_provider: String,
+    pub llm: LlmCallConfig,
     pub llm_provider_config: Option<PathBuf>,
-    pub llm_api_key_env: Option<String>,
     pub evidence_paths: Vec<PathBuf>,
-    pub llm_base_url: String,
-    pub llm_model: String,
-    pub llm_max_tokens: u32,
-    pub llm_timeout_secs: u64,
-    pub llm_retries: u32,
     pub llm_concurrency: usize,
     pub llm_debug_evidence: bool,
     pub llm_dry_run: bool,
@@ -74,15 +68,9 @@ impl Default for WikiConfig {
             repo: PathBuf::new(),
             out: None,
             run_llm: false,
-            llm_provider: "openai-compatible".into(),
+            llm: LlmCallConfig::default(),
             llm_provider_config: None,
-            llm_api_key_env: None,
             evidence_paths: vec![],
-            llm_base_url: "https://api.openai.com/v1".into(),
-            llm_model: String::new(),
-            llm_max_tokens: 1024,
-            llm_timeout_secs: 30,
-            llm_retries: 2,
             llm_concurrency: 4,
             llm_debug_evidence: false,
             llm_dry_run: false,
