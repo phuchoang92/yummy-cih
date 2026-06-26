@@ -14,6 +14,7 @@ pub mod group_cmd;
 pub mod group_sync;
 pub mod llm;
 pub mod registry;
+pub mod runtime;
 pub mod scan;
 pub mod scope;
 pub mod start;

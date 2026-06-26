@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cih_core::GraphArtifacts;
 use cih_falkor::FalkorStore;
 use cih_graph_store::{GraphStore, LoadStats};
@@ -43,12 +43,7 @@ pub fn load_many_to_falkor(
     graph_key: &str,
     artifact_sets: &[&GraphArtifacts],
 ) -> Result<cih_graph_store::LoadStats> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime")?;
-
-    rt.block_on(async {
+    crate::runtime::block_on(async {
         let staging_key = format!("{graph_key}-staging");
         let store = FalkorStore::connect(url, &staging_key)
             .map_err(|e| anyhow::anyhow!("FalkorDB connect: {e}"))?;

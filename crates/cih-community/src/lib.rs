@@ -416,6 +416,249 @@ pub fn detect_communities(
     out
 }
 
+/// Derive communities from package/module structure rather than graph clustering.
+///
+/// `feature_of` maps a file path to a feature slug (e.g. "order", "payment", "shared").
+/// Community IDs are stable across runs: `Community:<feature>`.
+/// Each community node carries the same semantic props as Leiden communities
+/// (routes, DB tables, Kafka topics, controllers, stereotypes) so all downstream
+/// wiki generation and LLM enrichment works unchanged.
+pub fn detect_communities_from_packages(
+    nodes: &[Node],
+    edges: &[Edge],
+    feature_of: &dyn Fn(&str) -> String,
+) -> CommunityOutput {
+    let source_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+
+    // Build the same edge-lookup maps used by detect_communities.
+    let mut route_nodes_by_handler: HashMap<NodeId, Vec<&Node>> = HashMap::new();
+    let mut queries_by_method: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut read_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut write_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut publishes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
+    let mut consumes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
+    for e in edges {
+        match e.kind {
+            EdgeKind::HandlesRoute => {
+                if let Some(rn) = source_by_id.get(&e.dst) {
+                    route_nodes_by_handler.entry(e.src.clone()).or_default().push(rn);
+                }
+            }
+            EdgeKind::ExecutesQuery => {
+                queries_by_method.entry(e.src.clone()).or_default().push(e.dst.clone());
+            }
+            EdgeKind::ReadsTable => {
+                read_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+            }
+            EdgeKind::WritesTable => {
+                write_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+            }
+            EdgeKind::PublishesEvent => {
+                if let Some(tn) = source_by_id.get(&e.dst) {
+                    let kind_str = topic_kind_str(tn);
+                    publishes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
+                }
+            }
+            EdgeKind::ListensTo => {
+                if let Some(tn) = source_by_id.get(&e.dst) {
+                    let kind_str = topic_kind_str(tn);
+                    consumes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Group eligible symbol nodes by package feature.
+    let mut groups: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
+    for node in nodes.iter().filter(|n| graph::is_community_symbol(n.kind)) {
+        let feature = feature_of(&node.file);
+        groups.entry(feature).or_default().push(node.id.clone());
+    }
+
+    // Largest groups first, then alphabetical for a stable, deterministic order.
+    let mut groups: Vec<(String, Vec<NodeId>)> = groups.into_iter().collect();
+    groups.sort_by(|(a_feat, a_members), (b_feat, b_members)| {
+        b_members.len().cmp(&a_members.len()).then_with(|| a_feat.cmp(b_feat))
+    });
+
+    let mut out = CommunityOutput::default();
+    for (comm_idx, (feature, mut member_ids)) in groups.into_iter().enumerate() {
+        member_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        // Stable ID: Community:<feature> — survives re-runs without index shifts.
+        let comm_id = NodeId::new(format!("Community:{}", feature));
+        let display_name = capitalize_first(&feature);
+
+        // ── Semantic enrichment (identical logic to detect_communities) ────────
+        let mut route_prefix_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_route_prefixes: BTreeSet<String> = BTreeSet::new();
+        for mid in &member_ids {
+            for rn in route_nodes_by_handler.get(mid).into_iter().flatten() {
+                let path = rn
+                    .props
+                    .as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| rn.name.splitn(2, ' ').nth(1).unwrap_or(&rn.name));
+                if let Some(seg) = first_non_generic_path_segment(path) {
+                    *route_prefix_counts.entry(seg.clone()).or_insert(0) += 1;
+                    all_route_prefixes.insert(seg);
+                }
+            }
+        }
+
+        let mut controller_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_controllers: BTreeSet<String> = BTreeSet::new();
+        for mid in &member_ids {
+            let id_str = mid.as_str();
+            let without_kind = id_str
+                .strip_prefix("Method:")
+                .or_else(|| id_str.strip_prefix("Constructor:"))
+                .or_else(|| id_str.strip_prefix("Function:"))
+                .unwrap_or(id_str);
+            if let Some(fqcn) = without_kind.split('#').next() {
+                if let Some(simple) = fqcn.rsplit('.').next() {
+                    if simple.ends_with("Controller") || simple.ends_with("Resource") {
+                        let name = simple
+                            .strip_suffix("Controller")
+                            .or_else(|| simple.strip_suffix("Resource"))
+                            .unwrap_or(simple);
+                        let domain = strip_role_prefix(name).to_string();
+                        *controller_counts.entry(domain.clone()).or_insert(0) += 1;
+                        all_controllers.insert(simple.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut table_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_tables: BTreeSet<String> = BTreeSet::new();
+        for mid in &member_ids {
+            for qid in queries_by_method.get(mid).into_iter().flatten() {
+                for tid in read_tables_by_query
+                    .get(qid)
+                    .into_iter()
+                    .flatten()
+                    .chain(write_tables_by_query.get(qid).into_iter().flatten())
+                {
+                    let tname = tid.as_str().strip_prefix("DbTable:").unwrap_or(tid.as_str());
+                    all_tables.insert(tname.to_string());
+                    *table_counts.entry(tname.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut topic_domain_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut all_publishes: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut all_consumes: BTreeSet<(String, String)> = BTreeSet::new();
+        for mid in &member_ids {
+            for (tn, kind_str) in publishes_by_member.get(mid).into_iter().flatten() {
+                let name = topic_display_name(tn);
+                all_publishes.insert((name.clone(), kind_str.to_string()));
+                let domain = strip_event_suffix(strip_role_prefix(&name));
+                *topic_domain_counts.entry(domain.to_string()).or_insert(0) += 1;
+            }
+            for (tn, kind_str) in consumes_by_member.get(mid).into_iter().flatten() {
+                let name = topic_display_name(tn);
+                all_consumes.insert((name.clone(), kind_str.to_string()));
+                let domain = strip_event_suffix(strip_role_prefix(&name));
+                *topic_domain_counts.entry(domain.to_string()).or_insert(0) += 1;
+            }
+        }
+        let all_topics: BTreeSet<String> = all_publishes
+            .iter()
+            .chain(all_consumes.iter())
+            .map(|(n, _)| n.clone())
+            .collect();
+
+        let primary_stereotype = {
+            let mut stereo_counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for mid in &member_ids {
+                let class_id = mid.as_str().split_once('#').map(|(prefix, _)| {
+                    let fqcn = prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:")
+                        .trim_start_matches("Function:");
+                    format!("Class:{}", fqcn)
+                });
+                let class_node_id = class_id.as_ref().map(|s| NodeId::new(s.clone()));
+                let node = class_node_id
+                    .as_ref()
+                    .and_then(|cid| source_by_id.get(cid))
+                    .or_else(|| source_by_id.get(mid));
+                if let Some(n) = node {
+                    if let Some(s) = n
+                        .props
+                        .as_ref()
+                        .and_then(|p| p.get("stereotype"))
+                        .and_then(|v| v.as_str())
+                    {
+                        *stereo_counts.entry(s).or_insert(0) += 1;
+                    }
+                }
+            }
+            stereo_counts
+                .into_iter()
+                .max_by(|(a_k, a_v), (b_k, b_v)| a_v.cmp(b_v).then(b_k.cmp(a_k).reverse()))
+                .map(|(k, _)| k.to_string())
+        };
+
+        let route_prefixes_sorted: Vec<String> = all_route_prefixes.into_iter().collect();
+        let controllers_sorted: Vec<String> = all_controllers.into_iter().collect();
+        let tables_sorted: Vec<String> = all_tables.into_iter().collect();
+        let topics_sorted: Vec<String> = all_topics.into_iter().collect();
+        let publishes_topics: Vec<serde_json::Value> = all_publishes
+            .into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+            .collect();
+        let consumes_topics: Vec<serde_json::Value> = all_consumes
+            .into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+            .collect();
+
+        out.nodes.push(Node {
+            id: comm_id.clone(),
+            kind: NodeKind::Community,
+            name: display_name.clone(),
+            qualified_name: Some(display_name.clone()),
+            file: String::new(),
+            range: Range::default(),
+            props: Some(serde_json::json!({
+                "label": feature,
+                "heuristic_label": feature,
+                "cohesion": 1.0,
+                "symbol_count": member_ids.len(),
+                "symbolCount": member_ids.len(),
+                "color": COLOR_PALETTE[comm_idx % COLOR_PALETTE.len()],
+                "display_name": display_name,
+                "feature": feature,
+                "naming_reason": "package",
+                "route_prefixes": route_prefixes_sorted,
+                "controllers": controllers_sorted,
+                "db_tables": tables_sorted,
+                "topics": topics_sorted,
+                "publishes_topics": publishes_topics,
+                "consumes_topics": consumes_topics,
+                "primary_stereotype": primary_stereotype,
+            })),
+        });
+
+        for member_id in member_ids {
+            out.edges.push(Edge {
+                src: member_id.clone(),
+                dst: comm_id.clone(),
+                kind: EdgeKind::MemberOf,
+                confidence: 1.0,
+                reason: "package".into(),
+                props: None,
+            });
+            out.memberships.push((member_id, comm_id.clone()));
+        }
+    }
+    out
+}
+
 pub fn trace_processes(
     nodes: &[Node],
     edges: &[Edge],

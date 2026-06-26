@@ -9,6 +9,7 @@ mod group_cmd;
 mod group_sync;
 mod llm;
 mod registry;
+mod runtime;
 mod scan;
 mod scope;
 mod start;
@@ -120,10 +121,16 @@ enum Command {
         json: bool,
 
         // ── Community detection overrides ──────────────────────────────────
-        /// Louvain resolution. Higher = more, smaller communities; lower = fewer, larger ones.
-        /// Default: 1.0 (2.0 for large graphs, but see --min-community-size).
+        /// Community detection strategy.
+        /// "package" (default): groups by package/module structure — one community per feature.
+        /// "graph": Leiden graph-clustering — groups by call-graph connectivity.
+        #[arg(long, default_value = "package")]
+        community_strategy: String,
+        /// Leiden resolution (only used with --community-strategy graph).
+        /// Higher = more, smaller communities; lower = fewer, larger ones. Default: 1.0.
         #[arg(long)]
         resolution: Option<f64>,
+        /// Minimum community size (only used with --community-strategy graph).
         /// Drop communities smaller than this many members. Default: 2 (3 for large graphs).
         #[arg(long)]
         min_community_size: Option<usize>,
@@ -444,6 +451,8 @@ fn main() -> Result<()> {
         )
         .init();
 
+    runtime::init()?;
+
     let cli = Cli::parse();
 
     // TUI command builder — runs before the normal dispatch so the terminal is
@@ -507,6 +516,7 @@ fn main() -> Result<()> {
             repo,
             db,
             json,
+            community_strategy,
             resolution,
             min_community_size,
             max_trace_depth,
@@ -552,6 +562,7 @@ fn main() -> Result<()> {
                 db.no_load,
                 json,
                 discover::DiscoverOverrides {
+                    community_strategy,
                     resolution,
                     min_community_size,
                     max_trace_depth,
@@ -827,8 +838,7 @@ fn run_artifact(command: ArtifactCommand) -> Result<()> {
             // Bulk-load into FalkorDB.
             let falkor_url = falkor_url.unwrap_or_else(|| DEFAULT_FALKOR_URL.to_string());
             let graph_key = graph_key.unwrap_or_else(|| DEFAULT_GRAPH_KEY.to_string());
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async {
+            runtime::block_on(async {
                 use cih_falkor::FalkorStore;
                 use cih_graph_store::GraphStore;
                 let store = FalkorStore::connect(&falkor_url, &graph_key)

@@ -29,6 +29,9 @@ pub struct FeatureLlmConfig {
 /// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
 pub struct DiscoverOverrides {
+    /// Community detection strategy: "package" (default) or "graph" (Leiden).
+    pub community_strategy: String,
+    // Leiden-only overrides (ignored when community_strategy is "package").
     pub resolution: Option<f64>,
     pub min_community_size: Option<usize>,
     pub max_trace_depth: Option<usize>,
@@ -124,49 +127,53 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         "architecture hint loaded"
     );
 
-    let mut community_cfg = cih_community::CommunityConfig::default();
-    if cih_community::is_large_graph(&nodes) {
-        // Large graphs are often sparsely connected (many unresolved external refs), so
-        // keeping resolution at 1.0 avoids over-splitting already-fragmented clusters.
-        // Raise min_community_size to 3 to drop 2-node fragments that aren't meaningful.
-        tracing::info!(
-            nodes = nodes.len(),
-            resolution = 1.0,
-            max_iterations = 3,
-            min_community_size = 3,
-            "large graph detected — using conservative resolution to reduce fragmentation"
-        );
-        community_cfg.max_iterations = 3;
-        community_cfg.min_community_size = 3;
-    }
-    // Monolith hint: increase min_community_size further to fight over-fragmentation.
-    // A 55-module monolith emitting 4000+ Leiden communities is over-split; raising the
-    // minimum to 5 drops isolated 2-4 node fragments that have no meaningful business story.
-    if arch_hint == ArchitectureHint::Monolith && community_cfg.min_community_size < 5 {
-        tracing::info!(
-            min_community_size = 5,
-            "monolith detected — raising min_community_size to reduce over-fragmentation"
-        );
-        community_cfg.min_community_size = 5;
-    }
-    // Apply CLI overrides on top of heuristics.
-    if let Some(v) = overrides.resolution {
-        community_cfg.resolution = v;
-    }
-    if let Some(v) = overrides.min_community_size {
-        community_cfg.min_community_size = v;
-    }
+    let use_leiden = overrides.community_strategy == "graph";
 
-    tracing::info!(
-        resolution = community_cfg.resolution,
-        min_community_size = community_cfg.min_community_size,
-        "running community detection"
-    );
     ui.spin("Detecting communities");
-    let community_output = cih_community::detect_communities(&nodes, &edges, &community_cfg);
+    let community_output = if use_leiden {
+        let mut community_cfg = cih_community::CommunityConfig::default();
+        if cih_community::is_large_graph(&nodes) {
+            tracing::info!(
+                nodes = nodes.len(),
+                resolution = 1.0,
+                max_iterations = 3,
+                min_community_size = 3,
+                "large graph detected — using conservative Leiden resolution"
+            );
+            community_cfg.max_iterations = 3;
+            community_cfg.min_community_size = 3;
+        }
+        if arch_hint == ArchitectureHint::Monolith && community_cfg.min_community_size < 5 {
+            tracing::info!(
+                min_community_size = 5,
+                "monolith detected — raising min_community_size to reduce over-fragmentation"
+            );
+            community_cfg.min_community_size = 5;
+        }
+        if let Some(v) = overrides.resolution {
+            community_cfg.resolution = v;
+        }
+        if let Some(v) = overrides.min_community_size {
+            community_cfg.min_community_size = v;
+        }
+        tracing::info!(
+            resolution = community_cfg.resolution,
+            min_community_size = community_cfg.min_community_size,
+            "running Leiden community detection"
+        );
+        cih_community::detect_communities(&nodes, &edges, &community_cfg)
+    } else {
+        let pkg_cfg = PackageConfig::load_or_default(repo);
+        let pkg_strategy = cih_grouping::PackageStrategy::new(pkg_cfg);
+        tracing::info!("running package-based community detection");
+        cih_community::detect_communities_from_packages(&nodes, &edges, &|file| {
+            pkg_strategy.feature_of(file)
+        })
+    };
     tracing::info!(
         communities = community_output.nodes.len(),
         edges = community_output.edges.len(),
+        strategy = if use_leiden { "graph" } else { "package" },
         "community detection complete"
     );
     ui.finish_with(format!(

@@ -20,12 +20,7 @@ pub(crate) fn run_embed(
         .or_else(|| std::env::var("CIH_PG_URL").ok())
         .context("missing Postgres URL: pass --pg-url or set CIH_PG_URL")?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime")?;
-
-    let embed = rt.block_on(async {
+    let embed = crate::runtime::block_on(async {
         let store = cih_embed::EmbedStore::connect(&pg_url, model_kind).await?;
         store.ensure_schema().await?;
         store.embed_nodes(&nodes, &repo).await
