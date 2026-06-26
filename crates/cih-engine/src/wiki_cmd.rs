@@ -692,7 +692,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             &nodes,
             repo,
             prev_store,
-            adapter.as_ref().unwrap().as_ref(),
+            adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
             api_key.as_deref(),
             llm_model,
             llm_max_tokens,
@@ -739,8 +739,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 &wiki_graph,
                 repo,
                 &evidence_corpus,
-                pool.as_ref().unwrap(),
-                llm_params.as_ref().unwrap(),
+                pool.as_ref().expect("thread pool set when run_llm is active"),
+                llm_params.as_ref().expect("LLM params set when run_llm is active"),
                 json,
             )
         } else {
@@ -754,7 +754,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     } else if grouping == "llm" {
         match crate::llm::grouping::propose_module_tree(
             &wiki_graph,
-            adapter.as_ref().unwrap().as_ref(),
+            adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
             api_key.as_deref(),
             llm_model,
             llm_max_tokens,
@@ -805,7 +805,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
         let ui_feat = std::sync::Arc::new(std::sync::Mutex::new(PhaseProgress::new()));
         {
-            let mut locked = ui_feat.lock().unwrap();
+            let mut locked = ui_feat.lock().expect("UI progress mutex poisoned");
             if json {
                 locked.hide();
             }
@@ -815,7 +815,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         // Parallel feature enrichment: one LLM call per feature, independent of each other.
         // Returns (feature_name, summary, ev_hash); None on LLM failure (warning already logged).
         let raw_features: Vec<(String, FeatureLlmSummary, String)> =
-            pool.as_ref().unwrap().install(|| {
+            pool.as_ref().expect("thread pool set when run_llm is active").install(|| {
                 active_features
                     .par_iter()
                     .filter_map(|group| {
@@ -843,17 +843,17 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                             resolve_feature_citations(&mut cached, &citation_map);
                             ui_feat
                                 .lock()
-                                .unwrap()
+                                .expect("UI progress mutex poisoned")
                                 .tick_skipped(format!("{} (cached)", &group.feature));
                             return Some((group.feature.clone(), cached, ev_hash));
                         }
 
-                        ui_feat.lock().unwrap().tick(group.feature.as_str());
+                        ui_feat.lock().expect("UI progress mutex poisoned").tick(group.feature.as_str());
                         tracing::info!(feature = %group.feature, "calling LLM for feature enrichment");
                         match enrich_one_feature(
                             &group.feature,
                             &merged_ev,
-                            adapter.as_ref().unwrap().as_ref(),
+                            adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
                             api_key.as_deref(),
                             llm_model,
                             llm_max_tokens,
@@ -864,12 +864,12 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                         ) {
                             Ok(mut summary) => {
                                 resolve_feature_citations(&mut summary, &citation_map);
-                                ui_feat.lock().unwrap().inc_ok();
+                                ui_feat.lock().expect("UI progress mutex poisoned").inc_ok();
                                 Some((group.feature.clone(), summary, ev_hash))
                             }
                             Err(err) => {
                                 tracing::warn!(feature = %group.feature, error = %err, "feature LLM enrichment failed");
-                                ui_feat.lock().unwrap().inc_failed();
+                                ui_feat.lock().expect("UI progress mutex poisoned").inc_failed();
                                 None
                             }
                         }
@@ -877,7 +877,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                     .collect()
             });
 
-        ui_feat.lock().unwrap().finish_phase();
+        ui_feat.lock().expect("UI progress mutex poisoned").finish_phase();
 
         let mut map: HashMap<String, FeatureLlmSummary> = HashMap::new();
         for (feature, summary, ev_hash) in raw_features {
@@ -935,7 +935,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     // Per-flow LLM enrichment: one LLM call per process trace.
     let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if effective_run_llm && !llm_no_call {
-        let map = run_process_flow_enrichment(&wiki_graph, llm_params.as_ref().unwrap(), json);
+        let map = run_process_flow_enrichment(&wiki_graph, llm_params.as_ref().expect("LLM params set when run_llm is active"), json);
         if map.is_empty() { None } else { Some(map) }
     } else {
         None
@@ -949,7 +949,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             let (route_flows, updates) = enrich_route_flows(
                 &wiki_graph,
                 route_flow_scope.as_ref(),
-                adapter.as_ref().unwrap().as_ref(),
+                adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
                 api_key.as_deref(),
                 llm_model,
                 llm_max_tokens,
@@ -968,7 +968,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let (route_flows, updates) = enrich_route_flows(
             &wiki_graph,
             route_flow_scope.as_ref(),
-            adapter.as_ref().unwrap().as_ref(),
+            adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
             api_key.as_deref(),
             llm_model,
             llm_max_tokens,
@@ -1247,7 +1247,8 @@ fn enrich_one_community_full(
             }
         }
     }
-    Err(last_err.unwrap())
+    let _ = last_err;
+    unreachable!("retry loop always returns on the final attempt")
 }
 
 /// Walk call chains from every route handler, enrich each unique class once,
@@ -1323,7 +1324,7 @@ pub fn enrich_classes_for_chains(
 
     let ui = std::sync::Arc::new(std::sync::Mutex::new(PhaseProgress::new()));
     {
-        let mut locked = ui.lock().unwrap();
+        let mut locked = ui.lock().expect("UI progress mutex poisoned");
         if json_output {
             locked.hide();
         }
@@ -1339,7 +1340,7 @@ pub fn enrich_classes_for_chains(
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(effective_concurrency)
             .build()
-            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().expect("failed to build default rayon thread pool"));
 
         pool.install(|| {
             class_list
@@ -1374,12 +1375,12 @@ pub fn enrich_classes_for_chains(
                     // Cache hit — same source, skip LLM call.
                     if let Some(cached) = prev_entries.get(fqcn.as_str()) {
                         if cached.content_hash == content_hash {
-                            ui.lock().unwrap().tick_skipped(format!("{} (cached)", simple_name));
+                            ui.lock().expect("UI progress mutex poisoned").tick_skipped(format!("{} (cached)", simple_name));
                             return None;
                         }
                     }
 
-                    ui.lock().unwrap().tick(simple_name);
+                    ui.lock().expect("UI progress mutex poisoned").tick(simple_name);
 
                     let entry = if dry_run {
                         println!("--- [dry-run] class: {} ---", fqcn);
@@ -1462,7 +1463,7 @@ pub fn enrich_classes_for_chains(
         updated_entries.insert(fqcn, entry);
     }
 
-    ui.lock().unwrap().finish_phase();
+    ui.lock().expect("UI progress mutex poisoned").finish_phase();
 
     // Build ControllerLlmSummary keyed by simple class name — covers all classes in chains.
     let mut ctrl_map: HashMap<String, ControllerLlmSummary> = HashMap::new();
@@ -1947,14 +1948,14 @@ fn enrich_route_flows(
 
     let ui = std::sync::Arc::new(std::sync::Mutex::new(PhaseProgress::new()));
     ui.lock()
-        .unwrap()
+        .expect("UI progress mutex poisoned")
         .start_phase("Enriching route flows", Some(handlers.len() as u64));
 
     let effective_concurrency = concurrency.max(1);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(effective_concurrency)
         .build()
-        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().expect("failed to build default rayon thread pool"));
 
     // Each item: (handler_id, summary, Option<evidence_hash>)
     // evidence_hash is Some only for fresh LLM results; None for cache hits or dry-run.
@@ -1964,7 +1965,7 @@ fn enrich_route_flows(
             .filter_map(|(handler_id, handler_name)| {
                 let chain = graph.build_call_chain(handler_id.as_str(), 4);
                 if chain.is_empty() {
-                    ui.lock().unwrap().inc_ok();
+                    ui.lock().expect("UI progress mutex poisoned").inc_ok();
                     return None;
                 }
                 let step_count = chain.len();
@@ -1974,12 +1975,12 @@ fn enrich_route_flows(
                 // Cache hit: chain unchanged since last run.
                 if let Some(cached) = flow_cache.get(handler_id.as_str()) {
                     if cached.evidence_hash == evidence_hash {
-                        ui.lock().unwrap().inc_ok();
+                        ui.lock().expect("UI progress mutex poisoned").inc_ok();
                         return Some((handler_id.clone(), cached.summary.clone(), None));
                     }
                 }
 
-                ui.lock().unwrap().tick(handler_name.as_str());
+                ui.lock().expect("UI progress mutex poisoned").tick(handler_name.as_str());
 
                 if dry_run {
                     let summary = FlowLlmSummary {
@@ -1987,7 +1988,7 @@ fn enrich_route_flows(
                         business_impact: String::new(),
                         step_descriptions: vec!["[dry-run]".into(); step_count],
                     };
-                    ui.lock().unwrap().inc_ok();
+                    ui.lock().expect("UI progress mutex poisoned").inc_ok();
                     return Some((handler_id.clone(), summary, None));
                 }
 
@@ -2039,7 +2040,7 @@ Respond ONLY with this JSON object (no extra commentary):
                         .and_then(|r| parse_flow_summary(&r.text, step_count))
                     {
                         Ok(summary) => {
-                            ui.lock().unwrap().inc_ok();
+                            ui.lock().expect("UI progress mutex poisoned").inc_ok();
                             return Some((
                                 handler_id.clone(),
                                 summary,
@@ -2064,16 +2065,16 @@ Respond ONLY with this JSON object (no extra commentary):
                 }
                 tracing::warn!(
                     handler = %handler_id,
-                    error = %last_err.unwrap(),
+                    error = %last_err.expect("last_err always set after retry loop"),
                     "route flow LLM enrichment failed"
                 );
-                ui.lock().unwrap().inc_failed();
+                ui.lock().expect("UI progress mutex poisoned").inc_failed();
                 None
             })
             .collect()
     });
 
-    ui.lock().unwrap().finish_phase();
+    ui.lock().expect("UI progress mutex poisoned").finish_phase();
 
     let mut result = HashMap::with_capacity(raw.len());
     let mut cache_updates = Vec::new();
@@ -2188,7 +2189,8 @@ Respond ONLY with this JSON object (no extra commentary):
             }
         }
     }
-    Err(last_err.unwrap())
+    let _ = last_err;
+    unreachable!("retry loop always returns on the final attempt")
 }
 
 /// Token budget for route-flow enrichment: ~100 tokens per step for step_descriptions
@@ -2449,7 +2451,8 @@ pub fn enrich_one_feature(
             }
         }
     }
-    Err(last_err.unwrap())
+    let _ = last_err;
+    unreachable!("retry loop always returns on the final attempt")
 }
 
 fn build_feature_system_prompt() -> String {
