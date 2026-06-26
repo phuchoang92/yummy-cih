@@ -18,7 +18,7 @@ mod start_env;
 mod tui;
 mod ui;
 mod versioning;
-mod wiki_cmd;
+mod wiki;
 
 use std::path::PathBuf;
 
@@ -727,7 +727,7 @@ fn main() -> Result<()> {
             filter_feature,
             filter_route,
             json,
-        } => wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        } => wiki::run_wiki(wiki::WikiConfig {
             repo,
             out,
             run_llm: llm || llm_enrich,

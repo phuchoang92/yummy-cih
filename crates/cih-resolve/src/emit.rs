@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use cih_core::{
     file_id, Edge, EdgeKind, Node, NodeId, ParsedFile, RawImport, RefKind, ReferenceSite,
@@ -596,12 +596,21 @@ fn c3_linearize(
         return vec![fqcn.to_string()];
     }
 
-    // Build the merge input: one linearization per base, plus the bases list itself.
-    let mut lists: Vec<Vec<String>> = bases
+    // Build merge input as VecDeques for O(1) front removal.
+    let mut lists: Vec<VecDeque<String>> = bases
         .iter()
-        .map(|b| c3_linearize(b, index, cache))
+        .map(|b| c3_linearize(b, index, cache).into_iter().collect())
         .collect();
-    lists.push(bases);
+    lists.push(bases.into_iter().collect());
+
+    // tail_counts[x] = number of lists where x appears at index >= 1.
+    // Maintained incrementally so the "is head blocked?" check is O(1).
+    let mut tail_counts: HashMap<String, usize> = HashMap::new();
+    for list in &lists {
+        for item in list.iter().skip(1) {
+            *tail_counts.entry(item.clone()).or_insert(0) += 1;
+        }
+    }
 
     let mut result = vec![fqcn.to_string()];
     loop {
@@ -609,22 +618,54 @@ fn c3_linearize(
         if lists.is_empty() {
             break;
         }
-        // Pick the first head that is not in the tail of any list.
+
+        // O(m) scan; tail check is O(1) via tail_counts.
         let head = lists
             .iter()
             .find_map(|list| {
                 let h = &list[0];
-                let blocked = lists.iter().any(|l| l.len() > 1 && l[1..].contains(h));
-                if !blocked {
+                if tail_counts.get(h.as_str()).copied().unwrap_or(0) == 0 {
                     Some(h.clone())
                 } else {
                     None
                 }
             })
-            .unwrap_or_else(|| lists[0][0].clone()); // cycle fallback: take first
+            .unwrap_or_else(|| lists[0][0].clone()); // inconsistent MRO: take first
+
         result.push(head.clone());
-        for list in &mut lists {
-            list.retain(|x| x != &head);
+
+        let is_cycle = tail_counts.get(head.as_str()).copied().unwrap_or(0) > 0;
+
+        if is_cycle {
+            // Inconsistent MRO (should not happen in valid Java). Use retain for
+            // correctness and rebuild tail_counts to stay consistent.
+            for list in &mut lists {
+                list.retain(|x| x != &head);
+            }
+            tail_counts.clear();
+            for list in &lists {
+                for item in list.iter().skip(1) {
+                    *tail_counts.entry(item.clone()).or_insert(0) += 1;
+                }
+            }
+        } else {
+            // Normal case: head is not in any tail, so it only appears at index 0.
+            // Pop it from each list where it is the front; decrement tail_counts for
+            // whatever was at index 1 (now promoted to index 0, leaving the tail).
+            tail_counts.remove(&head);
+            for list in &mut lists {
+                if list.front().map(|h| h == &head).unwrap_or(false) {
+                    list.pop_front();
+                    if let Some(new_front) = list.front() {
+                        if let Some(c) = tail_counts.get_mut(new_front.as_str()) {
+                            *c -= 1;
+                            if *c == 0 {
+                                tail_counts.remove(new_front.as_str());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

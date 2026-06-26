@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cih_engine_lib::llm::evidence::EvidenceCorpus;
 use cih_engine_lib::llm::{LlmAdapter, LlmRequest, LlmResponse};
-use cih_engine_lib::wiki_cmd::*;
+use cih_engine_lib::wiki::*;
 use cih_wiki::features::FeatureGroup;
 use cih_wiki::{FeatureMetaEntry, WikiGraph, WikiMeta};
 use std::collections::VecDeque;

@@ -4,7 +4,7 @@ use cih_engine_lib::db::LoadOutcome;
 use cih_engine_lib::discover::run_discover_core;
 use cih_engine_lib::scan;
 use cih_engine_lib::scope::{ScopeFile, ScopeRequest};
-use cih_engine_lib::wiki_cmd;
+use cih_engine_lib::wiki as wiki_cmd;
 use cih_wiki::{WikiManifest, WikiMeta};
 use std::fs;
 use std::path::{Path, PathBuf};

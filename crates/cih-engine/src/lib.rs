@@ -22,4 +22,4 @@ pub mod start_env;
 pub mod tui;
 pub mod ui;
 pub mod versioning;
-pub mod wiki_cmd;
+pub mod wiki;
