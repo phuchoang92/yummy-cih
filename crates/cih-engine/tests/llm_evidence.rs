@@ -1,5 +1,6 @@
 use cih_core::{Edge, EdgeKind, NodeId, NodeKind, Range};
 use cih_engine_lib::llm::evidence::*;
+use cih_engine_lib::llm::split_text_chunks;
 use cih_wiki::WikiGraph;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +32,7 @@ fn temp_repo() -> PathBuf {
 
 #[test]
 fn split_md_and_txt_chunks_at_paragraphs() {
-    let chunks = split_chunks("one\n\n two\n\nthree");
+    let chunks = split_text_chunks("one\n\n two\n\nthree", 400);
     assert_eq!(chunks.len(), 1);
     assert!(chunks[0].contains("one"));
     assert!(chunks[0].contains("three"));

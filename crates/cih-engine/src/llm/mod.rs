@@ -127,3 +127,46 @@ pub fn require_api_key<'a>(api_key: Option<&'a str>, provider: &str) -> Result<&
         )
     })
 }
+
+/// Split `text` into chunks of at most `max_chars` characters, breaking at line boundaries.
+/// Lines that individually exceed `max_chars` are hard-cut at UTF-8 char boundaries.
+/// Empty lines are skipped.
+pub fn split_text_chunks(text: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if line.len() > max_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            let mut start = 0;
+            while start < line.len() {
+                let mut end = (start + max_chars).min(line.len());
+                while end > start && !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                chunks.push(line[start..end].to_string());
+                start = end;
+            }
+            continue;
+        }
+        if !current.is_empty() && current.len() + 1 + line.len() > max_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() && !text.is_empty() {
+        chunks.push(text.to_string());
+    }
+    chunks
+}

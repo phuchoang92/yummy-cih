@@ -96,7 +96,7 @@ impl EvidenceCorpus {
             }
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read evidence file {}", path.display()))?;
-            for (idx, chunk) in split_chunks(&text).into_iter().enumerate() {
+            for (idx, chunk) in super::split_text_chunks(&text, 400).into_iter().enumerate() {
                 chunks.push(EvidenceChunk {
                     source: format!("{}#{}", path.display(), idx + 1),
                     text: chunk,
@@ -646,41 +646,3 @@ fn simple_class_from_callable(id: &str) -> Option<String> {
     fqcn.rsplit('.').next().map(|s| s.to_string())
 }
 
-pub fn split_chunks(text: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for para in text.split("\n\n") {
-        let para = para.trim();
-        if para.is_empty() {
-            continue;
-        }
-        if current.len() + para.len() + 2 <= 400 {
-            if !current.is_empty() {
-                current.push_str("\n\n");
-            }
-            current.push_str(para);
-        } else {
-            if !current.is_empty() {
-                chunks.push(current);
-                current = String::new();
-            }
-            if para.len() <= 400 {
-                current.push_str(para);
-            } else {
-                let mut start = 0usize;
-                while start < para.len() {
-                    let mut end = (start + 400).min(para.len());
-                    while end > start && !para.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    chunks.push(para[start..end].trim().to_string());
-                    start = end;
-                }
-            }
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
-}

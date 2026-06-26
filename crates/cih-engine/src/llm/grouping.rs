@@ -364,7 +364,7 @@ fn two_phase_grouping(
     tracing::info!(modules = outline.len(), "LLM grouping phase 1 complete");
 
     // Phase 2: assign communities to the established outline in batches
-    let chunks = split_into_chunks(detailed_evidence, MAX_EVIDENCE_CHARS);
+    let chunks = super::split_text_chunks(detailed_evidence, MAX_EVIDENCE_CHARS);
     let total = chunks.len();
     let mut all: Vec<ModuleProposal> = Vec::new();
 
@@ -471,27 +471,6 @@ fn estimate_module_count(graph: &WikiGraph) -> usize {
     hints.len().max(8).min(40)
 }
 
-pub fn split_into_chunks(text: &str, max_chars: usize) -> Vec<String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for line in lines {
-        if current.len() + line.len() + 1 > max_chars && !current.is_empty() {
-            chunks.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(line);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    if chunks.is_empty() {
-        chunks.push(text.to_string());
-    }
-    chunks
-}
 
 pub fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal> {
     let mut map: HashMap<String, ModuleProposal> = HashMap::new();
