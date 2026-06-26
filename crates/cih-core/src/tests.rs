@@ -149,9 +149,10 @@ fn parsed_file_round_trips_json() {
             param_types: vec!["Long".into()],
             return_type: Some("User".into()),
             declared_type: None,
-            stereotype: None,
+            framework_role: None,
             body_fingerprint: None,
             complexity: None,
+            lang_meta: None,
         }],
         imports: vec![RawImport {
             raw: "java.util.List".into(),

@@ -176,9 +176,10 @@ fn collect_declarations(
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
-            stereotype: stereotype.clone(),
+            framework_role: stereotype.clone(),
             complexity: None,
             body_fingerprint: None,
+        lang_meta: None,
         });
 
         if let Some(parent_id) = owner_id {
@@ -343,9 +344,10 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         param_types,
         return_type,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity,
         body_fingerprint,
+        lang_meta: None,
 });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -419,9 +421,10 @@ fn collect_constructor(
         param_types: param_type_names(node, src),
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity,
         body_fingerprint,
+        lang_meta: None,
 });
     builder.callable_contexts.push(CallableContext {
         id: id.clone(),
@@ -491,9 +494,10 @@ fn collect_fields(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             param_types: Vec::new(),
             return_type: None,
             declared_type: declared_type.clone(),
-            stereotype: None,
+            framework_role: None,
             complexity: None,
             body_fingerprint: None,
+        lang_meta: None,
         });
     }
 }
@@ -884,7 +888,7 @@ fn emit_feign_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) 
                 normalize_external_url(&route.path)
             };
             builder.contract_sites.push(ContractSite {
-                kind: ContractKind::FeignClient,
+                kind: ContractKind::HttpClientProxy,
                 url_template: Some(url),
                 topic: None,
                 http_method: Some(route.http_method.to_string()),
@@ -2487,14 +2491,14 @@ fn attach_structural_profiles(builder: &mut FileBuilder) {
             sum_of(|c| c.try_count as f32),                           // 13 try_count
             sum_of(|c| c.return_count as f32),                        // 14 return_count
             sum_of(|c| c.throw_count as f32),                         // 15 throw_count
-            def.stereotype.is_some() as u8 as f32,                    // 16 annotation_count (proxy)
-            def.stereotype.is_some() as u8 as f32,                    // 17 has_spring_stereotype
+            def.framework_role.is_some() as u8 as f32,                    // 16 annotation_count (proxy)
+            def.framework_role.is_some() as u8 as f32,                    // 17 has_framework_stereotype
             (def.kind == NodeKind::Interface) as u8 as f32,           // 18 is_interface
             def.modifiers.iter().any(|m| m == "abstract") as u8 as f32, // 19 is_abstract
             (def.kind == NodeKind::Enum) as u8 as f32,                // 20 is_enum
             *implements_count.get(fqcn).unwrap_or(&0) as f32,         // 21 implements_count
             *extends_count.get(fqcn).unwrap_or(&0) as f32,            // 22 extends_count
-            (def.stereotype.as_deref() == Some("test")) as u8 as f32, // 23 is_test
+            (def.framework_role.as_deref() == Some("test")) as u8 as f32, // 23 is_test
             loc.min(1.0),                                              // 24 loc_normalized
         ];
 
@@ -2582,7 +2586,7 @@ fn normalize_builder(builder: &mut FileBuilder) {
         a.in_callable
             .as_str()
             .cmp(b.in_callable.as_str())
-            .then(contract_kind_key(a.kind).cmp(contract_kind_key(b.kind)))
+            .then(contract_kind_key(&a.kind).cmp(contract_kind_key(&b.kind)))
             .then(a.http_method.cmp(&b.http_method))
             .then(a.url_template.cmp(&b.url_template))
             .then(a.topic.cmp(&b.topic))
@@ -2599,12 +2603,13 @@ fn normalize_builder(builder: &mut FileBuilder) {
     });
 }
 
-fn contract_kind_key(kind: ContractKind) -> &'static str {
+fn contract_kind_key(kind: &ContractKind) -> &str {
     match kind {
         ContractKind::HttpCall => "http-call",
-        ContractKind::FeignClient => "feign-client",
+        ContractKind::HttpClientProxy => "http-client-proxy",
         ContractKind::EventPublish => "event-publish",
         ContractKind::EventListen => "event-listen",
+        ContractKind::Custom(s) => s.as_str(),
     }
 }
 

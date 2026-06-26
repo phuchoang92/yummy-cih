@@ -148,16 +148,6 @@ pub fn function_id(fqn: &str, name: &str, arity: u16) -> NodeId {
     NodeId::new(format!("Function:{fqn}#{name}/{arity}"))
 }
 
-/// Origin XML dialect for an integration route / message destination.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IntegrationSource {
-    CamelXml,
-    BlueprintXml,
-    SpringXml,
-    CxfXml,
-}
-
 pub fn file_id(rel: &str) -> NodeId {
     NodeId::new(format!("File:{rel}"))
 }

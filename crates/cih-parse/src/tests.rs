@@ -428,7 +428,7 @@ void call() {
     let parsed = output.parsed_files.first().unwrap();
 
     assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::FeignClient
+        site.kind == ContractKind::HttpClientProxy
             && site.http_method.as_deref() == Some("GET")
             && site.url_template.as_deref() == Some("/orders/{id}")
             && site.in_callable == method_id("com.example.OrdersClient", "getOrder", 1)
@@ -744,7 +744,7 @@ fn annotation_stereotype_wins_over_name_suffix() {
     let root = temp_repo();
     let rel = "src/main/java/com/example/CartController.java";
     write_file(&root, rel,
-        "package com.example;\nimport org.springframework.stereotype.Service;\n@Service\npublic class CartController {}\n",
+        "package com.example;\nimport org.springframework.framework_role.Service;\n@Service\npublic class CartController {}\n",
     );
     let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
     fs::remove_dir_all(&root).unwrap();

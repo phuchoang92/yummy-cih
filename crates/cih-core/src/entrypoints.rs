@@ -56,77 +56,53 @@ impl EntrypointRegistry {
 
     fn builtin_defaults() -> Self {
         let mut reg = Self::default();
+        Self::java_defaults(&mut reg);
+        Self::typescript_defaults(&mut reg);
+        Self::python_defaults(&mut reg);
+        reg
+    }
 
-        // Java — Spring MVC + JAX-RS
+    fn java_defaults(reg: &mut Self) {
         for ann in [
-            "GetMapping",
-            "PostMapping",
-            "PutMapping",
-            "DeleteMapping",
-            "PatchMapping",
-            "RequestMapping",
-            "GET",
-            "POST",
-            "PUT",
-            "DELETE",
-            "PATCH",
-            "HEAD",
-            "OPTIONS",
+            "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping",
+            "RequestMapping", "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
         ] {
             reg.http.insert(ann.to_string());
         }
-        // TypeScript — NestJS
+        for ann in [
+            "KafkaListener", "EventListener", "RabbitListener",
+            "JmsListener", "SqsListener", "StreamListener",
+        ] {
+            reg.event.insert(ann.to_string());
+        }
+        for ann in ["Scheduled", "Cron"] {
+            reg.scheduled.insert(ann.to_string());
+        }
+    }
+
+    fn typescript_defaults(reg: &mut Self) {
         for ann in ["Get", "Post", "Put", "Delete", "Patch", "Head", "Options", "All"] {
             reg.http.insert(ann.to_string());
         }
-        // Python — Flask + FastAPI
+        for ann in ["MessagePattern", "EventPattern"] {
+            reg.event.insert(ann.to_string());
+        }
+        for ann in ["Cron", "Interval", "Timeout"] {
+            reg.scheduled.insert(ann.to_string());
+        }
+    }
+
+    fn python_defaults(reg: &mut Self) {
         for ann in [
-            "app.route",
-            "app.get",
-            "app.post",
-            "app.put",
-            "app.delete",
-            "app.patch",
-            "router.get",
-            "router.post",
-            "router.put",
-            "router.delete",
-            "router.patch",
+            "app.route", "app.get", "app.post", "app.put", "app.delete", "app.patch",
+            "router.get", "router.post", "router.put", "router.delete", "router.patch",
             "blueprint.route",
         ] {
             reg.http.insert(ann.to_string());
         }
-
-        // Java — message listeners
-        for ann in [
-            "KafkaListener",
-            "EventListener",
-            "RabbitListener",
-            "JmsListener",
-            "SqsListener",
-            "StreamListener",
-        ] {
-            reg.event.insert(ann.to_string());
-        }
-        // TypeScript — NestJS messaging
-        for ann in ["MessagePattern", "EventPattern"] {
-            reg.event.insert(ann.to_string());
-        }
-        // Python — Celery tasks
         for ann in ["task", "app.task", "shared_task", "celery.task"] {
             reg.event.insert(ann.to_string());
         }
-
-        // Java
-        for ann in ["Scheduled", "Cron"] {
-            reg.scheduled.insert(ann.to_string());
-        }
-        // TypeScript — NestJS scheduling
-        for ann in ["Cron", "Interval", "Timeout"] {
-            reg.scheduled.insert(ann.to_string());
-        }
-
-        reg
     }
 
     fn merge_toml(&mut self, content: &str) {

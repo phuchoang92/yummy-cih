@@ -329,9 +329,10 @@ fn emit_class_decl(
         param_types: vec![],
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity: None,
         body_fingerprint: None,
+    lang_meta: None,
     });
 
     // Primary constructor
@@ -360,9 +361,10 @@ fn emit_class_decl(
             param_types: vec![],
             return_type: None,
             declared_type: None,
-            stereotype: None,
+            framework_role: None,
             complexity: None,
             body_fingerprint: None,
+        lang_meta: None,
         });
     }
 
@@ -415,9 +417,10 @@ fn emit_object_decl(
         param_types: vec![],
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity: None,
         body_fingerprint: None,
+    lang_meta: None,
     });
 
     if let Some(body) = find_named_child(node, "class_body") {
@@ -499,9 +502,10 @@ fn emit_function_decl(
                 param_types: vec![],
                 return_type: None,
                 declared_type: None,
-                stereotype: None,
+                framework_role: None,
                 complexity: None,
                 body_fingerprint: body_fp,
+                lang_meta: None,
             });
         }
         None => {
@@ -527,9 +531,10 @@ fn emit_function_decl(
                 param_types: vec![],
                 return_type: None,
                 declared_type: None,
-                stereotype: None,
+                framework_role: None,
                 complexity: None,
                 body_fingerprint: body_fp,
+                lang_meta: None,
             });
         }
     }
@@ -585,9 +590,10 @@ fn emit_property_decl(
         param_types: vec![],
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity: None,
         body_fingerprint: None,
+    lang_meta: None,
     });
 }
 
@@ -625,9 +631,10 @@ fn emit_secondary_constructor(
         param_types: vec![],
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity: None,
         body_fingerprint: None,
+    lang_meta: None,
     });
 
     let _ = src;

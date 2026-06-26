@@ -216,9 +216,10 @@ impl Builder {
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
-            stereotype: stereotype.map(|s| s.to_string()),
+            framework_role: stereotype.map(|s| s.to_string()),
             complexity: None,
             body_fingerprint: None,
+        lang_meta: None,
         });
         fqn
     }
@@ -255,9 +256,10 @@ impl Builder {
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
-            stereotype: None,
+            framework_role: None,
             complexity: None,
             body_fingerprint: None,
+        lang_meta: None,
         });
     }
 
@@ -319,9 +321,10 @@ impl Builder {
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
-            stereotype: None,
+            framework_role: None,
             complexity: None,
             body_fingerprint,
+            lang_meta: None,
         });
         id
     }

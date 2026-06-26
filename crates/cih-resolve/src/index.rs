@@ -54,7 +54,7 @@ impl ResolveIndex {
             );
             for def in &pf.defs {
                 if is_type_kind(def.kind) {
-                    if let Some(s) = def.stereotype.as_deref() {
+                    if let Some(s) = def.framework_role.as_deref() {
                         idx.type_stereotypes.insert(def.fqcn.clone(), s.to_string());
                     }
                     idx.types_by_fqcn.insert(def.fqcn.clone(), def.clone());

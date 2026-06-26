@@ -58,9 +58,10 @@ fn parsed(file: &str, package: &str, class_name: &str, imports: Vec<&str>) -> Pa
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
-            stereotype: None,
+            framework_role: None,
             body_fingerprint: None,
             complexity: None,
+            lang_meta: None,
         }],
         imports: imports
             .into_iter()

@@ -11,8 +11,8 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
 
     for pf in parsed {
         for site in &pf.contract_sites {
-            match site.kind {
-                ContractKind::HttpCall | ContractKind::FeignClient => {
+            match &site.kind {
+                ContractKind::HttpCall | ContractKind::HttpClientProxy => {
                     let Some(url_template) = site.url_template.as_deref() else {
                         continue;
                     };
@@ -22,8 +22,8 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                     let method = http_method.to_ascii_uppercase();
                     let id = external_endpoint_id(&method, url_template);
                     let name = format!("{method} {url_template}");
-                    let source = match site.kind {
-                        ContractKind::FeignClient => "feign-client",
+                    let source = match &site.kind {
+                        ContractKind::HttpClientProxy => "http-client-proxy",
                         _ => "http-client",
                     };
                     nodes.push(Node {
@@ -45,8 +45,8 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                         dst: id,
                         kind: EdgeKind::ExternalCall,
                         confidence: 0.75,
-                        reason: match site.kind {
-                            ContractKind::FeignClient => "feign-client",
+                        reason: match &site.kind {
+                            ContractKind::HttpClientProxy => "http-client-proxy",
                             _ => "http-client",
                         }
                         .to_string(),
@@ -69,7 +69,7 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                             "topic": topic,
                         })),
                     });
-                    let (kind, reason) = match site.kind {
+                    let (kind, reason) = match &site.kind {
                         ContractKind::EventPublish => (EdgeKind::PublishesEvent, "event-publish"),
                         ContractKind::EventListen => (EdgeKind::ListensTo, "event-listen"),
                         _ => unreachable!("HTTP contract kind handled above"),
@@ -80,9 +80,10 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                         kind,
                         confidence: 0.8,
                         reason: reason.to_string(),
-            props: None,
+                        props: None,
                     });
                 }
+                ContractKind::Custom(_) => continue,
             }
         }
     }

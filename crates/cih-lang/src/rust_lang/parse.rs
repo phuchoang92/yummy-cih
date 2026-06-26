@@ -139,8 +139,9 @@ fn extract_fn(
         id: id.clone(), kind, fqcn: owner_fqcn.unwrap_or(&fqcn).to_string(),
         name: name.clone(), owner: owner_id.clone(),
         range, modifiers: Vec::new(), param_types: Vec::new(),
-        return_type: None, declared_type: None, stereotype: None,
+        return_type: None, declared_type: None, framework_role: None,
         complexity: None, body_fingerprint: None,
+    lang_meta: None,
     };
     let graph_node = Node {
         id: id.clone(), kind, name: name.clone(),
@@ -165,8 +166,9 @@ fn extract_type(
     let def = SymbolDef {
         id: id.clone(), kind, fqcn: fqcn.clone(), name: name.clone(),
         owner: None, range, modifiers: Vec::new(), param_types: Vec::new(),
-        return_type: None, declared_type: None, stereotype: None,
+        return_type: None, declared_type: None, framework_role: None,
         complexity: None, body_fingerprint: None,
+    lang_meta: None,
     };
     let graph_node = Node {
         id: id.clone(), kind, name: name.clone(),
@@ -189,7 +191,8 @@ fn extract_trait(
         id: id.clone(), kind: NodeKind::Interface, fqcn: fqcn.clone(),
         name: name.clone(), owner: None, range, modifiers: Vec::new(),
         param_types: Vec::new(), return_type: None, declared_type: None,
-        stereotype: None, complexity: None, body_fingerprint: None,
+        framework_role: None, complexity: None, body_fingerprint: None,
+    lang_meta: None,
     };
     let graph_node = Node {
         id: id.clone(), kind: NodeKind::Interface, name: name.clone(),

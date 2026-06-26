@@ -216,9 +216,10 @@ fn extract_function(
         param_types: Vec::new(),
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity: None,
         body_fingerprint: None,
+    lang_meta: None,
     };
     let graph_node = Node {
         id: id.clone(),
@@ -272,9 +273,10 @@ fn extract_method(
         param_types: Vec::new(),
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity: None,
         body_fingerprint: None,
+    lang_meta: None,
     };
     let graph_node = Node {
         id: id.clone(),
@@ -348,9 +350,10 @@ fn extract_type_spec(
         param_types: Vec::new(),
         return_type: None,
         declared_type: None,
-        stereotype: None,
+        framework_role: None,
         complexity: None,
         body_fingerprint: None,
+    lang_meta: None,
     };
     let graph_node = Node {
         id: id.clone(),

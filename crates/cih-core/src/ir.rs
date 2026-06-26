@@ -105,16 +105,19 @@ pub struct ContractSite {
 }
 
 /// Type of contract site discovered by the parser.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContractKind {
     /// HTTP call via RestTemplate / WebClient.
     HttpCall,
-    /// Feign client method declaration.
-    FeignClient,
+    /// Declarative HTTP client proxy (e.g. Feign/OpenFeign interface).
+    HttpClientProxy,
     /// KafkaTemplate.send() / ApplicationEventPublisher.publishEvent().
     EventPublish,
     /// @KafkaListener / @EventListener method.
     EventListen,
+    /// Language-specific contract kind emitted by a parser (e.g. `"grpc_stub"`, `"graphql_query"`).
+    /// Not resolved to edges automatically; consumers check the inner key.
+    Custom(String),
 }
 
 /// A declared symbol — a type, method, constructor, or field.
@@ -144,16 +147,22 @@ pub struct SymbolDef {
     /// Declared type for fields, raw name (`None` for non-fields).
     #[serde(default)]
     pub declared_type: Option<String>,
-    /// Spring stereotype for type-kind defs: `"service"`, `"repository"`, `"component"`,
-    /// `"controller"`, `"configuration"`, `"entity"`. `None` for non-types and plain classes.
-    #[serde(default)]
-    pub stereotype: Option<String>,
+    /// Framework role for type-kind defs emitted by language parsers.
+    /// Java examples: `"service"`, `"repository"`, `"controller"`, `"entity"`.
+    /// `None` for non-types and unannotated classes.
+    #[serde(default, rename = "stereotype")]
+    pub framework_role: Option<String>,
     /// Optional complexity analysis (Gap 1). None = language provider did not compute this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub complexity: Option<ComplexityRecord>,
     /// Optional MinHash body fingerprint (Gap 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_fingerprint: Option<BodyFingerprint>,
+    /// Language-specific metadata not part of the universal IR.
+    /// Parsers may write arbitrary JSON here; consumers must check the `language` field
+    /// of the enclosing `ParsedFile` before reading. `None` for parsers that don't use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang_meta: Option<serde_json::Value>,
 }
 
 /// Semantic import binding kind — more structured than raw text.
@@ -237,7 +246,7 @@ pub struct ComplexityRecord {
 ///  6  max_cognitive       7  avg_loop_depth        8  max_loop_depth
 ///  9  if_count (sum)     10  for_count (sum)      11  while_count (sum)
 /// 12  switch_count (sum) 13  try_count (sum)      14  return_count (sum)
-/// 15  throw_count (sum)  16  annotation_count     17  has_spring_stereotype
+/// 15  throw_count (sum)  16  annotation_count     17  has_framework_stereotype
 /// 18  is_interface       19  is_abstract          20  is_enum
 /// 21  implements_count   22  extends_count        23  is_test
 /// 24  loc_normalized (LOC/1000, clamped 1.0)

@@ -46,7 +46,7 @@ impl LanguageResolver for JavaResolver {
     }
 
     fn type_metadata(&self, def: &SymbolDef) -> Option<String> {
-        def.stereotype.clone()
+        def.framework_role.clone()
     }
 
     fn inheritance_model(&self) -> InheritanceModel {

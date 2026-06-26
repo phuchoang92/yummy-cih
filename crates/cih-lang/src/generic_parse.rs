@@ -33,7 +33,8 @@ pub fn emit_function(
         id: id.clone(), kind: NodeKind::Function, fqcn: fqcn.to_string(),
         name: name.to_string(), owner: None, range, modifiers: Vec::new(),
         param_types: Vec::new(), return_type: None, declared_type: None,
-        stereotype: None, complexity: None, body_fingerprint: None,
+        framework_role: None, complexity: None, body_fingerprint: None,
+    lang_meta: None,
     });
     nodes.push(Node {
         id: id.clone(), kind: NodeKind::Function, name: name.to_string(),
@@ -56,7 +57,8 @@ pub fn emit_type(
         id: id.clone(), kind, fqcn: fqcn.to_string(),
         name: name.to_string(), owner: None, range, modifiers: Vec::new(),
         param_types: Vec::new(), return_type: None, declared_type: None,
-        stereotype: None, complexity: None, body_fingerprint: None,
+        framework_role: None, complexity: None, body_fingerprint: None,
+    lang_meta: None,
     });
     nodes.push(Node {
         id: id.clone(), kind, name: name.to_string(),
@@ -79,7 +81,8 @@ pub fn emit_method(
         id: id.clone(), kind: NodeKind::Method, fqcn: owner_fqcn.to_string(),
         name: name.to_string(), owner: Some(owner_id.clone()), range,
         modifiers: Vec::new(), param_types: Vec::new(), return_type: None,
-        declared_type: None, stereotype: None, complexity: None, body_fingerprint: None,
+        declared_type: None, framework_role: None, complexity: None, body_fingerprint: None,
+    lang_meta: None,
     });
     nodes.push(Node {
         id: id.clone(), kind: NodeKind::Method, name: name.to_string(),
