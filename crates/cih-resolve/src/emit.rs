@@ -121,7 +121,7 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn emit_receiver_bound_calls(&mut self) {
-        let parsed = self.parsed.to_vec();
+        let parsed = self.parsed;
         for (file_idx, pf) in parsed.iter().enumerate() {
             for (site_idx, site) in pf.reference_sites.iter().enumerate() {
                 if site.kind != RefKind::Call || site.receiver.is_none() {
@@ -143,7 +143,7 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn emit_free_call_fallback(&mut self) {
-        let parsed = self.parsed.to_vec();
+        let parsed = self.parsed;
         for (file_idx, pf) in parsed.iter().enumerate() {
             for (site_idx, site) in pf.reference_sites.iter().enumerate() {
                 if self.handled.contains(&(file_idx, site_idx)) {
@@ -174,7 +174,7 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn emit_references_via_lookup(&mut self) {
-        let parsed = self.parsed.to_vec();
+        let parsed = self.parsed;
         for (file_idx, pf) in parsed.iter().enumerate() {
             for (site_idx, site) in pf.reference_sites.iter().enumerate() {
                 if self.handled.contains(&(file_idx, site_idx)) {
@@ -232,8 +232,8 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn emit_import_edges(&mut self) {
-        let parsed = self.parsed.to_vec();
-        for pf in &parsed {
+        let parsed = self.parsed;
+        for pf in parsed {
             for import in &pf.imports {
                 let Some(dst) = self.resolve_import_target(pf, import) else {
                     continue;
@@ -250,8 +250,8 @@ impl<'a> EdgeEmitter<'a> {
     }
 
     fn emit_heritage_edges(&mut self) {
-        let parsed = self.parsed.to_vec();
-        for pf in &parsed {
+        let parsed = self.parsed;
+        for pf in parsed {
             for site in &pf.reference_sites {
                 let kind = match site.kind {
                     RefKind::Extends => EdgeKind::Extends,
