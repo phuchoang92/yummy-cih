@@ -29,6 +29,20 @@ use clap::{Parser, Subcommand};
 const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
 const DEFAULT_GRAPH_KEY: &str = "cih";
 
+/// Shared FalkorDB connection + load options, used by Analyze, Resolve, and Discover.
+#[derive(Debug, clap::Args)]
+struct DbArgs {
+    /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
+    #[arg(long, env = "FALKOR_URL")]
+    falkor_url: Option<String>,
+    /// FalkorDB graph key. Defaults to $CIH_GRAPH_KEY or "cih".
+    #[arg(long, env = "CIH_GRAPH_KEY")]
+    graph_key: Option<String>,
+    /// Skip the FalkorDB load step (emit JSONL artifacts only).
+    #[arg(long)]
+    no_load: bool,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "cih-engine", about = "Code Intelligence Hub engine CLI")]
 struct Cli {
@@ -71,15 +85,8 @@ enum Command {
         /// Print the resolved ScopeFile JSON instead of the human summary.
         #[arg(long)]
         json: bool,
-        /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
-        #[arg(long, env = "FALKOR_URL")]
-        falkor_url: Option<String>,
-        /// FalkorDB graph key. Defaults to $CIH_GRAPH_KEY or "cih".
-        #[arg(long, env = "CIH_GRAPH_KEY")]
-        graph_key: Option<String>,
-        /// Skip the FalkorDB load step (emit JSONL artifacts only).
-        #[arg(long)]
-        no_load: bool,
+        #[command(flatten)]
+        db: DbArgs,
         /// Disable incremental parse cache and re-parse all files.
         #[arg(long)]
         no_cache: bool,
@@ -96,15 +103,8 @@ enum Command {
     Resolve {
         /// Repository root (must contain .cih/scope.json from a prior `analyze` run).
         repo: PathBuf,
-        /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
-        #[arg(long, env = "FALKOR_URL")]
-        falkor_url: Option<String>,
-        /// FalkorDB graph key. Defaults to $CIH_GRAPH_KEY or "cih".
-        #[arg(long, env = "CIH_GRAPH_KEY")]
-        graph_key: Option<String>,
-        /// Skip the FalkorDB load step (emit JSONL artifacts only).
-        #[arg(long)]
-        no_load: bool,
+        #[command(flatten)]
+        db: DbArgs,
         /// Print the summary as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -113,15 +113,8 @@ enum Command {
     Discover {
         /// Repository root with `.cih/artifacts/<version>` from a prior analyze/resolve run.
         repo: PathBuf,
-        /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
-        #[arg(long, env = "FALKOR_URL")]
-        falkor_url: Option<String>,
-        /// FalkorDB graph key. Defaults to $CIH_GRAPH_KEY or "cih".
-        #[arg(long, env = "CIH_GRAPH_KEY")]
-        graph_key: Option<String>,
-        /// Skip the FalkorDB load step (emit JSONL artifacts only).
-        #[arg(long)]
-        no_load: bool,
+        #[command(flatten)]
+        db: DbArgs,
         /// Print the summary as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -483,9 +476,7 @@ fn main() -> Result<()> {
             include_decompiled,
             scope,
             json,
-            falkor_url,
-            graph_key,
-            no_load,
+            db,
             no_cache,
             skip_xml_integration,
             languages,
@@ -499,9 +490,9 @@ fn main() -> Result<()> {
                 include_decompiled,
                 scope,
                 json,
-                falkor_url,
-                graph_key,
-                no_load,
+                falkor_url: db.falkor_url,
+                graph_key: db.graph_key,
+                no_load: db.no_load,
                 no_cache,
                 skip_xml_integration,
                 languages,
@@ -509,16 +500,12 @@ fn main() -> Result<()> {
         ),
         Command::Resolve {
             repo,
-            falkor_url,
-            graph_key,
-            no_load,
+            db,
             json,
-        } => analyze::run_resolve(repo, falkor_url, graph_key, no_load, json),
+        } => analyze::run_resolve(repo, db.falkor_url, db.graph_key, db.no_load, json),
         Command::Discover {
             repo,
-            falkor_url,
-            graph_key,
-            no_load,
+            db,
             json,
             resolution,
             min_community_size,
@@ -560,9 +547,9 @@ fn main() -> Result<()> {
             });
             discover::run_discover(
                 repo,
-                falkor_url,
-                graph_key,
-                no_load,
+                db.falkor_url,
+                db.graph_key,
+                db.no_load,
                 json,
                 discover::DiscoverOverrides {
                     resolution,
@@ -838,8 +825,8 @@ fn run_artifact(command: ArtifactCommand) -> Result<()> {
             );
 
             // Bulk-load into FalkorDB.
-            let falkor_url = falkor_url.unwrap_or_else(|| "redis://127.0.0.1:6380".to_string());
-            let graph_key = graph_key.unwrap_or_else(|| "cih".to_string());
+            let falkor_url = falkor_url.unwrap_or_else(|| DEFAULT_FALKOR_URL.to_string());
+            let graph_key = graph_key.unwrap_or_else(|| DEFAULT_GRAPH_KEY.to_string());
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 use cih_falkor::FalkorStore;

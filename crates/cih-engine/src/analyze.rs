@@ -266,8 +266,8 @@ pub fn analyze_from_scope_with_options(
     {
         ui.finish_with(format!(
             "{} nodes, {} edges  \x1b[2m(no changes — reused)\x1b[0m",
-            fmt_count(node_count),
-            fmt_count(edge_count)
+            crate::ui::fmt_count(node_count),
+            crate::ui::fmt_count(edge_count)
         ));
         return Ok(EmitOutcome {
             scope_file,
@@ -314,8 +314,8 @@ pub fn analyze_from_scope_with_options(
     tracing::info!("starting resolve phase");
     ui.finish_with(format!(
         "{} parsed, {} skipped",
-        fmt_count(parse_output.parsed_files.len()),
-        fmt_count(parse_output.skipped.len())
+        crate::ui::fmt_count(parse_output.parsed_files.len()),
+        crate::ui::fmt_count(parse_output.skipped.len())
     ));
     ui.spin("Resolving");
 
@@ -341,8 +341,8 @@ pub fn analyze_from_scope_with_options(
     );
     ui.finish_with(format!(
         "{} edges  \x1b[2m({} unresolved)\x1b[0m",
-        fmt_count(resolve_output.edges.len()),
-        fmt_count(resolve_output.skipped as usize)
+        crate::ui::fmt_count(resolve_output.edges.len()),
+        crate::ui::fmt_count(resolve_output.skipped as usize)
     ));
 
     // ── JAR API extraction ────────────────────────────────────────────────────
@@ -364,7 +364,7 @@ pub fn analyze_from_scope_with_options(
         "JAR API extraction complete"
     );
     if !jars.is_empty() {
-        ui.finish_with(format!("{} nodes", fmt_count(jar_node_count)));
+        ui.finish_with(format!("{} nodes", crate::ui::fmt_count(jar_node_count)));
     }
 
     // ── DB access + XML integration + artifact write ──────────────────────────
@@ -484,8 +484,8 @@ pub fn analyze_from_scope_with_options(
     );
     ui.finish_with(format!(
         "{} nodes, {} edges  \x1b[2m(v{})\x1b[0m",
-        fmt_count(all_nodes.len()),
-        fmt_count(edges.len()),
+        crate::ui::fmt_count(all_nodes.len()),
+        crate::ui::fmt_count(edges.len()),
         &version[..8.min(version.len())]
     ));
 
@@ -821,83 +821,6 @@ impl EmitOutcome {
         }
     }
 
-    pub fn print_human(&self, load: &LoadOutcome) {
-        println!(
-            "Scope: {} .java files across {} modules -> {}.",
-            self.scope_file.file_count,
-            self.scope_file.modules.len(),
-            self.scope_path.display()
-        );
-        println!(
-            "Parsed: {} files -> {} nodes, {} edges, IR {}.",
-            self.parsed_file_count,
-            self.node_count,
-            self.edge_count,
-            self.parsed_files_path.display()
-        );
-        if self.skipped_count > 0 {
-            println!(
-                "Skipped: {} files (see logs for details).",
-                self.skipped_count
-            );
-        }
-        if self.cache_stats.enabled {
-            if self.cache_stats.noop {
-                println!("Cache: no source changes; reused existing artifacts.");
-            } else {
-                println!(
-                    "Cache: {} hits, {} changed, {} expanded, {} reparsed.",
-                    self.cache_stats.cache_hits,
-                    self.cache_stats.changed_files,
-                    self.cache_stats.expanded_files,
-                    self.cache_stats.reparsed_files
-                );
-            }
-        }
-        println!(
-            "Resolved: {} edges, {} unresolved refs.",
-            self.resolved_edge_count, self.unresolved_reference_count
-        );
-        if !self.unresolved_external_fqcns.is_empty() {
-            println!(
-                "External unresolved types: {}.",
-                self.unresolved_external_fqcns.len()
-            );
-        }
-        if let Some(ref p) = self.unresolved_report_path {
-            println!("Unresolved report: {}", p.display());
-        }
-        if self.jar_node_count > 0 || self.jar_failed > 0 {
-            let failed_note = if self.jar_failed > 0 {
-                format!(", {} JARs failed", self.jar_failed)
-            } else {
-                String::new()
-            };
-            println!(
-                "JAR API: {} nodes from dependency JARs{}.",
-                self.jar_node_count, failed_note
-            );
-        }
-        println!(
-            "Artifacts: {} (version {})",
-            self.artifacts_dir.display(),
-            self.version
-        );
-        match load {
-            LoadOutcome::Loaded(stats) => {
-                println!(
-                    "FalkorDB: loaded {} nodes, {} edges.",
-                    stats.nodes, stats.edges
-                )
-            }
-            LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
-            LoadOutcome::Reused => println!("FalkorDB: unchanged; existing live graph reused."),
-            LoadOutcome::Failed(_) => {
-                println!("FalkorDB: load failed (artifacts on disk — re-run to retry).")
-            }
-        }
-    }
-
     pub fn print_styled(&self, load: &LoadOutcome) {
         let repo_name = Path::new(&self.scope_file.repo_root)
             .file_name()
@@ -909,7 +832,7 @@ impl EmitOutcome {
             "Files",
             &format!(
                 "{} parsed{}",
-                fmt_count(self.parsed_file_count),
+                crate::ui::fmt_count(self.parsed_file_count),
                 if self.skipped_count > 0 {
                     format!("  \x1b[2m({} skipped)\x1b[0m", self.skipped_count)
                 } else {
@@ -921,20 +844,20 @@ impl EmitOutcome {
             "Graph",
             &format!(
                 "{}  nodes  {}  edges",
-                fmt_count(self.node_count),
-                fmt_count(self.edge_count)
+                crate::ui::fmt_count(self.node_count),
+                crate::ui::fmt_count(self.edge_count)
             ),
         );
         if self.resolved_edge_count > 0 {
             crate::ui::print_row(
                 "Resolve",
-                &format!("{}  edges", fmt_count(self.resolved_edge_count)),
+                &format!("{}  edges", crate::ui::fmt_count(self.resolved_edge_count)),
             );
         }
         if self.jar_node_count > 0 {
             crate::ui::print_row(
                 "JARs",
-                &format!("{}  nodes", fmt_count(self.jar_node_count)),
+                &format!("{}  nodes", crate::ui::fmt_count(self.jar_node_count)),
             );
         }
         crate::ui::print_row("Artifacts", &self.artifacts_dir.display().to_string());
@@ -942,8 +865,8 @@ impl EmitOutcome {
             LoadOutcome::Loaded(stats) => {
                 format!(
                     "{}  nodes  {}  edges",
-                    fmt_count(stats.nodes as usize),
-                    fmt_count(stats.edges as usize)
+                    crate::ui::fmt_count(stats.nodes as usize),
+                    crate::ui::fmt_count(stats.edges as usize)
                 )
             }
             LoadOutcome::Skipped => "\x1b[2mskipped (--no-load)\x1b[0m".to_string(),
@@ -1104,18 +1027,6 @@ fn load_jars_from_repo_map(repo: &Path) -> Vec<JarInfo> {
         .unwrap_or_default()
 }
 
-fn fmt_count(n: usize) -> String {
-    // Insert thousands separators
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out.chars().rev().collect()
-}
 
 fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
     let mut map: HashMap<(String, String, &'static str), Edge> =

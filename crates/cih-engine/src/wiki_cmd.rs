@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use cih_core::{Edge, GraphArtifacts, Node, RepoMap, VersionId};
+use cih_core::{Edge, Node, RepoMap};
 use cih_wiki::assign_class_slugs;
 use cih_wiki::features::{group_communities_by_feature, FeatureGroup};
 use cih_wiki::graph::route_path;
@@ -245,7 +245,7 @@ fn load_wiki_artifacts(
             if feat == "shared" { repo_default_feature.as_ref().clone() } else { feat }
         });
     } else {
-        let community_artifact = latest_community_artifacts(repo).ok();
+        let community_artifact = cih_core::GraphArtifacts::latest_in_dir(&repo.join(".cih").join("artifacts-community")).ok();
         let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
             Some(a) => {
                 let ns = a.read_nodes().with_context(|| {
@@ -668,7 +668,6 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     });
 
     let mut llm_info: Option<WikiLlmInfo> = None;
-    let summaries_for_cache: Vec<(String, String, CommunityLlmSummary)> = Vec::new();
     let mut class_enrichment_store: Option<ClassEnrichmentStore> = None;
     let (llm_summaries, controller_summaries): (
         Option<HashMap<String, CommunityLlmSummary>>,
@@ -1067,7 +1066,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "wiki generation complete"
     );
 
-    persist_wiki_meta_caches(&out_dir, &summaries_for_cache, &feature_cache_updates, &flow_cache_updates)?;
+    persist_wiki_meta_caches(&out_dir, &[], &feature_cache_updates, &flow_cache_updates)?;
 
     if let Some(store) = &class_enrichment_store {
         let cih_dir = repo.join(".cih");
@@ -1119,46 +1118,6 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     Ok(())
 }
 
-fn latest_community_artifacts(repo: &Path) -> Result<GraphArtifacts> {
-    let parent = repo.join(".cih").join("artifacts-community");
-    let mut candidates = Vec::new();
-    let entries = std::fs::read_dir(&parent).with_context(|| {
-        format!(
-            "no community artifacts at {} - run `discover` first",
-            parent.display()
-        )
-    })?;
-    for entry in entries {
-        let entry = entry?;
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let nodes_path = dir.join("nodes.jsonl");
-        let edges_path = dir.join("edges.jsonl");
-        if !nodes_path.is_file() || !edges_path.is_file() {
-            continue;
-        }
-        let version = entry.file_name().to_string_lossy().into_owned();
-        let modified = std::fs::metadata(&nodes_path)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        candidates.push((
-            modified,
-            GraphArtifacts {
-                nodes_path,
-                edges_path,
-                version: VersionId(version),
-            },
-        ));
-    }
-    candidates.sort_by(|(a, _), (b, _)| b.cmp(a));
-    candidates
-        .into_iter()
-        .next()
-        .map(|(_, a)| a)
-        .with_context(|| format!("no complete community artifacts under {}", parent.display()))
-}
 
 
 fn build_full_prompt(name: &str, evidence: &str) -> String {

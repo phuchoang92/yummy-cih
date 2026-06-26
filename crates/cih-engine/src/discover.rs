@@ -113,8 +113,8 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     );
     ui.finish_with(format!(
         "{} nodes, {} edges",
-        fmt_count(nodes.len()),
-        fmt_count(edges.len())
+        crate::ui::fmt_count(nodes.len()),
+        crate::ui::fmt_count(edges.len())
     ));
 
     // Load architecture hint from repo-map.json (written during scan/analyze).
@@ -171,7 +171,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     );
     ui.finish_with(format!(
         "{} communities",
-        fmt_count(community_output.nodes.len())
+        crate::ui::fmt_count(community_output.nodes.len())
     ));
 
     let symbol_count = nodes
@@ -221,7 +221,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     );
     ui.finish_with(format!(
         "{} processes",
-        fmt_count(process_output.nodes.len())
+        crate::ui::fmt_count(process_output.nodes.len())
     ));
 
     // Write entrypoints sidecar — persists Scheduled/EventListener methods that are
@@ -275,8 +275,8 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     );
     ui.finish_with(format!(
         "{} nodes, {} edges  \x1b[2m(v{})\x1b[0m",
-        fmt_count(output_nodes.len()),
-        fmt_count(output_edges.len()),
+        crate::ui::fmt_count(output_nodes.len()),
+        crate::ui::fmt_count(output_edges.len()),
         &version[..8.min(version.len())]
     ));
 
@@ -376,7 +376,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         entries = merged_entries.len(),
         "feature artifacts written"
     );
-    ui.finish_with(format!("{} features", fmt_count(feature_count)));
+    ui.finish_with(format!("{} features", crate::ui::fmt_count(feature_count)));
 
     let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
 
@@ -448,55 +448,26 @@ impl DiscoverOutcome {
         }
     }
 
-    fn print_human(&self, load: &LoadOutcome) {
-        println!(
-            "Discover: source graph {} -> {} communities, {} processes.",
-            self.source_artifacts.version.0, self.community_count, self.process_count
-        );
-        println!(
-            "Edges: {} MEMBER_OF, {} STEP_IN_PROCESS.",
-            self.member_edge_count, self.step_edge_count
-        );
-        println!(
-            "Artifacts: {} (version {})",
-            self.artifacts_dir.display(),
-            self.version
-        );
-        match load {
-            LoadOutcome::Loaded(stats) => {
-                println!(
-                    "FalkorDB: loaded {} nodes, {} edges.",
-                    stats.nodes, stats.edges
-                )
-            }
-            LoadOutcome::Reused => println!("FalkorDB: unchanged; existing live graph reused."),
-            LoadOutcome::Skipped => println!("FalkorDB: skipped (--no-load)."),
-            LoadOutcome::Failed(_) => {
-                println!("FalkorDB: load failed (artifacts on disk - re-run to retry).")
-            }
-        }
-    }
-
     fn print_styled(&self, load: &LoadOutcome) {
         let ver = &self.version[..8.min(self.version.len())];
         crate::ui::print_header("Discover", "", Some(ver));
-        crate::ui::print_row("Communities", &fmt_count(self.community_count));
-        crate::ui::print_row("Processes", &fmt_count(self.process_count));
-        crate::ui::print_row("Features", &fmt_count(self.feature_count));
+        crate::ui::print_row("Communities", &crate::ui::fmt_count(self.community_count));
+        crate::ui::print_row("Processes", &crate::ui::fmt_count(self.process_count));
+        crate::ui::print_row("Features", &crate::ui::fmt_count(self.feature_count));
         crate::ui::print_row(
             "Edges",
             &format!(
                 "{}  member  {}  process",
-                fmt_count(self.member_edge_count),
-                fmt_count(self.step_edge_count)
+                crate::ui::fmt_count(self.member_edge_count),
+                crate::ui::fmt_count(self.step_edge_count)
             ),
         );
         crate::ui::print_row("Artifacts", &self.artifacts_dir.display().to_string());
         let falkor_str = match load {
             LoadOutcome::Loaded(stats) => format!(
                 "{}  nodes  {}  edges",
-                fmt_count(stats.nodes as usize),
-                fmt_count(stats.edges as usize)
+                crate::ui::fmt_count(stats.nodes as usize),
+                crate::ui::fmt_count(stats.edges as usize)
             ),
             LoadOutcome::Skipped => "\x1b[2mskipped (--no-load)\x1b[0m".to_string(),
             LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
@@ -507,17 +478,6 @@ impl DiscoverOutcome {
     }
 }
 
-fn fmt_count(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out.chars().rev().collect()
-}
 
 #[derive(Serialize)]
 struct DiscoverSummary<'a> {

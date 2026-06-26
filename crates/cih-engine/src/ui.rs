@@ -270,3 +270,16 @@ pub fn print_row(label: &str, value: &str) {
 pub fn print_blank() {
     eprintln!();
 }
+
+/// Format a count with thousands separators, e.g. `1234567` → `"1,234,567"`.
+pub fn fmt_count(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
+}

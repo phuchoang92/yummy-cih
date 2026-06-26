@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use cih_core::{Edge, GraphArtifacts, Node, ParsedFile, VersionId};
+use cih_core::{Edge, GraphArtifacts, Node, ParsedFile};
 
 /// blake3 (first 16 hex) over deterministic nodes+edges+IR → graph version.
 pub fn content_version(nodes: &[Node], edges: &[Edge], parsed_files: &[ParsedFile]) -> String {
@@ -23,47 +23,8 @@ pub fn content_version(nodes: &[Node], edges: &[Edge], parsed_files: &[ParsedFil
 
 pub fn latest_graph_artifacts(repo: &Path) -> Result<GraphArtifacts> {
     let parent = repo.join(".cih").join("artifacts");
-    let mut candidates = Vec::new();
-    let entries = std::fs::read_dir(&parent).with_context(|| {
-        format!(
-            "no graph artifacts at {} - run `analyze` first",
-            parent.display()
-        )
-    })?;
-    for entry in entries {
-        let entry = entry?;
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let nodes_path = dir.join("nodes.jsonl");
-        let edges_path = dir.join("edges.jsonl");
-        if !nodes_path.is_file() || !edges_path.is_file() {
-            continue;
-        }
-        let version = entry.file_name().to_string_lossy().into_owned();
-        let modified = std::fs::metadata(&nodes_path)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        candidates.push((
-            modified,
-            GraphArtifacts {
-                nodes_path,
-                edges_path,
-                version: VersionId(version),
-            },
-        ));
-    }
-    candidates.sort_by(|(a_mtime, a_artifacts), (b_mtime, b_artifacts)| {
-        b_mtime
-            .cmp(a_mtime)
-            .then_with(|| b_artifacts.version.0.cmp(&a_artifacts.version.0))
-    });
-    candidates
-        .into_iter()
-        .next()
-        .map(|(_, artifacts)| artifacts)
-        .with_context(|| format!("no complete graph artifacts under {}", parent.display()))
+    GraphArtifacts::latest_in_dir(&parent)
+        .with_context(|| format!("run `analyze` first — no graph artifacts at {}", parent.display()))
 }
 
 pub fn discover_version(nodes: &[Node], edges: &[Edge]) -> String {

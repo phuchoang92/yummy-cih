@@ -9,6 +9,7 @@
 //! length + zstd-compressed blob.
 
 use crate::{CihBundleManifest, Edge, GraphArtifacts, Node, VersionId};
+use anyhow::{anyhow, Context as _};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fs::{self, File};
@@ -41,6 +42,51 @@ impl GraphArtifacts {
 
     pub fn read_edges(&self) -> std::io::Result<Vec<Edge>> {
         read_jsonl(&self.edges_path)
+    }
+
+    /// Return the most-recent `GraphArtifacts` found directly under `parent`.
+    ///
+    /// Walks `parent`, keeps every immediate subdirectory that contains both
+    /// `nodes.jsonl` and `edges.jsonl`, and returns the one with the newest
+    /// `nodes.jsonl` mtime (ties broken by version string, descending).
+    pub fn latest_in_dir(parent: &Path) -> anyhow::Result<GraphArtifacts> {
+        let entries = std::fs::read_dir(parent)
+            .with_context(|| format!("no artifacts at {}", parent.display()))?;
+        let mut candidates: Vec<(std::time::SystemTime, GraphArtifacts)> = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let nodes_path = dir.join("nodes.jsonl");
+            let edges_path = dir.join("edges.jsonl");
+            if !nodes_path.is_file() || !edges_path.is_file() {
+                continue;
+            }
+            let version = entry.file_name().to_string_lossy().into_owned();
+            let modified = std::fs::metadata(&nodes_path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            candidates.push((
+                modified,
+                GraphArtifacts {
+                    nodes_path,
+                    edges_path,
+                    version: VersionId(version),
+                },
+            ));
+        }
+        candidates.sort_by(|(a_mtime, a_art), (b_mtime, b_art)| {
+            b_mtime
+                .cmp(a_mtime)
+                .then_with(|| b_art.version.0.cmp(&a_art.version.0))
+        });
+        candidates
+            .into_iter()
+            .next()
+            .map(|(_, a)| a)
+            .ok_or_else(|| anyhow!("no complete artifacts under {}", parent.display()))
     }
 }
 

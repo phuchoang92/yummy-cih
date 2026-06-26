@@ -1,8 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use cih_core::{GraphArtifacts, VersionId};
 use cih_embed::{EmbedStore, SemanticHit};
 use cih_graph_store::Subgraph;
 use cih_search::{rrf_merge, SearchHit, SearchIndex};
@@ -85,7 +84,7 @@ impl SearchState {
             return Ok(None);
         };
 
-        let artifacts = latest_graph_artifacts_in_dir(artifacts_dir)?;
+        let artifacts = cih_core::GraphArtifacts::latest_in_dir(artifacts_dir)?;
         let latest_version = artifacts.version.0.clone();
 
         {
@@ -124,46 +123,5 @@ fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
         hit.score,
         "semantic",
     )
-}
-
-#[doc(hidden)]
-pub fn latest_graph_artifacts_in_dir(parent: &Path) -> Result<GraphArtifacts> {
-    let entries = std::fs::read_dir(parent)
-        .map_err(|err| anyhow!("no graph artifacts at {}: {err}", parent.display()))?;
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let nodes_path = dir.join("nodes.jsonl");
-        let edges_path = dir.join("edges.jsonl");
-        if !nodes_path.is_file() || !edges_path.is_file() {
-            continue;
-        }
-        let version = entry.file_name().to_string_lossy().into_owned();
-        let modified = std::fs::metadata(&nodes_path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        candidates.push((
-            modified,
-            GraphArtifacts {
-                nodes_path,
-                edges_path,
-                version: VersionId(version),
-            },
-        ));
-    }
-    candidates.sort_by(|(left_mtime, left), (right_mtime, right)| {
-        right_mtime
-            .cmp(left_mtime)
-            .then_with(|| right.version.0.cmp(&left.version.0))
-    });
-    candidates
-        .into_iter()
-        .next()
-        .map(|(_, artifacts)| artifacts)
-        .ok_or_else(|| anyhow!("no complete graph artifacts under {}", parent.display()))
 }
 
