@@ -15,7 +15,7 @@ pub struct GroupRegistry {
     pub groups: Vec<GroupEntry>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractMatchKind {
     HttpRoute,
@@ -23,7 +23,7 @@ pub enum ContractMatchKind {
     SpringEvent,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContractMatch {
     pub kind: ContractMatchKind,
     pub provider_repo: String,

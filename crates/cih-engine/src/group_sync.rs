@@ -247,20 +247,8 @@ fn event_match_kind(provider: &EventContract, consumer: &EventContract) -> Contr
 }
 
 fn dedup_matches(matches: Vec<ContractMatch>) -> Vec<ContractMatch> {
-    let mut deduped = BTreeMap::new();
-    for item in matches {
-        let key = format!(
-            "{:?}|{}|{}|{}|{}|{}",
-            item.kind,
-            item.provider_repo,
-            item.provider_id,
-            item.consumer_repo,
-            item.consumer_id,
-            item.match_key
-        );
-        deduped.entry(key).or_insert(item);
-    }
-    deduped.into_values().collect()
+    let mut seen = std::collections::HashSet::new();
+    matches.into_iter().filter(|m| seen.insert(m.clone())).collect()
 }
 
 pub fn normalize_contract_path(path: &str) -> String {
