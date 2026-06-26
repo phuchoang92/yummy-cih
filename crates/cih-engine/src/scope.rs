@@ -209,7 +209,9 @@ fn matches_language_filter(file_language: &str, languages: &[String]) -> bool {
 fn is_decompiled(path: &str, decompiled_dirs: &[String]) -> bool {
     decompiled_dirs.iter().any(|dir| {
         let dir = dir.trim_end_matches('/');
-        path == dir || path.starts_with(&format!("{dir}/"))
+        path == dir || (path.len() > dir.len() + 1
+            && path.as_bytes().get(dir.len()) == Some(&b'/')
+            && path.starts_with(dir))
     })
 }
 
