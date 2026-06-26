@@ -1,17 +1,14 @@
 use cih_engine_lib::llm::*;
 
 #[test]
-fn make_adapter_rejects_unknown_provider() {
-    let err = match make_adapter("unknown", "http://localhost", None) {
-        Ok(_) => panic!("unknown provider should fail"),
-        Err(err) => err.to_string(),
-    };
+fn llm_provider_rejects_unknown_string() {
+    let err = "unknown".parse::<LlmProvider>().unwrap_err().to_string();
     assert!(err.contains("unknown"));
 }
 
 #[test]
 fn make_adapter_requires_http_json_config() {
-    let err = match make_adapter("http-json", "http://localhost", None) {
+    let err = match make_adapter(&LlmProvider::HttpJson, "http://localhost", None) {
         Ok(_) => panic!("missing config should fail"),
         Err(err) => err.to_string(),
     };
@@ -20,10 +17,10 @@ fn make_adapter_requires_http_json_config() {
 
 #[test]
 fn make_adapter_accepts_builtin_providers() {
-    assert!(make_adapter("openai-compatible", "http://localhost", None).is_ok());
-    assert!(make_adapter("anthropic", "http://localhost", None).is_ok());
-    assert!(make_adapter("deepseek", "http://localhost", None).is_ok());
-    assert!(make_adapter("gemini", "http://localhost", None).is_ok());
+    assert!(make_adapter(&LlmProvider::OpenAiCompatible, "http://localhost", None).is_ok());
+    assert!(make_adapter(&LlmProvider::Anthropic, "http://localhost", None).is_ok());
+    assert!(make_adapter(&LlmProvider::DeepSeek, "http://localhost", None).is_ok());
+    assert!(make_adapter(&LlmProvider::Gemini, "http://localhost", None).is_ok());
 }
 
 #[test]

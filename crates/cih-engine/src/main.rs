@@ -532,27 +532,30 @@ fn main() -> Result<()> {
             feature_llm_timeout_secs,
         } => {
             // Build optional LLM config when a provider is specified.
-            let feature_llm = feature_llm_provider.map(|provider| {
-                let model = if feature_llm_model.is_empty() {
-                    match provider.as_str() {
-                        "deepseek" => "deepseek-chat".to_string(),
-                        "gemini" => "gemini-2.5-flash".to_string(),
-                        "anthropic" => "claude-haiku-4-5-20251001".to_string(),
-                        _ => "gpt-4o-mini".to_string(),
+            let feature_llm = feature_llm_provider
+                .map(|s| s.parse::<llm::LlmProvider>())
+                .transpose()?
+                .map(|provider| {
+                    let model = if feature_llm_model.is_empty() {
+                        match provider {
+                            llm::LlmProvider::DeepSeek => "deepseek-chat".to_string(),
+                            llm::LlmProvider::Gemini => "gemini-2.5-flash".to_string(),
+                            llm::LlmProvider::Anthropic => "claude-haiku-4-5-20251001".to_string(),
+                            _ => "gpt-4o-mini".to_string(),
+                        }
+                    } else {
+                        feature_llm_model.clone()
+                    };
+                    llm::LlmCallConfig {
+                        provider,
+                        base_url: feature_llm_base_url,
+                        model,
+                        api_key_env: feature_llm_api_key_env,
+                        max_tokens: feature_llm_max_tokens,
+                        timeout_secs: feature_llm_timeout_secs,
+                        retries: 0,
                     }
-                } else {
-                    feature_llm_model.clone()
-                };
-                llm::LlmCallConfig {
-                    provider,
-                    base_url: feature_llm_base_url,
-                    model,
-                    api_key_env: feature_llm_api_key_env,
-                    max_tokens: feature_llm_max_tokens,
-                    timeout_secs: feature_llm_timeout_secs,
-                    retries: 0,
-                }
-            });
+                });
             discover::run_discover(
                 repo,
                 db.falkor_url,
@@ -567,7 +570,7 @@ fn main() -> Result<()> {
                     max_processes,
                     max_branching,
                     min_trace_confidence,
-                    feature_strategy,
+                    feature_strategy: feature_strategy.parse().unwrap_or_default(),
                     feature_llm,
                 },
             )
@@ -730,7 +733,7 @@ fn main() -> Result<()> {
             out,
             run_llm: llm || llm_enrich,
             llm: llm::LlmCallConfig {
-                provider: llm_provider,
+                provider: llm_provider.parse()?,
                 base_url: llm_base_url,
                 model: llm_model,
                 api_key_env: llm_api_key_env,
@@ -744,8 +747,8 @@ fn main() -> Result<()> {
             llm_debug_evidence,
             llm_dry_run,
             wiki_language,
-            wiki_mode,
-            grouping,
+            wiki_mode: wiki_mode.parse()?,
+            grouping: grouping.parse()?,
             html,
             incremental,
             save_evidence,

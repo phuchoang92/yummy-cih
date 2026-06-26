@@ -11,6 +11,43 @@ use cih_grouping::{
 
 use crate::feature_strategy::{build_feature_strategy, FeatureLlmOptions};
 use crate::llm::LlmCallConfig;
+
+/// Feature-classification strategy for community grouping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FeatureStrategyKind {
+    #[default]
+    Package,
+    Structural,
+    Hybrid,
+    Llm,
+}
+
+impl std::fmt::Display for FeatureStrategyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Package => "package",
+            Self::Structural => "structural",
+            Self::Hybrid => "hybrid",
+            Self::Llm => "llm",
+        })
+    }
+}
+
+impl std::str::FromStr for FeatureStrategyKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "" | "package" => Ok(Self::Package),
+            "structural" => Ok(Self::Structural),
+            "hybrid" => Ok(Self::Hybrid),
+            "llm" => Ok(Self::Llm),
+            other => anyhow::bail!(
+                "unknown --feature-strategy '{}'; expected package | structural | hybrid | llm",
+                other
+            ),
+        }
+    }
+}
 use serde::Serialize;
 
 use crate::db::{load_many_to_falkor, LoadOutcome};
@@ -29,8 +66,8 @@ pub struct DiscoverOverrides {
     pub max_processes: Option<usize>,
     pub max_branching: Option<usize>,
     pub min_trace_confidence: Option<f32>,
-    /// Feature classification strategy: "package" (default), "structural", "hybrid", "llm".
-    pub feature_strategy: String,
+    /// Feature classification strategy.
+    pub feature_strategy: FeatureStrategyKind,
     /// LLM config — required when feature_strategy is "llm" or "hybrid".
     pub feature_llm: Option<LlmCallConfig>,
 }
@@ -279,11 +316,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     ));
 
     // ── Feature artifacts ─────────────────────────────────────────────────────
-    let feature_strategy_kind = if overrides.feature_strategy.is_empty() {
-        "package"
-    } else {
-        overrides.feature_strategy.as_str()
-    };
+    let feature_strategy_kind = overrides.feature_strategy;
     ui.spin(format!("Grouping features ({})", feature_strategy_kind));
     let pkg_cfg = PackageConfig::load_or_default(repo);
 
@@ -325,7 +358,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         Ok(s) => s,
         Err(err) => {
             tracing::warn!(
-                strategy = feature_strategy_kind,
+                strategy = %feature_strategy_kind,
                 error = %err,
                 "feature strategy failed to load — falling back to package"
             );

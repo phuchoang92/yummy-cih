@@ -11,13 +11,14 @@ use cih_wiki::features::group_communities_by_feature;
 use cih_wiki::graph::route_path;
 
 use crate::llm::evidence::EvidenceCorpus;
-use crate::llm::{make_adapter, resolve_api_key};
+use crate::llm::{make_adapter, resolve_api_key, LlmProvider};
 
 use super::cache::persist_wiki_meta_caches;
 use super::class_enrich::enrich_classes_for_chains;
 use super::community_enrich::{run_community_full_enrichment, run_process_flow_enrichment};
 use super::config::{
     fnv64, load_class_enrichment, load_wiki_meta, save_class_enrichment, LlmRunParams, WikiConfig,
+    WikiGrouping, WikiMode,
 };
 use super::feature_enrich::{
     build_feature_citation_map, build_feature_evidence, cached_feature_summary, enrich_one_feature,
@@ -58,12 +59,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         json,
     } = cfg;
     let repo = repo.as_path();
-    let llm_provider = llm_provider.as_str();
-    let llm_base_url = llm_base_url.as_str();
     let default_model = match llm_provider {
-        "gemini" => "gemini-2.5-flash",
-        "anthropic" => "claude-haiku-4-5-20251001",
-        "deepseek" => "deepseek-chat",
+        LlmProvider::Gemini => "gemini-2.5-flash",
+        LlmProvider::Anthropic => "claude-haiku-4-5-20251001",
+        LlmProvider::DeepSeek => "deepseek-chat",
         _ => "gpt-4o-mini",
     };
     let llm_model_owned;
@@ -74,19 +73,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         llm_model_owned.as_str()
     };
     let wiki_language = wiki_language.as_str();
-    let wiki_mode = wiki_mode.as_str();
-    let grouping = grouping.as_str();
     if wiki_language.is_empty() {
         bail!("--wiki-language must not be empty (e.g. en, vi, ja, fr)");
     }
-    let effective_run_llm = run_llm || wiki_mode == "llm-summary" || wiki_mode == "llm-full";
-    if !["graph", "llm-summary", "llm-full"].contains(&wiki_mode) {
-        bail!("--wiki-mode must be one of: graph, llm-summary, llm-full");
-    }
-    if !["package", "graph", "llm"].contains(&grouping) {
-        bail!("--grouping must be one of: package, graph, llm");
-    }
-    let llm_max_tokens = if wiki_mode == "llm-full" {
+    let effective_run_llm = run_llm || matches!(wiki_mode, WikiMode::LlmSummary | WikiMode::LlmFull);
+    let llm_max_tokens = if wiki_mode == WikiMode::LlmFull {
         llm_max_tokens.max(2048)
     } else {
         llm_max_tokens
@@ -98,8 +89,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     tracing::info!(
         repo = %repo.display(),
-        mode = wiki_mode,
-        grouping = grouping,
+        mode = %wiki_mode,
+        grouping = %grouping,
         llm = effective_run_llm,
         "starting wiki"
     );
@@ -116,8 +107,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let repo_name_display = repo_name.clone();
 
     let (adapter, api_key): (Option<Box<dyn crate::llm::LlmAdapter>>, Option<String>) =
-        if effective_run_llm || grouping == "llm" {
-            let a = make_adapter(llm_provider, llm_base_url, llm_provider_config.as_deref())?;
+        if effective_run_llm || grouping == WikiGrouping::Llm {
+            let a = make_adapter(&llm_provider, &llm_base_url, llm_provider_config.as_deref())?;
             let k = if llm_no_call {
                 None
             } else {
@@ -169,7 +160,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         tracing::info!(
             concurrency = concurrency,
             model = llm_model,
-            provider = llm_provider,
+            provider = %llm_provider,
             "starting class-traversal LLM enrichment"
         );
 
@@ -215,10 +206,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     };
 
     let llm_full_map: Option<HashMap<String, CommunityLlmFull>> =
-        if wiki_mode == "llm-full" && llm_no_call {
+        if wiki_mode == WikiMode::LlmFull && llm_no_call {
             tracing::info!("skipping llm-full enrichment because dry-run/debug mode is enabled");
             None
-        } else if wiki_mode == "llm-full" {
+        } else if wiki_mode == WikiMode::LlmFull {
             run_community_full_enrichment(
                 &community_nodes,
                 &wiki_graph,
@@ -232,10 +223,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             None
         };
 
-    let llm_module_tree: Option<WikiModuleTree> = if grouping == "llm" && llm_no_call {
+    let llm_module_tree: Option<WikiModuleTree> = if grouping == WikiGrouping::Llm && llm_no_call {
         tracing::info!("skipping LLM grouping because dry-run/debug mode is enabled");
         None
-    } else if grouping == "llm" {
+    } else if grouping == WikiGrouping::Llm {
         match crate::llm::grouping::propose_module_tree(
             &wiki_graph,
             adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),

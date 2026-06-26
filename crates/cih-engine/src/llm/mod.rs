@@ -8,9 +8,49 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 
+/// LLM backend provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LlmProvider {
+    #[default]
+    OpenAiCompatible,
+    Anthropic,
+    DeepSeek,
+    Gemini,
+    HttpJson,
+}
+
+impl std::fmt::Display for LlmProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::Anthropic => "anthropic",
+            Self::DeepSeek => "deepseek",
+            Self::Gemini => "gemini",
+            Self::HttpJson => "http-json",
+        })
+    }
+}
+
+impl std::str::FromStr for LlmProvider {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "openai-compatible" => Ok(Self::OpenAiCompatible),
+            "anthropic" => Ok(Self::Anthropic),
+            "deepseek" => Ok(Self::DeepSeek),
+            "gemini" => Ok(Self::Gemini),
+            "http-json" => Ok(Self::HttpJson),
+            other => bail!(
+                "unknown --llm-provider '{}'; expected openai-compatible | anthropic | deepseek | gemini | http-json",
+                other
+            ),
+        }
+    }
+}
+
 /// Shared LLM call configuration used by WikiConfig and the feature-classification stage.
 pub struct LlmCallConfig {
-    pub provider: String,
+    pub provider: LlmProvider,
     pub base_url: String,
     pub model: String,
     pub api_key_env: Option<String>,
@@ -22,7 +62,7 @@ pub struct LlmCallConfig {
 impl Default for LlmCallConfig {
     fn default() -> Self {
         Self {
-            provider: "openai-compatible".into(),
+            provider: LlmProvider::OpenAiCompatible,
             base_url: "https://api.openai.com/v1".into(),
             model: String::new(),
             api_key_env: None,
@@ -50,28 +90,24 @@ pub trait LlmAdapter: Send + Sync {
 }
 
 pub fn make_adapter(
-    provider: &str,
+    provider: &LlmProvider,
     base_url: &str,
     provider_config: Option<&Path>,
 ) -> Result<Box<dyn LlmAdapter>> {
     validate_base_url(base_url)?;
     match provider {
-        "openai-compatible" => Ok(Box::new(openai::OpenAiAdapter::new(base_url))),
-        "anthropic" => Ok(Box::new(anthropic::AnthropicAdapter::new(base_url))),
-        "deepseek" => Ok(Box::new(openai::OpenAiAdapter::new("https://api.deepseek.com"))),
-        "gemini" => Ok(Box::new(openai::OpenAiAdapter::new(
+        LlmProvider::OpenAiCompatible => Ok(Box::new(openai::OpenAiAdapter::new(base_url))),
+        LlmProvider::Anthropic => Ok(Box::new(anthropic::AnthropicAdapter::new(base_url))),
+        LlmProvider::DeepSeek => Ok(Box::new(openai::OpenAiAdapter::new("https://api.deepseek.com"))),
+        LlmProvider::Gemini => Ok(Box::new(openai::OpenAiAdapter::new(
             "https://generativelanguage.googleapis.com/v1beta/openai",
         ))),
-        "http-json" => {
+        LlmProvider::HttpJson => {
             let config_path = provider_config.ok_or_else(|| {
                 anyhow!("--llm-provider http-json requires --llm-provider-config <path>")
             })?;
             Ok(Box::new(http_json::HttpJsonAdapter::load(config_path)?))
         }
-        other => bail!(
-            "unknown --llm-provider '{}'; expected openai-compatible | anthropic | deepseek | gemini | http-json",
-            other
-        ),
     }
 }
 

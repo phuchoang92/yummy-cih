@@ -7,6 +7,68 @@ use cih_wiki::{ClassEnrichmentStore, WikiGraph, WikiMeta};
 
 use crate::llm::{LlmAdapter, LlmCallConfig};
 
+/// Wiki generation mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WikiMode {
+    #[default]
+    Graph,
+    LlmSummary,
+    LlmFull,
+}
+
+impl std::fmt::Display for WikiMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Graph => "graph",
+            Self::LlmSummary => "llm-summary",
+            Self::LlmFull => "llm-full",
+        })
+    }
+}
+
+impl std::str::FromStr for WikiMode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "graph" => Ok(Self::Graph),
+            "llm-summary" => Ok(Self::LlmSummary),
+            "llm-full" => Ok(Self::LlmFull),
+            other => anyhow::bail!("unknown --wiki-mode '{}'; expected graph | llm-summary | llm-full", other),
+        }
+    }
+}
+
+/// Wiki community-to-module grouping strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WikiGrouping {
+    #[default]
+    Package,
+    Graph,
+    Llm,
+}
+
+impl std::fmt::Display for WikiGrouping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Package => "package",
+            Self::Graph => "graph",
+            Self::Llm => "llm",
+        })
+    }
+}
+
+impl std::str::FromStr for WikiGrouping {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "package" => Ok(Self::Package),
+            "graph" => Ok(Self::Graph),
+            "llm" => Ok(Self::Llm),
+            other => anyhow::bail!("unknown --grouping '{}'; expected package | graph | llm", other),
+        }
+    }
+}
+
 pub(super) fn fnv64(s: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
@@ -50,8 +112,8 @@ pub struct WikiConfig {
     pub llm_debug_evidence: bool,
     pub llm_dry_run: bool,
     pub wiki_language: String,
-    pub wiki_mode: String,
-    pub grouping: String,
+    pub wiki_mode: WikiMode,
+    pub grouping: WikiGrouping,
     pub html: bool,
     pub incremental: bool,
     pub save_evidence: bool,
@@ -75,8 +137,8 @@ impl Default for WikiConfig {
             llm_debug_evidence: false,
             llm_dry_run: false,
             wiki_language: "en".into(),
-            wiki_mode: "graph".into(),
-            grouping: "package".into(),
+            wiki_mode: WikiMode::Graph,
+            grouping: WikiGrouping::Package,
             html: false,
             incremental: false,
             save_evidence: false,

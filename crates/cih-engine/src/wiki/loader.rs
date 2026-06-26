@@ -152,7 +152,7 @@ pub(super) fn build_file_dev_map(
 pub(super) fn load_wiki_artifacts(
     repo: &Path,
     out: Option<PathBuf>,
-    grouping: &str,
+    grouping: super::config::WikiGrouping,
     filter_community: &[String],
     max_communities: Option<usize>,
     filter_route: &[String],
@@ -166,7 +166,7 @@ pub(super) fn load_wiki_artifacts(
     let community_version: String;
     let feature_of: Box<dyn Fn(&str, &str) -> String + Send>;
 
-    if grouping == "package" {
+    if grouping == super::config::WikiGrouping::Package {
         graph_artifacts = crate::versioning::latest_graph_artifacts(repo)?;
         nodes = graph_artifacts.read_nodes().with_context(|| {
             format!(

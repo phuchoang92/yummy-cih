@@ -432,8 +432,8 @@ fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
     let root = repo_with_wiki_artifacts();
     wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
         repo: root.clone(),
-        wiki_mode: "graph".into(),
-        grouping: "graph".into(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
         ..wiki_cmd::WikiConfig::default()
     })
     .unwrap();
@@ -464,7 +464,7 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
         },
         llm_dry_run: true,
         wiki_language: "vi".into(),
-        wiki_mode: "llm-summary".into(),
+        wiki_mode: wiki_cmd::WikiMode::LlmSummary,
         ..wiki_cmd::WikiConfig::default()
     })
     .unwrap();
@@ -497,7 +497,7 @@ fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
         },
         llm_dry_run: true,
         wiki_language: "vi".into(),
-        wiki_mode: "llm-summary".into(),
+        wiki_mode: wiki_cmd::WikiMode::LlmSummary,
         incremental: true,
         ..wiki_cmd::WikiConfig::default()
     })
@@ -520,13 +520,13 @@ fn wiki_command_http_json_requires_provider_config() {
         repo: root.clone(),
         run_llm: true,
         llm: wiki_cmd::LlmCallConfig {
-            provider: "http-json".into(),
+            provider: wiki_cmd::LlmProvider::HttpJson,
             base_url: "http://localhost".into(),
             model: "local".into(),
             ..Default::default()
         },
         llm_dry_run: true,
-        wiki_mode: "llm-summary".into(),
+        wiki_mode: wiki_cmd::WikiMode::LlmSummary,
         ..wiki_cmd::WikiConfig::default()
     })
     .unwrap_err()

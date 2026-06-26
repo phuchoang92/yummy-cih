@@ -65,15 +65,16 @@ impl FeatureLlmCaller for EngineLlmCaller {
 /// Returns `Err` only when `"hybrid"` or `"embed"` is requested and the embedding model
 /// fails to load (e.g. model file not found).
 pub fn build_feature_strategy(
-    kind: &str,
+    kind: crate::discover::FeatureStrategyKind,
     pkg_cfg: PackageConfig,
     llm: Option<FeatureLlmOptions>,
 ) -> Result<Box<dyn FeatureStrategy>> {
+    use crate::discover::FeatureStrategyKind;
     match kind {
-        "structural" => Ok(Box::new(StructuralStrategy::new(
+        FeatureStrategyKind::Structural => Ok(Box::new(StructuralStrategy::new(
             StructuralConfig::default(),
         ))),
-        "llm" => {
+        FeatureStrategyKind::Llm => {
             if let Some(opts) = llm {
                 let caller = Arc::new(EngineLlmCaller {
                     adapter: opts.adapter,
@@ -94,7 +95,7 @@ pub fn build_feature_strategy(
                 Ok(Box::new(PackageStrategy::new(pkg_cfg)))
             }
         }
-        "hybrid" => {
+        FeatureStrategyKind::Hybrid => {
             let embedder = load_embedder()?;
             let structural = Box::new(StructuralStrategy::new(StructuralConfig::default()));
             let package = Box::new(PackageStrategy::new(pkg_cfg));
@@ -124,7 +125,7 @@ pub fn build_feature_strategy(
 
             Ok(Box::new(HybridStrategy::new(strategies, catch_all)))
         }
-        _ => Ok(Box::new(PackageStrategy::new(pkg_cfg))),
+        FeatureStrategyKind::Package => Ok(Box::new(PackageStrategy::new(pkg_cfg))),
     }
 }
 
