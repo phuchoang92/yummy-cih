@@ -14,17 +14,18 @@ fn temp_dir(suffix: &str) -> PathBuf {
 #[test]
 fn start_render_env_contains_required_keys() {
     let repo = Path::new("/home/user/myrepo");
-    let output = render_env(repo, "myrepo", None);
+    let output = render_env(repo, "myrepo", "changeme", None);
 
     assert!(output.contains("# CIH Interactive Start configuration"));
     assert!(output.contains("REPO_PATH=/home/user/myrepo"));
     assert!(output.contains("REPO_NAME=myrepo"));
+    assert!(output.contains("POSTGRES_PASSWORD=changeme"));
 }
 
 #[test]
 fn start_render_env_no_llm_has_no_key_line() {
     let repo = Path::new("/home/user/myrepo");
-    let output = render_env(repo, "myrepo", None);
+    let output = render_env(repo, "myrepo", "changeme", None);
 
     assert!(!output.contains("DEEPSEEK_API_KEY"));
     assert!(!output.contains("GEMINI_API_KEY"));
@@ -35,8 +36,14 @@ fn start_render_env_no_llm_has_no_key_line() {
 #[test]
 fn start_render_env_with_llm_includes_key() {
     let repo = Path::new("/home/user/myrepo");
-    let output = render_env(repo, "myrepo", Some("DEEPSEEK_API_KEY=sk-test-123"));
+    let output = render_env(
+        repo,
+        "myrepo",
+        "changeme",
+        Some("DEEPSEEK_API_KEY=sk-test-123"),
+    );
 
+    assert!(output.contains("POSTGRES_PASSWORD=changeme"));
     assert!(output.contains("DEEPSEEK_API_KEY=sk-test-123"));
 }
 
@@ -71,7 +78,7 @@ fn start_merge_preserves_comments() {
     let existing = vec!["# my comment".to_string(), "REPO_PATH=/old".to_string()];
     let repo = Path::new("/new");
 
-    let output = merge_env_values(&existing, repo, "test", None);
+    let output = merge_env_values(&existing, repo, "test", "changeme", None);
 
     assert!(output.contains("# my comment"));
     assert!(output.contains("REPO_PATH=/new"));
@@ -82,7 +89,7 @@ fn start_merge_preserves_blank_lines() {
     let existing = vec!["".to_string(), "REPO_PATH=/old".to_string(), "".to_string()];
     let repo = Path::new("/new");
 
-    let output = merge_env_values(&existing, repo, "test", None);
+    let output = merge_env_values(&existing, repo, "test", "changeme", None);
 
     let lines: Vec<&str> = output.lines().collect();
     // Should have blank lines preserved
@@ -94,7 +101,7 @@ fn start_merge_preserves_unknown_keys() {
     let existing = vec!["FOO=bar".to_string(), "REPO_PATH=/old".to_string()];
     let repo = Path::new("/new");
 
-    let output = merge_env_values(&existing, repo, "test", None);
+    let output = merge_env_values(&existing, repo, "test", "changeme", None);
 
     assert!(output.contains("FOO=bar"));
     assert!(output.contains("REPO_PATH=/new"));
@@ -105,7 +112,7 @@ fn start_merge_updates_existing_repo_path() {
     let existing = vec!["REPO_PATH=/old".to_string()];
     let repo = Path::new("/new");
 
-    let output = merge_env_values(&existing, repo, "test", None);
+    let output = merge_env_values(&existing, repo, "test", "changeme", None);
 
     assert!(!output.contains("REPO_PATH=/old"));
     assert!(output.contains("REPO_PATH=/new"));
@@ -116,7 +123,7 @@ fn start_merge_appends_missing_keys() {
     let existing = vec!["# comment".to_string()];
     let repo = Path::new("/new");
 
-    let output = merge_env_values(&existing, repo, "myrepo", None);
+    let output = merge_env_values(&existing, repo, "myrepo", "changeme", None);
 
     assert!(output.contains("REPO_PATH=/new"));
     assert!(output.contains("REPO_NAME=myrepo"));
@@ -134,6 +141,7 @@ fn start_merge_llm_key_replaces_existing() {
         &existing,
         repo,
         "test",
+        "changeme",
         Some("DEEPSEEK_API_KEY=sk-test-123"),
     );
 
@@ -146,7 +154,7 @@ fn start_merge_llm_key_appends_if_missing() {
     let existing = vec!["REPO_PATH=/old".to_string()];
     let repo = Path::new("/new");
 
-    let output = merge_env_values(&existing, repo, "test", Some("GEMINI_API_KEY=sk-test-456"));
+    let output = merge_env_values(&existing, repo, "test", "changeme", Some("GEMINI_API_KEY=sk-test-456"));
 
     assert!(output.contains("GEMINI_API_KEY=sk-test-456"));
 }
@@ -164,7 +172,7 @@ fn start_merge_recognized_llm_keys() {
         let repo = Path::new("/new");
         let new_line = format!("{}=sk-test-123", key_name);
 
-        let output = merge_env_values(&existing, repo, "test", Some(&new_line));
+        let output = merge_env_values(&existing, repo, "test", "changeme", Some(&new_line));
 
         assert!(
             output.contains(&format!("{}=sk-test-123", key_name)),

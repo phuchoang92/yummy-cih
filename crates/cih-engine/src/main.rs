@@ -329,6 +329,10 @@ enum Command {
         /// Repository name for docs viewer URL prefix. Default: derived from repo path.
         #[arg(long)]
         repo_name: Option<String>,
+        /// Postgres password written to .env. Required in --non-interactive mode
+        /// (or read from the POSTGRES_PASSWORD env var).
+        #[arg(long)]
+        postgres_password: Option<String>,
         /// Print plan without writing files or running commands.
         #[arg(long)]
         dry_run: bool,
@@ -758,20 +762,22 @@ fn main() -> Result<()> {
             filter_route,
             json,
         }),
-        Command::Start {
-            workspace,
-            repo,
-            repo_name,
-            dry_run,
-            non_interactive,
-        } => start::run_start(start::StartConfig {
-            workspace,
-            repo,
-            repo_name,
-            dry_run,
-            non_interactive,
-            ..Default::default()
-        }),
+Command::Start {
+        workspace,
+        repo,
+        repo_name,
+        postgres_password,
+        dry_run,
+        non_interactive,
+    } => start::run_start(start::StartConfig {
+        workspace,
+        repo,
+        repo_name,
+        postgres_password,
+        dry_run,
+        non_interactive,
+        ..Default::default()
+    }),
         Command::Artifact { command } => run_artifact(command),
         // Handled above before the match; unreachable at runtime.
         Command::Ui => unreachable!(),

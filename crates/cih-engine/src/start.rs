@@ -1,9 +1,80 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use dialoguer::{Confirm, Input, Password, Select};
 
 use crate::start_env;
+
+// ── Timeline UI ────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+struct Palette {
+    has_color: bool,
+}
+
+fn palette() -> &'static Palette {
+    static PAL: OnceLock<Palette> = OnceLock::new();
+    PAL.get_or_init(|| {
+        // console::colors_enabled() honors NO_COLOR and non-TTY output.
+        Palette {
+            has_color: console::colors_enabled(),
+        }
+    })
+}
+
+fn paint(active: bool, code: &str, text: &str) -> String {
+    if active {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn paint_dim(active: bool, text: &str) -> String {
+    paint(active, "2", text)
+}
+
+fn step_begin(name: &str) {
+    let pal = palette();
+    let dot = paint(pal.has_color, "36", "●");
+    let label = paint(pal.has_color, "1", name);
+    println!("\n {dot}  {label}");
+}
+
+fn step_blank() {
+    let pal = palette();
+    let bar = paint_dim(pal.has_color, "│");
+    println!(" {bar}");
+}
+
+fn step_line(text: &str) {
+    let pal = palette();
+    let bar = paint_dim(pal.has_color, "│");
+    println!(" {bar}  {text}");
+}
+
+fn step_warn(text: &str) {
+    let pal = palette();
+    let bar = paint_dim(pal.has_color, "│");
+    let warn = paint(pal.has_color, "33", "⚠");
+    let label = paint(pal.has_color, "1", &format!("{warn} {text}"));
+    println!(" {bar}  {label}");
+}
+
+fn step_ok(name: &str) {
+    let pal = palette();
+    let dot = paint(pal.has_color, "32", "✓");
+    let label = paint(pal.has_color, "1", name);
+    println!("\n {dot}  {label}");
+}
+
+fn step_fail(text: &str) {
+    let pal = palette();
+    let dot = paint(pal.has_color, "31", "✗");
+    let label = paint(pal.has_color, "1", text);
+    eprintln!("\n {dot}  {label}");
+}
 
 // ── Core types ──────────────────────────────────────────────────────────────
 
@@ -74,6 +145,9 @@ pub struct StartConfig {
     pub dry_run: bool,
     /// Skip interactive prompts.
     pub non_interactive: bool,
+    /// Postgres password. Required in non-interactive mode (or read from
+    /// the `POSTGRES_PASSWORD` env var). Prompted (hidden) in interactive mode.
+    pub postgres_password: Option<String>,
 }
 
 impl Default for StartConfig {
@@ -90,6 +164,7 @@ impl Default for StartConfig {
             llm: LlmChoice::default(),
             dry_run: false,
             non_interactive: false,
+            postgres_password: None,
         }
     }
 }
@@ -278,19 +353,21 @@ pub fn build_command_plan(cfg: &StartConfig) -> Vec<PlannedCommand> {
 /// Hard failures: workspace/docker-compose.yml missing, repo_path invalid.
 /// Soft warnings (never block dry-run): docker compose missing, no .java files.
 pub fn run_preflight_checks(workspace: &Path, repo_path: &Path, dry_run: bool) -> Result<()> {
-    println!("Running preflight checks...");
+    step_begin("Preflight checks");
 
-    // 1. workspace/docker-compose.yml must exist
     let compose_file = workspace.join("docker-compose.yml");
     if !compose_file.exists() {
+        step_fail(&format!(
+            "docker-compose.yml not found in workspace: {}",
+            workspace.display()
+        ));
         anyhow::bail!(
             "docker-compose.yml not found in workspace: {}",
             workspace.display()
         );
     }
-    println!("  ✓ docker-compose.yml found");
+    step_line(&format!("docker-compose.yml found: {}", compose_file.display()));
 
-    // 2. docker compose version (warning only in dry-run)
     let docker_ok = std::process::Command::new("docker")
         .args(["compose", "version"])
         .stdout(std::process::Stdio::null())
@@ -301,29 +378,28 @@ pub fn run_preflight_checks(workspace: &Path, repo_path: &Path, dry_run: bool) -
 
     if !docker_ok {
         if dry_run {
-            eprintln!("  ⚠ docker compose not available (dry-run continues)");
+            step_warn("docker compose not available (dry-run continues)");
         } else {
-            eprintln!("  ⚠ docker compose not available — commands may fail");
+            step_warn("docker compose not available — commands may fail");
         }
     } else {
-        println!("  ✓ docker compose available");
+        step_line("docker compose available");
     }
 
-    // 3. repo_path must exist
     let canonical = validate_repo_path(repo_path)?;
-    println!("  ✓ repo path exists: {}", canonical.display());
+    step_line(&format!("repo path exists: {}", canonical.display()));
 
-    // 4. Check for at least one .java file (warning only)
     let has_java = dir_contains_java(&canonical);
     if !has_java {
-        eprintln!(
-            "  ⚠ no .java files found under {} (indexing may produce no artifacts)",
+        step_warn(&format!(
+            "no .java files found under {} (indexing may produce no artifacts)",
             canonical.display()
-        );
+        ));
     } else {
-        println!("  ✓ .java files detected");
+        step_line(".java files detected");
     }
 
+    step_ok("Preflight checks");
     Ok(())
 }
 
@@ -358,13 +434,16 @@ pub fn execute_command_plan(
     dry_run: bool,
     non_interactive: bool,
 ) -> Result<()> {
-    println!("\nExecuting command plan:");
+    step_begin("Executing command plan");
 
     for cmd in plan {
-        println!("[{}] {}", cmd.label, cmd.command);
+        step_blank();
+        let tag = if cmd.optional { "(optional)" } else { "(required)" };
+        step_line(&format!("[{}] {}", cmd.label, cmd.command));
+        step_line(tag);
 
         if dry_run {
-            println!("  [DRY RUN] would execute, skipping");
+            step_line("[DRY RUN] would execute, skipping");
             continue;
         }
 
@@ -379,22 +458,23 @@ pub fn execute_command_plan(
         };
 
         if !proceed {
-            println!("  Skipped. Copy/paste: {}", cmd.command);
+            step_line(&format!("Skipped. Copy/paste: {}", cmd.command));
             continue;
         }
 
         match runner.run(&cmd.label, &cmd.command) {
-            Ok(()) => println!("  ✓ done"),
+            Ok(()) => step_line("done"),
             Err(e) => {
-                eprintln!("  ✗ [{}] failed: {}", cmd.label, e);
+                step_fail(&format!("[{}] failed: {}", cmd.label, e));
                 if !cmd.optional {
                     anyhow::bail!("required command [{}] failed — aborting", cmd.label);
                 }
-                eprintln!("  (optional — continuing)");
+                step_line("(optional — continuing)");
             }
         }
     }
 
+    step_ok("Executing command plan");
     Ok(())
 }
 
@@ -413,20 +493,33 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
             .clone()
             .unwrap_or_else(|| default_repo_name(&repo_canonical));
 
+        let pg_password = match cfg.postgres_password.clone() {
+            Some(p) if !p.is_empty() => p,
+            _ => match std::env::var("POSTGRES_PASSWORD") {
+                Ok(p) if !p.is_empty() => p,
+                _ => bail!(
+                    "Error: POSTGRES_PASSWORD is required in --non-interactive mode \
+                     (pass --postgres-password or export POSTGRES_PASSWORD)"
+                ),
+            },
+        };
+
         run_preflight_checks(&cfg.workspace, &repo_canonical, cfg.dry_run)?;
 
         let plan = build_command_plan(&cfg);
 
         let llm_key_line = cfg.llm.env_var().map(|key| format!("{}=", key));
-        let content = start_env::render_env(&repo_canonical, &repo_name, llm_key_line.as_deref());
+        let content =
+            start_env::render_env(&repo_canonical, &repo_name, &pg_password, llm_key_line.as_deref());
 
         start_env::write_env_file(&cfg.workspace, &content, cfg.dry_run)?;
 
-        println!("Command plan:");
+        step_begin("Command plan");
         for cmd in &plan {
             let tag = if cmd.optional { "optional" } else { "required" };
-            println!("  [{}] {}: {}", tag, cmd.label, cmd.command);
+            step_line(&format!("[{}] {}: {}", tag, cmd.label, cmd.command));
         }
+        step_blank();
 
         let runner = RealCommandRunner;
         execute_command_plan(&plan, &runner, cfg.dry_run, cfg.non_interactive)?;
@@ -434,18 +527,22 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
         Ok(())
     } else {
         // ── Interactive mode ──
-        println!("══ CIH Interactive Setup Wizard ══\n");
+        println!();
+        let title = paint(palette().has_color, "1", "══ CIH Interactive Setup Wizard ══");
+        println!("{title}");
 
         // Step 1: Workspace
+        step_begin("CIH workspace directory");
         let workspace_default = cfg.workspace.display().to_string();
         let workspace: String = Input::new()
             .with_prompt("CIH workspace directory (must contain docker-compose.yml)")
             .default(workspace_default)
             .interact_text()?;
         cfg.workspace = PathBuf::from(&workspace);
-        println!();
+        step_line(&format!("workspace: {}", cfg.workspace.display()));
 
         // Step 2: Repo path (loop until valid)
+        step_begin("Java/Spring repository path");
         let repo_canonical = loop {
             let repo_input: String = Input::new()
                 .with_prompt("Java/Spring repository path (absolute)")
@@ -453,25 +550,26 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
             let repo = PathBuf::from(&repo_input);
             match validate_repo_path(&repo) {
                 Ok(p) => {
-                    println!("  ✓ found: {}", p.display());
+                    step_line(&format!("found: {}", p.display()));
                     break p;
                 }
-                Err(e) => eprintln!("  ✗ {}. Try again.", e),
+                Err(e) => step_fail(&format!("{}. Try again.", e)),
             }
         };
         cfg.repo = Some(repo_canonical.clone());
-        println!();
 
         // Step 3: Repo name
+        step_begin("Repository name");
         let default_name = default_repo_name(&repo_canonical);
         let repo_name: String = Input::new()
             .with_prompt("Repository name (URL prefix for docs viewer)")
             .default(default_name)
             .interact_text()?;
         cfg.repo_name = Some(repo_name.clone());
-        println!();
+        step_line(&format!("repo name: {}", repo_name));
 
         // Step 4: Index mode
+        step_begin("Indexing scope");
         let index_options = &[
             "analyze all modules",
             "scan only (no analyze)",
@@ -495,7 +593,7 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
                     .filter(|s| !s.is_empty())
                     .collect();
                 if modules.is_empty() {
-                    println!("  No modules entered, defaulting to analyze-all.");
+                    step_warn("no modules entered, defaulting to analyze-all");
                     IndexMode::AnalyzeAll
                 } else {
                     IndexMode::Modules(modules)
@@ -503,9 +601,14 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
             }
             _ => IndexMode::AnalyzeAll,
         };
-        println!();
+        match &cfg.index_mode {
+            IndexMode::AnalyzeAll => step_line("mode: analyze all"),
+            IndexMode::ScanOnly => step_line("mode: scan only"),
+            IndexMode::Modules(m) => step_line(&format!("mode: modules: {}", m.join(", "))),
+        }
 
         // Step 5: Optional steps
+        step_begin("Optional steps");
         cfg.do_discover = Confirm::new()
             .with_prompt("Run community discover after indexing?")
             .default(true)
@@ -524,9 +627,16 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
                 .default(false)
                 .interact()?;
         }
-        println!();
+        step_line(&format!(
+            "discover={}, embed={}, wiki={}, docs={}",
+            bool_str(cfg.do_discover),
+            bool_str(cfg.do_embed),
+            bool_str(cfg.do_wiki),
+            bool_str(cfg.do_docs),
+        ));
 
         // Step 6: LLM provider
+        step_begin("LLM provider");
         let llm_options = &[
             "None (no AI enrichment)",
             "DeepSeek",
@@ -546,91 +656,119 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
             4 => LlmChoice::OpenAI,
             _ => LlmChoice::None,
         };
-        println!();
+        match cfg.llm {
+            LlmChoice::None => step_line("provider: none"),
+            other => step_line(&format!("provider: {:?}", other)),
+        }
 
         // Step 7: API key (if LLM selected)
         let llm_key_line = if cfg.llm != LlmChoice::None {
+            step_begin("LLM API key");
             let key_name = cfg.llm.env_var().unwrap_or("API_KEY");
             let key: String = Password::new()
                 .with_prompt(format!("{} (input hidden)", key_name))
                 .interact()?;
             if key.is_empty() {
-                println!("  ⚠ no key entered — you can add it to .env later.");
+                step_warn("no key entered — you can add it to .env later.");
                 Some(format!("{}=", key_name))
             } else {
+                step_line("key accepted");
                 Some(format!("{}={}", key_name, key))
             }
         } else {
             None
         };
-        println!();
+
+        // Step 7b: Postgres password (required, hidden, ≤3 attempts — contract §3.3)
+        let pg_password = prompt_required_password(
+            "Postgres password (POSTGRES_PASSWORD, hidden)",
+            "POSTGRES_PASSWORD cannot be empty.",
+        )?;
 
         // Step 8: Show summary
-        println!("══ Configuration Summary ══");
-        println!("  Workspace:      {}", cfg.workspace.display());
-        println!("  Repo path:      {}", repo_canonical.display());
-        println!("  Repo name:      {}", repo_name);
-        println!(
+        step_begin("Configuration summary");
+        step_line(&format!("  Workspace:      {}", cfg.workspace.display()));
+        step_line(&format!("  Repo path:      {}", repo_canonical.display()));
+        step_line(&format!("  Repo name:      {}", repo_name));
+        step_line(&format!("  Postgres pwd:   ********"));
+        step_line(&format!(
             "  Index mode:     {}",
             match &cfg.index_mode {
                 IndexMode::AnalyzeAll => "analyze all".to_string(),
                 IndexMode::ScanOnly => "scan only".to_string(),
                 IndexMode::Modules(m) => format!("modules: {}", m.join(", ")),
             }
-        );
-        println!(
-            "  Discover:       {}",
-            if cfg.do_discover { "yes" } else { "no" }
-        );
-        println!(
-            "  Embed:          {}",
-            if cfg.do_embed { "yes" } else { "no" }
-        );
-        println!(
-            "  Wiki:           {}",
-            if cfg.do_wiki { "yes" } else { "no" }
-        );
-        println!(
-            "  Docs viewer:    {}",
-            if cfg.do_docs { "yes" } else { "no" }
-        );
-        println!(
+        ));
+        step_line(&format!("  Discover:       {}", bool_str(cfg.do_discover)));
+        step_line(&format!("  Embed:          {}", bool_str(cfg.do_embed)));
+        step_line(&format!("  Wiki:           {}", bool_str(cfg.do_wiki)));
+        step_line(&format!("  Docs viewer:    {}", bool_str(cfg.do_docs)));
+        step_line(&format!(
             "  LLM provider:   {}",
             match cfg.llm {
                 LlmChoice::None => "none".to_string(),
                 other => format!("{:?}", other),
             }
-        );
-        println!();
+        ));
 
         if !Confirm::new()
             .with_prompt("Write .env and run preflight checks?")
             .default(true)
             .interact()?
         {
-            println!("Cancelled. No files written.");
+            step_warn("cancelled — no files written.");
             return Ok(());
         }
 
         // Step 9: Preflight checks & write .env
         run_preflight_checks(&cfg.workspace, &repo_canonical, false)?;
 
-        let content = start_env::render_env(&repo_canonical, &repo_name, llm_key_line.as_deref());
+        let content =
+            start_env::render_env(&repo_canonical, &repo_name, &pg_password, llm_key_line.as_deref());
         start_env::write_env_file(&cfg.workspace, &content, false)?;
-        println!("  ✓ .env written to {}/.env", cfg.workspace.display());
+        step_line(&format!(".env written to {}/.env", cfg.workspace.display()));
 
         // Step 10: Command plan & execution
         let plan = build_command_plan(&cfg);
-        println!("\nCommand plan:");
+        step_begin("Command plan");
         for cmd in &plan {
             let tag = if cmd.optional { "optional" } else { "required" };
-            println!("  [{}] {}: {}", tag, cmd.label, cmd.command);
+            step_line(&format!("[{}] {}: {}", tag, cmd.label, cmd.command));
         }
-        println!();
 
         let runner = RealCommandRunner;
         execute_command_plan(&plan, &runner, false, false)?;
 
+        step_ok("CIH Interactive Setup Wizard complete");
         Ok(())
+    }
+}
+
+fn bool_str(b: bool) -> &'static str {
+    if b {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+// Hidden password prompt with non-empty validation and ≤3 attempts.
+// `empty_error` is the exact contract-mandated message (setup.sh / setup.bat).
+fn prompt_required_password(prompt: &str, empty_error: &str) -> Result<String> {
+    let mut attempts = 0;
+    loop {
+        let pw: String = Password::new()
+            .with_prompt(prompt)
+            .interact()
+            .unwrap_or_default();
+        if !pw.is_empty() {
+            step_line("password accepted");
+            return Ok(pw);
+        }
+        attempts += 1;
+        step_fail(&format!("ERROR: {empty_error}"));
+        if attempts >= 3 {
+            bail!("ERROR: {empty_error}");
+        }
     }
 }

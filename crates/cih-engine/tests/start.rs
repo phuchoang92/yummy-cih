@@ -129,6 +129,7 @@ fn start_builds_full_command_plan() {
         llm: LlmChoice::None,
         dry_run: false,
         non_interactive: false,
+        postgres_password: None,
     };
 
     let plan = build_command_plan(&cfg);
@@ -179,6 +180,7 @@ fn start_build_command_plan_never_includes_down_v() {
                             llm: LlmChoice::None,
                             dry_run: false,
                             non_interactive: false,
+                            postgres_password: None,
                         };
                         let plan = build_command_plan(&cfg);
                         for cmd in &plan {
