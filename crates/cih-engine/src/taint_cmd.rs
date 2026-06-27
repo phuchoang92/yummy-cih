@@ -76,22 +76,29 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         crate::ui::fmt_count(paths.len())
     ));
 
+    // Shared constants for all intra-procedural phases.
+    // Declared here so Phase 1 and Phase 3 use the same set — divergence would cause
+    // a path confirmed by one phase to be missed by the other.
+    const SINK_PATTERNS: &[&str] = &[
+        "execute", "executeQuery", "executeUpdate", "exec",
+        "write", "delete", "update", "insert",
+    ];
+    let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let repo_ref = repo.as_path();
+    // Snapshot Phase-0 scores before Phase 1 modifies them.
+    // Phase 3 applies its multiplier against this baseline so that a Phase-1 penalty
+    // cannot be silently erased by a Phase-3 boost (or vice versa).
+    let original_confidence: Vec<f32> = paths.iter().map(|p| p.confidence).collect();
+
     // ── Run Phase 1 (optional) ────────────────────────────────────────────────
     if flags.intra_proc && !paths.is_empty() {
         ui.spin("Phase 1: intra-procedural IR refinement");
-
-        let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
-        let sink_patterns = [
-            "execute", "executeQuery", "executeUpdate", "exec",
-            "write", "delete", "update", "insert",
-        ];
-        let repo_ref = repo.as_path();
 
         let refinements = cih_taint::phase1::refine_paths(
             &paths,
             &|id| node_map.get(id).map(|n| n.file.clone()),
             |file| std::fs::read_to_string(repo_ref.join(file)).ok(),
-            &sink_patterns,
+            SINK_PATTERNS,
         );
 
         // Apply confidence multipliers.
@@ -113,9 +120,6 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let mut cfg_stats = CfgStats::default();
     if flags.intra_proc && flags.cfg && !paths.is_empty() {
         ui.spin("Phase 2: CFG construction + dominance tree");
-
-        let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
-        let repo_ref = repo.as_path();
 
         // Build CFG for each unique source method on a taint path.
         let unique_sources: std::collections::HashSet<&NodeId> =
@@ -156,29 +160,24 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     if flags.intra_proc && flags.cfg && flags.pdg && !paths.is_empty() {
         ui.spin("Phase 3: PDG construction + flow-sensitive taint");
 
-        let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
-        let repo_ref = repo.as_path();
-
-        let sink_patterns = [
-            "execute", "executeQuery", "executeUpdate", "exec",
-            "write", "delete", "update", "insert",
-        ];
         // Sanitizer node-id patterns from the same rules used by Phase 0.
         let sanitizer_patterns: Vec<&str> =
             rules.sanitizers.iter().map(|s| s.node_id_pattern).collect();
 
-        // Tainted params are extracted automatically from each source method's CFG
-        // (all formal params of an HTTP handler arrive as untrusted user input).
         let refinements = cih_taint::taint3::refine_paths_phase3(
             &paths,
             &|id| node_map.get(id).map(|n| n.file.clone()),
             |file| std::fs::read_to_string(repo_ref.join(file)).ok(),
-            &sink_patterns,
+            SINK_PATTERNS,
             &sanitizer_patterns,
         );
 
         for r in &refinements {
-            if r.confidence_multiplier == 1.0 {
+            // "IR unavailable" means the source file could not be read or parsed.
+            // Detect it via the pdg_clean/confirmed/conditional fields rather than a
+            // float equality check on confidence_multiplier (which would misfire if a
+            // future neutral multiplier of 1.0 is ever added).
+            if !r.pdg_confirmed && !r.pdg_conditional && !r.pdg_clean {
                 pdg_stats.ir_unavailable += 1;
                 continue;
             }
@@ -189,9 +188,11 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
             if r.pdg_conditional {
                 pdg_stats.conditional_sinks += 1;
             }
-            // Apply the Phase 3 multiplier on top of the Phase 1 score.
+            // Apply Phase 3 against the Phase-0 baseline, not the Phase-1-modified score,
+            // so the two phases score independently rather than compounding.
             if let Some(p) = paths.get_mut(r.path_index) {
-                p.confidence = (p.confidence * r.confidence_multiplier).clamp(0.0, 1.0);
+                p.confidence =
+                    (original_confidence[r.path_index] * r.confidence_multiplier).clamp(0.0, 1.0);
             }
         }
 

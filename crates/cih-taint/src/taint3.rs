@@ -119,9 +119,10 @@ pub fn analyze_with_pdg(
     for block in &cfg.blocks {
         for stmt in &block.stmts {
             match stmt.kind {
-                StatementKind::Call => {
+                // Check both standalone calls and assignment-RHS calls (e.g. `String r = stmt.execute(sql)`).
+                StatementKind::Call | StatementKind::Assign => {
                     let call_name = stmt.call_site.as_deref().unwrap_or("");
-                    if is_sink(call_name, sink_name_patterns) {
+                    if !call_name.is_empty() && is_sink(call_name, sink_name_patterns) {
                         let tainted_args = tainted_args_of(stmt, reaching, &tainted_defs);
                         if !tainted_args.is_empty() {
                             confirmed_sinks.push(ConfirmedSink3 {
@@ -129,7 +130,7 @@ pub fn analyze_with_pdg(
                                 call_name: call_name.to_string(),
                                 tainted_args,
                             });
-                        } else if is_control_dep_tainted(&stmt.id, pdg, &tainted_defs, reaching) {
+                        } else if is_control_dep_tainted(&stmt.id, pdg, cfg, &tainted_defs, reaching) {
                             conditionally_tainted_sinks.push(stmt.id.clone());
                         }
                     }
@@ -238,13 +239,18 @@ fn tainted_args_of(
         .collect()
 }
 
-/// True if `sink_stmt` has a control-dep edge from a statement whose own def is tainted.
+/// True if `sink_stmt` has a control-dep edge from a branch whose condition reads a tainted def.
 ///
 /// This catches the pattern: `if (tainted_flag) { sink(clean_arg); }` — the sink is
 /// only reachable when the branch condition (which is tainted) is true.
+///
+/// `cfg` is needed to retrieve the branch statement's `reads` set so that we only check
+/// variables the condition actually reads, rather than every variable live at that point
+/// (which would cause false positives whenever any unrelated tainted variable is in scope).
 fn is_control_dep_tainted(
     sink_stmt: &NodeId,
     pdg: &Pdg,
+    cfg: &Cfg,
     tainted_defs: &HashSet<NodeId>,
     reaching: &ReachingDefs,
 ) -> bool {
@@ -252,16 +258,20 @@ fn is_control_dep_tainted(
         if edge.kind != PdgEdgeKind::ControlDep {
             continue;
         }
-        // The branch stmt's ID is `edge.from`. It's "tainted" if its own def is tainted,
-        // or if its reads have a tainted reaching def.
+        // The branch stmt's ID is `edge.from`. It's tainted if its own def is tainted.
         if tainted_defs.contains(&edge.from) {
             return true;
         }
-        // Also check if the branch stmt reads a tainted variable.
-        // We synthesise a dummy StatementNode lookup from the reaching map.
-        if reaching.contains_key(&edge.from) {
-            let branch_rd = &reaching[&edge.from];
-            for (_var, defs) in branch_rd {
+        // Check whether any variable that the branch condition actually *reads* has a
+        // tainted reaching def. Restrict to branch.reads to avoid false positives from
+        // unrelated tainted locals that happen to be live at the branch point.
+        let Some(branch_rd) = reaching.get(&edge.from) else { continue };
+        let branch_reads: HashSet<&String> = cfg
+            .stmt_by_id(&edge.from)
+            .map(|s| s.reads.iter().collect())
+            .unwrap_or_default();
+        for (var, defs) in branch_rd {
+            if branch_reads.is_empty() || branch_reads.contains(var) {
                 if defs.iter().any(|d| tainted_defs.contains(d)) {
                     return true;
                 }
@@ -279,17 +289,20 @@ fn is_sink(call_name: &str, patterns: &[&str]) -> bool {
 
 /// True if `call_name` matches any sanitizer node-id pattern.
 ///
-/// Sanitizer patterns look like `"HtmlUtils#htmlEscape"`. We check whether the
-/// call-site name (e.g. `"htmlEscape"`) appears as a substring within any pattern.
-/// This works because the method-name portion always appears verbatim after `#`.
+/// Sanitizer patterns look like `"HtmlUtils#htmlEscape"`. We extract the method-name
+/// portion (after `#`) and require an exact case-insensitive match with `call_name`.
+/// Exact matching prevents a short name like `"set"` from spuriously matching
+/// `"PreparedStatement#setString"` and suppressing a real SQL-injection sink.
 fn is_sanitizer(call_name: &str, node_id_patterns: &[&str]) -> bool {
     if call_name.is_empty() {
         return false;
     }
     let lower = call_name.to_ascii_lowercase();
-    node_id_patterns
-        .iter()
-        .any(|p| p.to_ascii_lowercase().contains(lower.as_str()))
+    node_id_patterns.iter().any(|p| {
+        let p_lower = p.to_ascii_lowercase();
+        let method = p_lower.split('#').last().unwrap_or(&p_lower);
+        lower == method
+    })
 }
 
 // ── Refinement glue for taint_cmd.rs ─────────────────────────────────────────
@@ -515,6 +528,49 @@ class Web {
         assert!(
             !r2.confirmed_sinks.is_empty(),
             "without sanitizer pattern, print should be confirmed (baseline check)"
+        );
+    }
+
+    /// is_sanitizer must NOT match a short call name as a substring of a long pattern.
+    /// Before the fix, `is_sanitizer("set", &["PreparedStatement#setString"])` returned true,
+    /// turning a real SQL-injection sink into a sanitizer.
+    #[test]
+    fn sanitizer_short_name_does_not_match_longer_pattern() {
+        assert!(
+            !is_sanitizer("set", &["PreparedStatement#setString"]),
+            "'set' must not match pattern 'PreparedStatement#setString'"
+        );
+        assert!(
+            !is_sanitizer("execute", &["Statement#executeQuery"]),
+            "'execute' must not match pattern 'Statement#executeQuery'"
+        );
+        // Exact method-name match still works.
+        assert!(
+            is_sanitizer("htmlEscape", &["HtmlUtils#htmlEscape"]),
+            "'htmlEscape' should match 'HtmlUtils#htmlEscape'"
+        );
+        assert!(
+            is_sanitizer("escapeSql", &["StringEscapeUtils#escapeSql"]),
+            "'escapeSql' should match 'StringEscapeUtils#escapeSql'"
+        );
+    }
+
+    /// Sink call that is the RHS of an assignment must be detected.
+    /// Before the fix, `String r = stmt.execute(sql)` (StatementKind::Assign) was silently skipped.
+    #[test]
+    fn assign_rhs_sink_detected() {
+        let src = r#"
+class Dao {
+    void run(String input) {
+        String r = execute(input);
+    }
+}
+"#;
+        let r = run(src, "Method:com.example.Dao#run/1", &["input"], &["execute"]);
+        assert!(
+            !r.confirmed_sinks.is_empty(),
+            "sink on assignment RHS should be confirmed; sinks={:?}",
+            r.confirmed_sinks
         );
     }
 

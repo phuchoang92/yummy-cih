@@ -93,6 +93,14 @@ impl Cfg {
         self.blocks.iter().find(|b| b.id == *id)
     }
 
+    /// Look up a statement by its unique ID across all blocks.
+    pub fn stmt_by_id(&self, id: &NodeId) -> Option<&StatementNode> {
+        self.blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter())
+            .find(|s| &s.id == id)
+    }
+
     pub fn block_idx(&self, id: &BlockId) -> Option<usize> {
         self.blocks.iter().position(|b| b.id == *id)
     }
@@ -776,10 +784,13 @@ impl<'src> CfgBuilder<'src> {
         let final_entry_opt = children.iter().find(|c| c.kind() == "finally_clause");
         if let Some(finally) = final_entry_opt {
             let fin_entry = self.new_block();
-            // Normal path from try and catch → finally.
+            // `after` is the merge point for both the normal try exit and all catch exits.
+            // Wire it to finally so the dominator tree sees a single entry into the finally block.
             self.add_edge(&after, &fin_entry, CfgEdgeKind::Sequential);
             for ce in &catch_exits {
-                self.add_edge(ce, &fin_entry, CfgEdgeKind::Sequential);
+                // Catch exits go through `after` (not directly to fin_entry) so that `after`
+                // is reachable from both paths and the dominator tree is correct.
+                self.add_edge(ce, &after, CfgEdgeKind::Sequential);
             }
             let fin_children: Vec<TsNode<'_>> = {
                 let mut cursor2 = finally.walk();

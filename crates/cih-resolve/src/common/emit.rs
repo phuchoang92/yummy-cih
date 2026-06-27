@@ -674,14 +674,23 @@ impl<'a> EdgeEmitter<'a> {
                 .entry(node.id.as_str().to_string())
                 .or_insert(node);
         }
-        let mut deduped = BTreeMap::new();
+        let mut deduped: BTreeMap<(String, String, String), Edge> = BTreeMap::new();
         for edge in self.edges.drain(..) {
             let key = (
                 edge.src.as_str().to_string(),
                 edge.dst.as_str().to_string(),
-                edge.kind.cypher_label(),
+                edge.kind.cypher_label().to_string(),
             );
-            deduped.entry(key).or_insert(edge);
+            match deduped.entry(key) {
+                std::collections::btree_map::Entry::Occupied(mut occ) => {
+                    if edge.confidence > occ.get().confidence {
+                        *occ.get_mut() = edge;
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(vac) => {
+                    vac.insert(edge);
+                }
+            }
         }
         let edges = deduped.into_values().collect();
         ResolveOutput {
