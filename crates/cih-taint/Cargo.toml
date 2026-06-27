@@ -9,6 +9,8 @@ cih-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+tree-sitter.workspace = true
+tree-sitter-java.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

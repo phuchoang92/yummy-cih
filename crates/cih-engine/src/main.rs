@@ -315,14 +315,25 @@ enum Command {
         #[command(subcommand)]
         command: FeaturesCommand,
     },
-    /// Run Phase 0 inter-procedural taint analysis on the latest graph artifacts.
-    /// Detects taint paths from HTTP/event entry-points to SQL/exec/file sinks.
+    /// Run Phase 0 + Phase 1 + Phase 2 taint analysis on the latest graph artifacts.
+    /// Phase 0: BFS on method-granularity call graph (inter-procedural).
+    /// Phase 1: intra-procedural IR for source methods (confirms/penalises paths).
+    /// Phase 2: on-demand CFG construction + dominance tree for confirmed source methods.
     /// Requires a prior `analyze` run. Emits TaintFlow edges to .cih/artifacts-taint/.
     Taint {
         /// Repository root with `.cih/artifacts/` from a prior analyze run.
         repo: PathBuf,
         #[command(flatten)]
         db: DbArgs,
+        /// Skip Phase 1 intra-procedural refinement (faster but more false positives).
+        #[arg(long)]
+        no_phase1: bool,
+        /// Skip Phase 2 CFG construction (no dominance tree; slightly faster).
+        #[arg(long)]
+        no_phase2: bool,
+        /// Skip Phase 3 PDG construction + flow-sensitive taint (fastest mode).
+        #[arg(long)]
+        no_phase3: bool,
         /// Print results as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -771,12 +782,15 @@ fn main() -> Result<()> {
             filter_route,
             json,
         }),
-        Command::Taint { repo, db, json } => taint_cmd::run_taint(
+        Command::Taint { repo, db, no_phase1, no_phase2, no_phase3, json } => taint_cmd::run_taint(
             repo,
             taint_cmd::TaintFlags {
                 falkor_url: db.falkor_url,
                 graph_key: db.graph_key,
                 no_load: db.no_load,
+                no_phase1,
+                no_phase2,
+                no_phase3,
                 json,
             },
         ),

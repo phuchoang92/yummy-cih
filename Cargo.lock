@@ -766,6 +766,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-java",
 ]
 
 [[package]]
