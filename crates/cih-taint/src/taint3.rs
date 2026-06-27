@@ -1,22 +1,31 @@
 //! Phase 3: PDG-based flow-sensitive, kill-aware taint analysis.
 //!
 //! Unlike Phase 1 (which tracks "is variable X tainted?"), Phase 3 tracks
-//! "is *definition D* tainted?" This enables kill-through-reassignment:
+//! "is *definition D* tainted?" This enables two kinds of kill:
 //!
+//! **Kill by reassignment** — a literal or computed-clean value replaces a tainted def:
 //! ```java
 //! String x = userInput;   // def-1 of x is tainted
-//! x = sanitize(x);       // def-2 of x is clean — KILLS the tainted def
-//! sink(x);               // reaches def-2 only → NOT a confirmed sink
+//! x = "literal";          // def-2 of x is clean — KILLS the tainted def
+//! sink(x);                // reaches def-2 only → NOT a confirmed sink
 //! ```
 //!
-//! Phase 1 would flag that `sink` as confirmed (x was tainted). Phase 3 does not.
+//! **Kill by sanitizer call** — a known sanitizer method produces a clean def even if
+//! its arguments are tainted:
+//! ```java
+//! String safe = htmlEscape(userInput);  // sanitizer → clean def
+//! print(safe);                          // reaches clean def only → NOT a confirmed sink
+//! ```
+//!
+//! Phase 1 would flag both patterns as confirmed sinks. Phase 3 does not.
 //!
 //! # Algorithm
 //!
 //! 1. Initialize: mark the virtual param-def node IDs for each tainted parameter.
 //! 2. Forward propagation (RPO order, reaching-defs already computed):
-//!    - For each statement S: if any reaching def of a variable that S reads is tainted,
-//!      then S's *own* def(s) of that variable are also tainted.
+//!    - For each statement S: if S is a sanitizer call, its def is clean regardless of inputs.
+//!    - Otherwise: if any reaching def of a variable that S reads is tainted,
+//!      then S's own def is also tainted.
 //!    - Propagate until fixpoint (needed for loops).
 //! 3. Classify sinks:
 //!    - **Confirmed** (`DataDep` chain): a tainted def reaches an argument of a sink call.
@@ -74,12 +83,16 @@ pub struct Phase3Result {
 /// - `reaching`: computed by `compute_reaching_defs`
 /// - `tainted_params`: names of parameters that arrive tainted
 /// - `sink_name_patterns`: substrings matched against call sites to identify sinks
+/// - `sanitizer_patterns`: node-id patterns from `TaintRules::sanitizers`
+///   (e.g. `"HtmlUtils#htmlEscape"`). A call whose name appears as a substring of any
+///   pattern is treated as a sanitizer: its write is a clean def.
 pub fn analyze_with_pdg(
     cfg: &Cfg,
     pdg: &Pdg,
     reaching: &ReachingDefs,
     tainted_params: &[String],
     sink_name_patterns: &[&str],
+    sanitizer_patterns: &[&str],
 ) -> Phase3Result {
     let callable_id = cfg.callable_id.clone();
 
@@ -95,7 +108,7 @@ pub fn analyze_with_pdg(
     let mut changed = true;
     while changed {
         changed = false;
-        changed |= propagate_pass(cfg, reaching, &rpo, &mut tainted_defs);
+        changed |= propagate_pass(cfg, reaching, &rpo, &mut tainted_defs, sanitizer_patterns);
     }
 
     // Classify statements.
@@ -156,6 +169,7 @@ fn propagate_pass(
     reaching: &ReachingDefs,
     rpo: &[crate::cfg::BlockId],
     tainted_defs: &mut HashSet<NodeId>,
+    sanitizer_patterns: &[&str],
 ) -> bool {
     let mut changed = false;
     for block_id in rpo {
@@ -164,13 +178,17 @@ fn propagate_pass(
             if stmt.writes.is_empty() {
                 continue;
             }
+            // Sanitizer calls produce a clean def regardless of their inputs.
+            // Skip adding to tainted_defs: the write gets a clean def, which kills
+            // any prior tainted def of the same variable (via reaching-defs kill semantics).
+            if is_sanitizer(stmt.call_site.as_deref().unwrap_or(""), sanitizer_patterns) {
+                continue;
+            }
             // If any variable read by this stmt has a tainted reaching def,
             // then all variables *written* by this stmt are now tainted (the def is tainted).
             if stmt_reads_tainted(stmt, reaching, tainted_defs) {
-                for _ in &stmt.writes {
-                    if tainted_defs.insert(stmt.id.clone()) {
-                        changed = true;
-                    }
+                if tainted_defs.insert(stmt.id.clone()) {
+                    changed = true;
                 }
             }
         }
@@ -253,10 +271,25 @@ fn is_control_dep_tainted(
     false
 }
 
-/// True if `call_name` matches any sink pattern.
+/// True if `call_name` matches any sink pattern (pattern substring found in call name).
 fn is_sink(call_name: &str, patterns: &[&str]) -> bool {
     let lower = call_name.to_ascii_lowercase();
     patterns.iter().any(|p| lower.contains(p))
+}
+
+/// True if `call_name` matches any sanitizer node-id pattern.
+///
+/// Sanitizer patterns look like `"HtmlUtils#htmlEscape"`. We check whether the
+/// call-site name (e.g. `"htmlEscape"`) appears as a substring within any pattern.
+/// This works because the method-name portion always appears verbatim after `#`.
+fn is_sanitizer(call_name: &str, node_id_patterns: &[&str]) -> bool {
+    if call_name.is_empty() {
+        return false;
+    }
+    let lower = call_name.to_ascii_lowercase();
+    node_id_patterns
+        .iter()
+        .any(|p| p.to_ascii_lowercase().contains(lower.as_str()))
 }
 
 // ── Refinement glue for taint_cmd.rs ─────────────────────────────────────────
@@ -280,13 +313,16 @@ pub struct Phase3Refinement {
 ///
 /// `get_node_file(id)` → file-relative path for the method node.
 /// `resolve_src(file)` → source text for the file.
-/// `tainted_param_names_for(id)` → which params are tainted on this path.
+///
+/// Tainted parameters are derived automatically from the CFG: since `path.source` is
+/// an HTTP-handler / event-listener (identified by Phase 0), all of its formal parameters
+/// arrive with untrusted data and are therefore seeded as tainted.
 pub fn refine_paths_phase3(
     paths: &[crate::pass::TaintPath],
     get_node_file: &dyn Fn(&NodeId) -> Option<String>,
     resolve_src: impl Fn(&str) -> Option<String>,
-    tainted_param_names_for: impl Fn(&NodeId) -> Vec<String>,
     sink_name_patterns: &[&str],
+    sanitizer_patterns: &[&str],
 ) -> Vec<Phase3Refinement> {
     paths
         .iter()
@@ -302,11 +338,14 @@ pub fn refine_paths_phase3(
                 return unavailable(i);
             };
             let dom = cfg.compute_dominators();
-            let params = tainted_param_names_for(&path.source);
-            let reaching = crate::pdg::compute_reaching_defs(&cfg, &params);
+            // All params of the source (HTTP handler) are tainted — they carry user input.
+            let reaching = crate::pdg::compute_reaching_defs(&cfg, &cfg.param_names);
             let pdg = crate::pdg::build_pdg(&cfg, Some(&dom), Some(&reaching));
 
-            let result = analyze_with_pdg(&cfg, &pdg, &reaching, &params, sink_name_patterns);
+            let result = analyze_with_pdg(
+                &cfg, &pdg, &reaching, &cfg.param_names,
+                sink_name_patterns, sanitizer_patterns,
+            );
 
             let pdg_confirmed = !result.confirmed_sinks.is_empty();
             let pdg_conditional = !result.conditionally_tainted_sinks.is_empty();
@@ -346,13 +385,23 @@ mod tests {
     }
 
     fn run(src: &str, method_id: &str, tainted_params: &[&str], sinks: &[&str]) -> Phase3Result {
+        run_with_sanitizers(src, method_id, tainted_params, sinks, &[])
+    }
+
+    fn run_with_sanitizers(
+        src: &str,
+        method_id: &str,
+        tainted_params: &[&str],
+        sinks: &[&str],
+        sanitizers: &[&str],
+    ) -> Phase3Result {
         let mid = id(method_id);
         let cfg = build_cfg(&mid, src).expect("CFG must build");
         let dom = cfg.compute_dominators();
         let params: Vec<String> = tainted_params.iter().map(|s| s.to_string()).collect();
         let reaching = compute_reaching_defs(&cfg, &params);
         let pdg = build_pdg(&cfg, Some(&dom), Some(&reaching));
-        analyze_with_pdg(&cfg, &pdg, &reaching, &params, sinks)
+        analyze_with_pdg(&cfg, &pdg, &reaching, &params, sinks, sanitizers)
     }
 
     /// Direct: tainted param flows straight into a sink.
@@ -434,5 +483,64 @@ class Foo {
 "#;
         let r = run(src, "Method:com.example.Foo#get/1", &["input"], &["execute"]);
         assert!(r.taint_return, "should detect tainted return");
+    }
+
+    /// Sanitizer kill: result of a sanitizer call is a clean def even if input was tainted.
+    #[test]
+    fn sanitizer_kills_taint() {
+        let src = r#"
+class Web {
+    void render(String input) {
+        String safe = htmlEscape(input);
+        print(safe);
+    }
+}
+"#;
+        // "HtmlUtils#htmlEscape" is the node-id pattern; "htmlEscape" appears in it.
+        let r = run_with_sanitizers(
+            src,
+            "Method:com.example.Web#render/1",
+            &["input"],
+            &["print"],
+            &["HtmlUtils#htmlEscape"],
+        );
+        assert!(
+            r.confirmed_sinks.is_empty(),
+            "sanitizer should kill taint; confirmed_sinks={:?}",
+            r.confirmed_sinks
+        );
+        // Without the sanitizer check, the taint would propagate and print would be confirmed.
+        // Verify this by running again without the sanitizer pattern — should confirm.
+        let r2 = run(src, "Method:com.example.Web#render/1", &["input"], &["print"]);
+        assert!(
+            !r2.confirmed_sinks.is_empty(),
+            "without sanitizer pattern, print should be confirmed (baseline check)"
+        );
+    }
+
+    /// Sanitizer kill propagates: safe value assigned to another var stays clean.
+    #[test]
+    fn sanitizer_kill_propagates() {
+        let src = r#"
+class Web {
+    void render(String input) {
+        String s1 = htmlEscape(input);
+        String s2 = s1;
+        sink(s2);
+    }
+}
+"#;
+        let r = run_with_sanitizers(
+            src,
+            "Method:com.example.Web#render/1",
+            &["input"],
+            &["sink"],
+            &["HtmlUtils#htmlEscape"],
+        );
+        assert!(
+            r.confirmed_sinks.is_empty(),
+            "clean def should propagate through subsequent assignments; sinks={:?}",
+            r.confirmed_sinks
+        );
     }
 }

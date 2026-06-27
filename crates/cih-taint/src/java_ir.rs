@@ -93,7 +93,7 @@ pub(crate) fn extract_call_args(node: TsNode<'_>, src: &[u8]) -> Vec<String> {
 }
 
 /// Extract parameter names from a `formal_parameters` node.
-fn extract_param_names(params: TsNode<'_>, src: &[u8]) -> Vec<String> {
+pub(crate) fn extract_param_names(params: TsNode<'_>, src: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = params.walk();
     for child in params.named_children(&mut cursor) {

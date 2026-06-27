@@ -160,21 +160,18 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
             "execute", "executeQuery", "executeUpdate", "exec",
             "write", "delete", "update", "insert",
         ];
+        // Sanitizer node-id patterns from the same rules used by Phase 0.
+        let sanitizer_patterns: Vec<&str> =
+            rules.sanitizers.iter().map(|s| s.node_id_pattern).collect();
 
-        // For now, we conservatively assume all method parameters may be tainted.
-        // A future improvement: extract the actual tainted param names from the path edges.
-        let tainted_param_names_for = |_id: &NodeId| -> Vec<String> {
-            // Return an empty list so only defs with explicit taint sources are tracked.
-            // Callers of `refine_paths_phase3` should supply per-path param info.
-            vec![]
-        };
-
+        // Tainted params are extracted automatically from each source method's CFG
+        // (all formal params of an HTTP handler arrive as untrusted user input).
         let refinements = cih_taint::taint3::refine_paths_phase3(
             &paths,
             &|id| node_map.get(id).map(|n| n.file.clone()),
             |file| std::fs::read_to_string(repo_ref.join(file)).ok(),
-            tainted_param_names_for,
             &sink_patterns,
+            &sanitizer_patterns,
         );
 
         for r in &refinements {

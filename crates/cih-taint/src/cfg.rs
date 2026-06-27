@@ -18,8 +18,8 @@ use cih_core::NodeId;
 
 use crate::ir::{StatementKind, StatementNode};
 use crate::java_ir::{
-    collect_reads, extract_call_args, extract_call_site, find_method_node,
-    parse_method_id, range_of, stmt_id, ts_text,
+    collect_reads, extract_call_args, extract_call_site, extract_param_names,
+    find_method_node, parse_method_id, range_of, stmt_id, ts_text,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -65,6 +65,9 @@ pub struct Cfg {
     pub entry: BlockId,
     /// Synthetic exit block (no statements; all returns/throws flow here).
     pub exit: BlockId,
+    /// Formal parameter names in declaration order, extracted from the method signature.
+    /// Used by Phase 3 to seed initial taint: for HTTP-handler sources, all params arrive tainted.
+    pub param_names: Vec<String>,
 }
 
 impl Cfg {
@@ -860,6 +863,11 @@ pub fn build_cfg(method_id: &NodeId, src: &str) -> Option<Cfg> {
     let method_node = find_method_node(root, src.as_bytes(), &target_name, target_arity)?;
     let body = method_node.child_by_field_name("body")?;
 
+    let param_names = method_node
+        .child_by_field_name("parameters")
+        .map(|p| extract_param_names(p, src.as_bytes()))
+        .unwrap_or_default();
+
     let mut builder = CfgBuilder::new(method_id.clone(), src.as_bytes());
     let entry = BlockId(0);
     let exit = builder.exit_id.clone();
@@ -875,6 +883,7 @@ pub fn build_cfg(method_id: &NodeId, src: &str) -> Option<Cfg> {
         blocks: builder.blocks,
         entry,
         exit,
+        param_names,
     })
 }
 
