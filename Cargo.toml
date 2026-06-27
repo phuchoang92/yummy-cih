@@ -34,6 +34,7 @@ members = [
   "crates/cih-embed",
   "crates/cih-graph-store",
   "crates/cih-falkor",
+  "crates/cih-taint",
   "crates/cih-engine",
   "crates/cih-wiki",
   "crates/cih-server",
@@ -93,6 +94,7 @@ zstd = "0.13"
 
 # internal crates
 cih-core = { path = "crates/cih-core" }
+cih-taint = { path = "crates/cih-taint" }
 cih-grouping = { path = "crates/cih-grouping" }
 cih-engine = { path = "crates/cih-engine" }
 cih-lang = { path = "crates/cih-lang" }

@@ -1,6 +1,7 @@
 mod analyze;
 mod db;
 mod discover;
+mod taint_cmd;
 mod embed;
 mod feature_strategy;
 mod features_cmd;
@@ -313,6 +314,18 @@ enum Command {
     Features {
         #[command(subcommand)]
         command: FeaturesCommand,
+    },
+    /// Run Phase 0 inter-procedural taint analysis on the latest graph artifacts.
+    /// Detects taint paths from HTTP/event entry-points to SQL/exec/file sinks.
+    /// Requires a prior `analyze` run. Emits TaintFlow edges to .cih/artifacts-taint/.
+    Taint {
+        /// Repository root with `.cih/artifacts/` from a prior analyze run.
+        repo: PathBuf,
+        #[command(flatten)]
+        db: DbArgs,
+        /// Print results as JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
     },
     /// Open the interactive TUI command builder.
     /// Navigate commands on the left, fill options on the right,
@@ -758,6 +771,15 @@ fn main() -> Result<()> {
             filter_route,
             json,
         }),
+        Command::Taint { repo, db, json } => taint_cmd::run_taint(
+            repo,
+            taint_cmd::TaintFlags {
+                falkor_url: db.falkor_url,
+                graph_key: db.graph_key,
+                no_load: db.no_load,
+                json,
+            },
+        ),
         Command::Start {
             workspace,
             repo,

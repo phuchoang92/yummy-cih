@@ -246,6 +246,9 @@ pub enum EdgeKind {
     WritesTable,
     IntegrationLink,
     SimilarTo,
+    /// Inter-procedural taint flow from an entry-point method to a sink method.
+    /// Emitted by `cih-taint` Phase 0. Props: `hops`, `sink_category`, `hop_count`.
+    TaintFlow,
     Other,
 }
 
@@ -276,6 +279,7 @@ impl EdgeKind {
             EdgeKind::WritesTable => "WRITES_TABLE",
             EdgeKind::IntegrationLink => "INTEGRATION_LINK",
             EdgeKind::SimilarTo => "SIMILAR_TO",
+            EdgeKind::TaintFlow => "TAINT_FLOW",
             EdgeKind::Other => "REL",
         }
     }

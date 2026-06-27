@@ -602,6 +602,7 @@ dependencies = [
  "cih-lang",
  "cih-parse",
  "cih-resolve",
+ "cih-taint",
  "cih-wiki",
  "clap",
  "console",
@@ -755,6 +756,16 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cih-taint"
+version = "0.1.0"
+dependencies = [
+ "cih-core",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
