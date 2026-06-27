@@ -20,9 +20,12 @@ pub struct TaintFlags {
     pub falkor_url: Option<String>,
     pub graph_key: Option<String>,
     pub no_load: bool,
-    pub no_phase1: bool,
-    pub no_phase2: bool,
-    pub no_phase3: bool,
+    /// Run intra-procedural liveness analysis (Phase 1). Default: true.
+    pub intra_proc: bool,
+    /// Run CFG construction + dominance tree (Phase 2). Default: true.
+    pub cfg: bool,
+    /// Run PDG-based flow-sensitive taint (Phase 3). Default: true.
+    pub pdg: bool,
     pub json: bool,
 }
 
@@ -74,7 +77,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     ));
 
     // ── Run Phase 1 (optional) ────────────────────────────────────────────────
-    if !flags.no_phase1 && !paths.is_empty() {
+    if flags.intra_proc && !paths.is_empty() {
         ui.spin("Phase 1: intra-procedural IR refinement");
 
         let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
@@ -108,7 +111,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
 
     // ── Run Phase 2 (optional) ────────────────────────────────────────────────
     let mut cfg_stats = CfgStats::default();
-    if !flags.no_phase1 && !flags.no_phase2 && !paths.is_empty() {
+    if flags.intra_proc && flags.cfg && !paths.is_empty() {
         ui.spin("Phase 2: CFG construction + dominance tree");
 
         let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
@@ -150,7 +153,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
 
     // ── Run Phase 3 (optional) ────────────────────────────────────────────────
     let mut pdg_stats = PdgStats::default();
-    if !flags.no_phase1 && !flags.no_phase2 && !flags.no_phase3 && !paths.is_empty() {
+    if flags.intra_proc && flags.cfg && flags.pdg && !paths.is_empty() {
         ui.spin("Phase 3: PDG construction + flow-sensitive taint");
 
         let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
@@ -341,7 +344,7 @@ fn print_human_report(paths: &[TaintPath], load: &LoadOutcome, taint_dir: &Path,
     }
     println!();
     println!("  \x1b[2mPhase 0: inter-proc BFS  Phase 1: intra-proc IR  Phase 2: CFG + dom-tree  Phase 3: PDG taint");
-    println!("  Use --no-phase1 / --no-phase2 / --no-phase3 to skip, or --json for machine output.\x1b[0m");
+    println!("  Use --no-intra-proc / --no-cfg / --no-pdg to skip phases, or --json for machine output.\x1b[0m");
 }
 
 fn print_json_report(

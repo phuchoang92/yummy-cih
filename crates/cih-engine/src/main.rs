@@ -325,15 +325,15 @@ enum Command {
         repo: PathBuf,
         #[command(flatten)]
         db: DbArgs,
-        /// Skip Phase 1 intra-procedural refinement (faster but more false positives).
-        #[arg(long)]
-        no_phase1: bool,
-        /// Skip Phase 2 CFG construction (no dominance tree; slightly faster).
-        #[arg(long)]
-        no_phase2: bool,
-        /// Skip Phase 3 PDG construction + flow-sensitive taint (fastest mode).
-        #[arg(long)]
-        no_phase3: bool,
+        /// Disable intra-procedural liveness analysis (faster, more false positives).
+        #[arg(long = "no-intra-proc", default_value_t = true, action = clap::ArgAction::SetFalse)]
+        intra_proc: bool,
+        /// Disable CFG construction and dominance-tree analysis.
+        #[arg(long = "no-cfg", default_value_t = true, action = clap::ArgAction::SetFalse)]
+        cfg: bool,
+        /// Disable PDG-based flow-sensitive taint analysis.
+        #[arg(long = "no-pdg", default_value_t = true, action = clap::ArgAction::SetFalse)]
+        pdg: bool,
         /// Print results as JSON instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -782,15 +782,15 @@ fn main() -> Result<()> {
             filter_route,
             json,
         }),
-        Command::Taint { repo, db, no_phase1, no_phase2, no_phase3, json } => taint_cmd::run_taint(
+        Command::Taint { repo, db, intra_proc, cfg, pdg, json } => taint_cmd::run_taint(
             repo,
             taint_cmd::TaintFlags {
                 falkor_url: db.falkor_url,
                 graph_key: db.graph_key,
                 no_load: db.no_load,
-                no_phase1,
-                no_phase2,
-                no_phase3,
+                intra_proc,
+                cfg,
+                pdg,
                 json,
             },
         ),
