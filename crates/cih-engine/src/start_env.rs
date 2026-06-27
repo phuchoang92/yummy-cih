@@ -17,14 +17,21 @@ const DEFAULT_PG_URL: &str = "postgres://cih:cih@localhost:5433/cih";
 /// - Header: `# CIH Interactive Start configuration`
 /// - `REPO_PATH=<canonical_path>`
 /// - `REPO_NAME=<name>`
+/// - `POSTGRES_PASSWORD=<password>` (required by docker-compose.yml:${POSTGRES_PASSWORD:?...})
 /// - `CIH_PG_URL=<host postgres url>` (for native dev; compose services override)
 /// - Optional LLM key line (if `llm_key_line` is Some)
 #[allow(dead_code)]
-pub fn render_env(repo_path: &Path, repo_name: &str, llm_key_line: Option<&str>) -> String {
+pub fn render_env(
+    repo_path: &Path,
+    repo_name: &str,
+    postgres_password: &str,
+    llm_key_line: Option<&str>,
+) -> String {
     let mut content = String::new();
     content.push_str("# CIH Interactive Start configuration\n");
     content.push_str(&format!("REPO_PATH={}\n", repo_path.display()));
     content.push_str(&format!("REPO_NAME={}\n", repo_name));
+    content.push_str(&format!("POSTGRES_PASSWORD={}\n", postgres_password));
     content.push_str(&format!("CIH_PG_URL={}\n", DEFAULT_PG_URL));
 
     if let Some(key_line) = llm_key_line {
@@ -65,6 +72,7 @@ pub fn merge_env_values(
     existing_lines: &[String],
     repo_path: &Path,
     repo_name: &str,
+    postgres_password: &str,
     llm_key_line: Option<&str>,
 ) -> String {
     const LLM_KEYS: &[&str] = &[
@@ -77,6 +85,7 @@ pub fn merge_env_values(
     let mut result = Vec::new();
     let mut found_repo_path = false;
     let mut found_repo_name = false;
+    let mut found_pg_pass = false;
     let mut found_llm_key = false;
     let mut found_pg_url = false;
 
@@ -92,6 +101,10 @@ pub fn merge_env_values(
             } else if key == "REPO_NAME" {
                 result.push(format!("REPO_NAME={}", repo_name));
                 found_repo_name = true;
+                continue;
+            } else if key == "POSTGRES_PASSWORD" {
+                result.push(format!("POSTGRES_PASSWORD={}", postgres_password));
+                found_pg_pass = true;
                 continue;
             } else if key == "CIH_PG_URL" {
                 // Preserve the existing value — the user may have customized the URL.
@@ -120,6 +133,9 @@ pub fn merge_env_values(
     }
     if !found_repo_name {
         result.push(format!("REPO_NAME={}", repo_name));
+    }
+    if !found_pg_pass {
+        result.push(format!("POSTGRES_PASSWORD={}", postgres_password));
     }
     if !found_pg_url {
         result.push(format!("CIH_PG_URL={}", DEFAULT_PG_URL));

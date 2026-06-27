@@ -1,0 +1,50 @@
+# Task 6 Evidence — Repo Setup Scripts
+
+## README.md — Step 0 exists with setup.sh/setup.bat
+- Entry: "### Step 0 — First-Time Setup (Recommended)"
+- macOS/Linux: `./setup.sh` code block
+- Windows: `setup.bat` code block
+- Two modes listed: Binary build, Docker Compose
+- PATH revert instructions present (zshrc/bashrc/profile)
+
+## README.md — Step 1 renamed with note
+- Entry: "### Step 1 — Interactive Setup (cih-engine start)"
+- Note: "If you already built binaries via `setup.sh` option 1, use this directly"
+
+## README.md — Manual fallback preserved
+- Entry: "### Manual Setup (Fallback)"
+- Content intact: REPO_PATH/POSTGRES_PASSWORD instructions
+
+## DOCKER-QUICKSTART.md — Script-first path
+- Entry: "## Interactive Setup (Recommended)"
+- macOS/Linux: `./setup.sh` code block
+- Windows: `setup.bat` code block
+- Four bullet points describing script behavior
+- Note about `cih-engine start` for binary users
+
+## DOCKER-QUICKSTART.md — Manual fallback preserved
+- Entry: "## Manual Docker Setup"
+- All steps 1-8 intact
+- PowerShell and Bash examples preserved
+
+## Verification commands (run after changes):
+# README Step 0
+grep -n "Step 0" README.md
+grep -n "setup.sh" README.md
+grep -n "setup.bat" README.md
+grep -n "Revert PATH" README.md
+
+# README Step 1 renamed
+grep -n "cih-engine start" README.md
+
+# README Manual fallback intact
+grep -n "Manual Setup (Fallback)" README.md
+grep -n "REPO_PATH" README.md
+
+# DOCKER-QUICKSTART script-first path
+grep -n "setup.sh" docs/DOCKER-QUICKSTART.md
+grep -n "setup.bat" docs/DOCKER-QUICKSTART.md
+
+# DOCKER-QUICKSTART manual fallback intact
+grep -n "Manual Docker Setup" docs/DOCKER-QUICKSTART.md
+grep -n "docker compose pull" docs/DOCKER-QUICKSTART.md

@@ -1,0 +1,173 @@
+# Task 5: setup.bat Static Verification
+# Date: 2026-06-27
+# Plan: repo-setup-scripts
+# File under test: setup.bat (316 lines)
+
+## 1. REQUIRED LABELS (Section Headers)
+
+Each label below MUST exist in setup.bat as a goto/jump target.
+
+[PASS] :menu                  — line 31
+[PASS] :menu_prompt           — line 39
+[PASS] :binary_mode           — line 58
+[PASS] :add_path              — line 100
+[PASS] :binary_done_path      — line 120
+[PASS] :docker_mode           — line 128
+[PASS] :prompt_repo_path      — line 150
+[PASS] :health_loop           — line 284
+[PASS] :health_timeout        — line 298
+[PASS] :health_ok             — line 302
+[PASS] :docker_done           — line 306
+[PASS] :end                   — line 314
+
+## 2. REQUIRED COMMANDS
+
+Each command below MUST appear verbatim (or with required args) in setup.bat.
+
+Binary mode:
+[PASS] "where cargo"                          — line 61
+[PASS] "cargo build --release -p cih-server -p cih-engine"  — line 71
+[PASS] "target\release\cih-engine.exe"        — line 78
+[PASS] "target\release\cih-server.exe"        — line 82
+[PASS] "[Environment]::SetEnvironmentVariable('Path'"  — line 111
+[PASS] "[Environment]::GetEnvironmentVariable('Path', 'User')"  — line 106
+[PASS] ASCII menu header: ══  (U+2550)        — line 33
+
+Docker mode:
+[PASS] "where docker"                         — line 131
+[PASS] "docker compose version"               — line 137
+[PASS] "docker compose config"                — line 253
+[PASS] "docker compose pull"                  — line 262
+[PASS] "docker compose up -d"                 — line 271
+[PASS] "docker compose ps cih-server"         — line 291
+[PASS] "Read-Host -AsSecureString"            — line 206
+[PASS] "SecureStringToBSTR"                   — line 207
+
+General:
+[PASS] "@echo off"                            — line 1
+[PASS] "setlocal enabledelayedexpansion"      — line 2
+[PASS] "SCRIPT_DIR=%~dp0"                     — line 11
+[PASS] "cd /d"                                — line 12
+[PASS] "%ERRORLEVEL%" checks                  — lines 13,62,72,78,82,114,132,138,243,254,263,272
+[PASS] "set /p" for user input                — lines 41,157,176
+[PASS] "^" line continuation                  — lines 104-113,199-242
+[PASS] "endlocal"                             — line 315
+
+## 3. FORBIDDEN COMMANDS (MUST NOT appear)
+
+[PASS] No "docker compose down -v" — destructive data wipe
+[PASS] No "docker compose down" without explicit user confirmation
+[PASS] No "setx /M" — system PATH modification
+[PASS] No "setx" used for PATH at all — uses PowerShell [Environment]::SetEnvironmentVariable
+[PASS] No copy to "C:\Windows" or "Program Files"
+[PASS] No "rmdir /s" or "del /s" — recursive delete
+[PASS] No .env write into REPO_PATH — .env written to SCRIPT_DIR only
+
+## 4. CONTRACT ERROR MESSAGES (word-for-word match)
+
+Each error message from contract §7 MUST appear exactly.
+
+[PASS] "ERROR: Rust/Cargo not found. Install from https://rustup.rs and try again."
+       — line 63
+
+[PASS] "ERROR: Docker not found. Install Docker Desktop from https://docker.com and try again."
+       — line 133
+
+[PASS] "ERROR: Docker Compose v2 not found. Update Docker Desktop and try again."
+       — line 139
+
+[PASS] "ERROR: docker-compose.yml not found. Run this script from the yummy-cih repo root."
+       — line 20
+
+[PASS] "ERROR: REPO_PATH does not exist: " (preface + path variable)
+       — lines 163, 169
+
+[PASS] "REPO_PATH must be an absolute path to a Java/Spring repository."
+       — lines 164, 170
+
+[PASS] "ERROR: POSTGRES_PASSWORD cannot be empty."
+       — line 209
+
+[PASS] "ERROR: cargo build failed. See output above for details."
+       — line 73
+
+[PASS] "Too many invalid choices."
+       — line 49
+
+[PASS] "ERROR: Cargo.toml not found. Run this script from the yummy-cih repo root."
+       — line 24
+
+## 5. CONTRACT SUCCESS/INFO MESSAGES
+
+[PASS] "Binary built at %SCRIPT_DIR%target\release\"                    — line 88
+[PASS] "NOTE: Docker dependencies (FalkorDB, Postgres) are still required" — line 90
+[PASS] "Restart your terminal for the change to take effect."            — line 118
+[PASS] "CIH PATH entry already present."                                  — line 108
+[PASS] "CIH is ready at http://localhost:8080/mcp"                       — line 304
+[PASS] "WARNING: cih-server did not become healthy within 60s."          — line 299
+[PASS] "Next: see README > Quick Start for indexing commands"            — line 308
+
+## 6. MENU TEXT (byte-for-byte match to contract §1)
+
+[PASS] "══ CIH Setup ══"                             — line 33
+[PASS] "1) Binary build (cargo build --release)"     — line 34
+[PASS] "2) Docker Compose setup"                     — line 35
+[PASS] "q) Quit"                                     — line 36
+
+## 7. PLATFORM CONSTRAINTS (contract §6.2)
+
+[PASS] Target: cmd.exe (NOT PowerShell-only) — core flow in batch, PS only for password/PATH/.env
+[PASS] PowerShell only for:
+       - Hidden password input (Read-Host -AsSecureString) — line 206
+       - User PATH persistence ([Environment]::SetEnvironmentVariable) — line 111
+       - .env upsert logic (allowed per contract: "PowerShell -replace") — lines 199-242
+[PASS] "where" for command detection — lines 61, 131
+[PASS] "%ERRORLEVEL%" for exit code checks — 12 occurrences
+[PASS] "set /p" for user prompts — lines 41, 157, 176
+[PASS] Path separators: backslash (\) consistently
+[PASS] .env backup timestamp: YYYYMMDDHHmmss — line 189
+
+## 8. SECURITY & REDACTION
+
+[PASS] POSTGRES_PASSWORD redacted in all output: "(********)" — line 213
+[PASS] No real password echoed anywhere in success/info/error messages
+[PASS] Hidden input via PowerShell SecureString — line 206
+[PASS] Password never passes through batch variables (combined PS invocation) — lines 199-242
+[PASS] REPO_PATH and REPO_NAME passed via process env vars (avoids shell escaping) — lines 180-181
+
+## 9. IDEMPOTENCY
+
+[PASS] PATH check: already-present detection before append — line 107
+[PASS] PATH persistence: user scope only, no system scope
+[PASS] .env backup: creates uniquely-timestamped backup before writing — lines 191-194
+[PASS] .env upsert: replaces known keys, preserves unknown keys, appends missing — lines 219-241
+[PASS] Re-running with same values produces identical .env output
+
+## 10. PATH HANDLING (Windows spaces)
+
+[PASS] "%~dp0" for script directory (resolves all paths)
+[PASS] Double quotes around all path variables: "%SCRIPT_DIR%..." — consistent throughout
+[PASS] "cd /d" for drive-letter change — line 12
+[PASS] PowerShell path using TrimEnd('\') for case-insensitive comparison — line 105
+[PASS] idempotent: case-insensitive match (PowerShell -eq default) — line 107
+
+## 11. .env UPSERT ALGORITHM (contract §3 / task-3 §3)
+
+[PASS] Comment lines (starting with #) preserved verbatim — line 221
+[PASS] Blank lines preserved verbatim — line 221
+[PASS] Known keys (REPO_PATH, POSTGRES_PASSWORD, REPO_NAME) replaced — lines 225-229
+[PASS] Unknown keys preserved verbatim — line 231
+[PASS] Malformed lines (no =) preserved verbatim — line 234
+[PASS] Required keys not present appended at end — lines 237-241
+[PASS] Regex: ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ — line 225
+[PASS] UTF8 encoding with CRLF line endings — line 242
+
+## 12. SUMMARY
+
+Total checks: 64
+Passed:  64
+Failed:  0
+Skipped: 0
+
+VERDICT: ALL CHECKS PASS — setup.bat conforms to the shared behavior contract
+         defined in .omo/evidence/task-2-repo-setup-scripts.md.

@@ -13,9 +13,24 @@ Pull the pre-built image and build a code-intelligence graph for any Java/Spring
 
 ## Interactive Setup (Recommended)
 
-If you have the `cih-engine` binary installed, run `cih-engine start` for an interactive guided setup. The wizard creates `.env`, checks prerequisites, and prints the exact Docker commands to run.
+Run the setup script from the repo root and choose **Docker Compose setup**:
 
-> The wizard runs natively. Docker Compose cannot bootstrap before `.env` exists.
+**macOS / Linux:**
+```bash
+./setup.sh
+```
+**Windows (cmd.exe):**
+```cmd
+setup.bat
+```
+
+The script will:
+- Prompt for your Java/Spring repository path
+- Prompt for a database password
+- Write the `.env` configuration file
+- Pull Docker images and start FalkorDB, Postgres, and the MCP server
+
+> **If you already built binaries** via `setup.sh` option 1, you can also run `cih-engine start` for an interactive guided setup. The wizard creates `.env`, checks prerequisites, and prints the exact Docker commands to run.
 
 ## Manual Docker Setup
 

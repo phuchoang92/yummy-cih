@@ -17,9 +17,28 @@ LLM enrichment.
 
 ## Quick Start
 
-### Step 1 — Interactive Setup (Recommended)
+### Step 0 — First-Time Setup (Recommended)
 
-Run the interactive setup wizard:
+Run the interactive setup script from the repo root:
+
+**macOS / Linux:**
+```bash
+./setup.sh
+```
+**Windows (cmd.exe):**
+```cmd
+setup.bat
+```
+
+The script offers two modes:
+- **Binary build** — builds `cih-engine` and `cih-server` from source and adds them to your PATH.
+- **Docker Compose** — writes `.env`, pulls images, and starts FalkorDB, Postgres, and the MCP server.
+
+> **Revert PATH changes:** To remove the CIH PATH entry, edit `~/.zshrc` / `~/.bashrc` / `~/.bash_profile` and delete the block between `# >>> CIH begin >>>` and `# <<< CIH end <<<`. On Windows, run `rundll32 sysdm.cpl,EditEnvironmentVariables` and remove the `target\release` entry from the User `Path` variable.
+
+### Step 1 — Interactive Setup (cih-engine start)
+
+If you already built binaries via `setup.sh` option 1, use this directly:
 
 ```bash
 cih-engine start

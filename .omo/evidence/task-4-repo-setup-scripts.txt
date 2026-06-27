@@ -1,0 +1,172 @@
+# Task 4: setup.sh Implementation Verification
+# Date: 2026-06-27
+# Plan: repo-setup-scripts
+# File under test: setup.sh (449 lines)
+
+## 1. SHEBANG & BOILERPLATE
+
+[PASS] Shebang: #!/usr/bin/env bash                         — line 1
+[PASS] set -uo pipefail                                      — line 14
+[PASS] SCRIPT_DIR from BASH_SOURCE                           — line 18
+[PASS] cd "$SCRIPT_DIR"                                      — line 19
+[PASS] Matches scripts/eval-enterprise-java.sh precedent     — lines 18-20
+
+## 2. BASH 3.2 COMPATIBILITY (contract §6.1)
+
+[PASS] No [[ ]] test operator — all tests use [ ] with proper quoting
+[PASS] No indexed arrays (declare -a, arr=())
+[PASS] No mapfile / readarray — uses while IFS= read -r line
+[PASS] No <<< here-strings — uses printf, heredocs, or pipes
+[PASS] No ** globstar
+[PASS] No associative arrays (declare -A)
+[PASS] case patterns for multi-branch logic instead of fallthrough
+
+## 3. PREREQUISITE CHECKS (contract §2)
+
+[PASS] docker-compose.yml exists check                        — line 54
+[PASS] Cargo.toml exists check                                — line 57
+[PASS] "ERROR: docker-compose.yml not found..."               — line 55
+[PASS] "ERROR: Cargo.toml not found..."                       — line 58
+[PASS] Checks run BEFORE menu (fail-fast in check_prereqs)    — line 444
+
+## 4. MENU (contract §1)
+
+[PASS] Header: ══ CIH Setup ══ (U+2550 double horizontal)    — line 67
+[PASS] "1) Binary build (cargo build --release)"              — line 68
+[PASS] "2) Docker Compose setup"                              — line 69
+[PASS] "q) Quit"                                              — line 70
+[PASS] q/Q exits with code 0                                  — line 85
+[PASS] Max 3 invalid attempts                                 — line 66
+[PASS] "Too many invalid choices."                            — line 90
+[PASS] Exit code 1 on too many attempts                       — line 91
+
+## 5. BINARY MODE (contract §4)
+
+[PASS] Cargo check via command -v cargo                       — line 105
+[PASS] "ERROR: Rust/Cargo not found..." (exact contract text) — line 106
+[PASS] cargo build --release -p cih-server -p cih-engine      — line 111
+[PASS] Verify target/release/cih-engine exists + executable    — line 116
+[PASS] Verify target/release/cih-server exists + executable    — line 119
+[PASS] "ERROR: cargo build failed..." (exact)                 — lines 112,117,120
+[PASS] Success: "Binary built at <dir>/target/release/"        — line 123
+[PASS] Runtime note about FalkorDB/Postgres                   — line 124
+[PASS] docker compose up -d falkordb postgres hint             — line 126
+[PASS] PATH offer defaults to yes (accepts empty/Enter)        — lines 129-137
+[PASS] "Added target/release to your PATH..."                 — line 140
+[PASS] Calls update_bash_path function                         — line 139
+[PASS] No binary copy to /usr/local/bin
+[PASS] No destructive commands
+
+## 6. DOCKER MODE (contract §5)
+
+[PASS] Docker check via command -v docker                     — line 149
+[PASS] "ERROR: Docker not found..." (exact)                    — line 150
+[PASS] docker compose version check                            — line 153
+[PASS] "ERROR: Docker Compose v2 not found..." (exact)         — line 154
+[PASS] REPO_PATH prompt with validation                       — lines 160-195
+[PASS] REPO_PATH: absolute path check (must start with /)     — lines 172-180
+[PASS] REPO_PATH: directory existence check                   — lines 183-188
+[PASS] REPO_PATH: 3 retry attempts                            — lines 160,193
+[PASS] "ERROR: REPO_PATH does not exist..." (exact)            — lines 165,175,185
+[PASS] "REPO_PATH must be an absolute..." (exact)              — lines 166,176,186
+[PASS] POSTGRES_PASSWORD hidden input (stty -echo)             — lines 38,201
+[PASS] POSTGRES_PASSWORD non-empty validation                  — line 204
+[PASS] "ERROR: POSTGRES_PASSWORD cannot be empty." (exact)     — line 205
+[PASS] POSTGRES_PASSWORD 3 retry attempts                      — lines 200,212
+[PASS] REPO_NAME optional with default "repo"                  — lines 218-223
+[PASS] .env written to SCRIPT_DIR/.env (NOT target repo)       — line 226
+[PASS] "POSTGRES_PASSWORD=********" redacted output            — line 229
+[PASS] docker compose config validation                        — line 233
+[PASS] docker compose pull                                     — line 240
+[PASS] docker compose up -d                                    — line 247
+[PASS] Health polling (docker compose ps | grep healthy)       — line 259
+[PASS] 60s timeout                                             — line 254
+[PASS] "CIH is ready at http://localhost:8080/mcp"             — line 260
+[PASS] "Next: see README → Quick Start..."                     — line 261
+[PASS] Warning on timeout                                      — line 268
+[PASS] No docker compose down -v
+[PASS] No docker compose down without confirmation
+[PASS] All docker output piped through redact_output           — lines 240,247
+
+## 7. PATH IDEMPOTENCY (contract §4.5, task-3 §1)
+
+[PASS] Profile detection: .zshrc → .bashrc → .bash_profile → .profile — line 278
+[PASS] Creates ~/.bashrc if no profile found                   — line 286-289
+[PASS] CIH-marked block open marker: "# >>> CIH begin >>>"     — line 292
+[PASS] CIH-marked block close marker: "# <<< CIH end <<<"     — line 293
+[PASS] REPLACE mode when both markers found                    — lines 321-341
+[PASS] APPEND mode when markers not found                      — lines 342-360
+[PASS] Both markers required (orphaned open → APPEND)         — line 321
+[PASS] Strips trailing blank lines before append (portable awk) — lines 334-335, 348-349
+[PASS] Blank line separator before block                       — lines 338, 356
+[PASS] export PATH="...:$PATH" — shell-expands at source time  — lines 340, 358
+[PASS] Test 1: Existing CIH block → double-run idempotent     [PASS]
+[PASS] Test 2: Fresh injection → idempotent                   [PASS]
+[PASS] Test 3: Orphaned marker recovery → stabilizes          [PASS]
+[PASS] Test results: ALL 3 PATH tests passed
+
+## 8. .env BACKUP & UPSERT (contract §3, task-3 §3)
+
+[PASS] Backup existing .env with timestamp                    — lines 375-381
+[PASS] Backup format: .env.cih-backup-YYYYMMDDHHmmss          — line 378
+[PASS] UPSERT_KEYS: REPO_PATH, POSTGRES_PASSWORD, REPO_NAME   — lines 398-418
+[PASS] Comments (lines starting with #) preserved verbatim    — line 394
+[PASS] Blank lines preserved verbatim                          — line 394
+[PASS] Known keys REPLACED with new value                      — lines 398-418
+[PASS] Unknown keys (FOO=bar, etc.) preserved verbatim         — line 421
+[PASS] Malformed lines preserved verbatim                      — line 421
+[PASS] Duplicate UPSERT_KEYS skipped (first wins)              — lines 399-417
+[PASS] Missing keys appended at end                            — lines 428-436
+[PASS] Test 1: Updated .env matches env-after.txt fixture     [PASS]
+[PASS] Test 2: Double-run idempotent                          [PASS]
+[PASS] Test 3: Unknown keys (FOO=bar, BAZ=qux) preserved     [PASS]
+[PASS] Test 4: Backup file created on each run                [PASS]
+[PASS] Test 5: Fresh .env creation with all 3 keys            [PASS]
+[PASS] Test results: ALL 5 .env tests passed
+
+## 9. SECRET REDACTION (contract §5.6, task-3 §3.2)
+
+[PASS] redact_output() uses sed with | delimiter               — line 30
+[PASS] POSTGRES_PASSWORD never echoed in clear text
+[PASS] "POSTGRES_PASSWORD=********" in output                  — line 229
+[PASS] Docker output filtered through redaction                — lines 240,247
+[PASS] Global SECRET_PASSWORD used only for redaction          — line 23,215
+
+## 10. SYNTAX & EXECUTABILITY
+
+[PASS] bash -n setup.sh passes syntax check
+[PASS] setup.sh is executable (chmod +x)
+
+## 11. FORBIDDEN OPERATIONS (contract §8)
+
+[PASS] No docker compose down -v
+[PASS] No docker compose down without confirmation
+[PASS] No binary copy to /usr/local/bin
+[PASS] No export PATH in /etc/profile
+[PASS] No .env write into REPO_PATH
+[PASS] No rm -rf or recursive delete
+[PASS] No modification of product Rust source files
+
+## 12. CONTRACT ERROR MESSAGES (exact match, contract §7)
+
+[PASS] "ERROR: Rust/Cargo not found. Install from https://rustup.rs and try again."
+[PASS] "ERROR: Docker not found. Install Docker Desktop from https://docker.com and try again."
+[PASS] "ERROR: Docker Compose v2 not found. Update Docker Desktop and try again."
+[PASS] "ERROR: docker-compose.yml not found. Run this script from the yummy-cih repo root."
+[PASS] "ERROR: REPO_PATH does not exist: <path>"
+[PASS] "REPO_PATH must be an absolute path to a Java/Spring repository."
+[PASS] "ERROR: POSTGRES_PASSWORD cannot be empty."
+[PASS] "ERROR: cargo build failed. See output above for details."
+[PASS] "Too many invalid choices."
+[PASS] "ERROR: Cargo.toml not found. Run this script from the yummy-cih repo root."
+
+## 13. SUMMARY
+
+Total checks: 94
+Passed:  94
+Failed:  0
+Skipped: 0
+
+VERDICT: ALL CHECKS PASS — setup.sh conforms to the shared behavior contract
+         defined in .omo/evidence/task-2-repo-setup-scripts.md and implements
+         the algorithms from .omo/evidence/task-3-repo-setup-scripts.md.
