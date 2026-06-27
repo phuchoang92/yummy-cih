@@ -2,6 +2,7 @@ mod analyze;
 mod db;
 mod discover;
 mod taint_cmd;
+mod taint_config;
 mod embed;
 mod feature_strategy;
 mod features_cmd;

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use cih_core::{GraphArtifacts, Node, NodeId, VersionId};
-use cih_taint::{default_rules, find_taint_paths, TaintPath};
+use cih_taint::{find_taint_paths, TaintPath};
 
 use crate::db::{load_to_falkor, LoadOutcome};
 use crate::versioning::latest_graph_artifacts;
@@ -68,7 +68,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let mut ui = crate::ui::PhaseProgress::new();
     ui.spin("Phase 0: inter-procedural taint BFS");
 
-    let rules = default_rules();
+    let rules = crate::taint_config::load_taint_rules(&repo);
     let mut paths = find_taint_paths(&nodes, &edges, &rules);
 
     ui.finish_with(format!(
@@ -76,13 +76,11 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         crate::ui::fmt_count(paths.len())
     ));
 
-    // Shared constants for all intra-procedural phases.
-    // Declared here so Phase 1 and Phase 3 use the same set — divergence would cause
-    // a path confirmed by one phase to be missed by the other.
-    const SINK_PATTERNS: &[&str] = &[
-        "execute", "executeQuery", "executeUpdate", "exec",
-        "write", "delete", "update", "insert",
-    ];
+    // Derive intra-proc sink name patterns from the loaded rules so Phase 1 and Phase 3
+    // always use the same set (which now includes any user additions from cih.taint.toml).
+    let sink_name_patterns_owned: Vec<String> = rules.extra_sink_name_patterns.clone();
+    let sink_name_patterns: Vec<&str> =
+        sink_name_patterns_owned.iter().map(|s| s.as_str()).collect();
     let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
     let repo_ref = repo.as_path();
     // Snapshot Phase-0 scores before Phase 1 modifies them.
@@ -98,7 +96,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
             &paths,
             &|id| node_map.get(id).map(|n| n.file.clone()),
             |file| std::fs::read_to_string(repo_ref.join(file)).ok(),
-            SINK_PATTERNS,
+            &sink_name_patterns,
         );
 
         // Apply confidence multipliers.
@@ -162,13 +160,13 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
 
         // Sanitizer node-id patterns from the same rules used by Phase 0.
         let sanitizer_patterns: Vec<&str> =
-            rules.sanitizers.iter().map(|s| s.node_id_pattern).collect();
+            rules.sanitizers.iter().map(|s| s.node_id_pattern.as_str()).collect();
 
         let refinements = cih_taint::taint3::refine_paths_phase3(
             &paths,
             &|id| node_map.get(id).map(|n| n.file.clone()),
             |file| std::fs::read_to_string(repo_ref.join(file)).ok(),
-            SINK_PATTERNS,
+            &sink_name_patterns,
             &sanitizer_patterns,
         );
 

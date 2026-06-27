@@ -323,34 +323,33 @@ impl<'src> CfgBuilder<'src> {
         self.alloc_block()
     }
 
-    fn block_idx(&self, id: &BlockId) -> usize {
-        self.blocks.iter().position(|b| b.id == *id).unwrap()
+    fn block_idx(&self, id: &BlockId) -> Option<usize> {
+        self.blocks.iter().position(|b| b.id == *id)
     }
 
     fn add_edge(&mut self, from: &BlockId, to: &BlockId, kind: CfgEdgeKind) {
+        let Some(fi) = self.block_idx(from) else { return };
+        let Some(ti) = self.block_idx(to) else { return };
         // Avoid duplicate edges (can happen with dead-code blocks).
-        let fi = self.block_idx(from);
         if self.blocks[fi].succs.iter().any(|(t, k)| t == to && *k == kind) {
             return;
         }
         self.blocks[fi].succs.push((to.clone(), kind));
-        let ti = self.block_idx(to);
         self.blocks[ti].preds.push(from.clone());
     }
 
     fn add_stmt(&mut self, block: &BlockId, stmt: StatementNode) {
-        let idx = self.block_idx(block);
+        let Some(idx) = self.block_idx(block) else { return };
         self.blocks[idx].stmts.push(stmt);
     }
 
     fn set_terminated(&mut self, block: &BlockId) {
-        let idx = self.block_idx(block);
+        let Some(idx) = self.block_idx(block) else { return };
         self.blocks[idx].is_terminated = true;
     }
 
     fn is_terminated(&self, block: &BlockId) -> bool {
-        let idx = self.block_idx(block);
-        self.blocks[idx].is_terminated
+        self.block_idx(block).map_or(false, |idx| self.blocks[idx].is_terminated)
     }
 
     // ── Statement node factories ────────────────────────────────────────────
@@ -906,6 +905,20 @@ mod tests {
 
     fn mid(s: &str) -> NodeId {
         NodeId::new(s)
+    }
+
+    /// add_edge with an unknown BlockId must silently return instead of panicking.
+    #[test]
+    fn add_edge_unknown_block_id_no_panic() {
+        let method_id = mid("Method:com.example.Foo#noop/0");
+        let mut builder = CfgBuilder::new(method_id, b"class Foo {}");
+        let real = builder.alloc_block();
+        let bogus = BlockId(9999);
+        // Neither of these should panic.
+        builder.add_edge(&bogus, &real, CfgEdgeKind::Sequential);
+        builder.add_edge(&real, &bogus, CfgEdgeKind::Sequential);
+        // The real block should have no successors (second call targets bogus).
+        assert!(builder.blocks.iter().find(|b| b.id == real).unwrap().succs.is_empty());
     }
 
     #[test]

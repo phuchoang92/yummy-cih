@@ -39,7 +39,7 @@ impl SinkCategory {
 /// A sink pattern matched against the target node ID of a `Calls` edge.
 pub struct TaintSink {
     /// Substring matched against the callee node ID (e.g. `"Runtime#exec"`).
-    pub node_id_pattern: &'static str,
+    pub node_id_pattern: String,
     pub category: SinkCategory,
 }
 
@@ -47,17 +47,49 @@ pub struct TaintSink {
 /// When a method on the taint path calls a sanitizer, propagation stops on that branch.
 pub struct TaintSanitizer {
     /// Substring matched against the callee node ID.
-    pub node_id_pattern: &'static str,
+    pub node_id_pattern: String,
 }
 
 /// Complete ruleset used by the taint BFS pass.
 pub struct TaintRules {
-    /// Sink patterns checked against `Calls` edge targets.
+    /// Sink patterns checked against `Calls` edge targets (Phase 0 BFS).
     pub sinks: Vec<TaintSink>,
     /// Sanitizer patterns checked against `Calls` edge targets.
     pub sanitizers: Vec<TaintSanitizer>,
+    /// Method-name substrings for Phase 1/3 intra-proc IR analysis.
+    /// These complement `sinks` for the IR-level detection that only has the
+    /// call method name, not the full class-qualified node ID.
+    pub extra_sink_name_patterns: Vec<String>,
     /// Maximum number of edges to traverse from a source before giving up.
     pub max_hops: usize,
+}
+
+impl TaintRules {
+    /// Append `other`'s rules into `self`, deduplicating by pattern string.
+    pub fn merge(mut self, other: TaintRules) -> TaintRules {
+        let existing_sink_pats: std::collections::HashSet<String> =
+            self.sinks.iter().map(|s| s.node_id_pattern.clone()).collect();
+        for s in other.sinks {
+            if !existing_sink_pats.contains(&s.node_id_pattern) {
+                self.sinks.push(s);
+            }
+        }
+        let existing_san_pats: std::collections::HashSet<String> =
+            self.sanitizers.iter().map(|s| s.node_id_pattern.clone()).collect();
+        for s in other.sanitizers {
+            if !existing_san_pats.contains(&s.node_id_pattern) {
+                self.sanitizers.push(s);
+            }
+        }
+        let existing_extra: std::collections::HashSet<String> =
+            self.extra_sink_name_patterns.iter().cloned().collect();
+        for p in other.extra_sink_name_patterns {
+            if !existing_extra.contains(&p) {
+                self.extra_sink_name_patterns.push(p);
+            }
+        }
+        self
+    }
 }
 
 /// Built-in rules covering the most common Java/Spring vulnerabilities.
@@ -65,44 +97,67 @@ pub struct TaintRules {
 /// SQL sinks are also detected via the existing `ExecutesQuery` → dynamic `DbQuery`
 /// graph edges (no pattern matching needed for those). These patterns cover additional
 /// exec/file/HTML cases where the graph may not yet have explicit edges.
+macro_rules! sink {
+    ($pat:expr, $cat:expr) => {
+        TaintSink { node_id_pattern: $pat.into(), category: $cat }
+    };
+}
+macro_rules! san {
+    ($pat:expr) => {
+        TaintSanitizer { node_id_pattern: $pat.into() }
+    };
+}
+
 pub fn default_rules() -> TaintRules {
     TaintRules {
         sinks: vec![
             // OS process execution
-            TaintSink { node_id_pattern: "Runtime#exec", category: SinkCategory::Exec },
-            TaintSink { node_id_pattern: "ProcessBuilder#command", category: SinkCategory::Exec },
-            TaintSink { node_id_pattern: "ProcessBuilder#start", category: SinkCategory::Exec },
+            sink!("Runtime#exec",            SinkCategory::Exec),
+            sink!("ProcessBuilder#command",  SinkCategory::Exec),
+            sink!("ProcessBuilder#start",    SinkCategory::Exec),
             // JDBC raw-string execution (parameterized PreparedStatement is NOT a sink)
-            TaintSink { node_id_pattern: "Statement#execute", category: SinkCategory::Sql },
-            TaintSink { node_id_pattern: "Statement#executeQuery", category: SinkCategory::Sql },
-            TaintSink { node_id_pattern: "Statement#executeUpdate", category: SinkCategory::Sql },
-            TaintSink { node_id_pattern: "JdbcTemplate#execute", category: SinkCategory::Sql },
-            TaintSink { node_id_pattern: "JdbcTemplate#query", category: SinkCategory::Sql },
-            TaintSink { node_id_pattern: "JdbcTemplate#update", category: SinkCategory::Sql },
-            TaintSink { node_id_pattern: "NamedParameterJdbcTemplate#query", category: SinkCategory::Sql },
-            TaintSink { node_id_pattern: "NamedParameterJdbcTemplate#update", category: SinkCategory::Sql },
+            sink!("Statement#execute",       SinkCategory::Sql),
+            sink!("Statement#executeQuery",  SinkCategory::Sql),
+            sink!("Statement#executeUpdate", SinkCategory::Sql),
+            sink!("JdbcTemplate#execute",    SinkCategory::Sql),
+            sink!("JdbcTemplate#query",      SinkCategory::Sql),
+            sink!("JdbcTemplate#update",     SinkCategory::Sql),
+            sink!("NamedParameterJdbcTemplate#query",  SinkCategory::Sql),
+            sink!("NamedParameterJdbcTemplate#update", SinkCategory::Sql),
             // File-system writes
-            TaintSink { node_id_pattern: "Files#write", category: SinkCategory::File },
-            TaintSink { node_id_pattern: "Files#createFile", category: SinkCategory::File },
-            TaintSink { node_id_pattern: "FileOutputStream#<init>", category: SinkCategory::File },
-            TaintSink { node_id_pattern: "FileWriter#<init>", category: SinkCategory::File },
+            sink!("Files#write",                  SinkCategory::File),
+            sink!("Files#createFile",             SinkCategory::File),
+            sink!("FileOutputStream#<init>",      SinkCategory::File),
+            sink!("FileWriter#<init>",            SinkCategory::File),
             // HTML output (XSS)
-            TaintSink { node_id_pattern: "PrintWriter#print", category: SinkCategory::Html },
-            TaintSink { node_id_pattern: "HttpServletResponse#getWriter", category: SinkCategory::Html },
+            sink!("PrintWriter#print",            SinkCategory::Html),
+            sink!("HttpServletResponse#getWriter", SinkCategory::Html),
         ],
         sanitizers: vec![
             // HTML/JS output encoding
-            TaintSanitizer { node_id_pattern: "HtmlUtils#htmlEscape" },
-            TaintSanitizer { node_id_pattern: "StringEscapeUtils#escapeHtml" },
-            TaintSanitizer { node_id_pattern: "ESAPI" },
-            TaintSanitizer { node_id_pattern: "Encode#forHtml" },
+            san!("HtmlUtils#htmlEscape"),
+            san!("StringEscapeUtils#escapeHtml"),
+            san!("ESAPI"),
+            san!("Encode#forHtml"),
             // SQL parameterization (PreparedStatement prevents injection)
-            TaintSanitizer { node_id_pattern: "PreparedStatement#setString" },
-            TaintSanitizer { node_id_pattern: "PreparedStatement#setInt" },
-            TaintSanitizer { node_id_pattern: "PreparedStatement#set" },
+            san!("PreparedStatement#setString"),
+            san!("PreparedStatement#setInt"),
+            san!("PreparedStatement#set"),
             // Spring validation
-            TaintSanitizer { node_id_pattern: "Validator#validate" },
-            TaintSanitizer { node_id_pattern: "BindingResult#hasErrors" },
+            san!("Validator#validate"),
+            san!("BindingResult#hasErrors"),
+        ],
+        // Method-name substrings for Phase 1/3 intra-proc IR sink detection.
+        // These cover common dangerous method names when the class context is unavailable.
+        extra_sink_name_patterns: vec![
+            "execute".into(),
+            "executeQuery".into(),
+            "executeUpdate".into(),
+            "exec".into(),
+            "write".into(),
+            "delete".into(),
+            "update".into(),
+            "insert".into(),
         ],
         max_hops: 12,
     }

@@ -107,7 +107,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
             }
             EdgeKind::Calls => {
                 let target = edge.dst.as_str();
-                if let Some(rule) = rules.sinks.iter().find(|s| target.contains(s.node_id_pattern))
+                if let Some(rule) = rules.sinks.iter().find(|s| target.contains(s.node_id_pattern.as_str()))
                 {
                     sink_map.entry(&edge.src).or_insert(rule.category);
                 }
@@ -128,7 +128,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
         if rules
             .sanitizers
             .iter()
-            .any(|s| target.contains(s.node_id_pattern))
+            .any(|s| target.contains(s.node_id_pattern.as_str()))
         {
             sanitizing_methods.insert(&edge.src);
         }
