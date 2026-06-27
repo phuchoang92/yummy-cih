@@ -803,32 +803,18 @@ fn main() -> Result<()> {
             workspace,
             repo,
             repo_name,
+            postgres_password,
             dry_run,
             non_interactive,
         } => start::run_start(start::StartConfig {
             workspace,
             repo,
             repo_name,
+            postgres_password,
             dry_run,
             non_interactive,
             ..Default::default()
         }),
-Command::Start {
-        workspace,
-        repo,
-        repo_name,
-        postgres_password,
-        dry_run,
-        non_interactive,
-    } => start::run_start(start::StartConfig {
-        workspace,
-        repo,
-        repo_name,
-        postgres_password,
-        dry_run,
-        non_interactive,
-        ..Default::default()
-    }),
         Command::Artifact { command } => run_artifact(command),
         // Handled above before the match; unreachable at runtime.
         Command::Ui => unreachable!(),
