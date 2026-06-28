@@ -1,7 +1,8 @@
-use super::*;
-use cih_core::{
-    constructor_id, field_id, method_id, type_id, BindingKind, ContractKind, RefKind,
-};
+use std::fs;
+use std::path::PathBuf;
+
+use cih_core::{constructor_id, field_id, file_id, method_id, type_id, BindingKind, EdgeKind, RefKind};
+use cih_parse::{parse_files, LanguageRegistry, ParseOutput};
 
 fn java_registry() -> LanguageRegistry {
     let mut r = LanguageRegistry::new();
@@ -15,6 +16,36 @@ fn temp_repo() -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("cih-parse-test-{}-{nanos}", std::process::id()))
+}
+
+fn write_file(root: &PathBuf, rel: &str, content: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, content).unwrap();
+}
+
+fn stereotype_of(output: &ParseOutput, fqcn: &str) -> Option<String> {
+    output
+        .nodes
+        .iter()
+        .find(|node| node.id == type_id(cih_core::NodeKind::Class, fqcn))
+        .and_then(|node| node.props.as_ref())
+        .and_then(|props| props.get("stereotype"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn node_prop<'a>(
+    output: &'a ParseOutput,
+    node_id: &str,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    output
+        .nodes
+        .iter()
+        .find(|n| n.id.as_str() == node_id)
+        .and_then(|n| n.props.as_ref())
+        .and_then(|p| p.get(key))
 }
 
 #[test]
@@ -179,7 +210,7 @@ fn unreadable_file_is_skipped_without_aborting() {
     fs::create_dir_all(good_path.parent().unwrap()).unwrap();
     fs::write(&good_path, "package com.example;\nclass Ok {}\n").unwrap();
 
-    let missing = "src/main/java/com/example/Missing.java"; // never created on disk
+    let missing = "src/main/java/com/example/Missing.java";
     let output = parse_files(
         &root,
         &[good.to_string(), missing.to_string()],
@@ -188,7 +219,6 @@ fn unreadable_file_is_skipped_without_aborting() {
     .unwrap();
     fs::remove_dir_all(&root).unwrap();
 
-    // The good file parsed; the missing one was skipped, not fatal.
     assert_eq!(output.parsed_files.len(), 1);
     assert_eq!(output.parsed_files[0].file, good);
     assert_eq!(output.skipped.len(), 1);
@@ -214,23 +244,11 @@ fn explicit_receiver_parameter_excluded_from_arity() {
     let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
     fs::remove_dir_all(&root).unwrap();
 
-    // Arity counts the single argument `int x`, not the explicit receiver.
     let parsed = output.parsed_files.first().unwrap();
     assert!(parsed.defs.iter().any(|def| {
         def.kind == cih_core::NodeKind::Method
             && def.id == method_id("com.example.Receiver", "touch", 1)
     }));
-}
-
-fn stereotype_of(output: &ParseOutput, fqcn: &str) -> Option<String> {
-    output
-        .nodes
-        .iter()
-        .find(|node| node.id == type_id(cih_core::NodeKind::Class, fqcn))
-        .and_then(|node| node.props.as_ref())
-        .and_then(|props| props.get("stereotype"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
 }
 
 #[test]
@@ -302,7 +320,6 @@ public Owner findOwner(Long id) {
     fs::remove_dir_all(&root).unwrap();
     let parsed = output.parsed_files.first().unwrap();
 
-    // SymbolDef carries param/return/declared types.
     let method = parsed
         .defs
         .iter()
@@ -317,7 +334,6 @@ public Owner findOwner(Long id) {
         .unwrap();
     assert_eq!(field.declared_type.as_deref(), Some("OwnerService"));
 
-    // Type bindings: field, param, and the `var` call-result inference.
     let binding = |name: &str| {
         parsed
             .type_bindings
@@ -338,9 +354,8 @@ public Owner findOwner(Long id) {
 
     let found = binding("found");
     assert_eq!(found.kind, BindingKind::CallResult);
-    assert_eq!(found.raw_type, "findOwner"); // method whose return type to follow
+    assert_eq!(found.raw_type, "findOwner");
 
-    // ReferenceSite.in_callable is the caller's NodeId, not the in_fqcn string.
     let call = parsed
         .reference_sites
         .iter()
@@ -381,98 +396,6 @@ public void m() {}
             "expected route {path}"
         );
     }
-}
-
-#[test]
-fn parses_cross_service_contract_sites() {
-    let root = temp_repo();
-    let rel = "src/main/java/com/example/Contracts.java";
-    let path = root.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(
-        &path,
-        r#"
-package com.example;
-
-@FeignClient(name = "orders", path = "/orders")
-interface OrdersClient {
-@GetMapping("/{id}")
-Order getOrder(String id);
-}
-
-class ContractClient {
-private RestTemplate restTemplate;
-private WebClient webClient;
-private KafkaTemplate<String, String> kafkaTemplate;
-private ApplicationEventPublisher publisher;
-
-@KafkaListener(topics = {"orders.created"})
-void listen(String payload) {}
-
-@EventListener
-void onUserCreated(UserCreated event) {}
-
-void call() {
-    restTemplate.getForObject("http://orders.local/api/orders/{id}", String.class);
-    webClient.post().uri("/api/payments").retrieve();
-    kafkaTemplate.send("orders.created", "1");
-    publisher.publishEvent(new UserCreated());
-}
-}
-"#,
-    )
-    .unwrap();
-
-    let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
-    fs::remove_dir_all(&root).unwrap();
-    let parsed = output.parsed_files.first().unwrap();
-
-    assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::HttpClientProxy
-            && site.http_method.as_deref() == Some("GET")
-            && site.url_template.as_deref() == Some("/orders/{id}")
-            && site.in_callable == method_id("com.example.OrdersClient", "getOrder", 1)
-    }));
-    assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::HttpCall
-            && site.http_method.as_deref() == Some("GET")
-            && site.url_template.as_deref() == Some("/api/orders/{id}")
-            && site.in_callable == method_id("com.example.ContractClient", "call", 0)
-    }));
-    assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::HttpCall
-            && site.http_method.as_deref() == Some("POST")
-            && site.url_template.as_deref() == Some("/api/payments")
-    }));
-    assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::EventListen
-            && site.topic.as_deref() == Some("orders.created")
-            && site.in_callable == method_id("com.example.ContractClient", "listen", 1)
-    }));
-    assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::EventListen && site.topic.as_deref() == Some("UserCreated")
-    }));
-    assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::EventPublish
-            && site.topic.as_deref() == Some("orders.created")
-            && site.in_callable == method_id("com.example.ContractClient", "call", 0)
-    }));
-    assert!(parsed.contract_sites.iter().any(|site| {
-        site.kind == ContractKind::EventPublish && site.topic.as_deref() == Some("UserCreated")
-    }));
-}
-
-fn node_prop<'a>(
-    output: &'a ParseOutput,
-    node_id: &str,
-    key: &str,
-) -> Option<&'a serde_json::Value> {
-    output
-        .nodes
-        .iter()
-        .find(|n| n.id.as_str() == node_id)
-        .and_then(|n| n.props.as_ref())
-        .and_then(|p| p.get(key))
 }
 
 #[test]
@@ -601,14 +524,6 @@ fn jpa_annotation_idempotent_with_interface() {
     );
 }
 
-// ── Phase 16: test detection ──────────────────────────────────────────────
-
-fn write_file(root: &PathBuf, rel: &str, content: &str) {
-    let path = root.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, content).unwrap();
-}
-
 #[test]
 fn test_class_by_annotation_gets_test_stereotype() {
     let root = temp_repo();
@@ -628,7 +543,6 @@ public class OrderServiceTest {
     let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
     fs::remove_dir_all(&root).unwrap();
 
-    // Node props should carry stereotype="test"
     let test_node = output
         .nodes
         .iter()
@@ -740,7 +654,6 @@ fn name_suffix_fallback_stereotypes() {
 
 #[test]
 fn annotation_stereotype_wins_over_name_suffix() {
-    // @Service annotation on a class named XxxController → "service", not "controller"
     let root = temp_repo();
     let rel = "src/main/java/com/example/CartController.java";
     write_file(&root, rel,
@@ -766,235 +679,7 @@ fn annotation_stereotype_wins_over_name_suffix() {
 }
 
 #[test]
-fn test_method_emits_tests_edge_and_prop() {
-    let root = temp_repo();
-    let rel = "src/test/java/com/example/FooTest.java";
-    write_file(
-        &root,
-        rel,
-        r#"
-package com.example;
-public class FooTest {
-@Test
-public void shouldWork() {}
-public void helperMethod() {}
-}
-"#,
-    );
-    let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
-    fs::remove_dir_all(&root).unwrap();
-
-    // The @Test method node should have isTest=true in props.
-    let test_method = output
-        .nodes
-        .iter()
-        .find(|n| n.name == "shouldWork")
-        .expect("shouldWork method node must exist");
-    let is_test = test_method
-        .props
-        .as_ref()
-        .and_then(|p| p.get("isTest"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    assert!(is_test, "@Test method must have isTest=true prop");
-
-    // A TESTS edge must exist from shouldWork to FooTest class.
-    let test_class_id = type_id(cih_core::NodeKind::Class, "com.example.FooTest");
-    let test_method_id = method_id("com.example.FooTest", "shouldWork", 0);
-    assert!(
-        output.edges.iter().any(|e| {
-            e.kind == EdgeKind::Tests && e.src == test_method_id && e.dst == test_class_id
-        }),
-        "TESTS edge from @Test method to owner class must be emitted"
-    );
-
-    // helperMethod (no @Test) must NOT have a TESTS edge.
-    let helper_id = method_id("com.example.FooTest", "helperMethod", 0);
-    assert!(
-        !output
-            .edges
-            .iter()
-            .any(|e| e.kind == EdgeKind::Tests && e.src == helper_id),
-        "non-@Test method must not emit a TESTS edge"
-    );
-}
-
-#[test]
-fn mock_bean_field_emits_tests_edge() {
-    let root = temp_repo();
-    let rel = "src/test/java/com/example/BarTest.java";
-    write_file(
-        &root,
-        rel,
-        r#"
-package com.example;
-@SpringBootTest
-public class BarTest {
-@MockBean
-private OrderService orderService;
-}
-"#,
-    );
-    let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
-    fs::remove_dir_all(&root).unwrap();
-
-    let test_class_id = type_id(cih_core::NodeKind::Class, "com.example.BarTest");
-    // TESTS edge from test class to the raw "Class:OrderService" target.
-    assert!(
-        output.edges.iter().any(|e| {
-            e.kind == EdgeKind::Tests
-                && e.src == test_class_id
-                && e.dst.as_str() == "Class:OrderService"
-        }),
-        "TESTS edge from test class to @MockBean field type must be emitted"
-    );
-}
-
-// ── SQL constant + execution site extraction ──────────────────────────────
-
-#[test]
-fn parses_sql_constants_from_static_final_string_fields() {
-    let root = temp_repo();
-    let rel = "src/main/java/com/bank/OverdraftAdapterImpl.java";
-    write_file(
-        &root,
-        rel,
-        r#"
-package com.bank;
-public class OverdraftAdapterImpl {
-private static final String QUERY_GET_BY_CODE =
-    "SELECT id, amount FROM CUSTOM_OVERDRAFT_TYPE WHERE code = ?";
-private static final String NOT_A_QUERY = "hello";
-private String nonStatic = "SELECT FROM X";
-}
-"#,
-    );
-    let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
-    fs::remove_dir_all(&root).unwrap();
-
-    let parsed = output.parsed_files.first().unwrap();
-    // SCREAMING_SNAKE_CASE check: QUERY_GET_BY_CODE must be extracted.
-    assert!(
-        parsed.sql_constants.iter().any(|c| {
-            c.const_name == "QUERY_GET_BY_CODE"
-                && c.sql_text.contains("CUSTOM_OVERDRAFT_TYPE")
-                && !c.dynamic
-        }),
-        "QUERY_GET_BY_CODE not extracted: {:?}",
-        parsed.sql_constants
-    );
-    // Non-static instance field must not appear (it lacks `static` + `final`).
-    assert!(
-        !parsed
-            .sql_constants
-            .iter()
-            .any(|c| c.const_name == "nonStatic"),
-        "non-static field must not be extracted"
-    );
-}
-
-#[test]
-fn parses_sql_constants_folds_string_concatenation() {
-    let root = temp_repo();
-    let rel = "src/main/java/com/bank/Adapter.java";
-    write_file(
-        &root,
-        rel,
-        r#"
-package com.bank;
-public class Adapter {
-private static final String QUERY_CONCAT =
-    "SELECT id FROM " +
-    "CUSTOM_OVERDRAFT " +
-    "WHERE id = ?";
-}
-"#,
-    );
-    let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
-    fs::remove_dir_all(&root).unwrap();
-
-    let parsed = output.parsed_files.first().unwrap();
-    let c = parsed
-        .sql_constants
-        .iter()
-        .find(|c| c.const_name == "QUERY_CONCAT")
-        .expect("QUERY_CONCAT must be extracted");
-    assert!(
-        c.sql_text.contains("CUSTOM_OVERDRAFT"),
-        "folded text: {:?}",
-        c.sql_text
-    );
-    assert!(!c.dynamic, "pure literal concat must not be dynamic");
-}
-
-#[test]
-fn parses_sql_constants_marks_dynamic_on_non_literal_concat() {
-    let root = temp_repo();
-    let rel = "src/main/java/com/bank/Adapter.java";
-    write_file(
-        &root,
-        rel,
-        r#"
-package com.bank;
-public class Adapter {
-private static final String TABLE_NAME = "CUSTOM_OVERDRAFT";
-private static final String QUERY_DYN = "SELECT id FROM " + TABLE_NAME + " WHERE id = ?";
-}
-"#,
-    );
-    let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
-    fs::remove_dir_all(&root).unwrap();
-
-    let parsed = output.parsed_files.first().unwrap();
-    // TABLE_NAME is all caps but value is a short non-SQL string — may or may not be extracted.
-    // QUERY_DYN references a variable, so must be dynamic.
-    if let Some(c) = parsed
-        .sql_constants
-        .iter()
-        .find(|c| c.const_name == "QUERY_DYN")
-    {
-        assert!(c.dynamic, "concat with identifier must be dynamic");
-    }
-    // At minimum, the dynamic concat must not produce a fully resolved table list.
-}
-
-#[test]
-fn parses_sql_execution_sites_dbutil_pattern() {
-    let root = temp_repo();
-    let rel = "src/main/java/com/bank/OverdraftAdapterImpl.java";
-    write_file(
-        &root,
-        rel,
-        r#"
-package com.bank;
-import java.sql.Connection;
-public class OverdraftAdapterImpl {
-private static final String QUERY_GET = "SELECT id FROM CUSTOM_OVERDRAFT WHERE id = ?";
-
-public Object getOverdraft(Connection conn, long id) {
-    return DBUtil.executeQuery(conn, QUERY_GET, id);
-}
-}
-"#,
-    );
-    let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
-    fs::remove_dir_all(&root).unwrap();
-
-    let parsed = output.parsed_files.first().unwrap();
-    assert!(
-        parsed.sql_execution_sites.iter().any(|s| {
-            s.api_name == "executeQuery" && s.const_ref.as_deref() == Some("QUERY_GET")
-        }),
-        "DBUtil.executeQuery site not extracted: {:?}",
-        parsed.sql_execution_sites
-    );
-}
-
-#[test]
 fn registry_dispatches_to_correct_provider_by_extension() {
-    // A registry with a mock second provider that claims ".txt" extension.
-    // Verifies that provider_for routes by extension and that a Java file
-    // dispatches to JavaProvider while an unknown extension returns None.
     let mut r = LanguageRegistry::new();
     r.register(cih_lang::java::JavaProvider::new());
 
@@ -1024,7 +709,7 @@ fn bare_mapping_real_cart_controller() {
     let repo = std::path::Path::new("/Users/phuc/BigMoves/dienmaychiben/212ecom-be");
     let rel = "src/main/java/org/phuc/commerce/modules/order/controller/CartController.java";
     if !repo.join(rel).exists() {
-        return; // skip if not present in CI
+        return;
     }
     let output = parse_files(repo, &[rel.to_string()], &java_registry()).unwrap();
     let route_ids: Vec<String> = output

@@ -270,6 +270,4 @@ fn insert_edge(edges: &mut BTreeMap<(String, String, &'static str), Edge>, edge:
         .or_insert(edge);
 }
 
-#[cfg(test)]
-mod tests;
 

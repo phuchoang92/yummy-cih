@@ -1,0 +1,665 @@
+use std::path::{Path, PathBuf};
+use std::process;
+
+use anyhow::{Context, Result};
+use cih_core::{GraphArtifacts, JarInfo, VersionId};
+use serde::Serialize;
+
+use crate::db::{load_to_falkor, LoadOutcome};
+use crate::scope::{self, ScopeFile, ScopeRequest};
+use crate::versioning::{content_version, prune_other_versions};
+use crate::{scan, DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+
+use cache::{parse_scope, ParseScopeOutcome};
+use extract::{build_scope_request, load_jars_from_repo_map};
+use merge::combined_edges;
+
+mod cache;
+mod extract;
+mod merge;
+
+pub use extract::{extract_integration_xml_in_repo, extract_jar_api};
+
+#[derive(Debug)]
+pub struct AnalyzeFlags {
+    pub all: bool,
+    pub modules: Vec<String>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub include_decompiled: bool,
+    pub scope: Option<PathBuf>,
+    pub json: bool,
+    pub falkor_url: Option<String>,
+    pub graph_key: Option<String>,
+    pub no_load: bool,
+    pub no_cache: bool,
+    /// Skip the integration + DI XML walk (faster on large repos).
+    pub skip_xml_integration: bool,
+    /// Language filter: only include files for these languages (empty = all).
+    pub languages: Vec<String>,
+}
+
+pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
+    let span = tracing::info_span!("analyze", repo = %repo.display());
+    let _enter = span.enter();
+
+    tracing::info!(repo = %repo.display(), "starting analyze");
+
+    let scan = scan::scan_repo(&repo)?;
+    let repo_map_path = scan::write_repo_map(&scan.repo_map)?;
+    tracing::info!(
+        path = %repo_map_path.display(),
+        source_files = scan.repo_map.total_source_files,
+        modules = scan.repo_map.modules.len(),
+        "repo-map written"
+    );
+
+    let request = build_scope_request(&repo, &flags)?;
+
+    if !request.has_selector() {
+        scan::print_summary(&scan.repo_map, &repo_map_path);
+        println!();
+        println!("Choose a scope: --all | --module <names> | --include <glob> | a cih.scope.toml");
+        process::exit(2);
+    }
+
+    let emit = analyze_emit_with_options(
+        &scan,
+        request,
+        AnalyzeCacheOptions {
+            use_cache: !flags.no_cache,
+            allow_noop: !flags.no_cache,
+            skip_xml_integration: flags.skip_xml_integration,
+        },
+    )?;
+
+    let load = if emit.reused_artifacts {
+        tracing::info!("No source changes detected; reusing existing artifacts and live graph");
+        LoadOutcome::Reused
+    } else if flags.no_load {
+        tracing::info!("Skipping FalkorDB load (--no-load)");
+        LoadOutcome::Skipped
+    } else {
+        let falkor_url = flags.falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        match load_to_falkor(falkor_url, graph_key, &emit.artifacts) {
+            Ok(stats) => {
+                tracing::info!(
+                    nodes = stats.nodes,
+                    edges = stats.edges,
+                    url = falkor_url,
+                    graph = graph_key,
+                    "FalkorDB bulk load complete"
+                );
+                LoadOutcome::Loaded(stats)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    url = falkor_url,
+                    "FalkorDB bulk load failed — artifacts are on disk, re-run or load manually"
+                );
+                LoadOutcome::Failed(format!("{err:#}"))
+            }
+        }
+    };
+
+    if flags.json {
+        println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
+    } else {
+        emit.print_styled(&load);
+    }
+
+    let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+    crate::registry::persist_analyze(&emit, graph_key);
+
+    if matches!(load, LoadOutcome::Failed(_)) {
+        process::exit(3);
+    }
+    Ok(())
+}
+
+pub fn run_resolve(
+    repo: PathBuf,
+    falkor_url: Option<String>,
+    graph_key: Option<String>,
+    no_load: bool,
+    json: bool,
+) -> Result<()> {
+    let scope_path = repo.join(".cih").join("scope.json");
+    let scope_file: ScopeFile = {
+        let raw = std::fs::read_to_string(&scope_path).with_context(|| {
+            format!(
+                "no saved scope at {} — run `analyze` first",
+                scope_path.display()
+            )
+        })?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("malformed scope file at {}", scope_path.display()))?
+    };
+
+    let jars = load_jars_from_repo_map(&repo);
+    let emit = analyze_from_scope_with_options(
+        scope_file,
+        scope_path,
+        &jars,
+        AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: false,
+            skip_xml_integration: false,
+        },
+    )?;
+
+    let load = if no_load {
+        tracing::info!("Skipping FalkorDB load (--no-load)");
+        LoadOutcome::Skipped
+    } else {
+        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        match load_to_falkor(url, key, &emit.artifacts) {
+            Ok(stats) => {
+                tracing::info!(
+                    nodes = stats.nodes,
+                    edges = stats.edges,
+                    "FalkorDB resolve load complete"
+                );
+                LoadOutcome::Loaded(stats)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "FalkorDB load failed after resolve");
+                LoadOutcome::Failed(format!("{err:#}"))
+            }
+        }
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
+    } else {
+        emit.print_styled(&load);
+    }
+
+    if matches!(load, LoadOutcome::Failed(_)) {
+        process::exit(3);
+    }
+    Ok(())
+}
+
+/// DB-free core of `analyze`: resolve scope → parse → write IR + GraphArtifacts.
+pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<EmitOutcome> {
+    analyze_emit_with_options(
+        scan,
+        request,
+        AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: true,
+            skip_xml_integration: false,
+        },
+    )
+}
+
+pub fn analyze_emit_with_options(
+    scan: &scan::ScanResult,
+    request: ScopeRequest,
+    cache: AnalyzeCacheOptions,
+) -> Result<EmitOutcome> {
+    let scope_file = scope::resolve(&scan.repo_map, &scan.source_files, request)?;
+    let scope_path = scope::write_scope_file(&scope_file)?;
+    analyze_from_scope_with_options(scope_file, scope_path, &scan.repo_map.jars, cache)
+}
+
+/// DB-free core shared by `analyze` and `resolve`: parse → resolve → write artifacts.
+pub fn analyze_from_scope(
+    scope_file: ScopeFile,
+    scope_path: PathBuf,
+    jars: &[JarInfo],
+) -> Result<EmitOutcome> {
+    analyze_from_scope_with_options(
+        scope_file,
+        scope_path,
+        jars,
+        AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: true,
+            skip_xml_integration: false,
+        },
+    )
+}
+
+pub fn analyze_from_scope_with_options(
+    scope_file: ScopeFile,
+    scope_path: PathBuf,
+    jars: &[JarInfo],
+    cache: AnalyzeCacheOptions,
+) -> Result<EmitOutcome> {
+    let repo_root = PathBuf::from(&scope_file.repo_root);
+    let cih_dir = repo_root.join(".cih");
+    let mut ui = crate::ui::PhaseProgress::new();
+
+    let bundle_path = cih_dir.join("graph.db.zst");
+    let hashes_path = cih_dir.join("file-hashes.json");
+    if bundle_path.exists() && !hashes_path.exists() {
+        tracing::info!(
+            bundle = %bundle_path.display(),
+            "Bundle archive found but no incremental state — run `cih-engine artifact bootstrap` \
+             to restore; this analyze will be a full re-parse"
+        );
+    }
+
+    tracing::info!(
+        files = scope_file.files.len(),
+        modules = scope_file.modules.len(),
+        cache_enabled = cache.use_cache,
+        "starting parse phase"
+    );
+    ui.spin(format!("Parsing {} files", scope_file.files.len()));
+
+    let incremental = parse_scope(&repo_root, &cih_dir, &scope_file.files, cache)?;
+    if let ParseScopeOutcome::Reused {
+        artifacts,
+        parsed_files_path,
+        node_count,
+        edge_count,
+        parsed_file_count,
+        cache_stats,
+    } = incremental
+    {
+        ui.finish_with(format!(
+            "{} nodes, {} edges  \x1b[2m(no changes — reused)\x1b[0m",
+            crate::ui::fmt_count(node_count),
+            crate::ui::fmt_count(edge_count)
+        ));
+        return Ok(EmitOutcome {
+            scope_file,
+            scope_path,
+            artifacts,
+            parsed_files_path,
+            artifacts_dir: cih_dir
+                .join("artifacts")
+                .join(cache_stats.version.as_deref().unwrap_or_default()),
+            version: cache_stats.version.clone().unwrap_or_default(),
+            node_count,
+            edge_count,
+            resolved_edge_count: 0,
+            unresolved_reference_count: 0,
+            unresolved_external_fqcns: Vec::new(),
+            unresolved_report_path: None,
+            parsed_file_count,
+            skipped_count: 0,
+            jar_node_count: 0,
+            jar_failed: 0,
+            reused_artifacts: true,
+            cache_stats,
+        });
+    }
+
+    let ParseScopeOutcome::Parsed {
+        parse_output,
+        current_hashes,
+        cache_stats,
+    } = incremental
+    else {
+        unreachable!("reused case returned above");
+    };
+
+    tracing::info!(
+        parsed = parse_output.parsed_files.len(),
+        skipped = parse_output.skipped.len(),
+        struct_nodes = parse_output.nodes.len(),
+        struct_edges = parse_output.edges.len(),
+        "parse phase complete"
+    );
+
+    tracing::info!("starting resolve phase");
+    ui.finish_with(format!(
+        "{} parsed, {} skipped",
+        crate::ui::fmt_count(parse_output.parsed_files.len()),
+        crate::ui::fmt_count(parse_output.skipped.len())
+    ));
+    ui.spin("Resolving");
+
+    let resolvers = cih_resolve::default_registry();
+
+    let java_const_resolver = cih_resolve::build_java_constant_resolver(&parse_output.parsed_files);
+
+    let resolve_output = cih_resolve::resolve_with_registry(
+        &parse_output.parsed_files,
+        &resolvers,
+        cih_resolve::ResolveOptions {
+            repo_root: Some(&repo_root),
+            enable_xml_integrations: !cache.skip_xml_integration,
+            constant_resolver: Some(Box::new(java_const_resolver)),
+        },
+    );
+    tracing::info!(
+        resolved_edges = resolve_output.edges.len(),
+        skipped_refs = resolve_output.skipped,
+        unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
+        "resolve phase complete"
+    );
+    ui.finish_with(format!(
+        "{} edges  \x1b[2m({} unresolved)\x1b[0m",
+        crate::ui::fmt_count(resolve_output.edges.len()),
+        crate::ui::fmt_count(resolve_output.skipped as usize)
+    ));
+
+    if !jars.is_empty() {
+        ui.spin(format!("JAR API ({} JARs)", jars.len()));
+    }
+    tracing::info!(
+        jars = jars.len(),
+        unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
+        "starting JAR API extraction"
+    );
+    let (jar_nodes, jar_edges, jar_failed) =
+        extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
+    let jar_node_count = jar_nodes.len();
+    tracing::info!(
+        jar_nodes = jar_node_count,
+        jar_edges = jar_edges.len(),
+        jar_failed,
+        "JAR API extraction complete"
+    );
+    if !jars.is_empty() {
+        ui.finish_with(format!("{} nodes", crate::ui::fmt_count(jar_node_count)));
+    }
+
+    ui.spin("Writing artifacts");
+
+    let (mut db_nodes, mut db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
+    let (jpa_nodes, jpa_edges) = cih_resolve::emit_jpa_tables(&parse_output.nodes);
+    db_nodes.extend(jpa_nodes);
+    db_edges.extend(jpa_edges);
+    tracing::info!(
+        db_query_nodes = db_nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::DbQuery)
+            .count(),
+        db_table_nodes = db_nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::DbTable)
+            .count(),
+        "DB access emit complete"
+    );
+
+    let has_java = scope_file.files.iter().any(|f| f.ends_with(".java"));
+    let (xml_nodes, xml_edges) = if cache.skip_xml_integration || !has_java {
+        if !has_java {
+            tracing::info!("Skipping XML integration + DI extraction (no Java files in scope)");
+        } else {
+            tracing::info!("Skipping XML integration + DI extraction (--skip-xml-integration)");
+        }
+        (Vec::new(), Vec::new())
+    } else {
+        let (mut xml_nodes, mut xml_edges) = extract_integration_xml_in_repo(&repo_root);
+        tracing::info!(
+            integration_route_nodes = xml_nodes
+                .iter()
+                .filter(|n| n.kind == cih_core::NodeKind::IntegrationRoute)
+                .count(),
+            message_destination_nodes = xml_nodes
+                .iter()
+                .filter(|n| n.kind == cih_core::NodeKind::MessageDestination)
+                .count(),
+            integration_edges = xml_edges.len(),
+            "integration XML extraction complete"
+        );
+
+        let (di_nodes, di_edges) =
+            resolvers.extra_edges(Some(&repo_root), &parse_output.parsed_files);
+        tracing::info!(
+            di_bean_nodes = di_nodes.len(),
+            di_calls_edges = di_edges.len(),
+            "DI XML extraction complete"
+        );
+        xml_nodes.extend(di_nodes);
+        xml_edges.extend(di_edges);
+        (xml_nodes, xml_edges)
+    };
+
+    let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
+    edges.extend(jar_edges);
+    edges.extend(db_edges);
+    edges.extend(xml_edges);
+
+    let mut all_nodes = parse_output.nodes;
+    all_nodes.extend(resolve_output.nodes);
+    all_nodes.extend(jar_nodes);
+    all_nodes.extend(db_nodes);
+    all_nodes.extend(xml_nodes);
+
+    cih_resolve::propagate_loop_depths(&mut all_nodes, &edges);
+
+    let similar_edges = cih_resolve::emit_similar_to_edges(&all_nodes);
+    if !similar_edges.is_empty() {
+        tracing::info!(
+            similar_to_edges = similar_edges.len(),
+            "MinHash near-clone edges emitted"
+        );
+        edges.extend(similar_edges);
+    }
+
+    let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
+
+    let parsed_dir = cih_dir.join("parsed").join(&version);
+    let parse_artifacts = cih_parse::write_parsed_files(&parsed_dir, &parse_output.parsed_files)?;
+
+    let artifacts_dir = cih_dir.join("artifacts").join(&version);
+    let artifacts = GraphArtifacts::write(
+        &artifacts_dir,
+        VersionId(version.clone()),
+        &all_nodes,
+        &edges,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write graph artifacts to {}",
+            artifacts_dir.display()
+        )
+    })?;
+
+    cih_resolve::write_unresolved_reports(&resolve_output.unresolved_refs, &artifacts_dir)
+        .with_context(|| "failed to write unresolved-refs reports")?;
+
+    prune_other_versions(&cih_dir.join("parsed"), &version)?;
+    prune_other_versions(&cih_dir.join("artifacts"), &version)?;
+    crate::file_cache::FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
+
+    tracing::info!(
+        nodes = all_nodes.len(),
+        edges = edges.len(),
+        resolved_edges = resolve_output.edges.len(),
+        jar_nodes = jar_node_count,
+        unresolved_refs = resolve_output.skipped,
+        version = %version,
+        path = %artifacts_dir.display(),
+        "Graph artifacts written"
+    );
+    ui.finish_with(format!(
+        "{} nodes, {} edges  \x1b[2m(v{})\x1b[0m",
+        crate::ui::fmt_count(all_nodes.len()),
+        crate::ui::fmt_count(edges.len()),
+        &version[..8.min(version.len())]
+    ));
+
+    let cache_stats = cache_stats.with_version(version.clone());
+
+    Ok(EmitOutcome {
+        scope_file,
+        scope_path,
+        artifacts,
+        parsed_files_path: parse_artifacts.parsed_files_path,
+        artifacts_dir: artifacts_dir.clone(),
+        version,
+        node_count: all_nodes.len(),
+        edge_count: edges.len(),
+        resolved_edge_count: resolve_output.edges.len(),
+        unresolved_reference_count: resolve_output.skipped,
+        unresolved_external_fqcns: resolve_output.unresolved_external_fqcns,
+        unresolved_report_path: Some(artifacts_dir.join("unresolved-refs.md")),
+        parsed_file_count: parse_output.parsed_files.len(),
+        skipped_count: parse_output.skipped.len(),
+        jar_node_count,
+        jar_failed,
+        reused_artifacts: false,
+        cache_stats,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub struct AnalyzeCacheOptions {
+    pub use_cache: bool,
+    pub allow_noop: bool,
+    /// Skip the integration + DI XML walk (faster on large repos).
+    pub skip_xml_integration: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CacheStats {
+    pub enabled: bool,
+    pub noop: bool,
+    pub cache_hits: usize,
+    pub changed_files: usize,
+    pub expanded_files: usize,
+    pub reparsed_files: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl CacheStats {
+    pub(super) fn with_version(mut self, version: String) -> Self {
+        self.version = Some(version);
+        self
+    }
+}
+
+/// Everything `analyze_emit` produced (DB-free), used to load + report.
+pub struct EmitOutcome {
+    pub scope_file: scope::ScopeFile,
+    pub scope_path: PathBuf,
+    pub artifacts: GraphArtifacts,
+    pub parsed_files_path: PathBuf,
+    pub artifacts_dir: PathBuf,
+    pub version: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub resolved_edge_count: usize,
+    pub jar_node_count: usize,
+    pub jar_failed: usize,
+    pub unresolved_reference_count: u64,
+    pub unresolved_external_fqcns: Vec<String>,
+    pub unresolved_report_path: Option<PathBuf>,
+    pub parsed_file_count: usize,
+    pub skipped_count: usize,
+    pub reused_artifacts: bool,
+    pub cache_stats: CacheStats,
+}
+
+impl EmitOutcome {
+    pub fn summary<'a>(&'a self, load: &'a LoadOutcome) -> AnalyzeSummary<'a> {
+        AnalyzeSummary {
+            scope: &self.scope_file,
+            version: &self.version,
+            scope_path: self.scope_path.display().to_string(),
+            parsed_files_path: self.parsed_files_path.display().to_string(),
+            artifacts_path: self.artifacts_dir.display().to_string(),
+            node_count: self.node_count,
+            edge_count: self.edge_count,
+            resolved_edge_count: self.resolved_edge_count,
+            unresolved_reference_count: self.unresolved_reference_count,
+            unresolved_external_fqcns: &self.unresolved_external_fqcns,
+            parsed_file_count: self.parsed_file_count,
+            skipped_count: self.skipped_count,
+            jar_node_count: self.jar_node_count,
+            jar_failed: self.jar_failed,
+            reused_artifacts: self.reused_artifacts,
+            cache: &self.cache_stats,
+            falkor_status: load.status(),
+            falkor_nodes: load.stats().map(|s| s.nodes),
+            falkor_edges: load.stats().map(|s| s.edges),
+            falkor_error: load.error(),
+        }
+    }
+
+    pub fn print_styled(&self, load: &LoadOutcome) {
+        let repo_name = Path::new(&self.scope_file.repo_root)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let ver = &self.version[..8.min(self.version.len())];
+        crate::ui::print_header("Analyze", repo_name, Some(ver));
+        crate::ui::print_row(
+            "Files",
+            &format!(
+                "{} parsed{}",
+                crate::ui::fmt_count(self.parsed_file_count),
+                if self.skipped_count > 0 {
+                    format!("  \x1b[2m({} skipped)\x1b[0m", self.skipped_count)
+                } else {
+                    String::new()
+                }
+            ),
+        );
+        crate::ui::print_row(
+            "Graph",
+            &format!(
+                "{}  nodes  {}  edges",
+                crate::ui::fmt_count(self.node_count),
+                crate::ui::fmt_count(self.edge_count)
+            ),
+        );
+        if self.resolved_edge_count > 0 {
+            crate::ui::print_row(
+                "Resolve",
+                &format!("{}  edges", crate::ui::fmt_count(self.resolved_edge_count)),
+            );
+        }
+        if self.jar_node_count > 0 {
+            crate::ui::print_row(
+                "JARs",
+                &format!("{}  nodes", crate::ui::fmt_count(self.jar_node_count)),
+            );
+        }
+        crate::ui::print_row("Artifacts", &self.artifacts_dir.display().to_string());
+        let falkor_str = match load {
+            LoadOutcome::Loaded(stats) => {
+                format!(
+                    "{}  nodes  {}  edges",
+                    crate::ui::fmt_count(stats.nodes as usize),
+                    crate::ui::fmt_count(stats.edges as usize)
+                )
+            }
+            LoadOutcome::Skipped => "\x1b[2mskipped (--no-load)\x1b[0m".to_string(),
+            LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
+            LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
+        };
+        crate::ui::print_row("FalkorDB", &falkor_str);
+        eprintln!();
+    }
+}
+
+#[derive(Serialize)]
+pub struct AnalyzeSummary<'a> {
+    pub scope: &'a scope::ScopeFile,
+    pub version: &'a str,
+    pub scope_path: String,
+    pub parsed_files_path: String,
+    pub artifacts_path: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub resolved_edge_count: usize,
+    pub unresolved_reference_count: u64,
+    pub unresolved_external_fqcns: &'a [String],
+    pub parsed_file_count: usize,
+    pub skipped_count: usize,
+    pub jar_node_count: usize,
+    pub jar_failed: usize,
+    pub reused_artifacts: bool,
+    pub cache: &'a CacheStats,
+    pub falkor_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub falkor_nodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub falkor_edges: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub falkor_error: Option<&'a str>,
+}
