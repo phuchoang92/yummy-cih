@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::confidence::CONTRACT_HTTP_CLIENT;
+
 use cih_core::{
     external_endpoint_id, kafka_topic_id, ContractKind, Edge, EdgeKind, Node, NodeKind, ParsedFile,
 };
@@ -44,7 +46,7 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                         src: site.in_callable.clone(),
                         dst: id,
                         kind: EdgeKind::ExternalCall,
-                        confidence: 0.75,
+                        confidence: CONTRACT_HTTP_CLIENT,
                         reason: match &site.kind {
                             ContractKind::HttpClientProxy => "http-client-proxy",
                             _ => "http-client",

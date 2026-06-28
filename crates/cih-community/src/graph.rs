@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
+
+use crate::constants::MIN_EDGE_WEIGHT;
 use petgraph::graph::{NodeIndex, UnGraph};
 
 const LARGE_GRAPH_THRESHOLD: usize = 10_000;
@@ -50,10 +52,10 @@ pub fn build_community_graph(
         };
         if let Some(edge_idx) = graph.find_edge(src, dst) {
             if let Some(weight) = graph.edge_weight_mut(edge_idx) {
-                *weight += edge.confidence.max(0.01);
+                *weight += edge.confidence.max(MIN_EDGE_WEIGHT);
             }
         } else {
-            graph.add_edge(src, dst, edge.confidence.max(0.01));
+            graph.add_edge(src, dst, edge.confidence.max(MIN_EDGE_WEIGHT));
         }
     }
 

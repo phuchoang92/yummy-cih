@@ -1,5 +1,5 @@
-use super::*;
 use cih_core::NodeKind;
+use cih_lang::{python::PythonProvider, LanguageProvider};
 
 const FLASK_SAMPLE: &str = r#"
 from flask import Flask
@@ -28,7 +28,6 @@ fn flask_route_decorator_emits_route_nodes() {
         .collect();
     assert!(!routes.is_empty(), "expected Flask route nodes, got 0");
     let names: Vec<&str> = routes.iter().map(|n| n.name.as_str()).collect();
-    // @app.route with methods=['GET', 'POST'] → 2 route nodes
     assert!(
         names.iter().any(|n| n.contains("GET")),
         "expected a GET route: {names:?}"

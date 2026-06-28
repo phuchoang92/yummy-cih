@@ -178,6 +178,4 @@ fn has_spring_signal(src: &str) -> bool {
     SPRING_MARKERS.iter().any(|marker| src.contains(marker))
 }
 
-#[cfg(test)]
-mod tests;
 

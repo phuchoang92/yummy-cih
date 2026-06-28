@@ -78,6 +78,4 @@ impl LanguageProvider for TypescriptProvider {
     }
 }
 
-#[cfg(test)]
-mod tests;
 

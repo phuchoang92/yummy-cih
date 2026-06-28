@@ -16,6 +16,3 @@ pub use store::{EmbedStore, EmbedSummary, SemanticHit};
 pub use strip::strip_java_body;
 pub use text::{content_hash, embeddable_nodes, embedding_text, is_embeddable_kind, source_bodies};
 
-#[cfg(test)]
-mod tests;
-

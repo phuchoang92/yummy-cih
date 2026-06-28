@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::QueryCursor;
 
-use super::*;
+use cih_lang::{java::JavaProvider, LanguageProvider, Stereotype};
 
 const SAMPLE: &str = r#"
 package com.example;
@@ -50,11 +50,9 @@ fn scope_query_captures_declarations_and_references() {
     assert!(found.contains("declaration.class"));
     assert!(found.contains("declaration.method"));
     assert!(found.iter().any(|name| name.starts_with("reference.call.")));
-    // Captures the parse driver (cih-parse) actually consumes — guard against
-    // a grammar/query drift silently dropping them.
     assert!(found.contains("import.statement"));
-    assert!(found.contains("declaration.variable")); // `private OwnerService service;`
-    assert!(found.contains("type-binding.type")); // field type binding
+    assert!(found.contains("declaration.variable"));
+    assert!(found.contains("type-binding.type"));
 }
 
 const SPRING_ROUTES: &str = r#"
@@ -163,4 +161,3 @@ fn scan_file_extracts_package_and_spring_framework() {
     assert!(scan.frameworks.contains("spring"));
     assert_eq!(scan.frameworks.len(), 1);
 }
-

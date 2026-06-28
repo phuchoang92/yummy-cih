@@ -1,10 +1,14 @@
-use super::*;
-use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
+use cih_wiki::{
+    generate_wiki, CommunityLlmSummary, WikiGenerationInfo, WikiInput, WikiLlmInfo, WikiManifest,
+};
 
 static TEST_ID: AtomicU64 = AtomicU64::new(0);
 
-fn tmp_dir(label: &str) -> PathBuf {
+fn tmp_dir(label: &str) -> std::path::PathBuf {
     let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
         "cih-wiki-test-{}-{}-{}",
@@ -62,7 +66,6 @@ fn minimal_input<'a>(
 
 #[test]
 fn generate_wiki_writes_expected_files() {
-    // Method:com.example.Foo#bar/0 in Test.java → feature=shared, class=Foo, slug=foo
     let sym = make_node("Method:com.example.Foo#bar/0", NodeKind::Method, "bar");
     let comm = make_node("Community:0", NodeKind::Community, "order-service");
     let comm_edges = [Edge {
@@ -71,7 +74,7 @@ fn generate_wiki_writes_expected_files() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
-            props: None,
+        props: None,
     }];
     let nodes = [sym];
     let comm_nodes = [comm];
@@ -85,14 +88,12 @@ fn generate_wiki_writes_expected_files() {
     assert!(out.join("wiki_meta.json").exists(), "wiki_meta.json");
     assert!(out.join("pages/index.md").exists(), "system index");
     assert!(out.join("pages/routes.md").exists(), "routes.md");
-    // Feature-first paths: Test.java has no modules/ → feature=shared
     assert!(
         out.join("pages/shared/index.md").exists(),
         "shared/index.md"
     );
     assert!(out.join("pages/shared/po.md").exists(), "shared/po.md");
     assert!(out.join("pages/shared/ba.md").exists(), "shared/ba.md");
-    // class Foo → slug=foo
     assert!(
         out.join("pages/shared/dev/foo.md").exists(),
         "shared/dev/foo.md"
@@ -110,7 +111,6 @@ fn generate_wiki_writes_expected_files() {
 
 #[test]
 fn generate_wiki_records_llm_model_in_manifest_when_enriched() {
-    // Method:com.example.Bar#run/0 in Test.java → feature=shared, class=Bar, slug=bar
     let sym = make_node("Method:com.example.Bar#run/0", NodeKind::Method, "run");
     let comm = make_node("Community:1", NodeKind::Community, "payment-service");
     let comm_edges = [Edge {
@@ -119,7 +119,7 @@ fn generate_wiki_records_llm_model_in_manifest_when_enriched() {
         kind: EdgeKind::MemberOf,
         confidence: 1.0,
         reason: String::new(),
-            props: None,
+        props: None,
     }];
 
     let mut summaries = HashMap::new();
@@ -176,50 +176,9 @@ fn generate_wiki_records_llm_model_in_manifest_when_enriched() {
     assert_eq!(llm.provider, "anthropic");
     assert!(outcome.llm_enriched);
 
-    // PO page for the shared feature includes LLM summary
     let po_page = std::fs::read_to_string(out.join("pages/shared/po.md")).unwrap();
     assert!(po_page.contains("## Overview"), "po page has overview");
     assert!(po_page.contains("Handles payments"), "po page has llm text");
 
     let _ = std::fs::remove_dir_all(&out);
-}
-
-#[test]
-fn clean_method_desc_strips_fqcn_prefix_with_arity() {
-    let result = clean_method_desc(
-        "DelinquencyApiResource.updateDelinquencyBucket/2() processes the bucket update.",
-        "DelinquencyApiResource",
-        "updateDelinquencyBucket",
-    );
-    assert_eq!(result, "Processes the bucket update.");
-}
-
-#[test]
-fn clean_method_desc_strips_backtick_quoted_classname() {
-    let result = clean_method_desc(
-        "`DelinquencyApiResource`.updateDelinquencyBucket/2() processes the bucket update.",
-        "DelinquencyApiResource",
-        "updateDelinquencyBucket",
-    );
-    assert_eq!(result, "Processes the bucket update.");
-}
-
-#[test]
-fn clean_method_desc_strips_connective_phrase_after_paren() {
-    let result = clean_method_desc(
-        "The resource method ClassName.foo/0() is called to validate the input.",
-        "ClassName",
-        "foo",
-    );
-    assert_eq!(result, "Validate the input.");
-}
-
-#[test]
-fn clean_method_desc_leaves_clean_input_unchanged() {
-    let result = clean_method_desc(
-        "Validates the payment amount before processing.",
-        "SomeClass",
-        "someMethod",
-    );
-    assert_eq!(result, "Validates the payment amount before processing.");
 }

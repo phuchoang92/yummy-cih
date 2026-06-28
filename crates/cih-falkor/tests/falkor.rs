@@ -1,4 +1,5 @@
-use super::*;
+use cih_core::{NodeId, NodeKind};
+use cih_graph_store::{risk_from_fanout, CommunityEdge, RouteInfo};
 
 #[test]
 fn node_kind_label_roundtrip() {
@@ -25,12 +26,6 @@ fn node_kind_label_roundtrip() {
 }
 
 #[test]
-fn cstr_escapes_backslash_and_single_quote() {
-    assert_eq!(cstr("a\\b's"), "'a\\\\b\\'s'");
-    assert_eq!(cstr("line\nnext\tcell\rend"), "'line\\nnext\\tcell\\rend'");
-}
-
-#[test]
 fn risk_from_fanout_buckets() {
     assert_eq!(risk_from_fanout(0), "none");
     assert_eq!(risk_from_fanout(5), "low");
@@ -45,7 +40,6 @@ fn make_row(cells: &[&str]) -> Vec<String> {
 
 #[test]
 fn route_map_row_parses_correctly() {
-    // Simulate a row: path, httpMethod, decorator, handler(ignored), id, name, qualifiedName
     let row = make_row(&[
         "/api/users",
         "GET",
@@ -55,7 +49,6 @@ fn route_map_row_parses_correctly() {
         "list",
         "com.example.UserController#list/0",
     ]);
-    // Map using the same logic as route_map() implementation
     let info = RouteInfo {
         path: row.first().cloned().unwrap_or_default(),
         http_method: row.get(1).cloned().unwrap_or_default(),

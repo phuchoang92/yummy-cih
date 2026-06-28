@@ -1,4 +1,4 @@
-use super::*;
+use cih_embed::{chunk_text, content_hash};
 
 #[test]
 fn short_text_produces_one_chunk() {

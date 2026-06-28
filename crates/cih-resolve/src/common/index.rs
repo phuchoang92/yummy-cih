@@ -4,6 +4,9 @@ use cih_core::{
     BindingKind, NodeId, NodeKind, ParsedFile, RawImport, RefKind, SymbolDef, TypeBinding,
 };
 
+use crate::confidence::{
+    TYPE_EXPLICIT_IMPORT, TYPE_FULLY_QUALIFIED, TYPE_SAME_PACKAGE, TYPE_WILDCARD_IMPORT,
+};
 use crate::lang::ResolverRegistry;
 use crate::types::{base_type_name, class_of, is_type_kind, pick_binding, simple_of, stable_dedup};
 
@@ -215,22 +218,22 @@ impl CommonIndex {
             return None;
         }
         if base.contains('.') {
-            return Some((base, 1.00));
+            return Some((base, TYPE_FULLY_QUALIFIED));
         }
         if let Some(ctx) = self.files.get(file) {
             if let Some(fqcn) = ctx.import_map.get(base.as_str()) {
-                return Some((fqcn.clone(), 0.90));
+                return Some((fqcn.clone(), TYPE_EXPLICIT_IMPORT));
             }
             if let Some(pkg) = &ctx.package {
                 let cand = format!("{pkg}.{base}");
                 if self.types_by_fqcn.contains_key(&cand) {
-                    return Some((cand, 0.85));
+                    return Some((cand, TYPE_SAME_PACKAGE));
                 }
             }
             for prefix in &ctx.wildcard_prefixes {
                 let cand = format!("{prefix}.{base}");
                 if self.types_by_fqcn.contains_key(&cand) {
-                    return Some((cand, 0.75));
+                    return Some((cand, TYPE_WILDCARD_IMPORT));
                 }
             }
             // 0.72 tier: unique match within wildcard-imported packages (CBM module-index technique)

@@ -389,6 +389,4 @@ pub struct GraphDelta {
     pub edges: Vec<Edge>,
 }
 
-#[cfg(test)]
-mod tests;
 

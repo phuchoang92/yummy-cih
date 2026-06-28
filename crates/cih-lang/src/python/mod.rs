@@ -93,6 +93,4 @@ impl LanguageProvider for PythonProvider {
     }
 }
 
-#[cfg(test)]
-mod tests;
 

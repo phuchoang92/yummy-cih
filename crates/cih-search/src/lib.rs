@@ -32,6 +32,4 @@ pub fn is_searchable_kind(kind: NodeKind) -> bool {
     )
 }
 
-#[cfg(test)]
-mod tests;
 

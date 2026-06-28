@@ -1,6 +1,8 @@
-use super::*;
-use cih_core::NodeId;
+use std::collections::HashSet;
 use std::path::PathBuf;
+
+use cih_core::{constructor_id, field_id, method_id, type_id, EdgeKind, NodeId, NodeKind};
+use cih_jar::{JarApiExtractor, JarApiOutput};
 
 fn sample_jar() -> PathBuf {
     PathBuf::from(concat!(
@@ -27,7 +29,6 @@ fn extracts_api_with_ids_matching_the_locked_scheme() {
     let sample = type_id(NodeKind::Class, "com.acme.Sample");
     let inner = type_id(NodeKind::Class, "com.acme.Sample.Inner");
 
-    // These ids are exactly what the app side would resolve a call/ctor/field to.
     assert!(has_node(&out, &sample));
     assert!(has_node(&out, &field_id("com.acme.Sample", "count")));
     assert!(has_node(&out, &constructor_id("com.acme.Sample", 1)));
@@ -39,7 +40,6 @@ fn extracts_api_with_ids_matching_the_locked_scheme() {
         &method_id("com.acme.Sample.Inner", "ping", 0)
     ));
 
-    // HAS_METHOD / HAS_FIELD wire members to their owning class.
     assert!(has_edge(
         &out,
         EdgeKind::HasMethod,
@@ -53,13 +53,11 @@ fn extracts_api_with_ids_matching_the_locked_scheme() {
         &field_id("com.acme.Sample", "count")
     ));
 
-    // Anonymous Sample$1 is skipped by default (no `com.acme.Sample.1` type).
     assert!(!has_node(
         &out,
         &type_id(NodeKind::Class, "com.acme.Sample.1")
     ));
 
-    // Nodes are tagged as external/from-jar; descriptor types are rendered.
     let greet = out
         .nodes
         .iter()
@@ -96,7 +94,6 @@ fn demand_driven_include_emits_only_requested_classes() {
         &out,
         &method_id("com.acme.Sample.Inner", "ping", 0)
     ));
-    // The unreferenced top-level class is NOT emitted.
     assert!(!has_node(
         &out,
         &type_id(NodeKind::Class, "com.acme.Sample")

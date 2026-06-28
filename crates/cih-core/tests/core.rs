@@ -1,4 +1,12 @@
-use super::*;
+use cih_core::{
+    community_id, constructor_id, external_endpoint_id, field_id, file_id, folder_id,
+    kafka_topic_id, method_id, process_id, type_id,
+};
+use cih_core::{
+    ArchitectureHint, BindingKind, BuildSystem, ContractKind, ContractSite, JarInfo, ModuleInfo,
+    NodeKind, ParsedFile, RawImport, Range, ReferenceSite, RefKind, RepoMap, SymbolDef,
+    TypeBinding,
+};
 
 #[test]
 fn id_helpers_use_locked_scheme() {
@@ -71,6 +79,7 @@ fn node_kind_labels_round_trip() {
 
 #[test]
 fn db_id_helpers_use_locked_scheme() {
+    use cih_core::{db_query_const_id, db_query_inline_id, db_table_id};
     assert_eq!(
         db_query_const_id("com.bank.OverdraftAdapterImpl", "QUERY_FOO").as_str(),
         "DbQuery:com.bank.OverdraftAdapterImpl#QUERY_FOO"

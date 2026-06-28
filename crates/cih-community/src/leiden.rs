@@ -2,6 +2,7 @@ use cih_core::NodeId;
 use petgraph::graph::UnGraph;
 use petgraph::visit::EdgeRef;
 
+use crate::constants::MIN_EDGE_WEIGHT;
 use crate::leiden_impl::{GraphDataBuilder, Leiden, LeidenConfig, QualityType};
 
 pub(crate) fn leiden(
@@ -19,7 +20,7 @@ pub(crate) fn leiden(
     for edge in graph.edge_references() {
         let u = edge.source().index();
         let v = edge.target().index();
-        let w = (*edge.weight() as f64).max(0.01);
+        let w = (*edge.weight() as f64).max(MIN_EDGE_WEIGHT as f64);
         if u != v {
             let _ = builder.add_edge(u, v, w);
         }

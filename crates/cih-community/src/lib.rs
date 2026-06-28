@@ -1,5 +1,6 @@
 pub mod bfs;
 mod cohesion;
+mod constants;
 mod entry_points;
 pub mod graph;
 mod label;
@@ -1005,6 +1006,4 @@ fn slugify(name: &str) -> String {
 }
 
 
-#[cfg(test)]
-mod tests;
 

@@ -341,6 +341,4 @@ fn normalize(out: &mut JarApiOutput) {
     out.skipped.sort_by(|a, b| a.entry.cmp(&b.entry));
 }
 
-#[cfg(test)]
-mod tests;
 

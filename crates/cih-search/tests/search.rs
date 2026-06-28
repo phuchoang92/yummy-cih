@@ -1,5 +1,5 @@
-use super::*;
 use cih_core::{Node, NodeId, NodeKind, Range};
+use cih_search::{rrf_merge, tokenize, SearchHit, SearchIndex};
 
 fn node(id: &str, kind: NodeKind, name: &str, qualified_name: Option<&str>) -> Node {
     Node {

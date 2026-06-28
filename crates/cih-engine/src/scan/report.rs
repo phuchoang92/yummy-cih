@@ -7,6 +7,10 @@ use cih_core::{ModuleInfo, RepoMap};
 
 const PARSE_MS_PER_FILE: u64 = 25;
 const EST_NODES_PER_FILE: u64 = 17;
+const MS_PER_SECOND: f64 = 1_000.0;
+const MS_PER_MINUTE: f64 = 60_000.0;
+const UNITS_PER_MILLION: f64 = 1_000_000.0;
+const UNITS_PER_THOUSAND: f64 = 1_000.0;
 
 #[doc(hidden)]
 pub fn print_summary(repo_map: &RepoMap, output_path: &Path) {
@@ -118,17 +122,17 @@ fn format_duration_ms(ms: u64) -> String {
     if ms < 1_000 {
         format!("{ms}ms")
     } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1_000.0)
+        format!("{:.1}s", ms as f64 / MS_PER_SECOND)
     } else {
-        format!("{:.1}min", ms as f64 / 60_000.0)
+        format!("{:.1}min", ms as f64 / MS_PER_MINUTE)
     }
 }
 
 fn format_count(value: u64) -> String {
     if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
+        format!("{:.1}M", value as f64 / UNITS_PER_MILLION)
     } else if value >= 1_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
+        format!("{:.1}k", value as f64 / UNITS_PER_THOUSAND)
     } else {
         value.to_string()
     }

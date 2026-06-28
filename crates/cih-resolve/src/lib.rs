@@ -9,11 +9,15 @@
 use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};
 
-pub mod common;
-pub mod complexity;
-pub mod constant_propagation;
-pub mod lang;
-pub mod similarity;
+use crate::common::emit::EdgeEmitter;
+use crate::common::index::CommonIndex;
+
+pub(crate) mod confidence;
+pub(crate) mod common;
+pub(crate) mod complexity;
+pub(crate) mod constant_propagation;
+pub(crate) mod lang;
+pub(crate) mod similarity;
 
 mod contracts;
 pub mod db_access;
@@ -21,11 +25,8 @@ pub mod di_xml;
 mod emit;
 mod index;
 pub mod integration_xml;
-pub mod reports;
+pub(crate) mod reports;
 mod types;
-
-pub use common::emit::EdgeEmitter;
-pub use common::index::CommonIndex;
 pub use complexity::propagate_loop_depths;
 pub use constant_propagation::build_java_constant_resolver;
 pub use similarity::emit_similar_to_edges;

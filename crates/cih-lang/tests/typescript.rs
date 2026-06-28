@@ -1,5 +1,5 @@
-use super::*;
 use cih_core::NodeKind;
+use cih_lang::{typescript::TypescriptProvider, LanguageProvider};
 
 const NESTJS_SAMPLE: &str = r#"
 import { Controller, Get, Post } from '@nestjs/common';
@@ -38,7 +38,6 @@ fn nestjs_routes_extracted_with_correct_path() {
         names.iter().any(|n| n.contains("POST")),
         "expected a POST route, got: {names:?}"
     );
-    // Props should include source = nestjs
     for route in &routes {
         let props = route.props.as_ref().expect("route has props");
         assert!(
