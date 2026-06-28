@@ -674,6 +674,3 @@ async fn main() -> Result<()> {
     tracing::info!("server shut down cleanly");
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

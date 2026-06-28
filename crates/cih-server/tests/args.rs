@@ -1,6 +1,10 @@
-use super::*;
 use cih_core::ContractMatchKind;
 use cih_graph_store::Direction;
+use cih_server_lib::args::{
+    DetectChangesArgs, FeatureMapArgs, ImpactArgs, RegressionScopeArgs, RouteMapArgs,
+    TraceFlowArgs, UntestedPathsArgs,
+};
+use cih_server_lib::utils::{parse_contract_kind_filter, parse_direction};
 
 #[test]
 fn direction_parse_unknown_falls_back_to_upstream() {
@@ -19,8 +23,7 @@ fn route_map_args_default_limit_is_none() {
 
 #[test]
 fn detect_changes_args_defaults() {
-    let args: DetectChangesArgs =
-        serde_json::from_str(r#"{"scope":"working"}"#).unwrap();
+    let args: DetectChangesArgs = serde_json::from_str(r#"{"scope":"working"}"#).unwrap();
     assert_eq!(args.scope, "working");
     assert!(args.base_ref.is_none());
     assert!(args.repo.is_none());
@@ -28,7 +31,6 @@ fn detect_changes_args_defaults() {
 
 #[test]
 fn contract_kind_filter_accepts_aliases() {
-    use utils::parse_contract_kind_filter;
     assert_eq!(parse_contract_kind_filter(None).unwrap(), None);
     assert_eq!(
         parse_contract_kind_filter(Some("http")).unwrap(),
