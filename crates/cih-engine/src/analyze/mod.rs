@@ -245,15 +245,54 @@ pub fn analyze_from_scope_with_options(
         );
     }
 
+    // ── Decompile pre-step ────────────────────────────────────────────────
+    let decompile_cfg = crate::decompile_config::DecompileConfig::load_or_default(&repo_root);
+    let extra_java_files: Vec<String> = if decompile_cfg.is_enabled() {
+        ui.spin("Decompiling JARs");
+        match crate::decompile::run_decompile_precheck(&repo_root, &decompile_cfg) {
+            Ok((dirs, stats)) => {
+                ui.finish_with(format!(
+                    "{} decompiled, {} cached, {} failed  ({} classes)",
+                    stats.jars_decompiled,
+                    stats.jars_cached,
+                    stats.jars_failed,
+                    stats.classes_written,
+                ));
+                crate::decompile::collect_decompiled_java_files(&repo_root, &dirs)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "decompile pre-step failed — continuing without decompiled JARs");
+                ui.finish_with("decompile failed — skipped".to_string());
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
+
+    let combined_files: Vec<String>;
+    let files_to_parse: &[String] = if extra_java_files.is_empty() {
+        &scope_file.files
+    } else {
+        combined_files = scope_file
+            .files
+            .iter()
+            .cloned()
+            .chain(extra_java_files)
+            .collect();
+        &combined_files
+    };
+    // ─────────────────────────────────────────────────────────────────────
+
     tracing::info!(
-        files = scope_file.files.len(),
+        files = files_to_parse.len(),
         modules = scope_file.modules.len(),
         cache_enabled = cache.use_cache,
         "starting parse phase"
     );
-    ui.spin(format!("Parsing {} files", scope_file.files.len()));
+    ui.spin(format!("Parsing {} files", files_to_parse.len()));
 
-    let incremental = parse_scope(&repo_root, &cih_dir, &scope_file.files, cache)?;
+    let incremental = parse_scope(&repo_root, &cih_dir, files_to_parse, cache)?;
     if let ParseScopeOutcome::Reused {
         artifacts,
         parsed_files_path,

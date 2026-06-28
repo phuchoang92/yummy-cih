@@ -245,6 +245,26 @@ fn make_commands() -> Vec<Cmd> {
                 Field::bool("--html", "--html", "Also write a standalone index.html viewer alongside the Markdown files."),
             ],
         },
+        Cmd {
+            name: "config",
+            desc: "Edit CIH settings interactively — decompile tool, JAR sources, prefixes.",
+            fields: vec![
+                Field::text(
+                    "--repo",
+                    "--repo  ",
+                    "Repository root containing cih.decompile.toml (or where it will be created).",
+                    ".",
+                    false,
+                ),
+                Field::select(
+                    "decompile",
+                    "subcommand",
+                    "Config section to edit. Currently only 'decompile' is available.",
+                    &["decompile"],
+                    0,
+                ),
+            ],
+        },
     ]
 }
 

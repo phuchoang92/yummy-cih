@@ -1,5 +1,8 @@
 mod analyze;
+mod config_cmd;
 mod db;
+mod decompile;
+mod decompile_config;
 mod discover;
 mod taint_cmd;
 mod taint_config;
@@ -339,6 +342,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Edit CIH configuration files interactively.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Open the interactive TUI command builder.
     /// Navigate commands on the left, fill options on the right,
     /// then press r to review and run the assembled command.
@@ -403,6 +411,16 @@ enum ArtifactCommand {
         /// FalkorDB graph key.
         #[arg(long, env = "CIH_GRAPH_KEY")]
         graph_key: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Interactively edit decompile settings (JAR directories, prefixes, tool path).
+    Decompile {
+        /// Repository root. Reads and writes `<repo>/cih.decompile.toml`.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
     },
 }
 
@@ -816,6 +834,9 @@ fn main() -> Result<()> {
             ..Default::default()
         }),
         Command::Artifact { command } => run_artifact(command),
+        Command::Config { command } => match command {
+            ConfigCommand::Decompile { repo } => config_cmd::run_config_decompile(&repo),
+        },
         // Handled above before the match; unreachable at runtime.
         Command::Ui => unreachable!(),
     }
