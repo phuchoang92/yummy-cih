@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
 
+use crate::confidence::{PHASE0_BASE, PHASE0_FLOOR, PHASE0_HOP_PENALTY};
 use crate::rules::{SinkCategory, TaintRules};
 
 /// A single inter-procedural taint path found by the BFS.
@@ -196,8 +197,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
 }
 
 fn confidence_for_edges(edge_count: usize) -> f32 {
-    // Direct source→sink: 0.9; each additional hop reduces by 0.05, floor 0.5.
-    (0.9 - (edge_count.saturating_sub(1) as f32 * 0.05)).max(0.5)
+    (PHASE0_BASE - (edge_count.saturating_sub(1) as f32 * PHASE0_HOP_PENALTY)).max(PHASE0_FLOOR)
 }
 
 #[cfg(test)]

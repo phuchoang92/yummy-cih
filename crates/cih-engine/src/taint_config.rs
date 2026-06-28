@@ -87,7 +87,7 @@ pub(crate) fn load_taint_rules(repo: &std::path::Path) -> TaintRules {
                 Some("html") => SinkCategory::Html,
                 _ => SinkCategory::Sql,
             };
-            TaintSink { node_id_pattern: s.pattern.clone(), category }
+            TaintSink { node_id_pattern: s.pattern.clone(), category, language: None }
         })
         .collect();
 
@@ -103,7 +103,7 @@ pub(crate) fn load_taint_rules(repo: &std::path::Path) -> TaintRules {
     let user_sanitizers: Vec<TaintSanitizer> = parsed
         .sanitizer
         .iter()
-        .map(|s| TaintSanitizer { node_id_pattern: s.pattern.clone() })
+        .map(|s| TaintSanitizer { node_id_pattern: s.pattern.clone(), language: None })
         .collect();
 
     let user_rules = TaintRules {

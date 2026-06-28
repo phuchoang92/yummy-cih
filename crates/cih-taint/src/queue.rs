@@ -1,17 +1,17 @@
-//! Demand-driven CFG/PDG request queue (Phase 1+ stub).
+//! Demand-driven CFG/PDG work-item queue.
 //!
-//! Phase 0 taint runs entirely on the method-granularity call graph. This module
-//! provides the `CfgRequestQueue` that Phases 1–3 will use to trigger on-demand
-//! intra-procedural analysis for specific methods.
+//! This is a simple FIFO buffer used to coordinate which methods need
+//! intra-procedural analysis (Phases 1–3). The caller drains it and processes items
+//! synchronously in the current CLI batch run.
 //!
-//! Trigger conditions (Phase 1+):
-//!  1. The method is an API entry point (already tagged via `HandlesRoute` / `ListensTo`).
+//! There is no async worker pool, no LRU result cache, and no eviction logic —
+//! those are appropriate only for an incremental/daemon mode where source files change
+//! between requests. The current synchronous model is correct for CLI batch runs.
+//!
+//! Trigger conditions:
+//!  1. The method is an API entry point (`HandlesRoute` / `ListensTo`).
 //!  2. The method appears on a Phase 0 taint path.
-//!  3. An external caller (MCP tool, chat query) requests `analyze_method(fqn)`.
-//!
-//! Results are cached by `(fqn, ast_hash)` and evicted when the method body changes.
-//! Statement IR and CFG/PDG graphs are never persisted to the main graph store —
-//! they live only in memory for the duration of the analysis request.
+//!  3. An explicit external request (MCP tool or chat query).
 
 use cih_core::NodeId;
 
@@ -40,10 +40,7 @@ pub enum CfgTrigger {
     ExternalRequest,
 }
 
-/// Queue of pending CFG/PDG analysis requests. Phase 1 implements the worker.
-///
-/// For now this is a plain `Vec` — Phase 1 will add an async worker pool and
-/// an LRU result cache keyed by `(method_id, ast_hash)`.
+/// FIFO queue of pending intra-procedural analysis requests.
 #[derive(Default)]
 pub struct CfgRequestQueue {
     pending: Vec<CfgRequest>,

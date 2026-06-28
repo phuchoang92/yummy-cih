@@ -36,11 +36,24 @@ impl SinkCategory {
     }
 }
 
+/// Programming language a taint rule applies to.
+///
+/// `None` on a rule means "any language" (matches all sources).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    Java,
+    Kotlin,
+    Python,
+}
+
 /// A sink pattern matched against the target node ID of a `Calls` edge.
 pub struct TaintSink {
     /// Substring matched against the callee node ID (e.g. `"Runtime#exec"`).
     pub node_id_pattern: String,
     pub category: SinkCategory,
+    /// Language this rule applies to. `None` matches any language.
+    pub language: Option<Language>,
 }
 
 /// A sanitizer pattern matched against the callee node ID of a `Calls` edge.
@@ -48,6 +61,8 @@ pub struct TaintSink {
 pub struct TaintSanitizer {
     /// Substring matched against the callee node ID.
     pub node_id_pattern: String,
+    /// Language this rule applies to. `None` matches any language.
+    pub language: Option<Language>,
 }
 
 /// Complete ruleset used by the taint BFS pass.
@@ -99,12 +114,12 @@ impl TaintRules {
 /// exec/file/HTML cases where the graph may not yet have explicit edges.
 macro_rules! sink {
     ($pat:expr, $cat:expr) => {
-        TaintSink { node_id_pattern: $pat.into(), category: $cat }
+        TaintSink { node_id_pattern: $pat.into(), category: $cat, language: Some(Language::Java) }
     };
 }
 macro_rules! san {
     ($pat:expr) => {
-        TaintSanitizer { node_id_pattern: $pat.into() }
+        TaintSanitizer { node_id_pattern: $pat.into(), language: Some(Language::Java) }
     };
 }
 

@@ -4,11 +4,14 @@
 //! Java has no `goto`, so every loop/branch is a structured construct — this makes
 //! the recursive approach correct and simple.
 //!
-//! After CFG construction, [`Cfg::compute_dominators`] computes the immediate-dominator
-//! tree using the Cooper-Harvey-Kennedy "Simple, Fast Dominance Algorithm" (2001),
-//! which is the foundation for Phase 3 control-dependence computation.
+//! After CFG construction, [`Cfg::compute_dominators`] delegates to the
+//! Cooper-Harvey-Kennedy algorithm in [`domtree`] to produce a [`DomTree`].
+//! This is the foundation for Phase 3 control-dependence computation.
 //!
 //! Nothing in this module is persisted to the main graph.
+
+pub(crate) mod domtree;
+pub use domtree::DomTree;
 
 use std::collections::HashMap;
 
@@ -17,7 +20,7 @@ use tree_sitter::{Node as TsNode, Parser};
 use cih_core::NodeId;
 
 use crate::ir::{StatementKind, StatementNode};
-use crate::java_ir::{
+use crate::java_ast::{
     collect_reads, extract_call_args, extract_call_site, extract_param_names,
     find_method_node, parse_method_id, range_of, stmt_id, ts_text,
 };
@@ -111,77 +114,7 @@ impl Cfg {
     /// The entry block dominates all reachable blocks; the exit block dominates
     /// only itself (when reachable).
     pub fn compute_dominators(&self) -> DomTree {
-        let n = self.blocks.len();
-        if n == 0 {
-            return DomTree::empty();
-        }
-
-        // Compute reverse post-order (RPO) starting from entry.
-        let rpo = self.reverse_post_order();
-        // Map block_id → RPO index
-        let rpo_idx: HashMap<&BlockId, usize> = rpo
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (id, i))
-            .collect();
-
-        // idom[i] = RPO index of immediate dominator of rpo[i].
-        // Undefined = usize::MAX; entry dominates itself.
-        const UNDEF: usize = usize::MAX;
-        let mut idom = vec![UNDEF; n];
-        let entry_rpo = *rpo_idx.get(&self.entry).unwrap_or(&0);
-        idom[entry_rpo] = entry_rpo;
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-            // Iterate in RPO order (skip entry).
-            for rpo_i in 0..rpo.len() {
-                if rpo_i == entry_rpo {
-                    continue;
-                }
-                let block_id = &rpo[rpo_i];
-                let Some(block) = self.block(block_id) else {
-                    continue;
-                };
-
-                // Find the first already-processed predecessor.
-                let mut new_idom = UNDEF;
-                for pred_id in &block.preds {
-                    let Some(&pred_rpo) = rpo_idx.get(pred_id) else {
-                        continue;
-                    };
-                    if idom[pred_rpo] != UNDEF {
-                        new_idom = if new_idom == UNDEF {
-                            pred_rpo
-                        } else {
-                            intersect(new_idom, pred_rpo, &idom)
-                        };
-                    }
-                }
-
-                if new_idom != UNDEF && idom[rpo_i] != new_idom {
-                    idom[rpo_i] = new_idom;
-                    changed = true;
-                }
-            }
-        }
-
-        // Build BlockId → immediate dominator BlockId map.
-        let id_to_idom: HashMap<BlockId, BlockId> = rpo
-            .iter()
-            .enumerate()
-            .filter_map(|(i, id)| {
-                let dom_rpo = idom[i];
-                if dom_rpo == UNDEF {
-                    None
-                } else {
-                    Some((id.clone(), rpo[dom_rpo].clone()))
-                }
-            })
-            .collect();
-
-        DomTree { id_to_idom }
+        domtree::compute_dom_tree(self)
     }
 
     /// Reverse post-order DFS traversal starting from `entry`, following `succs`.
@@ -219,64 +152,6 @@ impl Cfg {
 
         post_order.reverse();
         post_order
-    }
-}
-
-/// `intersect` for the Cooper-Harvey-Kennedy algorithm.
-/// Both arguments are RPO indices with a valid `idom` entry.
-fn intersect(mut b1: usize, mut b2: usize, idom: &[usize]) -> usize {
-    while b1 != b2 {
-        while b1 > b2 {
-            b1 = idom[b1];
-        }
-        while b2 > b1 {
-            b2 = idom[b2];
-        }
-    }
-    b1
-}
-
-// ── Dominance tree ────────────────────────────────────────────────────────────
-
-/// Immediate-dominator tree for a [`Cfg`].
-pub struct DomTree {
-    /// Maps each block to its immediate dominator.
-    /// Entry block maps to itself.
-    id_to_idom: HashMap<BlockId, BlockId>,
-}
-
-impl DomTree {
-    fn empty() -> Self {
-        Self {
-            id_to_idom: HashMap::new(),
-        }
-    }
-
-    /// Immediate dominator of `block`. Returns `None` for unreachable blocks.
-    pub fn idom(&self, block: &BlockId) -> Option<&BlockId> {
-        self.id_to_idom.get(block)
-    }
-
-    /// Returns `true` if `dom` strictly dominates `block`
-    /// (i.e., `dom` != `block` and every path from entry to `block` passes through `dom`).
-    pub fn strictly_dominates(&self, dom: &BlockId, block: &BlockId) -> bool {
-        if dom == block {
-            return false;
-        }
-        let mut cur = block;
-        loop {
-            match self.id_to_idom.get(cur) {
-                Some(d) if d == cur => return false, // reached entry / unreachable
-                Some(d) if d == dom => return true,
-                Some(d) => cur = d,
-                None => return false,
-            }
-        }
-    }
-
-    /// All block IDs that have a known immediate dominator.
-    pub fn dominated_ids(&self) -> impl Iterator<Item = &BlockId> {
-        self.id_to_idom.keys()
     }
 }
 

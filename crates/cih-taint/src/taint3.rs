@@ -40,6 +40,7 @@ use std::collections::HashSet;
 use cih_core::NodeId;
 
 use crate::cfg::Cfg;
+use crate::confidence::{PHASE3_CLEAN, PHASE3_CONDITIONAL, PHASE3_CONFIRMED};
 use crate::ir::{StatementKind, StatementNode};
 use crate::pdg::{param_def_id, Pdg, PdgEdgeKind, ReachingDefs};
 
@@ -130,7 +131,13 @@ pub fn analyze_with_pdg(
                                 call_name: call_name.to_string(),
                                 tainted_args,
                             });
-                        } else if is_control_dep_tainted(&stmt.id, pdg, cfg, &tainted_defs, reaching) {
+                        } else if is_control_dep_tainted(
+                            &stmt.id,
+                            pdg,
+                            cfg,
+                            &tainted_defs,
+                            reaching,
+                        ) {
                             conditionally_tainted_sinks.push(stmt.id.clone());
                         }
                     }
@@ -146,11 +153,11 @@ pub fn analyze_with_pdg(
     }
 
     let confidence_multiplier = if !confirmed_sinks.is_empty() {
-        1.30
+        PHASE3_CONFIRMED
     } else if !conditionally_tainted_sinks.is_empty() {
-        0.85
+        PHASE3_CONDITIONAL
     } else {
-        0.60
+        PHASE3_CLEAN
     };
 
     Phase3Result {
@@ -174,7 +181,9 @@ fn propagate_pass(
 ) -> bool {
     let mut changed = false;
     for block_id in rpo {
-        let Some(block) = cfg.block(block_id) else { continue };
+        let Some(block) = cfg.block(block_id) else {
+            continue;
+        };
         for stmt in &block.stmts {
             if stmt.writes.is_empty() {
                 continue;
@@ -231,9 +240,8 @@ fn tainted_args_of(
     stmt.call_args
         .iter()
         .filter(|arg| {
-            rd.get(*arg).map_or(false, |defs| {
-                defs.iter().any(|d| tainted_defs.contains(d))
-            })
+            rd.get(*arg)
+                .map_or(false, |defs| defs.iter().any(|d| tainted_defs.contains(d)))
         })
         .cloned()
         .collect()
@@ -265,7 +273,9 @@ fn is_control_dep_tainted(
         // Check whether any variable that the branch condition actually *reads* has a
         // tainted reaching def. Restrict to branch.reads to avoid false positives from
         // unrelated tainted locals that happen to be live at the branch point.
-        let Some(branch_rd) = reaching.get(&edge.from) else { continue };
+        let Some(branch_rd) = reaching.get(&edge.from) else {
+            continue;
+        };
         let branch_reads: HashSet<&String> = cfg
             .stmt_by_id(&edge.from)
             .map(|s| s.reads.iter().collect())
@@ -356,8 +366,12 @@ pub fn refine_paths_phase3(
             let pdg = crate::pdg::build_pdg(&cfg, Some(&dom), Some(&reaching));
 
             let result = analyze_with_pdg(
-                &cfg, &pdg, &reaching, &cfg.param_names,
-                sink_name_patterns, sanitizer_patterns,
+                &cfg,
+                &pdg,
+                &reaching,
+                &cfg.param_names,
+                sink_name_patterns,
+                sanitizer_patterns,
             );
 
             let pdg_confirmed = !result.confirmed_sinks.is_empty();
@@ -427,9 +441,16 @@ class Dao {
     }
 }
 "#;
-        let r = run(src, "Method:com.example.Dao#query/1", &["input"], &["execute"]);
+        let r = run(
+            src,
+            "Method:com.example.Dao#query/1",
+            &["input"],
+            &["execute"],
+        );
         assert!(!r.confirmed_sinks.is_empty(), "should confirm sink");
-        assert!(r.confirmed_sinks[0].tainted_args.contains(&"input".to_string()));
+        assert!(r.confirmed_sinks[0]
+            .tainted_args
+            .contains(&"input".to_string()));
     }
 
     /// Propagation: tainted flows through assignment then into sink.
@@ -444,7 +465,10 @@ class Dao {
 }
 "#;
         let r = run(src, "Method:com.example.Dao#run/1", &["cmd"], &["exec"]);
-        assert!(!r.confirmed_sinks.is_empty(), "should confirm sink via assign chain");
+        assert!(
+            !r.confirmed_sinks.is_empty(),
+            "should confirm sink via assign chain"
+        );
     }
 
     /// Kill: reassignment with a literal kills the taint.
@@ -458,7 +482,12 @@ class Dao {
     }
 }
 "#;
-        let r = run(src, "Method:com.example.Dao#process/1", &["x"], &["execute"]);
+        let r = run(
+            src,
+            "Method:com.example.Dao#process/1",
+            &["x"],
+            &["execute"],
+        );
         // After `x = "safe"`, x is no longer tainted.
         // Phase 3 should NOT confirm the sink.
         // (Phase 1 would have confirmed it because x was ever tainted.)
@@ -494,7 +523,12 @@ class Foo {
     }
 }
 "#;
-        let r = run(src, "Method:com.example.Foo#get/1", &["input"], &["execute"]);
+        let r = run(
+            src,
+            "Method:com.example.Foo#get/1",
+            &["input"],
+            &["execute"],
+        );
         assert!(r.taint_return, "should detect tainted return");
     }
 
@@ -524,7 +558,12 @@ class Web {
         );
         // Without the sanitizer check, the taint would propagate and print would be confirmed.
         // Verify this by running again without the sanitizer pattern — should confirm.
-        let r2 = run(src, "Method:com.example.Web#render/1", &["input"], &["print"]);
+        let r2 = run(
+            src,
+            "Method:com.example.Web#render/1",
+            &["input"],
+            &["print"],
+        );
         assert!(
             !r2.confirmed_sinks.is_empty(),
             "without sanitizer pattern, print should be confirmed (baseline check)"
@@ -566,7 +605,12 @@ class Dao {
     }
 }
 "#;
-        let r = run(src, "Method:com.example.Dao#run/1", &["input"], &["execute"]);
+        let r = run(
+            src,
+            "Method:com.example.Dao#run/1",
+            &["input"],
+            &["execute"],
+        );
         assert!(
             !r.confirmed_sinks.is_empty(),
             "sink on assignment RHS should be confirmed; sinks={:?}",

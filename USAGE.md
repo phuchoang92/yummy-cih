@@ -108,7 +108,7 @@ being developed.
 
 ## LLM Enrichment
 
-The `wiki` command can call an LLM to generate richer documentation (descriptions, business summaries, feature grouping). See **[docs/llm-providers.md](llm-providers.md)** for the full provider guide, including:
+The `wiki` command can call an LLM to generate richer documentation (descriptions, business summaries, feature grouping). See **[docs/llm-providers.md](docs/llm-providers.md)** for the full provider guide, including:
 
 - Quick-start commands for DeepSeek, Gemini, Anthropic, OpenAI, and self-hosted models.
 - API key environment variable names per provider.
@@ -267,7 +267,7 @@ $REPO/.cih/artifacts-community/<version>/
 Required environment variable:
 
 ```bash
-export CIH_PG_URL=postgres://user:password@localhost:5432/database
+export CIH_PG_URL=postgres://cih:changeme@localhost:5433/cih
 ```
 
 Run with the default model:
@@ -290,6 +290,197 @@ cargo run -p cih-engine -- embed "$REPO" --json
 ```
 
 The first embedding run can be slower because the model may need to download.
+
+### Wiki
+
+`wiki` renders a role-based documentation bundle from the graph artifacts produced by
+`analyze`, `discover`, and (optionally) `embed`. Outputs Markdown pages to
+`$REPO/.cih/wiki/pages/`.
+
+Basic run (static graph-only, no LLM):
+
+```bash
+cargo run -p cih-engine -- wiki "$REPO"
+```
+
+Custom output directory:
+
+```bash
+cargo run -p cih-engine -- wiki "$REPO" --out /tmp/my-wiki
+```
+
+With LLM enrichment:
+
+```bash
+# DeepSeek
+DEEPSEEK_API_KEY="sk-..." \
+cargo run -p cih-engine -- wiki "$REPO" \
+  --llm --llm-provider deepseek --llm-model deepseek-chat --llm-max-tokens 4096
+
+# Google Gemini
+GEMINI_API_KEY="AQ...." \
+cargo run -p cih-engine -- wiki "$REPO" \
+  --llm --llm-provider gemini --llm-model gemini-2.5-flash --llm-max-tokens 4096
+
+# Anthropic Claude
+ANTHROPIC_API_KEY="sk-ant-..." \
+cargo run -p cih-engine -- wiki "$REPO" \
+  --llm --llm-provider anthropic --llm-model claude-haiku-4-5-20251001
+
+# OpenAI
+OPENAI_API_KEY="sk-..." \
+cargo run -p cih-engine -- wiki "$REPO" \
+  --llm --llm-provider openai-compatible --llm-model gpt-4o-mini
+
+# Local Ollama (no key needed)
+cargo run -p cih-engine -- wiki "$REPO" \
+  --llm --llm-provider openai-compatible \
+  --llm-base-url http://localhost:11434/v1 --llm-model llama3:8b
+```
+
+Wiki modes (pass `--wiki-mode`):
+
+| Mode | Behaviour |
+| --- | --- |
+| `graph` (default) | No LLM; renders from graph data only |
+| `llm-summary` | Adds a short LLM summary to each page |
+| `llm-full` | Full LLM-enriched content for every page |
+
+Generate an HTML viewer alongside the Markdown:
+
+```bash
+cargo run -p cih-engine -- wiki "$REPO" --html
+```
+
+Process only specific communities (useful during development):
+
+```bash
+cargo run -p cih-engine -- wiki "$REPO" \
+  --filter-community payment \
+  --llm --llm-provider deepseek
+```
+
+Main outputs:
+
+```text
+$REPO/.cih/wiki/pages/
+  index.md
+  routes.md
+  <feature>/
+    index.md
+    po.md
+    ba.md
+    dev/<class>.md
+```
+
+### Interactive TUI (`ui`)
+
+`ui` opens an interactive terminal interface for building and running cih commands without
+needing to remember flag names.
+
+```bash
+cargo run -p cih-engine -- ui
+```
+
+Navigation:
+- **Arrow keys / j/k** — move between commands (left panel) and fields (right panel)
+- **Enter** — select a command or toggle a field
+- **Tab** — switch between the command list and the field panel
+- **i** — enter edit mode for text fields
+- **Esc** — exit edit mode / cancel
+- **r** — review the assembled command and confirm to run it
+- **q** — quit
+
+The TUI covers: `scan`, `analyze`, `discover`, `embed`, and `wiki`. Set your env vars
+(`FALKOR_URL`, `CIH_GRAPH_KEY`, etc.) before launching — the TUI inherits them.
+
+### Interactive Wizard (`start`)
+
+`start` is a guided step-by-step wizard that walks through env setup, FalkorDB and Postgres
+startup, and the full indexing pipeline. Useful for first-time setup on a new machine.
+
+```bash
+cargo run -p cih-engine -- start
+```
+
+Non-interactive mode (scripting):
+
+```bash
+cargo run -p cih-engine -- start \
+  --repo /path/to/java-project \
+  --repo-name my-service \
+  --postgres-password changeme \
+  --non-interactive
+```
+
+Dry run (print the plan without writing files):
+
+```bash
+cargo run -p cih-engine -- start --repo /path/to/java-project --dry-run
+```
+
+### Repo Registry (`list`, `status`)
+
+List all repos registered in `~/.cih/registry.json`:
+
+```bash
+cargo run -p cih-engine -- list
+cargo run -p cih-engine -- list --json
+```
+
+Show registry status for a specific repo:
+
+```bash
+cargo run -p cih-engine -- status my-service
+cargo run -p cih-engine -- status /absolute/path/to/java-project --json
+```
+
+### Group (cross-service contracts)
+
+Manage multi-repo groups for cross-service HTTP and event contract analysis:
+
+```bash
+# Create a group
+cargo run -p cih-engine -- group create my-group
+
+# Add repos to the group
+cargo run -p cih-engine -- group add my-group payment-service
+cargo run -p cih-engine -- group add my-group order-service
+
+# List groups
+cargo run -p cih-engine -- group list
+
+# Sync contract matches across the group
+cargo run -p cih-engine -- group sync my-group
+
+# Remove a repo from a group
+cargo run -p cih-engine -- group remove my-group payment-service
+```
+
+### Features
+
+Inspect and override feature grouping assignments detected during `discover`:
+
+```bash
+cargo run -p cih-engine -- features show "$REPO"
+cargo run -p cih-engine -- features override "$REPO" --community payments --feature Payments
+```
+
+### Artifact (bundle import/export)
+
+Export and import `.cih/` state for sharing or offline bootstrap:
+
+```bash
+# Export current artifacts to a bundle
+cargo run -p cih-engine -- artifact export "$REPO"
+cargo run -p cih-engine -- artifact export "$REPO" --out /tmp/my-bundle.zst
+
+# Import a bundle (restores incremental state)
+cargo run -p cih-engine -- artifact import "$REPO" --bundle /tmp/my-bundle.zst
+
+# Bootstrap: import bundle + bulk-load into FalkorDB + register repo
+cargo run -p cih-engine -- artifact bootstrap "$REPO" --bundle /tmp/my-bundle.zst
+```
 
 ## Scope Selection
 
@@ -366,7 +557,7 @@ cargo run -p cih-server
 Optional semantic search:
 
 ```bash
-export CIH_PG_URL=postgres://user:password@localhost:5432/database
+export CIH_PG_URL=postgres://cih:changeme@localhost:5433/cih
 ```
 
 Server environment variables:
@@ -432,16 +623,15 @@ These files are usually local analysis artifacts. In most application repositori
 ## Common Command Cheat Sheet
 
 ```bash
-# From yummy-cih
-cd /Users/phuc/BigMoves/AI/yummy-cih
-
-# Point to the target Java repository
+# From the yummy-cih repo root
 export REPO=/absolute/path/to/java-repository
 
-# Start FalkorDB
-docker run -d --name falkordb -p 6380:6379 falkordb/falkordb:latest
+# Start backing services (FalkorDB on :6380, Postgres on :5433)
+POSTGRES_PASSWORD=changeme docker compose up -d falkordb postgres
+
 export FALKOR_URL=redis://127.0.0.1:6380
 export CIH_GRAPH_KEY=cih
+export CIH_PG_URL=postgres://cih:changeme@localhost:5433/cih
 
 # Scan
 cargo run -p cih-engine -- scan "$REPO"
@@ -455,15 +645,27 @@ cargo run -p cih-engine -- analyze "$REPO" --module app
 # Analyze without loading graph
 cargo run -p cih-engine -- analyze "$REPO" --all --no-load
 
-# Re-run resolver
+# Re-run resolver only
 cargo run -p cih-engine -- resolve "$REPO"
 
 # Discover communities and process traces
 cargo run -p cih-engine -- discover "$REPO"
 
+# Embed nodes into pgvector
+cargo run -p cih-engine -- embed "$REPO"
+
+# Generate wiki docs
+cargo run -p cih-engine -- wiki "$REPO"
+
+# Open interactive TUI
+cargo run -p cih-engine -- ui
+
 # Start MCP server
 export CIH_ARTIFACTS_DIR="$REPO/.cih/artifacts"
 cargo run -p cih-server
+
+# Run all tests
+cargo test --workspace
 ```
 
 ## Troubleshooting
@@ -533,6 +735,6 @@ cargo run -p cih-engine -- analyze "$REPO" --all --include-decompiled
 Confirm `CIH_PG_URL` is set and the database has pgvector support enabled. Then rerun:
 
 ```bash
-export CIH_PG_URL=postgres://user:password@localhost:5432/database
+export CIH_PG_URL=postgres://cih:changeme@localhost:5433/cih
 cargo run -p cih-engine -- embed "$REPO"
 ```
