@@ -40,7 +40,7 @@ use std::collections::HashSet;
 use cih_core::NodeId;
 
 use crate::cfg::Cfg;
-use crate::confidence::{PHASE3_CLEAN, PHASE3_CONDITIONAL, PHASE3_CONFIRMED};
+use crate::confidence::{PDG_CLEAN, PDG_CONDITIONAL, PDG_CONFIRMED};
 use crate::ir::{StatementKind, StatementNode};
 use crate::pdg::{param_def_id, Pdg, PdgEdgeKind, ReachingDefs};
 
@@ -153,11 +153,11 @@ pub fn analyze_with_pdg(
     }
 
     let confidence_multiplier = if !confirmed_sinks.is_empty() {
-        PHASE3_CONFIRMED
+        PDG_CONFIRMED
     } else if !conditionally_tainted_sinks.is_empty() {
-        PHASE3_CONDITIONAL
+        PDG_CONDITIONAL
     } else {
-        PHASE3_CLEAN
+        PDG_CLEAN
     };
 
     Phase3Result {

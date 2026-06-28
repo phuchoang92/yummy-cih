@@ -24,7 +24,7 @@ use std::collections::HashSet;
 
 use cih_core::NodeId;
 
-use crate::confidence::{PHASE1_CONFIRMED, PHASE1_NO_FLOW};
+use crate::confidence::{LIVENESS_CONFIRMED, LIVENESS_NO_FLOW};
 use crate::ir::{MethodBody, StatementKind};
 
 // ── Result types ─────────────────────────────────────────────────────────────
@@ -177,7 +177,7 @@ pub fn refine_paths(
                         intra_confirmed: confirmed,
                         ir_unavailable: false,
                         // Confirmed intra-flow → boost; no intra-flow → modest penalty.
-                        confidence_multiplier: if confirmed { PHASE1_CONFIRMED } else { PHASE1_NO_FLOW },
+                        confidence_multiplier: if confirmed { LIVENESS_CONFIRMED } else { LIVENESS_NO_FLOW },
                     }
                 }
             }
