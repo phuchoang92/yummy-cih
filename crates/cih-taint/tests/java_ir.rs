@@ -1,4 +1,5 @@
-use super::*;
+use cih_core::NodeId;
+use cih_taint::{java_ir::extract_method_body, StatementKind};
 
 fn mid(s: &str) -> NodeId {
     NodeId::new(s)
@@ -8,10 +9,10 @@ fn mid(s: &str) -> NodeId {
 fn parse_simple_method() {
     let src = r#"
 class Foo {
-public String process(String input) {
-    String result = sanitize(input);
-    return result;
-}
+    public String process(String input) {
+        String result = sanitize(input);
+        return result;
+    }
 }
 "#;
     let id = mid("Method:com.example.Foo#process/1");
@@ -42,11 +43,11 @@ fn parse_method_not_found_returns_none() {
 fn parse_if_and_call() {
     let src = r#"
 class OrderService {
-void save(String query) {
-    if (query != null) {
-        jdbcTemplate.execute(query);
+    void save(String query) {
+        if (query != null) {
+            jdbcTemplate.execute(query);
+        }
     }
-}
 }
 "#;
     let id = mid("Method:com.example.OrderService#save/1");

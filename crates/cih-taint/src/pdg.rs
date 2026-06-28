@@ -359,7 +359,3 @@ pub fn build_pdg(
     Pdg::new(cfg.callable_id.clone(), all_edges)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests;

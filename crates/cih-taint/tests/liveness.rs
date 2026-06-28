@@ -1,6 +1,5 @@
-use super::*;
-use crate::ir::{MethodBody, StatementKind, StatementNode};
 use cih_core::{NodeId, Range};
+use cih_taint::{analyze_method, MethodBody, StatementKind, StatementNode};
 
 fn mid(s: &str) -> NodeId {
     NodeId::new(s)
@@ -29,20 +28,11 @@ fn stmt(
 
 #[test]
 fn confirms_direct_tainted_sink_call() {
-    // void process(String input) { jdbcTemplate.execute(input); }
     let id = mid("Method:com.example.Foo#process/1");
     let body = MethodBody {
         callable_id: id.clone(),
         param_names: vec!["input".to_string()],
-        statements: vec![stmt(
-            &id,
-            StatementKind::Call,
-            &[],
-            &[],
-            Some("execute"),
-            &["input"],
-            10,
-        )],
+        statements: vec![stmt(&id, StatementKind::Call, &[], &[], Some("execute"), &["input"], 10)],
     };
 
     let result = analyze_method(&body, &["input".to_string()], &["execute"]);
@@ -53,7 +43,6 @@ fn confirms_direct_tainted_sink_call() {
 
 #[test]
 fn propagates_taint_through_assign_then_sink() {
-    // void process(String input) { String q = build(input); execute(q); }
     let id = mid("Method:com.example.Foo#process/1");
     let body = MethodBody {
         callable_id: id.clone(),
@@ -71,7 +60,6 @@ fn propagates_taint_through_assign_then_sink() {
 
 #[test]
 fn no_taint_no_sink_confirmation() {
-    // void process(String input) { execute(hardcoded); }  — non-tainted arg
     let id = mid("Method:com.example.Foo#process/1");
     let body = MethodBody {
         callable_id: id.clone(),
@@ -93,20 +81,11 @@ fn no_taint_no_sink_confirmation() {
 
 #[test]
 fn taint_return_detected() {
-    // String process(String input) { return input; }
     let id = mid("Method:com.example.Foo#process/1");
     let body = MethodBody {
         callable_id: id.clone(),
         param_names: vec!["input".to_string()],
-        statements: vec![stmt(
-            &id,
-            StatementKind::Return,
-            &["input"],
-            &[],
-            None,
-            &[],
-            10,
-        )],
+        statements: vec![stmt(&id, StatementKind::Return, &["input"], &[], None, &[], 10)],
     };
 
     let result = analyze_method(&body, &["input".to_string()], &["execute"]);

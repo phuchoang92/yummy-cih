@@ -48,7 +48,7 @@ use crate::pdg::{param_def_id, Pdg, PdgEdgeKind, ReachingDefs};
 
 /// A sink call confirmed reachable by a tainted data-def chain.
 #[derive(Debug, Clone)]
-pub struct ConfirmedSink3 {
+pub struct PdgSink {
     /// Statement node ID of the sink call.
     pub stmt_id: NodeId,
     /// Callee name as extracted from the AST.
@@ -59,10 +59,10 @@ pub struct ConfirmedSink3 {
 
 /// Full Phase 3 result for a single method analysis.
 #[derive(Debug)]
-pub struct Phase3Result {
+pub struct PdgResult {
     pub callable_id: NodeId,
     /// Sinks confirmed via a tainted data-dependence chain.
-    pub confirmed_sinks: Vec<ConfirmedSink3>,
+    pub confirmed_sinks: Vec<PdgSink>,
     /// Statement IDs of sinks that are control-dependent on tainted branches
     /// but have no direct data-dep taint evidence.
     pub conditionally_tainted_sinks: Vec<NodeId>,
@@ -94,7 +94,7 @@ pub fn analyze_with_pdg(
     tainted_params: &[String],
     sink_name_patterns: &[&str],
     sanitizer_patterns: &[&str],
-) -> Phase3Result {
+) -> PdgResult {
     let callable_id = cfg.callable_id.clone();
 
     // Seed: virtual parameter-definition node IDs are initially tainted.
@@ -126,7 +126,7 @@ pub fn analyze_with_pdg(
                     if !call_name.is_empty() && is_sink(call_name, sink_name_patterns) {
                         let tainted_args = tainted_args_of(stmt, reaching, &tainted_defs);
                         if !tainted_args.is_empty() {
-                            confirmed_sinks.push(ConfirmedSink3 {
+                            confirmed_sinks.push(PdgSink {
                                 stmt_id: stmt.id.clone(),
                                 call_name: call_name.to_string(),
                                 tainted_args,
@@ -160,7 +160,7 @@ pub fn analyze_with_pdg(
         PDG_CLEAN
     };
 
-    Phase3Result {
+    PdgResult {
         callable_id,
         confirmed_sinks,
         conditionally_tainted_sinks,
@@ -317,9 +317,9 @@ fn is_sanitizer(call_name: &str, node_id_patterns: &[&str]) -> bool {
 
 // ── Refinement glue for taint_cmd.rs ─────────────────────────────────────────
 
-/// Per-path refinement produced by Phase 3. Parallel to [`crate::phase1::PathRefinement`].
+/// Per-path refinement produced by Phase 3. Parallel to [`crate::liveness::PathRefinement`].
 #[derive(Debug)]
-pub struct Phase3Refinement {
+pub struct PdgRefinement {
     /// Index into the original `paths` slice.
     pub path_index: usize,
     /// True if at least one confirmed sink was found.
@@ -340,13 +340,13 @@ pub struct Phase3Refinement {
 /// Tainted parameters are derived automatically from the CFG: since `path.source` is
 /// an HTTP-handler / event-listener (identified by Phase 0), all of its formal parameters
 /// arrive with untrusted data and are therefore seeded as tainted.
-pub fn refine_paths_phase3(
-    paths: &[crate::pass::TaintPath],
+pub fn refine_paths(
+    paths: &[crate::interproc::TaintPath],
     get_node_file: &dyn Fn(&NodeId) -> Option<String>,
     resolve_src: impl Fn(&str) -> Option<String>,
     sink_name_patterns: &[&str],
     sanitizer_patterns: &[&str],
-) -> Vec<Phase3Refinement> {
+) -> Vec<PdgRefinement> {
     paths
         .iter()
         .enumerate()
@@ -378,7 +378,7 @@ pub fn refine_paths_phase3(
             let pdg_conditional = !result.conditionally_tainted_sinks.is_empty();
             let pdg_clean = !pdg_confirmed && !pdg_conditional;
 
-            Phase3Refinement {
+            PdgRefinement {
                 path_index: i,
                 pdg_confirmed,
                 pdg_conditional,
@@ -389,8 +389,8 @@ pub fn refine_paths_phase3(
         .collect()
 }
 
-fn unavailable(path_index: usize) -> Phase3Refinement {
-    Phase3Refinement {
+fn unavailable(path_index: usize) -> PdgRefinement {
+    PdgRefinement {
         path_index,
         pdg_confirmed: false,
         pdg_conditional: false,
@@ -399,7 +399,3 @@ fn unavailable(path_index: usize) -> Phase3Refinement {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests;

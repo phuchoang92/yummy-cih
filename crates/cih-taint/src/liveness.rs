@@ -137,7 +137,7 @@ pub struct PathRefinement {
 ///
 /// Returns one [`PathRefinement`] per path (same length as `paths`).
 pub fn refine_paths(
-    paths: &[crate::pass::TaintPath],
+    paths: &[crate::interproc::TaintPath],
     node_file: &dyn Fn(&cih_core::NodeId) -> Option<String>,
     resolve_src: impl Fn(&str) -> Option<String>,
     sink_name_patterns: &[&str],
@@ -184,6 +184,3 @@ pub fn refine_paths(
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests;

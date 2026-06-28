@@ -92,7 +92,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     if flags.intra_proc && !paths.is_empty() {
         ui.spin("Phase 1: intra-procedural IR refinement");
 
-        let refinements = cih_taint::phase1::refine_paths(
+        let refinements = cih_taint::liveness::refine_paths(
             &paths,
             &|id| node_map.get(id).map(|n| n.file.clone()),
             |file| std::fs::read_to_string(repo_ref.join(file)).ok(),
@@ -162,7 +162,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         let sanitizer_patterns: Vec<&str> =
             rules.sanitizers.iter().map(|s| s.node_id_pattern.as_str()).collect();
 
-        let refinements = cih_taint::taint3::refine_paths_phase3(
+        let refinements = cih_taint::flow_sensitive::refine_paths(
             &paths,
             &|id| node_map.get(id).map(|n| n.file.clone()),
             |file| std::fs::read_to_string(repo_ref.join(file)).ok(),

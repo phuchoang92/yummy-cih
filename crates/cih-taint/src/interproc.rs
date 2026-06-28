@@ -199,6 +199,3 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
 fn confidence_for_edges(edge_count: usize) -> f32 {
     (INTERPROC_BASE - (edge_count.saturating_sub(1) as f32 * INTERPROC_HOP_PENALTY)).max(INTERPROC_FLOOR)
 }
-
-#[cfg(test)]
-mod tests;

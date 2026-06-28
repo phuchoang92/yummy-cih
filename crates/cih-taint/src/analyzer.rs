@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use cih_core::{Edge, Node, NodeId};
 
 use crate::error::TaintResult;
-use crate::pass::TaintPath;
+use crate::interproc::TaintPath;
 use crate::rules::TaintRules;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -109,7 +109,7 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
     let TaintAnalysisInput { nodes, edges, rules, resolve_source, node_file, phases } = input;
 
     // ── Phase 0 ───────────────────────────────────────────────────────────────
-    let mut paths = crate::pass::find_taint_paths(nodes, edges, rules);
+    let mut paths = crate::interproc::find_taint_paths(nodes, edges, rules);
 
     let sink_name_patterns_owned: Vec<String> = rules.extra_sink_name_patterns.clone();
     let sink_patterns: Vec<&str> = sink_name_patterns_owned.iter().map(|s| s.as_str()).collect();
@@ -119,7 +119,7 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
 
     // ── Phase 1 ───────────────────────────────────────────────────────────────
     if phases.run_intra_proc && !paths.is_empty() {
-        let refinements = crate::phase1::refine_paths(
+        let refinements = crate::liveness::refine_paths(
             &paths,
             &*node_file,
             |file| resolve_source(file),
@@ -194,7 +194,7 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
             let reaching = crate::pdg::compute_reaching_defs(cfg, &cfg.param_names);
             let pdg = crate::pdg::build_pdg(cfg, Some(&dom), Some(&reaching));
 
-            let result = crate::taint3::analyze_with_pdg(
+            let result = crate::flow_sensitive::analyze_with_pdg(
                 cfg,
                 &pdg,
                 &reaching,

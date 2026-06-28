@@ -772,7 +772,3 @@ pub fn build_cfg(method_id: &NodeId, src: &str) -> Option<Cfg> {
     })
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests;

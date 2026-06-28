@@ -426,6 +426,3 @@ pub fn extract_method_body(method_id: &NodeId, src: &str) -> Option<MethodBody> 
         statements,
     })
 }
-
-#[cfg(test)]
-mod tests;
