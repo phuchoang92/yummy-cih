@@ -84,7 +84,9 @@ impl DecompileConfig {
 
     /// Collect all JAR file paths that match the configured `dir`+`prefix` pairs.
     ///
-    /// Paths that do not exist or cannot be read are silently skipped.
+    /// Walks the directory tree recursively. A JAR is included when its filename
+    /// starts with the configured prefix (empty prefix = include all JARs).
+    /// Directories that do not exist or cannot be read are silently skipped.
     pub fn collect_jars(&self, repo: &Path) -> Vec<PathBuf> {
         let mut jars = Vec::new();
         for source in &self.sources {
@@ -94,23 +96,11 @@ impl DecompileConfig {
             } else {
                 repo.join(&dir)
             };
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+            if !dir.exists() {
                 tracing::warn!(dir = %dir.display(), "decompile source dir not found — skipping");
                 continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jar") {
-                    continue;
-                }
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                if filename.starts_with(source.prefix.as_str()) {
-                    jars.push(path);
-                }
             }
+            walk_jars(&dir, &source.prefix, &mut jars);
         }
         jars.sort();
         jars
@@ -119,6 +109,22 @@ impl DecompileConfig {
     /// True if there is at least one configured source.
     pub fn is_enabled(&self) -> bool {
         !self.sources.is_empty()
+    }
+}
+
+/// Recursively collect `.jar` files under `dir` whose filename starts with `prefix`.
+fn walk_jars(dir: &Path, prefix: &str, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_jars(&path, prefix, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jar") {
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if filename.starts_with(prefix) {
+                out.push(path);
+            }
+        }
     }
 }
 
