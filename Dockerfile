@@ -42,7 +42,7 @@ RUN find target/release/build -name "libonnxruntime.so*" ! -name "*.gz" \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 \
+    ca-certificates libssl3 openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
 # Binaries
