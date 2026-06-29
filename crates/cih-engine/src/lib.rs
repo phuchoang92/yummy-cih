@@ -4,16 +4,15 @@ pub const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
 pub const DEFAULT_GRAPH_KEY: &str = "cih";
 
 pub mod analyze;
-pub mod config_cmd;
+pub mod cmd;
 pub mod db;
+pub mod taint_config;
 pub mod decompile;
 pub mod decompile_config;
 pub mod discover;
 pub mod embed;
 pub mod feature_strategy;
-pub mod features_cmd;
 pub mod file_cache;
-pub mod group_cmd;
 pub mod group_sync;
 pub mod llm;
 pub mod registry;

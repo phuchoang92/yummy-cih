@@ -1,16 +1,13 @@
 mod analyze;
-mod config_cmd;
+mod cmd;
 mod db;
 mod decompile;
 mod decompile_config;
 mod discover;
-mod taint_cmd;
 mod taint_config;
 mod embed;
 mod feature_strategy;
-mod features_cmd;
 mod file_cache;
-mod group_cmd;
 mod group_sync;
 mod llm;
 mod registry;
@@ -659,7 +656,7 @@ fn main() -> Result<()> {
             if let Some(entry) = reg.find(&name) {
                 let stale = reg.is_stale(&name);
                 let repo_path = std::path::Path::new(&entry.path);
-                let feat_status = features_cmd::load_feature_status(repo_path);
+                let feat_status = cmd::features::load_feature_status(repo_path);
                 if json {
                     #[derive(serde::Serialize)]
                     struct FeatureInfo {
@@ -728,24 +725,24 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Group { command } => match command {
-            GroupCommand::Create { name } => group_cmd::run_group_create(&name),
-            GroupCommand::Add { name, repo } => group_cmd::run_group_add(&name, &repo),
-            GroupCommand::Remove { name, repo } => group_cmd::run_group_remove(&name, &repo),
-            GroupCommand::List { json } => group_cmd::run_group_list(json),
+            GroupCommand::Create { name } => cmd::group::run_group_create(&name),
+            GroupCommand::Add { name, repo } => cmd::group::run_group_add(&name, &repo),
+            GroupCommand::Remove { name, repo } => cmd::group::run_group_remove(&name, &repo),
+            GroupCommand::List { json } => cmd::group::run_group_list(json),
             GroupCommand::Sync {
                 name,
                 falkor_url: _,
                 json,
-            } => group_cmd::run_group_sync(&name, json),
+            } => cmd::group::run_group_sync(&name, json),
         },
         Command::Features { command } => match command {
-            FeaturesCommand::Show { repo, json } => features_cmd::run_features_show(repo, json),
+            FeaturesCommand::Show { repo, json } => cmd::features::run_features_show(repo, json),
             FeaturesCommand::Override {
                 repo,
                 node_id,
                 feature,
                 reason,
-            } => features_cmd::run_features_override(repo, node_id, feature, reason),
+            } => cmd::features::run_features_override(repo, node_id, feature, reason),
         },
         Command::Wiki {
             repo,
@@ -805,9 +802,9 @@ fn main() -> Result<()> {
             filter_route,
             json,
         }),
-        Command::Taint { repo, db, intra_proc, cfg, pdg, json } => taint_cmd::run_taint(
+        Command::Taint { repo, db, intra_proc, cfg, pdg, json } => cmd::taint::run_taint(
             repo,
-            taint_cmd::TaintFlags {
+            cmd::taint::TaintFlags {
                 falkor_url: db.falkor_url,
                 graph_key: db.graph_key,
                 no_load: db.no_load,
@@ -835,7 +832,7 @@ fn main() -> Result<()> {
         }),
         Command::Artifact { command } => run_artifact(command),
         Command::Config { command } => match command {
-            ConfigCommand::Decompile { repo } => config_cmd::run_config_decompile(&repo),
+            ConfigCommand::Decompile { repo } => cmd::config::run_config_decompile(&repo),
         },
         // Handled above before the match; unreachable at runtime.
         Command::Ui => unreachable!(),
