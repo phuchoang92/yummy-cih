@@ -23,9 +23,9 @@ Place at repo root.
 ```toml
 # cih.decompile.toml
 
-tool     = "cfr"              # "cfr" | "jadx"
-tool_jar = "/opt/cfr.jar"     # path to cfr.jar (required for "cfr")
-# tool_bin = "/usr/local/bin/jadx"   # for "jadx"
+tool     = "vineflower"              # "vineflower" (recommended) | "cfr" | "jadx"
+tool_jar = "/opt/vineflower.jar"     # path to vineflower.jar or cfr.jar
+# tool_bin = "/usr/local/bin/jadx"   # for "jadx" only
 cache_dir = ".cih/decompiled" # where decompiled .java files live
 
 [[sources]]

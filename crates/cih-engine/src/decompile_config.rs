@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DecompileConfig {
-    /// Decompiler tool: `"cfr"` (default) or `"jadx"`.
+    /// Decompiler tool: `"vineflower"` (recommended), `"cfr"`, or `"jadx"`.
     pub tool: String,
     /// Absolute path to `cfr.jar` (required when `tool = "cfr"`).
     pub tool_jar: Option<String>,

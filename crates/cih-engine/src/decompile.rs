@@ -1,7 +1,11 @@
-//! JAR decompile pre-step: run CFR or jadx on user-configured JARs before
+//! JAR decompile pre-step: run Vineflower/CFR/jadx on user-configured JARs before
 //! the analyze parse phase, then inject the resulting `.java` files as ordinary
 //! source so the call graph flows through them.
+//!
+//! If `tool_jar` is not set (or the file is missing), Vineflower and CFR are
+//! downloaded automatically from GitHub releases into `.cih/tools/`.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -9,6 +13,29 @@ use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
 use crate::decompile_config::DecompileConfig;
+
+// ── Download metadata ─────────────────────────────────────────────────────────
+
+struct ToolRelease {
+    filename: &'static str,
+    url: &'static str,
+}
+
+fn tool_release(tool: &str) -> Option<ToolRelease> {
+    match tool {
+        "vineflower" => Some(ToolRelease {
+            filename: "vineflower-1.12.0.jar",
+            url: "https://github.com/Vineflower/vineflower/releases/download/1.12.0/vineflower-1.12.0.jar",
+        }),
+        "cfr" => Some(ToolRelease {
+            filename: "cfr-0.152.jar",
+            url: "https://github.com/leibnitz27/cfr/releases/download/0.152/cfr-0.152.jar",
+        }),
+        _ => None,
+    }
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 /// Statistics returned by `run_decompile_precheck`.
 #[derive(Debug, Default)]
@@ -30,6 +57,7 @@ pub fn run_decompile_precheck(
 ) -> Result<(Vec<PathBuf>, DecompileStats)> {
     let jars = config.collect_jars(repo);
     let cache_root = config.resolved_cache_dir(repo);
+    let cih_dir = repo.join(".cih");
 
     let mut stats = DecompileStats {
         jars_found: jars.len(),
@@ -41,6 +69,20 @@ pub fn run_decompile_precheck(
         return Ok((vec![], stats));
     }
 
+    // Resolve (and auto-download if needed) the tool JAR once — before the
+    // parallel loop so we don't race on the download.
+    let tool = if config.tool.is_empty() { "vineflower" } else { config.tool.as_str() };
+    let resolved_tool_jar: Option<String> = if tool != "jadx" {
+        Some(
+            ensure_tool_jar(config, tool, &cih_dir)
+                .with_context(|| format!("resolving decompiler tool '{tool}'"))?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        None
+    };
+
     let results: Vec<(PathBuf, Result<usize>, bool)> = jars
         .par_iter()
         .map(|jar| {
@@ -50,7 +92,7 @@ pub fn run_decompile_precheck(
                 let count = count_java_files(&out_dir);
                 return (out_dir, Ok(count), true);
             }
-            let result = run_one_jar(jar, &out_dir, config);
+            let result = run_one_jar(jar, &out_dir, config, resolved_tool_jar.as_deref());
             let count = match &result {
                 Ok(n) => *n,
                 Err(_) => 0,
@@ -96,22 +138,119 @@ pub fn collect_decompiled_java_files(repo: &Path, out_dirs: &[PathBuf]) -> Vec<S
     files
 }
 
-fn run_one_jar(jar: &Path, out_dir: &Path, config: &DecompileConfig) -> Result<usize> {
+// ── Tool resolution + auto-download ──────────────────────────────────────────
+
+/// Return the path to the tool JAR, downloading it if needed.
+///
+/// Resolution order:
+/// 1. `config.tool_jar` if set and the file exists → use as-is
+/// 2. `config.tool_jar` if set but file missing → error (user explicitly pointed at a bad path)
+/// 3. `tool_jar` not set → auto-download to `<cih_dir>/tools/<filename>`
+fn ensure_tool_jar(config: &DecompileConfig, tool: &str, cih_dir: &Path) -> Result<PathBuf> {
+    // Case 1 & 2: user explicitly configured a path
+    if let Some(configured) = &config.tool_jar {
+        let path = PathBuf::from(configured);
+        if path.exists() {
+            return Ok(path);
+        }
+        bail!(
+            "tool_jar = {configured:?} does not exist — \
+             fix the path in cih.decompile.toml or remove it to enable auto-download"
+        );
+    }
+
+    // Case 3: auto-download
+    let release = tool_release(tool).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no auto-download available for tool {tool:?} — \
+             set `tool_bin` in cih.decompile.toml"
+        )
+    })?;
+
+    let tools_dir = cih_dir.join("tools");
+    std::fs::create_dir_all(&tools_dir)
+        .with_context(|| format!("create tools dir: {}", tools_dir.display()))?;
+
+    let dest = tools_dir.join(release.filename);
+    if dest.exists() {
+        tracing::debug!(path = %dest.display(), "tool JAR already downloaded");
+        return Ok(dest);
+    }
+
+    download_tool(release.url, &dest, release.filename)?;
+    Ok(dest)
+}
+
+/// Download `url` to `dest`, writing via a `.tmp` file for atomicity.
+fn download_tool(url: &str, dest: &Path, display_name: &str) -> Result<()> {
+    eprint!("  Downloading {display_name} ... ");
+    let _ = std::io::stderr().flush();
+
+    let tmp = dest.with_extension("jar.tmp");
+
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("HTTP GET {url}"))?;
+
+    let content_len = response
+        .header("content-length")
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let mut reader = response.into_reader();
+    let mut file = std::fs::File::create(&tmp)
+        .with_context(|| format!("create temp file: {}", tmp.display()))?;
+
+    std::io::copy(&mut reader, &mut file)
+        .with_context(|| format!("write {display_name}"))?;
+
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("rename {} → {}", tmp.display(), dest.display()))?;
+
+    let size_kb = content_len.unwrap_or_else(|| dest.metadata().map(|m| m.len()).unwrap_or(0)) / 1024;
+    eprintln!("done ({size_kb} KB) → {}", dest.display());
+    tracing::info!(path = %dest.display(), "decompiler tool downloaded");
+    Ok(())
+}
+
+// ── Subprocess invocation ─────────────────────────────────────────────────────
+
+fn run_one_jar(
+    jar: &Path,
+    out_dir: &Path,
+    config: &DecompileConfig,
+    tool_jar: Option<&str>,
+) -> Result<usize> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("create decompile output dir: {}", out_dir.display()))?;
 
-    let tool = if config.tool.is_empty() { "cfr" } else { config.tool.as_str() };
+    let tool = if config.tool.is_empty() { "vineflower" } else { config.tool.as_str() };
 
     let status = match tool {
-        "cfr" => {
-            let tool_jar = config
-                .tool_jar
-                .as_deref()
-                .context("cih.decompile.toml: `tool_jar` is required when tool = \"cfr\"")?;
+        "vineflower" => {
+            let jar_path = tool_jar.context(
+                "internal: tool_jar should have been resolved before run_one_jar (vineflower)",
+            )?;
             std::process::Command::new("java")
                 .args([
                     "-jar",
-                    tool_jar,
+                    jar_path,
+                    "--log-level=error",
+                    jar.to_str().unwrap_or(""),
+                    out_dir.to_str().unwrap_or(""),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .with_context(|| format!("spawn java -jar {jar_path} (vineflower)"))?
+        }
+        "cfr" => {
+            let jar_path = tool_jar.context(
+                "internal: tool_jar should have been resolved before run_one_jar (cfr)",
+            )?;
+            std::process::Command::new("java")
+                .args([
+                    "-jar",
+                    jar_path,
                     jar.to_str().unwrap_or(""),
                     "--outputdir",
                     out_dir.to_str().unwrap_or(""),
@@ -121,7 +260,7 @@ fn run_one_jar(jar: &Path, out_dir: &Path, config: &DecompileConfig) -> Result<u
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .with_context(|| format!("spawn java -jar {tool_jar}"))?
+                .with_context(|| format!("spawn java -jar {jar_path} (cfr)"))?
         }
         "jadx" => {
             let tool_bin = config
@@ -139,7 +278,9 @@ fn run_one_jar(jar: &Path, out_dir: &Path, config: &DecompileConfig) -> Result<u
                 .status()
                 .with_context(|| format!("spawn jadx ({tool_bin})"))?
         }
-        other => bail!("unknown decompiler tool {other:?} — expected \"cfr\" or \"jadx\""),
+        other => bail!(
+            "unknown decompiler tool {other:?} — expected \"vineflower\", \"cfr\", or \"jadx\""
+        ),
     };
 
     if !status.success() {
@@ -153,14 +294,15 @@ fn run_one_jar(jar: &Path, out_dir: &Path, config: &DecompileConfig) -> Result<u
     Ok(count_java_files(out_dir))
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 /// Stable cache key for a JAR based on its size + modification time.
-///
-/// Using metadata avoids reading the JAR bytes on every run (which would be
-/// slow for large JARs). Size+mtime is sufficient for cache invalidation:
-/// any meaningful change to the JAR will change at least one of these.
 fn jar_cache_key(jar: &Path) -> String {
     let Ok(meta) = std::fs::metadata(jar) else {
-        return format!("unknown_{}", jar.file_name().and_then(|n| n.to_str()).unwrap_or("jar"));
+        return format!(
+            "unknown_{}",
+            jar.file_name().and_then(|n| n.to_str()).unwrap_or("jar")
+        );
     };
     let size = meta.len();
     let mtime = meta
@@ -169,15 +311,14 @@ fn jar_cache_key(jar: &Path) -> String {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let stem = jar
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or("jar");
+    let stem = jar.file_stem().and_then(|n| n.to_str()).unwrap_or("jar");
     format!("{stem}_{size}_{mtime}")
 }
 
 fn has_java_files(dir: &Path) -> bool {
-    let Ok(rd) = std::fs::read_dir(dir) else { return false };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
     for entry in rd.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("java") {
@@ -197,7 +338,9 @@ fn count_java_files(dir: &Path) -> usize {
 }
 
 fn walk_java_files(dir: &Path, cb: &mut impl FnMut(&Path)) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -207,6 +350,8 @@ fn walk_java_files(dir: &Path, cb: &mut impl FnMut(&Path)) {
         }
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -242,5 +387,39 @@ mod tests {
         let files = collect_decompiled_java_files(repo.path(), &[out_dir]);
         assert_eq!(files.len(), 1);
         assert!(files[0].starts_with(".cih/decompiled/"));
+    }
+
+    #[test]
+    fn ensure_tool_jar_errors_on_missing_configured_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::decompile_config::DecompileConfig {
+            tool: "vineflower".into(),
+            tool_jar: Some("/nonexistent/path/vineflower.jar".into()),
+            ..Default::default()
+        };
+        let err = ensure_tool_jar(&cfg, "vineflower", tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn ensure_tool_jar_returns_existing_configured_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jar = tmp.path().join("vineflower.jar");
+        std::fs::write(&jar, b"fake").unwrap();
+        let cfg = crate::decompile_config::DecompileConfig {
+            tool: "vineflower".into(),
+            tool_jar: Some(jar.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let resolved = ensure_tool_jar(&cfg, "vineflower", tmp.path()).unwrap();
+        assert_eq!(resolved, jar);
+    }
+
+    #[test]
+    fn tool_release_known_tools() {
+        assert!(tool_release("vineflower").is_some());
+        assert!(tool_release("cfr").is_some());
+        assert!(tool_release("jadx").is_none());
+        assert!(tool_release("unknown").is_none());
     }
 }

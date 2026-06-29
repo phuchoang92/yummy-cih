@@ -18,7 +18,7 @@ pub fn run_config_decompile(repo: &Path) -> Result<()> {
     println!("  File: {}\n", repo.join("cih.decompile.toml").display());
 
     // ── Tool selection ─────────────────────────────────────────────────────
-    let tools = ["cfr", "jadx"];
+    let tools = ["vineflower", "cfr", "jadx"];
     let tool_default = tools.iter().position(|t| *t == cfg.tool.as_str()).unwrap_or(0);
     let tool_idx = Select::with_theme(&theme)
         .with_prompt("Decompiler tool")
@@ -28,10 +28,10 @@ pub fn run_config_decompile(repo: &Path) -> Result<()> {
     cfg.tool = tools[tool_idx].to_string();
 
     // ── Tool path ──────────────────────────────────────────────────────────
-    if cfg.tool == "cfr" {
+    if cfg.tool == "vineflower" || cfg.tool == "cfr" {
         cfg.tool_jar = Some(
             Input::<String>::with_theme(&theme)
-                .with_prompt("Path to cfr.jar")
+                .with_prompt("Path to vineflower.jar / cfr.jar")
                 .default(cfg.tool_jar.clone().unwrap_or_default())
                 .allow_empty(true)
                 .interact_text()?,
