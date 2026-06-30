@@ -83,23 +83,35 @@ pub fn run_decompile_precheck(
         None
     };
 
-    let results: Vec<(PathBuf, Result<usize>, bool)> = jars
-        .par_iter()
-        .map(|jar| {
-            let cache_key = jar_cache_key(jar);
-            let out_dir = cache_root.join(&cache_key);
-            if out_dir.exists() && has_java_files(&out_dir) {
+    let threads = safe_parallel_jobs(tool);
+    tracing::info!(threads, tool, "decompile parallelism");
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+    let results: Vec<(PathBuf, Result<usize>, bool)> = pool.install(|| {
+        jars.par_iter().map(|jar| {
+            let stem = jar.file_stem().and_then(|n| n.to_str()).unwrap_or("jar");
+            let out_dir = cache_root.join(stem);
+            if is_cache_valid(jar, &out_dir) {
                 let count = count_java_files(&out_dir);
                 return (out_dir, Ok(count), true);
             }
+            // Stale or missing — wipe and redecompile.
+            let _ = std::fs::remove_dir_all(&out_dir);
             let result = run_one_jar(jar, &out_dir, config, resolved_tool_jar.as_deref());
+            if result.is_ok() {
+                write_jarinfo(jar, &out_dir);
+            }
             let count = match &result {
                 Ok(n) => *n,
                 Err(_) => 0,
             };
             (out_dir, result.map(|_| count), false)
-        })
-        .collect();
+        }).collect()
+    });
 
     let mut out_dirs = Vec::new();
     for (out_dir, result, was_cached) in results {
@@ -136,6 +148,69 @@ pub fn collect_decompiled_java_files(repo: &Path, out_dirs: &[PathBuf]) -> Vec<S
         });
     }
     files
+}
+
+// ── Parallelism ───────────────────────────────────────────────────────────────
+
+/// Compute how many JVM decompile processes to run in parallel.
+///
+/// Each JVM instance (Vineflower) uses ~512 MB; CFR is lighter at ~256 MB.
+/// We cap by both available RAM and CPU count, leaving 20% RAM headroom for
+/// the rest of the system.
+fn safe_parallel_jobs(tool: &str) -> usize {
+    let mb_per_jvm: u64 = if tool == "cfr" { 256 } else { 512 };
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+
+    let ram_limit = available_ram_mb()
+        .map(|ram| {
+            let headroom = ram * 80 / 100; // keep 20% free
+            ((headroom / mb_per_jvm) as usize).max(1)
+        })
+        .unwrap_or(2); // conservative fallback when RAM is unreadable
+
+    let jobs = cpus.min(ram_limit);
+    tracing::debug!(cpus, ram_limit, mb_per_jvm, jobs, "decompile parallelism calculated");
+    jobs.max(1)
+}
+
+/// Available RAM in MB. Returns `None` if it cannot be determined.
+fn available_ram_mb() -> Option<u64> {
+    available_ram_mb_impl()
+}
+
+#[cfg(target_os = "linux")]
+fn available_ram_mb_impl() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn available_ram_mb_impl() -> Option<u64> {
+    let pages: u64 = sysctl_u64("vm.page_free_count")?;
+    let page_size: u64 = sysctl_u64("hw.pagesize")?;
+    Some(pages * page_size / (1024 * 1024))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn available_ram_mb_impl() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn sysctl_u64(name: &str) -> Option<u64> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", name])
+        .output()
+        .ok()?;
+    std::str::from_utf8(&out.stdout).ok()?.trim().parse().ok()
 }
 
 // ── Tool resolution + auto-download ──────────────────────────────────────────
@@ -296,14 +371,9 @@ fn run_one_jar(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Stable cache key for a JAR based on its size + modification time.
-fn jar_cache_key(jar: &Path) -> String {
-    let Ok(meta) = std::fs::metadata(jar) else {
-        return format!(
-            "unknown_{}",
-            jar.file_name().and_then(|n| n.to_str()).unwrap_or("jar")
-        );
-    };
+/// Write `{size}_{mtime}` into `<out_dir>/.jarinfo` so we can detect JAR changes.
+fn write_jarinfo(jar: &Path, out_dir: &Path) {
+    let Ok(meta) = std::fs::metadata(jar) else { return };
     let size = meta.len();
     let mtime = meta
         .modified()
@@ -311,8 +381,26 @@ fn jar_cache_key(jar: &Path) -> String {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let stem = jar.file_stem().and_then(|n| n.to_str()).unwrap_or("jar");
-    format!("{stem}_{size}_{mtime}")
+    let _ = std::fs::write(out_dir.join(".jarinfo"), format!("{size}_{mtime}"));
+}
+
+/// True if the decompile output is present and matches the JAR's current size+mtime.
+fn is_cache_valid(jar: &Path, out_dir: &Path) -> bool {
+    if !has_java_files(out_dir) {
+        return false;
+    }
+    let Ok(meta) = std::fs::metadata(jar) else { return false };
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let expected = format!("{size}_{mtime}");
+    std::fs::read_to_string(out_dir.join(".jarinfo"))
+        .map(|s| s.trim() == expected)
+        .unwrap_or(false)
 }
 
 fn has_java_files(dir: &Path) -> bool {
@@ -358,14 +446,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jar_cache_key_is_stable() {
+    fn cache_valid_after_write_jarinfo() {
         let tmp = tempfile::tempdir().unwrap();
         let jar = tmp.path().join("mfa-core-2.1.jar");
         std::fs::write(&jar, b"fake jar bytes").unwrap();
-        let k1 = jar_cache_key(&jar);
-        let k2 = jar_cache_key(&jar);
-        assert_eq!(k1, k2);
-        assert!(k1.contains("mfa-core-2.1"));
+        let out_dir = tmp.path().join("mfa-core-2.1");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("Foo.java"), b"class Foo {}").unwrap();
+        assert!(!is_cache_valid(&jar, &out_dir), "no .jarinfo yet");
+        write_jarinfo(&jar, &out_dir);
+        assert!(is_cache_valid(&jar, &out_dir), "valid after write");
     }
 
     #[test]

@@ -29,12 +29,14 @@ COPY --from=ui-builder /build/crates/cih-server/assets/graph \
 
 # Build both release binaries in one pass.
 # ort-download-binaries fetches libonnxruntime.so into target/release/build/ort-sys-*/out/
-RUN cargo build --release -p cih-server -p cih-engine
-
-# Collect the ONNX Runtime shared library into a fixed path so the next stage
-# can COPY it without needing shell glob expansion.
-RUN find target/release/build -name "libonnxruntime.so*" ! -name "*.gz" \
-    -exec cp -L {} /tmp/libonnxruntime.so \; 2>/dev/null ; \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p cih-server -p cih-engine && \
+    cp target/release/cih-server /tmp/cih-server && \
+    cp target/release/cih-engine /tmp/cih-engine && \
+    find target/release/build -name "libonnxruntime.so*" ! -name "*.gz" \
+        -exec cp -L {} /tmp/libonnxruntime.so \; 2>/dev/null ; \
     ls -lh /tmp/libonnxruntime.so 2>/dev/null || echo "ort: no .so found (may be static)"; \
     touch /tmp/libonnxruntime.so
 
@@ -46,8 +48,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Binaries
-COPY --from=builder /build/target/release/cih-server /usr/local/bin/cih-server
-COPY --from=builder /build/target/release/cih-engine /usr/local/bin/cih-engine
+COPY --from=builder /tmp/cih-server /usr/local/bin/cih-server
+COPY --from=builder /tmp/cih-engine /usr/local/bin/cih-engine
 
 # ONNX Runtime shared library (only present if fastembed uses dynamic linking)
 COPY --from=builder /tmp/libonnxruntime.so /usr/local/lib/libonnxruntime.so
