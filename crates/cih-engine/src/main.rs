@@ -25,7 +25,7 @@ mod wiki;
 use std::path::PathBuf;
 
 use analyze::AnalyzeFlags;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 /// Default FalkorDB URL (Homebrew redis squats 6379, FalkorDB on 6380).
@@ -66,7 +66,7 @@ enum Command {
     /// Parse selected files, emit structure graph, and load into FalkorDB.
     Analyze {
         /// Repository root to analyze.
-        repo: PathBuf,
+        repo: Option<PathBuf>,
         /// Select all Java files, excluding decompiled dirs unless requested.
         #[arg(long)]
         all: bool,
@@ -533,24 +533,32 @@ fn main() -> Result<()> {
             no_cache,
             skip_xml_integration,
             languages,
-        } => analyze::run_analyze(
-            repo,
-            AnalyzeFlags {
-                all,
-                modules,
-                include,
-                exclude,
-                include_decompiled,
-                scope,
-                json,
-                falkor_url: db.falkor_url,
-                graph_key: db.graph_key,
-                no_load: db.no_load,
-                no_cache,
-                skip_xml_integration,
-                languages,
-            },
-        ),
+        } => {
+            let repo = match repo {
+                Some(r) => r,
+                None => std::env::current_dir().with_context(|| {
+                    "failed to determine current working directory — pass an explicit repo path or run from a valid directory"
+                })?,
+            };
+            analyze::run_analyze(
+                repo,
+                AnalyzeFlags {
+                    all,
+                    modules,
+                    include,
+                    exclude,
+                    include_decompiled,
+                    scope,
+                    json,
+                    falkor_url: db.falkor_url,
+                    graph_key: db.graph_key,
+                    no_load: db.no_load,
+                    no_cache,
+                    skip_xml_integration,
+                    languages,
+                },
+            )
+        }
         Command::Resolve {
             repo,
             db,
@@ -1003,4 +1011,55 @@ fn register_repo_in_registry(
     std::fs::write(registry_path, json)?;
     println!("Registered repo '{}' in registry.", name);
     Ok(())
+}
+
+// ── CLI argument parse tests ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    /// Parsing `analyze /tmp/repo --all` should set repo to Some("/tmp/repo").
+    #[test]
+    fn test_analyze_explicit_repo() {
+        let result = Cli::try_parse_from(["cih-engine", "analyze", "/tmp/repo", "--all"]);
+        assert!(result.is_ok(), "unexpected parse failure: {result:?}");
+        let cli = result.unwrap();
+        match cli.command {
+            Command::Analyze { repo, .. } => {
+                assert_eq!(repo, Some(PathBuf::from("/tmp/repo")));
+            }
+            other => panic!("expected Analyze command, got {other:?}"),
+        }
+    }
+
+    /// Parsing `analyze --all` (no repo) should keep repo as None (cwd fallback at runtime).
+    #[test]
+    fn test_analyze_omitted_repo() {
+        let result = Cli::try_parse_from(["cih-engine", "analyze", "--all"]);
+        assert!(result.is_ok(), "unexpected parse failure: {result:?}");
+        let cli = result.unwrap();
+        match cli.command {
+            Command::Analyze { repo, .. } => {
+                assert_eq!(repo, None, "repo should be None when omitted, got {repo:?}");
+            }
+            other => panic!("expected Analyze command, got {other:?}"),
+        }
+    }
+
+    /// Parsing `analyze` (no repo, no --all) should succeed — scope gate is a runtime check.
+    #[test]
+    fn test_analyze_no_repo_and_no_scope() {
+        let result = Cli::try_parse_from(["cih-engine", "analyze"]);
+        assert!(result.is_ok(), "unexpected parse failure: {result:?}");
+        let cli = result.unwrap();
+        match cli.command {
+            Command::Analyze { repo, .. } => {
+                assert_eq!(repo, None, "repo should be None when omitted, got {repo:?}");
+            }
+            other => panic!("expected Analyze command, got {other:?}"),
+        }
+    }
 }

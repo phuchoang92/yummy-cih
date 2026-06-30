@@ -193,7 +193,7 @@ fn make_commands() -> Vec<Cmd> {
             name: "analyze",
             desc: "Parse Java source, build call graph, load into FalkorDB.",
             fields: vec![
-                Field::text("", "repo", "Absolute path to the Java/Spring repository root.", "/path/to/java-project", true),
+                Field::text("", "repo", "Repository root. Leave blank to use the current directory.", "/path/to/java-project", false),
                 Field::bool("--all", "--all", "Index every eligible Java file. Most common choice for first runs."),
                 Field::text("--module", "--module", "Comma-separated module names instead of --all, e.g. payment,order,auth.", "payment,order", false),
                 Field::text("--include", "--include", "Glob to add to scope (repo-relative), e.g. src/main/java/**.", "src/main/java/**", false),
@@ -749,5 +749,48 @@ fn event_loop(
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an App that has the analyze Cmd selected.
+    fn analyze_app() -> App {
+        let mut app = App::new();
+        // Find the analyze command index.
+        let idx = app.cmds.iter().position(|c| c.name == "analyze").unwrap();
+        app.cmd_list.select(Some(idx));
+        app
+    }
+
+    #[test]
+    fn analyze_empty_repo_omits_positional_arg() {
+        let app = analyze_app();
+        let assembled = app.assembled_command();
+        assert!(
+            !assembled.contains("<repo>"),
+            "empty optional repo should NOT produce <repo> placeholder, got: {}",
+            assembled
+        );
+        assert_eq!(
+            assembled, "cih-engine analyze",
+            "assembled command should be just 'cih-engine analyze' when repo is empty"
+        );
+    }
+
+    #[test]
+    fn analyze_filled_repo_includes_explicit_path() {
+        let mut app = analyze_app();
+        let idx = app.cmd_idx();
+        app.cmds[idx].fields[0].val =
+            FieldVal::Text("/home/user/my-project".into());
+        let assembled = app.assembled_command();
+        assert_eq!(
+            assembled, "cih-engine analyze /home/user/my-project",
+            "filled optional repo should appear in assembled command, got: {}",
+            assembled
+        );
     }
 }
