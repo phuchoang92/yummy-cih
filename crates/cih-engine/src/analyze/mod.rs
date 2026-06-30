@@ -248,21 +248,16 @@ pub fn analyze_from_scope_with_options(
     // ── Decompile pre-step ────────────────────────────────────────────────
     let decompile_cfg = crate::decompile_config::DecompileConfig::load_or_default(&repo_root);
     let extra_java_files: Vec<String> = if decompile_cfg.is_enabled() {
-        ui.spin("Decompiling JARs");
-        match crate::decompile::run_decompile_precheck(&repo_root, &decompile_cfg) {
-            Ok((dirs, stats)) => {
-                ui.finish_with(format!(
-                    "{} decompiled, {} cached, {} failed  ({} classes)",
-                    stats.jars_decompiled,
-                    stats.jars_cached,
-                    stats.jars_failed,
-                    stats.classes_written,
-                ));
+        let jars = decompile_cfg.collect_jars(&repo_root);
+        ui.start_phase("Decompiling JARs", Some(jars.len() as u64));
+        match crate::decompile::run_decompile_precheck(&repo_root, &decompile_cfg, jars, &ui) {
+            Ok((dirs, _stats)) => {
+                ui.finish_phase();
                 crate::decompile::collect_decompiled_java_files(&repo_root, &dirs)
             }
             Err(err) => {
                 tracing::warn!(error = %err, "decompile pre-step failed — continuing without decompiled JARs");
-                ui.finish_with("decompile failed — skipped".to_string());
+                ui.finish_with("decompile failed — skipped");
                 vec![]
             }
         }

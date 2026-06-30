@@ -64,7 +64,7 @@ fn glyphs() -> &'static Glyphs {
 /// closed with `finish_phase()`. The completed summary line is printed with a
 /// `◆` glyph before the next phase begins (matching codegraph's `finishPhase`).
 pub struct PhaseProgress {
-    bar: ProgressBar,
+    pub(crate) bar: ProgressBar,
     phase_name: String,
     /// Running count of ok / failed for the finish-phase summary.
     ok: Arc<AtomicU64>,
@@ -204,6 +204,12 @@ impl PhaseProgress {
     /// Start an indeterminate spinner phase (shorthand for `start_phase(name, None)`).
     pub fn spin(&mut self, name: impl Into<String>) {
         self.start_phase(name, None);
+    }
+
+    /// Update the bar message without advancing the counter.
+    /// Used by the decompile phase to show currently-active JAR names in-place.
+    pub fn set_label(&self, msg: impl Into<String>) {
+        self.bar.set_message(Cow::Owned(msg.into()));
     }
 
     /// Finish and print a freeform detail string instead of the ok/failed counters.

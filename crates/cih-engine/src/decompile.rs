@@ -5,14 +5,17 @@
 //! If `tool_jar` is not set (or the file is missing), Vineflower and CFR are
 //! downloaded automatically from GitHub releases into `.cih/tools/`.
 
+use std::collections::VecDeque;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
 use crate::decompile_config::DecompileConfig;
+use crate::ui::PhaseProgress;
 
 // ── Download metadata ─────────────────────────────────────────────────────────
 
@@ -51,11 +54,16 @@ pub struct DecompileStats {
 ///
 /// Returns `(output_dirs, stats)` where each path in `output_dirs` is a
 /// directory containing `.java` files that should be added to the parse scope.
+///
+/// `jars` is the pre-collected list from `DecompileConfig::collect_jars` —
+/// the caller obtains it first so it can start a counted progress phase before
+/// calling this function.
 pub fn run_decompile_precheck(
     repo: &Path,
     config: &DecompileConfig,
+    jars: Vec<PathBuf>,
+    progress: &PhaseProgress,
 ) -> Result<(Vec<PathBuf>, DecompileStats)> {
-    let jars = config.collect_jars(repo);
     let cache_root = config.resolved_cache_dir(repo);
     let cih_dir = repo.join(".cih");
 
@@ -91,25 +99,53 @@ pub fn run_decompile_precheck(
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
+    // N-slot live display: each rayon worker holds one slot while processing a JAR.
+    let slots: Arc<Mutex<Vec<Option<String>>>> =
+        Arc::new(Mutex::new(vec![None; threads]));
+    let slot_pool: Arc<Mutex<VecDeque<usize>>> =
+        Arc::new(Mutex::new((0..threads).collect()));
+
     let results: Vec<(PathBuf, Result<usize>, bool)> = pool.install(|| {
         jars.par_iter().map(|jar| {
-            let stem = jar.file_stem().and_then(|n| n.to_str()).unwrap_or("jar");
-            let out_dir = cache_root.join(stem);
-            if is_cache_valid(jar, &out_dir) {
+            let stem = jar.file_stem().and_then(|n| n.to_str()).unwrap_or("jar").to_string();
+            let out_dir = cache_root.join(&stem);
+
+            // Acquire a display slot and mark this JAR as active.
+            let slot_idx = slot_pool.lock().unwrap().pop_front().unwrap();
+            {
+                let mut s = slots.lock().unwrap();
+                s[slot_idx] = Some(stem.clone());
+                progress.set_label(format_slots(&s));
+            }
+
+            let outcome = if is_cache_valid(jar, &out_dir) {
                 let count = count_java_files(&out_dir);
-                return (out_dir, Ok(count), true);
-            }
-            // Stale or missing — wipe and redecompile.
-            let _ = std::fs::remove_dir_all(&out_dir);
-            let result = run_one_jar(jar, &out_dir, config, resolved_tool_jar.as_deref());
-            if result.is_ok() {
-                write_jarinfo(jar, &out_dir);
-            }
-            let count = match &result {
-                Ok(n) => *n,
-                Err(_) => 0,
+                progress.inc_ok();
+                progress.bar.inc(1);
+                (out_dir, Ok(count), true)
+            } else {
+                let _ = std::fs::remove_dir_all(&out_dir);
+                let result = run_one_jar(jar, &out_dir, config, resolved_tool_jar.as_deref());
+                if result.is_ok() {
+                    write_jarinfo(jar, &out_dir);
+                    progress.inc_ok();
+                } else {
+                    progress.inc_failed();
+                }
+                progress.bar.inc(1);
+                let count = result.as_ref().map(|n| *n).unwrap_or(0);
+                (out_dir, result.map(|_| count), false)
             };
-            (out_dir, result.map(|_| count), false)
+
+            // Release slot and clear the JAR name from the display.
+            {
+                let mut s = slots.lock().unwrap();
+                s[slot_idx] = None;
+                progress.set_label(format_slots(&s));
+            }
+            slot_pool.lock().unwrap().push_back(slot_idx);
+
+            outcome
         }).collect()
     });
 
@@ -148,6 +184,15 @@ pub fn collect_decompiled_java_files(repo: &Path, out_dirs: &[PathBuf]) -> Vec<S
         });
     }
     files
+}
+
+// ── Slot display ─────────────────────────────────────────────────────────────
+
+/// Format the N active slot names into a single bar-message string.
+fn format_slots(slots: &[Option<String>]) -> String {
+    let active: Vec<&str> = slots.iter().filter_map(|s| s.as_deref()).collect();
+    if active.is_empty() { return String::new(); }
+    active.join("  │  ")
 }
 
 // ── Parallelism ───────────────────────────────────────────────────────────────
