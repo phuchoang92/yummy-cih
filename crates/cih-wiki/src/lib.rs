@@ -180,7 +180,7 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
     //   "The resource method ClassName.method/N() is called..."
     let sig_needle = format!("{}.", cls);
     let sig_needle_bt = format!("`{}`.", cls);
-    let scan_window = s.len().min(100);
+    let scan_window = s.floor_char_boundary(100);
     let sig_pos_len = s[..scan_window]
         .find(sig_needle_bt.as_str())
         .map(|p| (p, sig_needle_bt.len()))

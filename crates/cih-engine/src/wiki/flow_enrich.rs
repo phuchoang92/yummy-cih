@@ -499,6 +499,9 @@ fn extract_flow_partial(text: &str, step_count: usize) -> Option<FlowLlmSummary>
 }
 
 pub fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
+    if text.trim().is_empty() {
+        bail!("LLM returned an empty response");
+    }
     let stripped = text
         .trim()
         .trim_start_matches("```json")
