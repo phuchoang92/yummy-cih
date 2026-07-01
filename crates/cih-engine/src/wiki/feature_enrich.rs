@@ -145,26 +145,13 @@ pub fn enrich_one_feature(
 }
 
 fn build_feature_system_prompt() -> String {
-    "You are a software architect writing business documentation from code evidence.\n\
-     Write only from the provided evidence. Cite evidence IDs exactly as shown, like [C1-R1],[C1-P1],[C2-B1].\n\
-     Do not invent behavior not in the evidence."
-        .to_string()
+    crate::llm::prompts::FEATURE_SYSTEM_PROMPT.to_string()
 }
 
 pub fn build_feature_user_prompt(feature: &str, evidence: &str) -> String {
     format!(
-        r#"You are writing feature-level documentation for the "{feature}" module.
-
-Evidence (grouped by community):
-{evidence}
-
-Respond ONLY with a JSON object:
-{{
-  "po_overview": "<3-5 sentences of plain-language business overview>",
-  "po_capabilities": "<bullet list of business capabilities, one per line starting with - >",
-  "ba_process_overview": "<3-5 sentences describing business processes and flows>",
-  "ba_business_rules": "<key business rules or invariants, one per line starting with - >"
-}}"#
+        "You are writing feature-level documentation for the \"{feature}\" module.\n\nEvidence (grouped by community):\n{evidence}\n\n{}",
+        crate::llm::prompts::FEATURE_JSON_TEMPLATE
     )
 }
 

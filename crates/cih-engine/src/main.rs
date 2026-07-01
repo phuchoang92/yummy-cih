@@ -10,6 +10,7 @@ mod feature_strategy;
 mod file_cache;
 mod group_sync;
 mod llm;
+mod node_prefix;
 mod registry;
 mod runtime;
 mod scan;

@@ -4,6 +4,7 @@ pub const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
 pub const DEFAULT_GRAPH_KEY: &str = "cih";
 
 pub mod analyze;
+pub mod node_prefix;
 pub mod cmd;
 pub mod db;
 pub mod taint_config;

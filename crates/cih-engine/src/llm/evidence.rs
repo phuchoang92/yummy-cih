@@ -640,8 +640,8 @@ fn add_terms(terms: &mut BTreeSet<String>, text: &str) {
 fn simple_class_from_callable(id: &str) -> Option<String> {
     let (prefix, _) = id.split_once('#')?;
     let fqcn = prefix
-        .trim_start_matches("Method:")
-        .trim_start_matches("Constructor:")
+        .trim_start_matches(crate::node_prefix::METHOD)
+        .trim_start_matches(crate::node_prefix::CONSTRUCTOR)
         .trim_start_matches("Function:");
     fqcn.rsplit('.').next().map(|s| s.to_string())
 }

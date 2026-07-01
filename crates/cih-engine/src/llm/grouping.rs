@@ -259,20 +259,8 @@ fn call_outline_llm(
     outline_evidence: &str,
     estimated_modules: usize,
 ) -> Result<Vec<OutlineModule>> {
-    let system = format!(
-        "You are a software architect designing product modules for a backend service.\n\
-         Your job is to propose a MODULE OUTLINE — the list of distinct business-capability modules \
-         that make sense for this codebase. Do NOT assign communities yet.\n\
-         \n\
-         Rules:\n\
-         1. Group by BUSINESS DOMAIN (bounded context), not technical layer.\n\
-         2. Use route prefixes as the primary signal for domain boundaries.\n\
-         3. Merge weak auto-detected hints like 'repo', 'service', 'dto', 'entity', 'util' into \
-            the domain modules that own them.\n\
-         4. Target approximately {estimated_modules} modules.\n\
-         5. Name modules after the business capability (e.g. orders, payments), not the layer.\n\
-         6. Respond ONLY with a valid JSON object — no prose, no markdown fences."
-    );
+    let system = crate::llm::prompts::MODULE_OUTLINE_SYSTEM_PROMPT
+        .replace("{estimated_modules}", &estimated_modules.to_string());
     let user = format!(
         "Based on this codebase summary, propose a module outline:\n\n\
          {outline_evidence}\n\n\
@@ -309,11 +297,7 @@ fn call_assignment_llm(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let system = "You are a software architect assigning code communities to product modules.\n\
-                  Assign each community to the BEST matching module slug from the established list.\n\
-                  If a community truly does not fit any established module, assign it to the closest one.\n\
-                  Respond ONLY with a valid JSON object — no prose, no markdown fences."
-        .to_string();
+    let system = crate::llm::prompts::COMMUNITY_ASSIGN_SYSTEM_PROMPT.to_string();
 
     let user = format!(
         "ESTABLISHED MODULES:\n{module_list}\n\n\
@@ -404,22 +388,8 @@ fn two_phase_grouping(
 // ── Prompt builders ──────────────────────────────────────────────────────────
 
 fn build_grouping_system(estimated_modules: usize) -> String {
-    format!(
-        "You are a software architect grouping code communities into product modules.\n\
-         \n\
-         Rules:\n\
-         1. Group by BUSINESS DOMAIN (bounded context), not technical layer.\n\
-         2. \"prefixes\" are the PRIMARY signal — communities sharing a route prefix almost always \
-            belong to the same module.\n\
-         3. \"controllers\" and \"tables\" reveal data ownership — group communities that share them.\n\
-         4. \"hint\" is the current auto-grouping — use it as a starting point; fix it where it \
-            lumps unrelated things or uses technical names (repo, service, dto, util).\n\
-         5. Target approximately {estimated_modules} modules. Don't create a module for one tiny \
-            community unless it is truly standalone.\n\
-         6. Name modules after the business capability (orders, payments, customers), not the layer.\n\
-         7. Every community_id must appear in exactly one module.\n\
-         8. Respond ONLY with a valid JSON object — no prose, no markdown fences."
-    )
+    crate::llm::prompts::GROUPING_SYSTEM_PROMPT_TEMPLATE
+        .replace("{estimated_modules}", &estimated_modules.to_string())
 }
 
 fn build_grouping_user(evidence: &str) -> String {

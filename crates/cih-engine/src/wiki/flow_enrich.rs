@@ -36,8 +36,8 @@ fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
             .split_once('#')
             .map(|(prefix, _)| {
                 prefix
-                    .trim_start_matches("Method:")
-                    .trim_start_matches("Constructor:")
+                    .trim_start_matches(crate::node_prefix::METHOD)
+                    .trim_start_matches(crate::node_prefix::CONSTRUCTOR)
                     .rsplit('.')
                     .next()
                     .unwrap_or(prefix)
@@ -48,9 +48,9 @@ fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
             .split_once('#')
             .and_then(|(prefix, _)| {
                 let fqcn = prefix
-                    .trim_start_matches("Method:")
-                    .trim_start_matches("Constructor:");
-                let cls_id = format!("Class:{}", fqcn);
+                    .trim_start_matches(crate::node_prefix::METHOD)
+                    .trim_start_matches(crate::node_prefix::CONSTRUCTOR);
+                let cls_id = format!("{}{}", crate::node_prefix::CLASS, fqcn);
                 graph
                     .nodes_by_id
                     .get(&cls_id)
@@ -78,7 +78,7 @@ fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
                     .flatten()
                     .take(2)
                 {
-                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid);
+                    let name = tid.strip_prefix(crate::node_prefix::DB_TABLE).unwrap_or(tid);
                     tables.push(format!("{}(r)", name));
                 }
                 for tid in graph
@@ -88,7 +88,7 @@ fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
                     .flatten()
                     .take(2)
                 {
-                    let name = tid.strip_prefix("DbTable:").unwrap_or(tid);
+                    let name = tid.strip_prefix(crate::node_prefix::DB_TABLE).unwrap_or(tid);
                     tables.push(format!("{}(w)", name));
                 }
             }
@@ -127,8 +127,8 @@ fn chain_steps_text(chain: &[String], graph: &WikiGraph) -> String {
                 .split_once('#')
                 .map(|(prefix, method)| {
                     let cls = prefix
-                        .trim_start_matches("Method:")
-                        .trim_start_matches("Constructor:")
+                        .trim_start_matches(crate::node_prefix::METHOD)
+                        .trim_start_matches(crate::node_prefix::CONSTRUCTOR)
                         .rsplit('.')
                         .next()
                         .unwrap_or(prefix);
@@ -219,33 +219,12 @@ pub(super) fn enrich_route_flows(
                     return Some((handler_id.clone(), summary, None));
                 }
 
-                let mut system = String::from(
-                    "You are a code documentation assistant. Describe this HTTP request flow \
-                     based solely on the provided call chain. Do not invent behavior not shown. \
-                     Each step description must start with an action verb and must not repeat \
-                     the class name, method name, or arity notation (e.g. /2()).",
-                );
-                if language != "en" {
-                    system.push_str(&format!(
-                        " Write all documentation in language: {}.",
-                        language
-                    ));
-                }
+                let system = crate::llm::prompts::http_flow_system(language);
+                let json_template = crate::llm::prompts::HTTP_FLOW_JSON_TEMPLATE
+                    .replace("{step_count}", &step_count.to_string());
                 let user = format!(
-                    r#"HTTP handler: "{name}"
-
-Call chain ({step_count} steps):
-{steps}
-
-Respond ONLY with this JSON object (no extra commentary):
-{{
-  "narrative": "<2-3 sentences describing this request flow for a business analyst>",
-  "business_impact": "<1-2 sentences describing the business value for a product owner>",
-  "step_descriptions": [<one quoted sentence per step, {step_count} total>]
-}}"#,
-                    name = handler_name,
-                    step_count = step_count,
-                    steps = steps_text,
+                    "HTTP handler: \"{}\"\n\nCall chain ({} steps):\n{}\n\n{}",
+                    handler_name, step_count, steps_text, json_template,
                 );
                 let effective_max_tokens = route_flow_token_budget(step_count, max_tokens);
                 let req = LlmRequest {
@@ -334,35 +313,13 @@ pub(super) fn enrich_one_flow(
         .map(|s| s.len())
         .unwrap_or(0);
 
-    let mut system = String::from(
-        "You are a code documentation assistant. Describe this business process \
-         based solely on the provided evidence. Do not invent behavior not shown.",
-    );
-    if language != "en" {
-        system.push_str(&format!(
-            " Write all documentation in language: {}.",
-            language
-        ));
-    }
-    let evidence_str = if evidence.trim().is_empty() {
-        "none"
-    } else {
-        &evidence
-    };
+    let system = crate::llm::prompts::process_flow_system(language);
+    let evidence_str = if evidence.trim().is_empty() { "none" } else { &evidence };
+    let json_template = crate::llm::prompts::PROCESS_FLOW_JSON_TEMPLATE
+        .replace("{step_count}", &step_count.to_string());
     let user = format!(
-        r#"Process: "{name}"
-
-{evidence}
-
-Respond ONLY with this JSON object (no extra commentary):
-{{
-  "narrative": "<2-3 sentences describing this flow for a business analyst>",
-  "business_impact": "<1-2 sentences describing the business value for a product owner>",
-  "step_descriptions": [<one quoted sentence per step, {step_count} total>]
-}}"#,
-        name = process_node.name,
-        evidence = evidence_str,
-        step_count = step_count,
+        "Process: \"{}\"\n\n{}\n\n{}",
+        process_node.name, evidence_str, json_template,
     );
 
     if debug_evidence {

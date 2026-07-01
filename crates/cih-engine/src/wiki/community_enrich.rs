@@ -113,32 +113,10 @@ pub(super) fn run_process_flow_enrichment(
 }
 
 fn build_full_prompt(name: &str, evidence: &str) -> String {
-    let evidence = if evidence.trim().is_empty() {
-        "none"
-    } else {
-        evidence
-    };
+    let evidence = if evidence.trim().is_empty() { "none" } else { evidence };
     format!(
-        r#"You are writing detailed documentation from a code analysis graph.
-Module: "{name}"
-
-Evidence:
-{evidence}
-
-Write exactly ten JSON fields (2–4 sentences each, cite evidence IDs):
-{{
-  "po_summary": "<business purpose and value>",
-  "po_capabilities": "<key business capabilities exposed>",
-  "po_workflows": "<end-to-end user-facing workflows>",
-  "po_open_questions": "<gaps or assumptions needing clarification>",
-  "ba_process_overview": "<high-level process flow>",
-  "ba_contracts": "<API and event contracts with other modules>",
-  "ba_business_rules": "<validations, rules, and invariants>",
-  "dev_responsibility": "<what this module owns in the system>",
-  "dev_key_classes": "<central classes and their roles>",
-  "dev_entry_points": "<primary entry points: routes, listeners, scheduled tasks>"
-}}
-Only output the JSON object. Do not add commentary."#
+        "You are writing detailed documentation from a code analysis graph.\nModule: \"{name}\"\n\nEvidence:\n{evidence}\n\n{}",
+        crate::llm::prompts::COMMUNITY_FULL_JSON_TEMPLATE
     )
 }
 
@@ -198,15 +176,7 @@ fn enrich_one_community_full(
 ) -> Result<CommunityLlmFull> {
     let evidence_pack = build_evidence_pack(Some(repo), graph, community, evidence_corpus);
     let evidence = evidence_pack.render();
-    let system = format!(
-        "You are a code documentation assistant. Write only from the provided evidence. \
-         Do not invent behavior not in the evidence.{}",
-        if language != "en" {
-            format!(" Write all documentation in language: {}.", language)
-        } else {
-            String::new()
-        }
-    );
+    let system = crate::llm::prompts::community_system(language);
     let user = build_full_prompt(&community.name, &evidence);
     let request = LlmRequest {
         system,

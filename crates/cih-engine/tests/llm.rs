@@ -67,3 +67,84 @@ fn redact_key_hides_key_in_message() {
     assert!(!redacted.contains("ABCDEFGHIJK"), "key should be redacted");
     assert!(redacted.contains("sk-p"), "prefix should survive");
 }
+
+/// Integration test: verifies that prompt constants produce valid JSON via DeepSeek.
+/// Only runs when DEEPSEEK_API_KEY is set in the environment.
+#[test]
+fn integration_deepseek_community_full_prompt() {
+    let api_key = match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => return, // skip when key not set
+    };
+
+    use cih_engine_lib::llm::{make_adapter, LlmProvider, LlmRequest};
+    use cih_engine_lib::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
+
+    let adapter = make_adapter(&LlmProvider::DeepSeek, "https://api.deepseek.com", None)
+        .expect("DeepSeek adapter");
+
+    let system = community_system("en");
+    let user = format!(
+        "Module: \"PaymentService\"\n\nEvidence:\n[R1] POST /api/payments\n[S1] processPayment(){{validateCard(); gateway.charge();}}\n\n{}",
+        COMMUNITY_FULL_JSON_TEMPLATE
+    );
+    let req = LlmRequest { system, user, model: "deepseek-chat".into(), max_tokens: 2000, timeout_secs: 30 };
+
+    let resp = adapter.call(Some(&api_key), &req).expect("DeepSeek call");
+    let text = &resp.text;
+
+    // Same extraction logic as parse_llm_full
+    let (s, e) = (text.find('{'), text.rfind('}'));
+    let json_str = match (s, e) {
+        (Some(s), Some(e)) if s < e => &text[s..=e],
+        _ => text.as_str(),
+    };
+    let val: serde_json::Value = serde_json::from_str(json_str)
+        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nRaw: {}", &text[..text.len().min(300)]));
+
+    for field in &["po_summary", "po_capabilities", "ba_process_overview", "dev_entry_points"] {
+        assert!(
+            val[field].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+            "field '{}' missing or empty in response", field
+        );
+    }
+}
+
+#[test]
+fn integration_deepseek_http_flow_prompt() {
+    let api_key = match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => return,
+    };
+
+    use cih_engine_lib::llm::{make_adapter, LlmProvider, LlmRequest};
+    use cih_engine_lib::llm::prompts::{http_flow_system, HTTP_FLOW_JSON_TEMPLATE};
+
+    let adapter = make_adapter(&LlmProvider::DeepSeek, "https://api.deepseek.com", None)
+        .expect("DeepSeek adapter");
+
+    let step_count = 3usize;
+    let system = http_flow_system("en");
+    let json_template = HTTP_FLOW_JSON_TEMPLATE.replace("{step_count}", &step_count.to_string());
+    let user = format!(
+        "HTTP handler: \"processPayment\"\n\nCall chain (3 steps):\n[1] PaymentController.processPayment() (Controller)\n[2] PaymentService.validate() (Service)\n[3] GatewayClient.charge() (Client)\n\n{}",
+        json_template
+    );
+    let req = LlmRequest { system, user, model: "deepseek-chat".into(), max_tokens: 600, timeout_secs: 30 };
+
+    let resp = adapter.call(Some(&api_key), &req).expect("DeepSeek call");
+    let text = &resp.text;
+
+    let (s, e) = (text.find('{'), text.rfind('}'));
+    let json_str = match (s, e) {
+        (Some(s), Some(e)) if s < e => &text[s..=e],
+        _ => text.as_str(),
+    };
+    let val: serde_json::Value = serde_json::from_str(json_str)
+        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nRaw: {}", &text[..text.len().min(300)]));
+
+    assert!(val["narrative"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "narrative missing");
+    assert!(val["business_impact"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "business_impact missing");
+    let descs = val["step_descriptions"].as_array().expect("step_descriptions should be array");
+    assert!(!descs.is_empty(), "step_descriptions should not be empty");
+}

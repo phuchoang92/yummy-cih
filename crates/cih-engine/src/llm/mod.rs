@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod prompts;
 pub mod evidence;
 pub mod grouping;
 pub mod http_json;

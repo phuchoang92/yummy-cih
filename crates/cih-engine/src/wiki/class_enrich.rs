@@ -264,16 +264,7 @@ pub fn enrich_classes_for_chains(
 }
 
 fn build_class_system_prompt(language: &str) -> String {
-    let mut s = String::from(
-        "You are a code documentation assistant. Describe Java class methods in one sentence \
-         each for a business analyst. Return JSON only. Do not invent behavior. \
-         Start each method description with an action verb. \
-         Do not mention the class name, method name, or arity (e.g. /2()) in the description.",
-    );
-    if language != "en" {
-        s.push_str(&format!(" Write all descriptions in language: {}.", language));
-    }
-    s
+    crate::llm::prompts::class_system(language)
 }
 
 fn build_class_enrich_prompt(fqcn: &str, bodies: &[(&str, &str)]) -> String {
