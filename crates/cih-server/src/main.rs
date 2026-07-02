@@ -274,7 +274,7 @@ impl CihServer {
     }
 
     #[tool(description = "List all repos indexed in the CIH registry with their stats.")]
-    async fn list_repos(&self) -> Result<CallToolResult, McpError> {
+    async fn list_repos(&self, _: Parameters<ListReposArgs>) -> Result<CallToolResult, McpError> {
         let reg = cih_core::Registry::load();
         json_result(&reg.entries)
     }

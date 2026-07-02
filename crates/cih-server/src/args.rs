@@ -203,6 +203,9 @@ pub struct ReadFileArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListReposArgs {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComplexityHotspotsArgs {
     /// Minimum cyclomatic complexity to include (default: 5).
     #[serde(default)]
