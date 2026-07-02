@@ -62,6 +62,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let default_model = match llm_provider {
         LlmProvider::Gemini => "gemini-2.5-flash",
         LlmProvider::Anthropic => "claude-haiku-4-5-20251001",
+        LlmProvider::Bedrock => "us.anthropic.claude-haiku-4-5-20251001",
         LlmProvider::DeepSeek => "deepseek-chat",
         _ => "gpt-4o-mini",
     };

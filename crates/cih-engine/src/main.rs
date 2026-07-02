@@ -159,13 +159,14 @@ enum Command {
         #[arg(long, default_value = "package")]
         feature_strategy: String,
         /// LLM provider for feature classification.
-        /// One of: deepseek, gemini, anthropic, openai-compatible.
+        /// One of: deepseek, gemini, anthropic, bedrock, openai-compatible.
         /// Required when --feature-strategy is llm or hybrid with LLM stage.
         #[arg(long)]
         feature_llm_provider: Option<String>,
         /// LLM model for feature classification.
         /// Defaults: deepseek-chat (deepseek), gemini-2.5-flash (gemini),
-        /// claude-haiku-4-5-20251001 (anthropic), gpt-4o-mini (openai-compatible).
+        /// claude-haiku-4-5-20251001 (anthropic), us.anthropic.claude-haiku-4-5-20251001 (bedrock),
+        /// gpt-4o-mini (openai-compatible).
         #[arg(long, default_value = "")]
         feature_llm_model: String,
         /// Base URL for --feature-llm-provider openai-compatible.
@@ -223,7 +224,7 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
         /// Enable LLM enrichment. Set an API key env var before using:
-        /// DEEPSEEK_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or CIH_LLM_API_KEY.
+        /// DEEPSEEK_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, AWS_BEARER_TOKEN_BEDROCK, or CIH_LLM_API_KEY.
         #[arg(long, env = "CIH_LLM")]
         llm: bool,
         /// Deprecated: alias for --llm. Will be removed in a future release.
@@ -233,6 +234,7 @@ enum Command {
         ///   deepseek          — DeepSeek API (DEEPSEEK_API_KEY, model: deepseek-chat)
         ///   gemini            — Google Gemini API (GEMINI_API_KEY, model: gemini-2.5-flash)
         ///   anthropic         — Anthropic API (ANTHROPIC_API_KEY, model: claude-haiku-4-5-20251001)
+        ///   bedrock           — AWS Bedrock Converse API (AWS_BEARER_TOKEN_BEDROCK, model: us.anthropic.claude-haiku-4-5-20251001)
         ///   openai-compatible — Any OpenAI-compatible endpoint (use with --llm-base-url)
         ///   http-json         — Custom HTTP adapter (use with --llm-provider-config)
         #[arg(long, default_value = "openai-compatible")]
@@ -594,6 +596,7 @@ fn main() -> Result<()> {
                             llm::LlmProvider::DeepSeek => "deepseek-chat".to_string(),
                             llm::LlmProvider::Gemini => "gemini-2.5-flash".to_string(),
                             llm::LlmProvider::Anthropic => "claude-haiku-4-5-20251001".to_string(),
+                            llm::LlmProvider::Bedrock => "us.anthropic.claude-haiku-4-5-20251001".to_string(),
                             _ => "gpt-4o-mini".to_string(),
                         }
                     } else {

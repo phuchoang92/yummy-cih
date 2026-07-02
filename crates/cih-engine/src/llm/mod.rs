@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod bedrock;
 pub mod prompts;
 pub mod evidence;
 pub mod grouping;
@@ -15,6 +16,7 @@ pub enum LlmProvider {
     #[default]
     OpenAiCompatible,
     Anthropic,
+    Bedrock,
     DeepSeek,
     Gemini,
     HttpJson,
@@ -25,6 +27,7 @@ impl std::fmt::Display for LlmProvider {
         f.write_str(match self {
             Self::OpenAiCompatible => "openai-compatible",
             Self::Anthropic => "anthropic",
+            Self::Bedrock => "bedrock",
             Self::DeepSeek => "deepseek",
             Self::Gemini => "gemini",
             Self::HttpJson => "http-json",
@@ -38,11 +41,12 @@ impl std::str::FromStr for LlmProvider {
         match s {
             "openai-compatible" => Ok(Self::OpenAiCompatible),
             "anthropic" => Ok(Self::Anthropic),
+            "bedrock" => Ok(Self::Bedrock),
             "deepseek" => Ok(Self::DeepSeek),
             "gemini" => Ok(Self::Gemini),
             "http-json" => Ok(Self::HttpJson),
             other => bail!(
-                "unknown --llm-provider '{}'; expected openai-compatible | anthropic | deepseek | gemini | http-json",
+                "unknown --llm-provider '{}'; expected openai-compatible | anthropic | bedrock | deepseek | gemini | http-json",
                 other
             ),
         }
@@ -99,6 +103,7 @@ pub fn make_adapter(
     match provider {
         LlmProvider::OpenAiCompatible => Ok(Box::new(openai::OpenAiAdapter::new(base_url))),
         LlmProvider::Anthropic => Ok(Box::new(anthropic::AnthropicAdapter::new(base_url))),
+        LlmProvider::Bedrock => Ok(Box::new(bedrock::BedrockAdapter::new(base_url))),
         LlmProvider::DeepSeek => Ok(Box::new(openai::OpenAiAdapter::new("https://api.deepseek.com"))),
         LlmProvider::Gemini => Ok(Box::new(openai::OpenAiAdapter::new(
             "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -174,6 +179,7 @@ pub fn resolve_api_key(llm_api_key_env: Option<&str>) -> Result<Option<String>> 
     }
 
     Ok(std::env::var("CIH_LLM_API_KEY")
+        .or_else(|_| std::env::var("AWS_BEARER_TOKEN_BEDROCK"))
         .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
         .or_else(|_| std::env::var("GEMINI_API_KEY"))
         .or_else(|_| std::env::var("OPENAI_API_KEY"))
@@ -184,7 +190,7 @@ pub fn resolve_api_key(llm_api_key_env: Option<&str>) -> Result<Option<String>> 
 pub fn require_api_key<'a>(api_key: Option<&'a str>, provider: &str) -> Result<&'a str> {
     api_key.ok_or_else(|| {
         anyhow!(
-            "--llm-provider {} requires an API key in CIH_LLM_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or --llm-api-key-env",
+            "--llm-provider {} requires an API key in CIH_LLM_API_KEY, AWS_BEARER_TOKEN_BEDROCK, OPENAI_API_KEY, ANTHROPIC_API_KEY, or --llm-api-key-env",
             provider
         )
     })
