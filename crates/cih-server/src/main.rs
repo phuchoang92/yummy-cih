@@ -550,18 +550,29 @@ impl ServerHandler for CihServer {
                 ..Default::default()
             },
             instructions: Some(
-                "Code Intelligence Hub — index and query the call graph of any repository. \
-                 Indexing: `index_repo` (start), `index_status` (poll). \
-                 Graph queries: `context`, `impact`, `trace_flow`, `route_map`, `communities`, \
-                 `feature_map`, `search_code`, `query`, `ask_codebase`. \
-                 Multi-repo: `group_contracts`, `api_impact`, `shape_check`. \
-                 Registry: `list_repos`, `status`. \
-                 Change analysis: `detect_changes`. \
-                 Test coverage: `test_coverage`, `regression_scope`, `untested_paths`. \
-                 Source: `read_file`. \
-                 Short symbol names trigger disambiguation; full NodeIds (Kind:fqn) skip it. \
-                 Viz: impact(format=\"diagram\"), trace_flow(format=\"mermaid\"), \
-                 communities(format=\"diagram\"), route_map(format=\"openapi\")."
+                "Code Intelligence Hub (CIH) — structural call-graph intelligence for indexed repositories.\n\
+                 \n\
+                 ## Always use CIH tools instead of grep/read when possible.\n\
+                 \n\
+                 ## NodeId format\n\
+                 Full form: `Kind:fully.qualified.Name` (e.g. `Class:org.phuc.commerce.order.OrderService`, `Route:POST /api/v1/orders`).\n\
+                 Short names (e.g. `OrderService`) also work and trigger interactive disambiguation.\n\
+                 \n\
+                 ## Core workflow\n\
+                 1. `list_repos` — see what is indexed\n\
+                 2. `search_code(query=...)` — find symbols by keyword\n\
+                 3. `context(name=...)` — callers, callees, which routes reach a symbol\n\
+                 4. `impact(name=..., direction=\"upstream\")` — blast radius before changing something; add format=\"diagram\" for a visual\n\
+                 5. `trace_flow(name=\"Route:METHOD /path\")` — follow an HTTP request end-to-end; add format=\"mermaid\" for a diagram\n\
+                 6. `route_map()` — all HTTP routes; add format=\"openapi\" for an OpenAPI spec\n\
+                 7. `communities()` — module/service groupings across the codebase\n\
+                 \n\
+                 ## Indexing\n\
+                 `index_repo(repo_path=\"/abs/path\")` → returns job_id → poll with `index_status(job_id=...)`.\n\
+                 \n\
+                 ## Other tools\n\
+                 `feature_map`, `query`, `ask_codebase`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
+                 `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`."
                     .into(),
             ),
         }
