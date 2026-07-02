@@ -1,6 +1,7 @@
 import { Check, ChevronRight, RefreshCw, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
+import type { GraphSummary } from "./api";
 import { cameraTarget, GalaxyScene } from "./Scene";
 import type { OverviewData, OverviewNode, SymbolContext } from "./types";
 
@@ -9,6 +10,20 @@ const KIND_COLORS: Record<string, string> = {
   Class: "#a855f7", Interface: "#c084fc", Method: "#06b6d4", Function: "#06b6d4",
   File: "#3b82f6", Folder: "#22c55e", DbTable: "#60a5fa", ExternalEndpoint: "#fb7185",
 };
+
+// These kinds are pre-selected in the selector for large graphs.
+const STRUCTURAL_KINDS = new Set([
+  "Community", "Process", "Route", "IntegrationRoute",
+  "MessageDestination", "KafkaTopic", "ExternalEndpoint", "DbTable", "DbQuery",
+]);
+
+// Graphs with fewer nodes than this skip the selector and load immediately.
+const SMALL_GRAPH_THRESHOLD = 10_000;
+
+// Warn when a kind has more than this many nodes.
+const LARGE_KIND_WARN = 10_000;
+
+type Phase = "idle" | "selecting" | "loading" | "ready" | "error";
 
 function clusterName(file: string, kind: string): string {
   const parts = file.split("/").filter(Boolean);
@@ -26,6 +41,86 @@ function ResizeHandle({ side, onDelta }: { side: "left" | "right"; onDelta: (del
     const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
   }} />;
+}
+
+function KindSelector({ summary, selected, onChange, onLoad }: {
+  summary: GraphSummary;
+  selected: Set<string>;
+  onChange: (kinds: Set<string>) => void;
+  onLoad: () => void;
+}) {
+  const toggle = (kind: string) => {
+    const next = new Set(selected);
+    next.has(kind) ? next.delete(kind) : next.add(kind);
+    onChange(next);
+  };
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(6,9,15,0.88)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50,
+    }}>
+      <div style={{
+        background: "#0e2028", border: "1px solid rgba(98,150,158,.2)", borderRadius: "12px",
+        padding: "24px", width: "380px", maxHeight: "85vh",
+        display: "flex", flexDirection: "column", gap: "16px",
+      }}>
+        <div>
+          <h2 style={{ margin: "0 0 4px", fontSize: "15px", color: "#e1ecec" }}>Graph Explorer</h2>
+          <p style={{ margin: 0, color: "#709093", fontSize: "10px" }}>
+            {summary.total_nodes.toLocaleString()} nodes · {summary.total_edges.toLocaleString()} edges
+            <span style={{ marginLeft: 8, color: "#425d61" }}>— select kinds to load</span>
+          </p>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <div className="rail-label">
+            <span>Node kinds</span>
+            <button onClick={() => onChange(new Set(summary.kinds.map((k) => k.kind)))}>All</button>
+            <button onClick={() => onChange(new Set())}>None</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "2px", maxHeight: "380px", overflowY: "auto" }}>
+            {summary.kinds.map(({ kind, count }) => {
+              const isLarge = count > LARGE_KIND_WARN;
+              const isActive = selected.has(kind);
+              return (
+                <button
+                  key={kind}
+                  onClick={() => toggle(kind)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: "8px", width: "100%",
+                    border: "1px solid", borderColor: isActive ? "rgba(255,255,255,.1)" : "transparent",
+                    borderRadius: "6px", background: isActive ? "rgba(255,255,255,.05)" : "transparent",
+                    color: isActive ? "#9cb0b2" : "#425d61", padding: "5px 8px",
+                    textAlign: "left", cursor: "pointer", fontSize: "10px", transition: ".12s",
+                  }}
+                >
+                  <i style={{ width: 5, height: 5, borderRadius: "50%", flex: "none", background: KIND_COLORS[kind] ?? "#94a3b8" }} />
+                  <span style={{ flex: 1 }}>{kind}</span>
+                  <span style={{ fontVariantNumeric: "tabular-nums", color: "#425d61" }}>{count.toLocaleString()}</span>
+                  {isLarge && <span style={{ color: "#f59e0b", fontSize: "9px" }}>⚠</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <button
+          onClick={onLoad}
+          disabled={selected.size === 0}
+          style={{
+            height: "34px", border: "1px solid rgba(29,162,126,.45)", borderRadius: "7px",
+            background: selected.size === 0 ? "transparent" : "#1da27e",
+            color: selected.size === 0 ? "#425d61" : "#03120e",
+            fontWeight: 700, fontSize: "11px",
+            cursor: selected.size === 0 ? "not-allowed" : "pointer",
+          }}
+        >
+          Load Graph →
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function Inspector({ context, loading, onClose, onNavigate }: {
@@ -52,9 +147,11 @@ function Inspector({ context, loading, onClose, onNavigate }: {
 }
 
 export function Overview({ selectedId, onSelectedId }: { selectedId: string | null; onSelectedId: (id: string | null) => void }) {
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [summary, setSummary] = useState<GraphSummary | null>(null);
+  const [selectedKinds, setSelectedKinds] = useState<Set<string>>(new Set());
   const [data, setData] = useState<OverviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [enabledKinds, setEnabledKinds] = useState<Set<string>>(new Set());
   const [enabledEdges, setEnabledEdges] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<number> | null>(null);
@@ -64,18 +161,52 @@ export function Overview({ selectedId, onSelectedId }: { selectedId: string | nu
   const [leftWidth, setLeftWidth] = useState(() => storedWidth("cih-left-width", 276));
   const [rightWidth, setRightWidth] = useState(() => storedWidth("cih-right-width", 310));
 
-  const load = async () => {
-    setLoading(true); setError(null);
+  const loadOverview = async (kinds?: string[]) => {
+    setPhase("loading");
+    setError(null);
     try {
-      const next = await api.overview(); setData(next);
+      const next = await api.overview(kinds);
+      setData(next);
       setEnabledKinds(new Set(next.nodes.map((node) => node.kind)));
       setEnabledEdges(new Set(next.edges.map((edge) => edge.kind)));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load graph overview"); }
-    finally { setLoading(false); }
+      setPhase("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to load graph overview");
+      setPhase("error");
+    }
   };
-  useEffect(() => { void load(); }, []);
 
-  const nodeByIndex = useMemo(() => new Map(data?.nodes.map((node) => [node.index, node]) ?? []), [data]);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.summary();
+        setSummary(s);
+        const defaults = new Set((s.kinds ?? []).map((k) => k.kind).filter((k) => STRUCTURAL_KINDS.has(k)));
+        setSelectedKinds(defaults);
+        if (s.total_nodes < SMALL_GRAPH_THRESHOLD) {
+          await loadOverview();
+        } else {
+          setPhase("selecting");
+        }
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "Unable to reach graph server");
+        setPhase("error");
+      }
+    })();
+  }, []);
+
+  const handleLoadFromSelector = () => {
+    void loadOverview([...selectedKinds]);
+  };
+
+  const handleRefresh = () => {
+    if (summary && summary.total_nodes >= SMALL_GRAPH_THRESHOLD) {
+      setPhase("selecting");
+    } else {
+      void loadOverview();
+    }
+  };
+
   const filteredNodes = useMemo(() => data?.nodes.filter((node) => enabledKinds.has(node.kind)) ?? [], [data, enabledKinds]);
   const filteredNodeIds = useMemo(() => new Set(filteredNodes.map((node) => node.index)), [filteredNodes]);
   const filteredEdges = useMemo(() => data?.edges.filter((edge) => enabledEdges.has(edge.kind) && filteredNodeIds.has(edge.source) && filteredNodeIds.has(edge.target)) ?? [], [data, enabledEdges, filteredNodeIds]);
@@ -99,13 +230,22 @@ export function Overview({ selectedId, onSelectedId }: { selectedId: string | nu
   }, [data]);
   const matches = useMemo(() => search.trim() ? filteredNodes.filter((node) => `${node.name} ${node.id} ${node.file}`.toLowerCase().includes(search.toLowerCase())).slice(0, 40) : [], [filteredNodes, search]);
 
-  if (loading) return <div className="center-state"><span className="spinner" /><strong>Computing repository layout</strong><small>Preparing the bounded graph overview</small></div>;
-  if (error) return <div className="center-state error-state"><strong>Overview unavailable</strong><span>{error}</span><button onClick={load}>Retry</button></div>;
-  if (!data || data.nodes.length === 0) return <div className="center-state"><strong>No graph data</strong><small>Index a repository, then refresh this view.</small></div>;
+  if (phase === "idle" || phase === "loading") {
+    return <div className="center-state"><span className="spinner" /><strong>Computing repository layout</strong><small>Preparing the graph overview</small></div>;
+  }
+  if (phase === "error") {
+    return <div className="center-state error-state"><strong>Overview unavailable</strong><span>{error}</span><button onClick={handleRefresh}>Retry</button></div>;
+  }
+  if (phase === "selecting" && summary) {
+    return <KindSelector summary={summary} selected={selectedKinds} onChange={setSelectedKinds} onLoad={handleLoadFromSelector} />;
+  }
+  if (!data || data.nodes.length === 0) {
+    return <div className="center-state"><strong>No graph data</strong><small>Index a repository, then refresh this view.</small></div>;
+  }
 
   return <div className="overview-shell">
     <aside className="filter-rail" style={{ width: leftWidth }}>
-      <div className="rail-section rail-heading"><span>Projection</span><button className="icon-button" onClick={load} title="Refresh"><RefreshCw size={14} /></button></div>
+      <div className="rail-section rail-heading"><span>Projection</span><button className="icon-button" onClick={handleRefresh} title="Change selection"><RefreshCw size={14} /></button></div>
       <div className="projection-meta"><b>{data.nodes.length.toLocaleString()}</b> of {data.total_nodes.toLocaleString()} nodes<br/><b>{data.edges.length.toLocaleString()}</b> of {data.total_edges.toLocaleString()} edges{data.truncated && <em>bounded view</em>}</div>
       <div className="rail-section"><div className="rail-label"><span>Node types</span><button onClick={() => setEnabledKinds(new Set(counts.kinds.map(([kind]) => kind)))}>All</button><button onClick={() => setEnabledKinds(new Set())}>None</button></div><div className="filter-chips">{counts.kinds.map(([kind, count]) => <button key={kind} className={enabledKinds.has(kind) ? "is-active" : ""} onClick={() => setEnabledKinds((before) => { const next = new Set(before); next.has(kind) ? next.delete(kind) : next.add(kind); return next; })}><i style={{ background: KIND_COLORS[kind] ?? "#94a3b8" }} />{kind}<span>{count.toLocaleString()}</span></button>)}</div></div>
       <div className="rail-section"><div className="rail-label"><span>Relationships</span></div><div className="filter-chips edge-chips">{counts.edges.map(([kind, count]) => <button key={kind} className={enabledEdges.has(kind) ? "is-active" : ""} onClick={() => setEnabledEdges((before) => { const next = new Set(before); next.has(kind) ? next.delete(kind) : next.add(kind); return next; })}>{enabledEdges.has(kind) && <Check size={10} />}{kind.replaceAll("_", " ").toLowerCase()}<span>{count.toLocaleString()}</span></button>)}</div></div>

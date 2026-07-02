@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
 };
 use cih_core::{Node, NodeId};
-use cih_graph_store::{Direction, FlowHop, FlowNode, GraphStore, GraphStoreError};
+use cih_graph_store::{Direction, FlowHop, GraphStore, GraphStoreError, GraphSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -44,6 +44,7 @@ pub(crate) fn router(state: BrowserState) -> Router {
         .route("/graph/", get(graph_shell))
         .route("/graph/assets/app.js", get(app_js))
         .route("/graph/assets/styles.css", get(styles_css))
+        .route("/api/graph/summary", get(graph_summary_handler))
         .route("/api/graph/overview", get(graph_overview))
         .route("/api/graph/search", get(graph_search))
         .route("/api/graph/context", get(graph_context))
@@ -82,6 +83,9 @@ struct SearchParams {
 struct OverviewParams {
     max_nodes: Option<usize>,
     max_edges: Option<usize>,
+    /// Comma-separated list of node kinds to include (e.g. "Community,Process,Route").
+    /// When absent the server auto-selects a structural + high-degree projection.
+    kinds: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,13 +113,13 @@ struct RoutesParams {
 }
 
 #[doc(hidden)]
-pub const OVERVIEW_DEFAULT_NODES: usize = 20_000;
+pub const OVERVIEW_DEFAULT_NODES: usize = 5_000;
 #[doc(hidden)]
-pub const OVERVIEW_MAX_NODES: usize = 50_000;
+pub const OVERVIEW_MAX_NODES: usize = 20_000;
 #[doc(hidden)]
-pub const OVERVIEW_DEFAULT_EDGES: usize = 80_000;
+pub const OVERVIEW_DEFAULT_EDGES: usize = 25_000;
 #[doc(hidden)]
-pub const OVERVIEW_MAX_EDGES: usize = 250_000;
+pub const OVERVIEW_MAX_EDGES: usize = 100_000;
 
 async fn graph_overview(
     State(state): State<BrowserState>,
@@ -131,15 +135,29 @@ async fn graph_overview(
         OVERVIEW_DEFAULT_EDGES,
         OVERVIEW_MAX_EDGES,
     );
+    let kinds: Option<Vec<String>> = params.kinds.as_deref().map(|raw| {
+        raw.split(',').map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()).collect()
+    });
     let overview = state
         .store
-        .graph_overview(max_nodes, max_edges)
+        .graph_overview(max_nodes, max_edges, kinds.as_deref())
         .await
         .map_err(BrowserError::from_store)?;
     let positioned = tokio::task::spawn_blocking(move || layout::compute(overview))
         .await
         .map_err(|err| BrowserError::internal(format!("layout worker failed: {err}")))?;
     Ok(Json(positioned))
+}
+
+async fn graph_summary_handler(
+    State(state): State<BrowserState>,
+) -> Result<Json<GraphSummary>, BrowserError> {
+    let summary = state
+        .store
+        .graph_summary()
+        .await
+        .map_err(BrowserError::from_store)?;
+    Ok(Json(summary))
 }
 
 async fn graph_search(

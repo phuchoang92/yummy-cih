@@ -17,8 +17,8 @@ use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKin
 use cih_graph_store::{
     risk_from_fanout, BulkLoader, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge,
     FlowHop, FlowNode, GraphStore, GraphOverview, GraphOverviewEdge, GraphOverviewNode,
-    GraphStoreError, HotspotNode, Impact, ImpactNode, LoadStats, Path, Result, RouteInfo,
-    SimilarMethod, Subgraph, SymbolContext,
+    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadStats, Path,
+    Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
 };
 use redis::Value;
 
@@ -318,7 +318,40 @@ impl GraphStore for FalkorStore {
         Ok(Subgraph { nodes, edges })
     }
 
-    async fn graph_overview(&self, max_nodes: usize, max_edges: usize) -> Result<GraphOverview> {
+    async fn graph_summary(&self) -> Result<GraphSummary> {
+        let total_nodes = self
+            .rows("MATCH (n:Symbol) RETURN count(n)")
+            .await?
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        let total_edges = self
+            .rows("MATCH (:Symbol)-[r]->(:Symbol) RETURN count(r)")
+            .await?
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        let kinds = self
+            .rows("MATCH (n:Symbol) RETURN n.kind, count(n) ORDER BY count(n) DESC")
+            .await?
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() < 2 { return None; }
+                let count = row[1].parse::<u64>().ok()?;
+                Some(KindCount { kind: row[0].clone(), count })
+            })
+            .collect();
+        Ok(GraphSummary { kinds, total_nodes, total_edges })
+    }
+
+    async fn graph_overview(
+        &self,
+        max_nodes: usize,
+        max_edges: usize,
+        kinds: Option<&[String]>,
+    ) -> Result<GraphOverview> {
         let max_nodes = max_nodes.max(1);
         let max_edges = max_edges.max(1);
 
@@ -337,52 +370,107 @@ impl GraphStore for FalkorStore {
             .and_then(|raw| raw.parse::<u64>().ok())
             .unwrap_or(0);
 
-        // Architectural/runtime nodes come first, then connected symbols. The
-        // final id ordering makes the projection stable when degrees tie.
-        let node_query = format!(
-            "MATCH (n:Symbol) \
-             OPTIONAL MATCH (n)-[r]-(:Symbol) \
-             WITH n, count(r) AS degree, \
-                  CASE n.kind \
-                    WHEN 'Community' THEN 0 \
-                    WHEN 'Process' THEN 1 \
-                    WHEN 'Route' THEN 2 \
-                    WHEN 'IntegrationRoute' THEN 3 \
-                    WHEN 'MessageDestination' THEN 4 \
-                    WHEN 'KafkaTopic' THEN 5 \
-                    WHEN 'ExternalEndpoint' THEN 6 \
-                    WHEN 'DbTable' THEN 7 \
-                    WHEN 'DbQuery' THEN 8 \
-                    ELSE 20 \
-                  END AS priority \
-             RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree \
-             ORDER BY priority ASC, degree DESC, n.id ASC \
-             LIMIT {max_nodes}"
-        );
-
         let mut internal_to_node = HashMap::<i64, NodeId>::with_capacity(max_nodes);
         let mut nodes = Vec::with_capacity(max_nodes.min(total_nodes as usize));
-        for row in self.rows(&node_query).await? {
-            if row.len() < 7 {
-                continue;
+
+        if let Some(kind_list) = kinds {
+            // User-selected kinds: single filtered query with degree scan only on the subset.
+            let kind_literals = kind_list
+                .iter()
+                .map(|k| format!("'{k}'"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let node_query = format!(
+                "MATCH (n:Symbol) \
+                 WHERE n.kind IN [{kind_literals}] \
+                 OPTIONAL MATCH (n)-[r]-(:Symbol) \
+                 WITH n, count(r) AS degree \
+                 ORDER BY degree DESC, n.id ASC \
+                 LIMIT {max_nodes}"
+            );
+            for row in self.rows(&node_query).await? {
+                if row.len() < 7 { continue; }
+                let Ok(internal_id) = row[0].parse::<i64>() else { continue; };
+                let id = NodeId::new(row[1].clone());
+                internal_to_node.insert(internal_id, id.clone());
+                nodes.push(GraphOverviewNode {
+                    node: Node {
+                        id,
+                        kind: NodeKind::from_label(&row[2]),
+                        name: row[3].clone(),
+                        qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
+                        file: row.get(5).cloned().unwrap_or_default(),
+                        range: Range::default(),
+                        props: None,
+                    },
+                    degree: row[6].parse::<u64>().unwrap_or(0),
+                });
             }
-            let Ok(internal_id) = row[0].parse::<i64>() else {
-                continue;
-            };
-            let id = NodeId::new(row[1].clone());
-            internal_to_node.insert(internal_id, id.clone());
-            nodes.push(GraphOverviewNode {
-                node: Node {
-                    id,
-                    kind: NodeKind::from_label(&row[2]),
-                    name: row[3].clone(),
-                    qualified_name: row.get(4).filter(|value| !value.is_empty()).cloned(),
-                    file: row.get(5).cloned().unwrap_or_default(),
-                    range: Range::default(),
-                    props: None,
-                },
-                degree: row[6].parse::<u64>().unwrap_or(0),
-            });
+        } else {
+            // No filter: two-pass to avoid full-graph degree scan.
+            // Pass 1: architectural/runtime nodes — shown regardless of degree.
+            let structural_kinds =
+                "['Community','Process','Route','IntegrationRoute',\
+                  'MessageDestination','KafkaTopic','ExternalEndpoint',\
+                  'DbTable','DbQuery']";
+            let pass1_limit = max_nodes.min(2_000);
+            let pass1_query = format!(
+                "MATCH (n:Symbol) \
+                 WHERE n.kind IN {structural_kinds} \
+                 RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file \
+                 LIMIT {pass1_limit}"
+            );
+            for row in self.rows(&pass1_query).await? {
+                if row.len() < 6 { continue; }
+                let Ok(internal_id) = row[0].parse::<i64>() else { continue; };
+                let id = NodeId::new(row[1].clone());
+                internal_to_node.insert(internal_id, id.clone());
+                nodes.push(GraphOverviewNode {
+                    node: Node {
+                        id,
+                        kind: NodeKind::from_label(&row[2]),
+                        name: row[3].clone(),
+                        qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
+                        file: row.get(5).cloned().unwrap_or_default(),
+                        range: Range::default(),
+                        props: None,
+                    },
+                    degree: 0,
+                });
+            }
+
+            // Pass 2: fill remaining budget with Class-family nodes ordered by degree.
+            let remaining = max_nodes.saturating_sub(nodes.len());
+            if remaining > 0 {
+                let class_kinds = "['Class','Interface','Enum','Record']";
+                let pass2_query = format!(
+                    "MATCH (n:Symbol) \
+                     WHERE n.kind IN {class_kinds} \
+                     OPTIONAL MATCH (n)-[r]-(:Symbol) \
+                     WITH n, count(r) AS degree \
+                     ORDER BY degree DESC, n.id ASC \
+                     LIMIT {remaining}"
+                );
+                for row in self.rows(&pass2_query).await? {
+                    if row.len() < 7 { continue; }
+                    let Ok(internal_id) = row[0].parse::<i64>() else { continue; };
+                    if internal_to_node.contains_key(&internal_id) { continue; }
+                    let id = NodeId::new(row[1].clone());
+                    internal_to_node.insert(internal_id, id.clone());
+                    nodes.push(GraphOverviewNode {
+                        node: Node {
+                            id,
+                            kind: NodeKind::from_label(&row[2]),
+                            name: row[3].clone(),
+                            qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
+                            file: row.get(5).cloned().unwrap_or_default(),
+                            range: Range::default(),
+                            props: None,
+                        },
+                        degree: row[6].parse::<u64>().unwrap_or(0),
+                    });
+                }
+            }
         }
 
         let mut edges = Vec::new();

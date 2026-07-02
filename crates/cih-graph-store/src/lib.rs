@@ -192,6 +192,19 @@ pub struct RouteInfo {
     pub handler_qualified: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KindCount {
+    pub kind: String,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphSummary {
+    pub kinds: Vec<KindCount>,
+    pub total_nodes: u64,
+    pub total_edges: u64,
+}
+
 /// The pluggable storage port. MCP tools map 1:1 onto the read methods.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
@@ -209,10 +222,17 @@ pub trait GraphStore: Send + Sync {
     async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact>;
     async fn call_chain(&self, from: &NodeId, to: &NodeId, max_depth: u32) -> Result<Vec<Path>>;
     async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph>;
+    /// Return per-kind node counts and total graph size. Fast — no degree scan.
+    async fn graph_summary(&self) -> Result<GraphSummary>;
     /// Return a deterministic, bounded whole-graph projection for interactive
-    /// visualization. Implementations should prioritize architectural nodes and
-    /// high-degree symbols, then include only edges whose endpoints were kept.
-    async fn graph_overview(&self, max_nodes: usize, max_edges: usize) -> Result<GraphOverview>;
+    /// visualization. When `kinds` is `Some`, only nodes of those kinds are included.
+    /// When `None`, implementations prioritize architectural nodes then high-degree symbols.
+    async fn graph_overview(
+        &self,
+        max_nodes: usize,
+        max_edges: usize,
+        kinds: Option<&[String]>,
+    ) -> Result<GraphOverview>;
     async fn context(&self, id: &NodeId) -> Result<SymbolContext>;
     async fn communities(&self) -> Result<Vec<CommunityInfo>>;
     async fn route_map(&self, prefix: Option<&str>, limit: usize) -> Result<Vec<RouteInfo>>;

@@ -29,6 +29,10 @@ const MOCK_DATA: OverviewData = {
 
 function mockFetchOverview(data: OverviewData = MOCK_DATA) {
   vi.stubGlobal("fetch", vi.fn((url: string) => {
+    if (url.includes("/api/graph/summary")) {
+      const kinds = [...new Set(data.nodes.map((n) => n.kind))].map((kind) => ({ kind, count: 1 }));
+      return Promise.resolve({ ok: true, text: async () => JSON.stringify({ kinds, total_nodes: data.total_nodes, total_edges: data.total_edges }) });
+    }
     if (url.includes("/api/graph/overview")) {
       return Promise.resolve({ ok: true, text: async () => JSON.stringify(data) });
     }
