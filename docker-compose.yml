@@ -51,6 +51,7 @@ services:
       HF_HOME: /data/hf-cache
       RUST_LOG: info,cih_server=debug
     volumes:
+      - cih-home:/home/cih/.cih
       - cih-data:/data
       - ${REPO_PATH}:/repo:ro
     depends_on:
@@ -106,6 +107,7 @@ services:
       # pgvector connection for the `embed` command.
       CIH_PG_URL: postgres://${POSTGRES_USER:-cih}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cih}
     volumes:
+      - cih-home:/home/cih/.cih
       - ${REPO_PATH}:/repo
     depends_on:
       falkordb:
@@ -116,5 +118,6 @@ services:
 
 volumes:
   falkordb-data:
+  cih-home:
   cih-data:
   pg-data:
