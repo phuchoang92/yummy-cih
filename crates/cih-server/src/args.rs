@@ -14,23 +14,23 @@ pub struct ImpactArgs {
     pub name: String,
     /// `upstream` (callers / blast radius, default), `downstream`, or `both`.
     #[serde(default)]
-    pub direction: Option<String>,
-    /// Max traversal depth (default 4).
+    pub direction: String,
+    /// Max traversal depth (default 4, pass 0 for default).
     #[serde(default)]
-    pub max_depth: Option<u32>,
-    /// Output format. Omit for default JSON. Pass `"diagram"` for D3 force-directed JSON.
+    pub max_depth: u32,
+    /// Output format. Omit or pass empty for default JSON. Pass `"diagram"` for D3 force-directed JSON.
     #[serde(default)]
-    pub format: Option<String>,
+    pub format: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CommunitiesArgs {
-    /// Optional maximum number of communities to return.
+    /// Maximum number of communities to return (0 = all).
     #[serde(default)]
-    pub limit: Option<usize>,
-    /// Output format. Omit for default JSON. Pass `"diagram"` for D3 service-map JSON.
+    pub limit: usize,
+    /// Output format. Omit or pass empty for default JSON. Pass `"diagram"` for D3 service-map JSON.
     #[serde(default)]
-    pub format: Option<String>,
+    pub format: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -38,12 +38,12 @@ pub struct RouteMapArgs {
     /// Path prefix filter (e.g. "/api/owners"). Omit or leave empty for all routes.
     #[serde(default)]
     pub prefix: String,
-    /// Max routes to return (default 200).
+    /// Max routes to return (default 200, pass 0 for default).
     #[serde(default)]
-    pub limit: Option<usize>,
-    /// Output format. Omit for default JSON. Pass `"openapi"` for OpenAPI 3.0.3 JSON.
+    pub limit: usize,
+    /// Output format. Omit or pass empty for default JSON. Pass `"openapi"` for OpenAPI 3.0.3 JSON.
     #[serde(default)]
-    pub format: Option<String>,
+    pub format: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -57,13 +57,12 @@ pub struct DetectChangesArgs {
     /// Scope of the git diff: `working` (all uncommitted vs HEAD),
     /// `staged` (index vs HEAD), or `base_ref` (HEAD vs a branch/commit).
     pub scope: String,
-    /// Git ref for `base_ref` scope (e.g. `main` or a commit SHA).
+    /// Git ref for `base_ref` scope (e.g. `main` or a commit SHA). Leave empty for non-base_ref scopes.
     #[serde(default)]
-    pub base_ref: Option<String>,
-    /// Repo name or absolute path (from registry). Defaults to the repo
-    /// registered under the server's active graph key.
+    pub base_ref: String,
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active graph key.
     #[serde(default)]
-    pub repo: Option<String>,
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -71,9 +70,9 @@ pub struct GroupContractsArgs {
     /// Group name created with `cih-engine group create`.
     pub group: String,
     /// Optional kind filter: `all`, `http`, `http_route`, `kafka`, `kafka_topic`,
-    /// `spring`, or `spring_event`.
+    /// `spring`, or `spring_event`. Leave empty for all.
     #[serde(default)]
-    pub kind: Option<String>,
+    pub kind: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -102,30 +101,30 @@ pub struct TraceFlowArgs {
     /// (e.g. `Route:GET /api/checkout`) or a Method node id.
     /// Short names trigger disambiguation like `context` and `impact`.
     pub entry_point: String,
-    /// Maximum traversal depth (default 6, clamped to 10).
+    /// Maximum traversal depth (default 6, clamped to 10, pass 0 for default).
     #[serde(default)]
-    pub max_depth: Option<u32>,
-    /// Output format. Omit for default JSON. Pass `"mermaid"` for a Mermaid flowchart string.
+    pub max_depth: u32,
+    /// Output format. Omit or pass empty for default JSON. Pass `"mermaid"` for a Mermaid flowchart string.
     #[serde(default)]
-    pub format: Option<String>,
+    pub format: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FeatureMapArgs {
     /// Business keywords to map to code clusters (e.g. "checkout payment").
     pub query: String,
-    /// Max symbols to search for before clustering (default 50, max 200).
+    /// Max symbols to search for before clustering (default 50, max 200, pass 0 for default).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchCodeArgs {
     /// Natural language or keyword query (e.g. "rate limiting", "payment settlement timeout").
     pub query: String,
-    /// Maximum number of results to return (default 10, max 50).
+    /// Maximum number of results to return (default 10, max 50, pass 0 for default).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,9 +143,9 @@ pub struct CodeMatch {
 pub struct AskCodebaseArgs {
     /// Natural language question about the codebase (e.g. "What does POST /orders do end-to-end?").
     pub question: String,
-    /// Optional one-sentence description of the codebase to prime the agent (e.g. "Java/Spring e-commerce backend").
+    /// One-sentence description of the codebase to prime the agent (e.g. "Java/Spring e-commerce backend"). Leave empty for generic description.
     #[serde(default)]
-    pub codebase_description: Option<String>,
+    pub codebase_description: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -165,18 +164,18 @@ pub struct RegressionScopeArgs {
 pub struct UntestedPathsArgs {
     /// Repo-relative path prefix to restrict the search (e.g. "src/main/java/com/acme/payment").
     pub module_prefix: String,
-    /// Max symbols to return (default 50, max 500).
+    /// Max symbols to return (default 50, max 500, pass 0 for default).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IndexRepoArgs {
     /// Absolute path to the repository to index (e.g. "/home/user/my-service").
     pub repo_path: String,
-    /// Languages to index, comma-separated (e.g. "java,typescript"). Default: all detected.
+    /// Languages to index, comma-separated (e.g. "java,typescript"). Leave empty for all detected.
     #[serde(default)]
-    pub languages: Option<String>,
+    pub languages: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -190,16 +189,15 @@ pub struct ReadFileArgs {
     /// Repo-relative file path as returned by search_code or context (e.g.
     /// "src/main/java/com/acme/OrderService.java").
     pub path: String,
-    /// Repo name or absolute path (from registry). Defaults to the repo
-    /// registered under the server's active graph key.
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active repo.
     #[serde(default)]
-    pub repo: Option<String>,
-    /// First line to return, 1-based inclusive (default: 1).
+    pub repo: String,
+    /// First line to return, 1-based inclusive (default: 1, pass 0 for default).
     #[serde(default)]
-    pub start_line: Option<u32>,
-    /// Last line to return, 1-based inclusive (default: entire file).
+    pub start_line: u32,
+    /// Last line to return, 1-based inclusive (default: entire file, pass 0 for default).
     #[serde(default)]
-    pub end_line: Option<u32>,
+    pub end_line: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -207,28 +205,28 @@ pub struct ListReposArgs {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComplexityHotspotsArgs {
-    /// Minimum cyclomatic complexity to include (default: 5).
+    /// Minimum cyclomatic complexity to include (0 = use server default of 5).
     #[serde(default)]
-    pub min_cyclomatic: Option<u16>,
-    /// Minimum cognitive complexity to include (default: 0).
+    pub min_cyclomatic: u16,
+    /// Minimum cognitive complexity to include (0 = use server default of 0).
     #[serde(default)]
-    pub min_cognitive: Option<u16>,
-    /// Minimum transitive loop depth to include (default: 1).
+    pub min_cognitive: u16,
+    /// Minimum transitive loop depth to include (0 = use server default of 1).
     #[serde(default)]
-    pub min_transitive_loop: Option<u8>,
-    /// Maximum number of results (default: 20, max 200).
+    pub min_transitive_loop: u8,
+    /// Maximum number of results (default: 20, max 200, pass 0 for default).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindDuplicatesArgs {
     /// Symbol id or short name of the method to find near-duplicates for.
     pub name: String,
-    /// Minimum Jaccard similarity threshold (default: 0.95).
+    /// Minimum Jaccard similarity threshold (default: 0.95, pass 0.0 for default).
     #[serde(default)]
-    pub min_jaccard: Option<f32>,
-    /// Maximum number of results (default: 10).
+    pub min_jaccard: f32,
+    /// Maximum number of results (default: 10, pass 0 for default).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: usize,
 }

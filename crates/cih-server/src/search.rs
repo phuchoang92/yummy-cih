@@ -13,12 +13,12 @@ use tokio::sync::RwLock;
 pub(crate) struct QueryArgs {
     /// Natural language or symbol keyword query.
     pub(crate) q: String,
-    /// Maximum number of fused hits to return (default 10).
+    /// Maximum number of fused hits to return (default 10, pass 0 for default).
     #[serde(default)]
-    pub(crate) limit: Option<usize>,
+    pub(crate) limit: usize,
     /// Include a one-hop subgraph around the top results.
     #[serde(default)]
-    pub(crate) expand: Option<bool>,
+    pub(crate) expand: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,8 +108,8 @@ impl SearchState {
 }
 
 #[doc(hidden)]
-pub fn query_limit(raw: Option<usize>) -> usize {
-    raw.unwrap_or(10).clamp(1, 50)
+pub fn query_limit(raw: usize) -> usize {
+    if raw == 0 { 10 } else { raw }.clamp(1, 50)
 }
 
 fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {

@@ -169,7 +169,7 @@ async fn graph_search(
         return Err(BrowserError::bad_request("query parameter `q` is required"));
     }
 
-    let limit = search::query_limit(params.limit);
+    let limit = search::query_limit(params.limit.unwrap_or(0));
     let hits = state
         .search
         .query_hits(q, limit)

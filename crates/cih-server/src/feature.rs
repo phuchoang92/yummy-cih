@@ -13,7 +13,7 @@ pub async fn feature_map(
     search: &SearchState,
     args: FeatureMapArgs,
 ) -> Result<CallToolResult, McpError> {
-    let limit = args.limit.unwrap_or(50).clamp(1, 200);
+    let limit = (if args.limit == 0 { 50 } else { args.limit }).clamp(1, 200);
     let hits = search
         .query_hits(&args.query, limit)
         .await

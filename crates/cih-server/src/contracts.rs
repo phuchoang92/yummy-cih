@@ -26,7 +26,7 @@ pub async fn group_contracts(
             None,
         )
     })?;
-    let filter = parse_contract_kind_filter(args.kind.as_deref())
+    let filter = parse_contract_kind_filter(if args.kind.is_empty() { None } else { Some(args.kind.as_str()) })
         .map_err(|e| McpError::invalid_params(e, None))?;
     let mut matches = Vec::new();
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {

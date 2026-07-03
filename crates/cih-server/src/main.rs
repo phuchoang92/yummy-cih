@@ -143,13 +143,13 @@ impl CihServer {
                 ));
             }
         };
-        let dir = parse_direction(args.direction.as_deref());
+        let dir = parse_direction(if args.direction.is_empty() { None } else { Some(args.direction.as_str()) });
         let res = self
             .store
-            .impact(&id, dir, args.max_depth.unwrap_or(4))
+            .impact(&id, dir, if args.max_depth == 0 { 4 } else { args.max_depth })
             .await
             .map_err(to_mcp)?;
-        if args.format.as_deref() == Some("diagram") {
+        if args.format == "diagram" {
             return json_result(&render_d3_impact(&res));
         }
         json_result(&res)
@@ -161,10 +161,10 @@ impl CihServer {
         Parameters(args): Parameters<CommunitiesArgs>,
     ) -> Result<CallToolResult, McpError> {
         let mut communities = self.store.communities().await.map_err(to_mcp)?;
-        if let Some(limit) = args.limit {
-            communities.truncate(limit);
+        if args.limit > 0 {
+            communities.truncate(args.limit);
         }
-        if args.format.as_deref() == Some("diagram") {
+        if args.format == "diagram" {
             let edges = self.store.community_graph().await.map_err(to_mcp)?;
             return json_result(&render_community_diagram(&communities, &edges));
         }
@@ -184,7 +184,7 @@ impl CihServer {
             .query_hits(&args.q, limit)
             .await
             .map_err(|err| McpError::internal_error(err.to_string(), None))?;
-        let subgraph = if args.expand.unwrap_or(false) && !hits.is_empty() {
+        let subgraph = if args.expand && !hits.is_empty() {
             let seeds: Vec<cih_core::NodeId> =
                 hits.iter().take(5).map(|hit| hit.node_id.clone()).collect();
             Some(self.store.subgraph(&seeds, 1).await.map_err(to_mcp)?)
@@ -204,7 +204,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<SearchCodeArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = args.limit.unwrap_or(10).clamp(1, 50);
+        let limit = (if args.limit == 0 { 10 } else { args.limit }).clamp(1, 50);
         let hits = self
             .search
             .query_hits(&args.query, limit)
@@ -242,7 +242,7 @@ impl CihServer {
                 None,
             )
         })?;
-        let description = args.codebase_description.as_deref().unwrap_or("a backend codebase");
+        let description = if args.codebase_description.is_empty() { "a backend codebase" } else { args.codebase_description.as_str() };
         let answer = runner
             .ask(&args.question, description)
             .await
@@ -264,10 +264,10 @@ impl CihServer {
         Parameters(args): Parameters<RouteMapArgs>,
     ) -> Result<CallToolResult, McpError> {
         let prefix = if args.prefix.is_empty() { None } else { Some(args.prefix.as_str()) };
-        let limit = args.limit.unwrap_or(200).clamp(1, 1000);
+        let limit = (if args.limit == 0 { 200 } else { args.limit }).clamp(1, 1000);
         let routes: Vec<cih_graph_store::RouteInfo> =
             self.store.route_map(prefix, limit).await.map_err(to_mcp)?;
-        if args.format.as_deref() == Some("openapi") {
+        if args.format == "openapi" {
             return json_result(&render_openapi(&routes));
         }
         json_result(&routes)
@@ -373,9 +373,9 @@ impl CihServer {
                 ));
             }
         };
-        let depth = args.max_depth.unwrap_or(6).clamp(1, 10);
+        let depth = (if args.max_depth == 0 { 6 } else { args.max_depth }).clamp(1, 10);
         let steps = self.store.flow_downstream(&id, depth).await.map_err(to_mcp)?;
-        if args.format.as_deref() == Some("mermaid") {
+        if args.format == "mermaid" {
             return text_result(render_mermaid_flow(&id, &steps));
         }
         json_result(&serde_json::json!({
@@ -396,10 +396,15 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ComplexityHotspotsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = args.limit.unwrap_or(20);
+        let limit = if args.limit == 0 { 20 } else { args.limit };
         let hotspots = self
             .store
-            .complexity_hotspots(args.min_cyclomatic, args.min_cognitive, args.min_transitive_loop, limit)
+            .complexity_hotspots(
+                if args.min_cyclomatic == 0 { None } else { Some(args.min_cyclomatic) },
+                if args.min_cognitive == 0 { None } else { Some(args.min_cognitive) },
+                if args.min_transitive_loop == 0 { None } else { Some(args.min_transitive_loop) },
+                limit,
+            )
             .await
             .map_err(to_mcp)?;
         json_result(&serde_json::json!({
@@ -429,8 +434,8 @@ impl CihServer {
                 ));
             }
         };
-        let min_jaccard = args.min_jaccard.unwrap_or(0.95);
-        let limit = args.limit.unwrap_or(10);
+        let min_jaccard = if args.min_jaccard == 0.0 { 0.95 } else { args.min_jaccard };
+        let limit = if args.limit == 0 { 10 } else { args.limit };
         let similar = self
             .store
             .similar_methods(&id, min_jaccard, limit)
@@ -557,6 +562,8 @@ impl ServerHandler for CihServer {
                  ## NodeId format\n\
                  Full form: `Kind:fully.qualified.Name` (e.g. `Class:org.phuc.commerce.order.OrderService`, `Route:POST /api/v1/orders`).\n\
                  Short names (e.g. `OrderService`) also work and trigger interactive disambiguation.\n\
+                 \n\
+                 ## IMPORTANT: Always call `list_repos()` first to get the exact repo name before calling any other CIH tool.\n\
                  \n\
                  ## Core workflow\n\
                  1. `list_repos` — see what is indexed\n\

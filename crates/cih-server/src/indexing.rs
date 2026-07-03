@@ -47,8 +47,8 @@ pub async fn index_repo(
             .env("RUST_LOG", "warn,cih_engine=info")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        if let Some(langs) = &languages {
-            for lang in langs.split(',') {
+        if !languages.is_empty() {
+            for lang in languages.split(',') {
                 let l = lang.trim();
                 if !l.is_empty() {
                     cmd.arg("--language").arg(l);

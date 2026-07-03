@@ -79,7 +79,7 @@ pub async fn untested_paths(
     store: &Arc<dyn GraphStore>,
     args: UntestedPathsArgs,
 ) -> Result<CallToolResult, McpError> {
-    let limit = args.limit.unwrap_or(50).clamp(1, 500);
+    let limit = (if args.limit == 0 { 50 } else { args.limit }).clamp(1, 500);
     let symbols = store
         .untested_symbols(&args.module_prefix, limit)
         .await

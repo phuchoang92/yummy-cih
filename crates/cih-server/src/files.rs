@@ -5,7 +5,7 @@ use crate::symbol::find_repo_path;
 use crate::utils::json_result;
 
 pub async fn read_file(graph_key: &str, args: ReadFileArgs) -> Result<CallToolResult, McpError> {
-    let repo_root = find_repo_path(args.repo.as_deref(), graph_key)
+    let repo_root = find_repo_path(if args.repo.is_empty() { None } else { Some(args.repo.as_str()) }, graph_key)
         .map_err(|e| McpError::invalid_params(e, None))?;
 
     let clean = std::path::Path::new(&args.path);
@@ -23,8 +23,8 @@ pub async fn read_file(graph_key: &str, args: ReadFileArgs) -> Result<CallToolRe
 
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len() as u32;
-    let start = args.start_line.unwrap_or(1).max(1);
-    let end = args.end_line.unwrap_or(total).min(total);
+    let start = (if args.start_line == 0 { 1 } else { args.start_line }).max(1);
+    let end = (if args.end_line == 0 { total } else { args.end_line }).min(total);
 
     let slice = lines
         .iter()
