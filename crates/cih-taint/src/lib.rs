@@ -44,6 +44,7 @@ pub(crate) mod java_ast;
 
 pub mod analyzer;
 pub mod cfg;
+pub mod config;
 pub mod error;
 pub mod ir;
 pub mod java_ir;
@@ -59,6 +60,7 @@ pub use analyzer::{
     TaintPass, TaintPhaseConfig,
 };
 pub use cfg::{build_cfg, BasicBlock, BlockId, Cfg, CfgEdgeKind, DomTree};
+pub use config::load_taint_rules;
 pub use error::{TaintError, TaintResult};
 pub use ir::{MethodBody, StatementKind, StatementNode};
 pub use interproc::{find_taint_paths, TaintPath};

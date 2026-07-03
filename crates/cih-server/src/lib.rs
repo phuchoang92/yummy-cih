@@ -14,5 +14,6 @@ pub mod resources;
 pub mod search;
 pub mod server;
 pub mod symbol;
+pub mod taint;
 pub mod utils;
 pub mod viz;

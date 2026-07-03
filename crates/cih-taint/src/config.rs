@@ -4,7 +4,7 @@
 //! If present, user-specified sinks and sanitizers are merged with the defaults
 //! (or replace them entirely if `settings.extend_defaults = false`).
 
-use cih_taint::{default_rules, SinkCategory, TaintRules, TaintSanitizer, TaintSink};
+use crate::rules::{default_rules, SinkCategory, TaintRules, TaintSanitizer, TaintSink};
 
 #[derive(serde::Deserialize, Default)]
 struct TomlRules {
@@ -48,7 +48,7 @@ fn default_true() -> bool {
 
 /// Load taint rules for `repo`. Returns merged rules (user + defaults unless
 /// `extend_defaults = false`). Falls back to `default_rules()` on any error.
-pub(crate) fn load_taint_rules(repo: &std::path::Path) -> TaintRules {
+pub fn load_taint_rules(repo: &std::path::Path) -> TaintRules {
     let config_path = repo.join("cih.taint.toml");
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
@@ -96,7 +96,7 @@ pub(crate) fn load_taint_rules(repo: &std::path::Path) -> TaintRules {
         .iter()
         .map(|s| {
             let p = s.pattern.as_str();
-            p.split('#').last().unwrap_or(p).to_string()
+            p.split('#').next_back().unwrap_or(p).to_string()
         })
         .collect();
 
@@ -117,5 +117,5 @@ pub(crate) fn load_taint_rules(repo: &std::path::Path) -> TaintRules {
 }
 
 #[cfg(test)]
-#[path = "taint_config_tests.rs"]
+#[path = "config_tests.rs"]
 mod tests;

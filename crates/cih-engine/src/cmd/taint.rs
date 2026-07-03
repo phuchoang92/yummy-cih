@@ -68,7 +68,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let mut ui = crate::ui::PhaseProgress::new();
     ui.spin("Phase 0: inter-procedural taint BFS");
 
-    let rules = crate::taint_config::load_taint_rules(&repo);
+    let rules = cih_taint::load_taint_rules(&repo);
     let mut paths = find_taint_paths(&nodes, &edges, &rules);
 
     ui.finish_with(format!(

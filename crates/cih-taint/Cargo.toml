@@ -9,6 +9,7 @@ cih-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 tracing.workspace = true
 tree-sitter.workspace = true
 tree-sitter-java.workspace = true

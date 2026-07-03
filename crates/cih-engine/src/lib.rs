@@ -7,7 +7,6 @@ pub mod analyze;
 pub mod node_prefix;
 pub mod cmd;
 pub mod db;
-pub mod taint_config;
 pub mod decompile;
 pub mod decompile_config;
 pub mod discover;

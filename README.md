@@ -228,6 +228,7 @@ Available MCP tools:
 | `regression_scope` | Tester | Tests to re-run for a set of changed files |
 | `detect_changes` | Dev | Changed symbols + their blast radius (git-aware) |
 | `group_contracts` | Architect | Cross-service HTTP + event contracts for a repo group |
+| `taint_paths` | Dev, Security | Source→sink taint paths (SQL injection, command exec, file write, XSS) |
 
 ---
 

@@ -26,6 +26,7 @@ mod resources;
 mod search;
 mod server;
 mod symbol;
+mod taint;
 mod utils;
 mod viz;
 
@@ -496,6 +497,21 @@ impl CihServer {
     }
 
     #[tool(
+        description = "Find source→sink taint paths: user-controlled data entering through an \
+            HTTP handler or event listener that reaches a dangerous operation. Categories: \
+            `sql` (SQL injection), `exec` (OS command execution), `file` (unsafe file write), \
+            `html` (XSS). Runs inter-procedural BFS on the call graph; pass refine=true for \
+            slower flow-sensitive CFG/PDG confirmation with adjusted confidence. Sink rules \
+            can be extended via `cih.taint.toml` in the repo root."
+    )]
+    async fn taint_paths(
+        &self,
+        Parameters(args): Parameters<TaintPathsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        taint::taint_paths(&self.graph_key, args).await
+    }
+
+    #[tool(
         description = "Index a repository so its code graph becomes queryable by the other tools. \
             Runs scan → parse → resolve → load into the live FalkorDB graph. \
             Returns immediately with a `job_id`; use index_status(job_id=...) to poll for completion. \
@@ -579,7 +595,10 @@ impl ServerHandler for CihServer {
                  \n\
                  ## Other tools\n\
                  `feature_map`, `query`, `ask_codebase`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
-                 `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`."
+                 `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`.\n\
+                 \n\
+                 ## Security\n\
+                 `taint_paths(category=\"sql\"|\"exec\"|\"file\"|\"html\")` — source→sink flows from HTTP/event entry points; refine=true for flow-sensitive confirmation."
                     .into(),
             ),
         }

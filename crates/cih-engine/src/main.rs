@@ -4,7 +4,6 @@ mod db;
 mod decompile;
 mod decompile_config;
 mod discover;
-mod taint_config;
 mod embed;
 mod feature_strategy;
 mod file_cache;

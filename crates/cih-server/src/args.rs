@@ -220,6 +220,33 @@ pub struct ComplexityHotspotsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaintPathsArgs {
+    /// Sink category filter: `all` (default), `sql` (SQL injection), `exec`
+    /// (OS command execution), `file` (unsafe file write), or `html` (XSS).
+    #[serde(default)]
+    pub category: String,
+    /// Minimum confidence to include, 0.0–1.0 (default 0.5). Pass an explicit
+    /// 0.0 to include every candidate path.
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence: f32,
+    /// Run refinement phases 1–3 (intra-procedural liveness, CFG, PDG
+    /// flow-sensitive taint) to adjust confidence. Slower — reads source files
+    /// for methods on candidate paths. Default: false (Phase 0 BFS only).
+    #[serde(default)]
+    pub refine: bool,
+    /// Max paths to return (default 50, max 500, pass 0 for default).
+    #[serde(default)]
+    pub limit: usize,
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active graph key.
+    #[serde(default)]
+    pub repo: String,
+}
+
+fn default_min_confidence() -> f32 {
+    0.5
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindDuplicatesArgs {
     /// Symbol id or short name of the method to find near-duplicates for.
     pub name: String,
