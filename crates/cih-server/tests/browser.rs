@@ -18,11 +18,11 @@ fn browser_limits_are_bounded() {
     assert_eq!(bounded_depth(Some(12), 6, 10), 10);
     assert_eq!(
         overview_limit(None, OVERVIEW_DEFAULT_NODES, OVERVIEW_MAX_NODES),
-        20_000
+        OVERVIEW_DEFAULT_NODES
     );
     assert_eq!(
         overview_limit(Some(80_000), OVERVIEW_DEFAULT_NODES, OVERVIEW_MAX_NODES),
-        50_000
+        OVERVIEW_MAX_NODES
     );
     assert_eq!(
         overview_limit(Some(0), OVERVIEW_DEFAULT_EDGES, OVERVIEW_MAX_EDGES),

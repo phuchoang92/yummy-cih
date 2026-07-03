@@ -15,18 +15,18 @@ fn direction_parse_unknown_falls_back_to_upstream() {
 }
 
 #[test]
-fn route_map_args_default_limit_is_none() {
+fn route_map_args_default_limit_is_zero() {
     let args: RouteMapArgs = serde_json::from_str("{}").unwrap();
     assert!(args.prefix.is_empty());
-    assert_eq!(args.limit, None);
+    assert_eq!(args.limit, 0);
 }
 
 #[test]
 fn detect_changes_args_defaults() {
     let args: DetectChangesArgs = serde_json::from_str(r#"{"scope":"working"}"#).unwrap();
     assert_eq!(args.scope, "working");
-    assert!(args.base_ref.is_none());
-    assert!(args.repo.is_none());
+    assert!(args.base_ref.is_empty());
+    assert!(args.repo.is_empty());
 }
 
 #[test]
@@ -52,8 +52,8 @@ fn trace_flow_args_defaults() {
     let args: TraceFlowArgs =
         serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
     assert_eq!(args.entry_point, "Route:GET /");
-    assert!(args.max_depth.is_none());
-    assert!(args.format.is_none());
+    assert_eq!(args.max_depth, 0);
+    assert!(args.format.is_empty());
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn impact_args_accepts_format_diagram() {
     let args: ImpactArgs =
         serde_json::from_str(r#"{"name":"OrderService","format":"diagram"}"#).unwrap();
     assert_eq!(args.name, "OrderService");
-    assert_eq!(args.format.as_deref(), Some("diagram"));
+    assert_eq!(args.format, "diagram");
 }
 
 #[test]
@@ -71,14 +71,14 @@ fn trace_flow_args_accepts_format_mermaid() {
     )
     .unwrap();
     assert_eq!(args.entry_point, "Route:GET /api/checkout");
-    assert_eq!(args.format.as_deref(), Some("mermaid"));
+    assert_eq!(args.format, "mermaid");
 }
 
 #[test]
 fn feature_map_args_defaults() {
     let args: FeatureMapArgs = serde_json::from_str(r#"{"query":"checkout"}"#).unwrap();
     assert_eq!(args.query, "checkout");
-    assert!(args.limit.is_none());
+    assert_eq!(args.limit, 0);
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn untested_paths_args_defaults() {
     let args: UntestedPathsArgs =
         serde_json::from_str(r#"{"module_prefix":"src/main/java/com/acme"}"#).unwrap();
     assert_eq!(args.module_prefix, "src/main/java/com/acme");
-    assert!(args.limit.is_none());
+    assert_eq!(args.limit, 0);
 }
 
 #[test]

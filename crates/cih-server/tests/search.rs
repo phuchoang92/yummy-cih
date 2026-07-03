@@ -36,10 +36,10 @@ impl Drop for TempDir {
 
 #[test]
 fn query_limit_defaults_and_clamps() {
-    assert_eq!(query_limit(None), 10);
-    assert_eq!(query_limit(Some(0)), 1);
-    assert_eq!(query_limit(Some(8)), 8);
-    assert_eq!(query_limit(Some(500)), 50);
+    assert_eq!(query_limit(0), 10);
+    assert_eq!(query_limit(1), 1);
+    assert_eq!(query_limit(8), 8);
+    assert_eq!(query_limit(500), 50);
 }
 
 #[test]
