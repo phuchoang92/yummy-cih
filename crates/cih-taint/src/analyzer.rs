@@ -78,6 +78,11 @@ pub struct TaintAnalysisResult {
 
 // ── Input ─────────────────────────────────────────────────────────────────────
 
+/// Resolves a file path (relative to repo root) to its full source text.
+pub type ResolveSourceFn<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
+/// Resolves a method node ID to the relative file path where it is defined.
+pub type NodeFileFn<'a> = Box<dyn Fn(&NodeId) -> Option<String> + 'a>;
+
 /// All inputs needed for a complete taint analysis run.
 pub struct TaintAnalysisInput<'a> {
     /// Method and edge nodes from the graph artifact.
@@ -86,9 +91,9 @@ pub struct TaintAnalysisInput<'a> {
     /// Sink/sanitizer rules to use (combine `default_rules()` with any user overrides).
     pub rules: &'a TaintRules,
     /// Resolves a file path (relative to repo root) to its full source text.
-    pub resolve_source: Box<dyn Fn(&str) -> Option<String> + 'a>,
+    pub resolve_source: ResolveSourceFn<'a>,
     /// Resolves a method node ID to the relative file path where it is defined.
-    pub node_file: Box<dyn Fn(&NodeId) -> Option<String> + 'a>,
+    pub node_file: NodeFileFn<'a>,
     /// Which phases to run.
     pub phases: TaintPhaseConfig,
 }

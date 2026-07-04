@@ -25,7 +25,7 @@ class Foo {
     let cfg = build_cfg(&id, src).expect("CFG should build");
     assert!(cfg.block_count() >= 2);
     let entry_block = cfg.block(&cfg.entry).unwrap();
-    assert!(entry_block.stmts.len() >= 1);
+    assert!(!entry_block.stmts.is_empty());
 }
 
 #[test]

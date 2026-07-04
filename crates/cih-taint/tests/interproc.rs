@@ -5,7 +5,7 @@ fn method_node(id: &str) -> Node {
     Node {
         id: NodeId::new(id),
         kind: NodeKind::Method,
-        name: id.split('#').last().unwrap_or(id).to_string(),
+        name: id.split('#').next_back().unwrap_or(id).to_string(),
         qualified_name: Some(id.to_string()),
         file: "Test.java".to_string(),
         range: Range::default(),

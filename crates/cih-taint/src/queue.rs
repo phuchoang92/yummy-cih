@@ -13,6 +13,10 @@
 //!  2. The method appears on a Phase 0 taint path.
 //!  3. An explicit external request (MCP tool or chat query).
 
+// Scaffolding for a future incremental/daemon mode — kept intentionally ahead of
+// its first caller so the demand-driven design stays documented in one place.
+#![allow(dead_code)]
+
 use cih_core::NodeId;
 
 /// A request to build an on-demand CFG/PDG for a specific method.

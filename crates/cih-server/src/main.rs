@@ -69,6 +69,7 @@ struct CihServer {
     graph_key: String,
     falkor_url: String,
     jobs: Jobs,
+    read_file_limits: files::ReadFileLimits,
     tool_router: ToolRouter<CihServer>,
     agent: Option<agent::AgentRunner>,
 }
@@ -81,6 +82,7 @@ impl CihServer {
         embed_store: Option<Arc<EmbedStore>>,
         graph_key: String,
         falkor_url: String,
+        read_file_limits: files::ReadFileLimits,
         agent: Option<agent::AgentRunner>,
     ) -> Self {
         Self {
@@ -89,6 +91,7 @@ impl CihServer {
             graph_key,
             falkor_url,
             jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            read_file_limits,
             tool_router: Self::tool_router(),
             agent,
         }
@@ -546,13 +549,15 @@ impl CihServer {
     #[tool(
         description = "Read the source of a file in the repo. Use the `file` field from \
             search_code or context results as the `path`. Optionally slice with start_line / \
-            end_line (1-based, inclusive) to fetch only the relevant section."
+            end_line (1-based, inclusive) to fetch only the relevant section. Files over the \
+            size limit are rejected, and un-ranged reads are capped; when capped the response \
+            sets `truncated: true` — pass start_line/end_line to read further."
     )]
     async fn read_file(
         &self,
         Parameters(args): Parameters<ReadFileArgs>,
     ) -> Result<CallToolResult, McpError> {
-        files::read_file(&self.graph_key, args).await
+        files::read_file(&self.graph_key, self.read_file_limits, args).await
     }
 }
 
@@ -641,6 +646,7 @@ async fn main() -> Result<()> {
     let cfg = Config::from_env();
     tracing::info!(?cfg, "starting CIH MCP server");
 
+    cfg.check_auth_posture()?;
     if cfg.api_token.is_none() {
         tracing::warn!("CIH_API_TOKEN is not set — server is open to unauthenticated requests");
     }
@@ -672,6 +678,10 @@ async fn main() -> Result<()> {
         embed_store,
         graph_key,
         cfg.falkor_url.clone(),
+        files::ReadFileLimits {
+            max_bytes: cfg.read_file_max_bytes,
+            max_lines: cfg.read_file_max_lines,
+        },
         agent,
     );
     let browser_state = browser::BrowserState::new(cih.store.clone(), cih.search.clone());

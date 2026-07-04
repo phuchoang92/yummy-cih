@@ -142,11 +142,10 @@ pub fn analyze_with_pdg(
                         }
                     }
                 }
-                StatementKind::Return => {
-                    if stmt_reads_tainted(stmt, reaching, &tainted_defs) {
+                StatementKind::Return
+                    if stmt_reads_tainted(stmt, reaching, &tainted_defs) => {
                         taint_return = true;
                     }
-                }
                 _ => {}
             }
         }
@@ -196,11 +195,10 @@ fn propagate_pass(
             }
             // If any variable read by this stmt has a tainted reaching def,
             // then all variables *written* by this stmt are now tainted (the def is tainted).
-            if stmt_reads_tainted(stmt, reaching, tainted_defs) {
-                if tainted_defs.insert(stmt.id.clone()) {
+            if stmt_reads_tainted(stmt, reaching, tainted_defs)
+                && tainted_defs.insert(stmt.id.clone()) {
                     changed = true;
                 }
-            }
         }
     }
     changed
@@ -241,7 +239,7 @@ fn tainted_args_of(
         .iter()
         .filter(|arg| {
             rd.get(*arg)
-                .map_or(false, |defs| defs.iter().any(|d| tainted_defs.contains(d)))
+                .is_some_and(|defs| defs.iter().any(|d| tainted_defs.contains(d)))
         })
         .cloned()
         .collect()
@@ -281,11 +279,10 @@ fn is_control_dep_tainted(
             .map(|s| s.reads.iter().collect())
             .unwrap_or_default();
         for (var, defs) in branch_rd {
-            if branch_reads.is_empty() || branch_reads.contains(var) {
-                if defs.iter().any(|d| tainted_defs.contains(d)) {
+            if (branch_reads.is_empty() || branch_reads.contains(var))
+                && defs.iter().any(|d| tainted_defs.contains(d)) {
                     return true;
                 }
-            }
         }
     }
     false
@@ -310,7 +307,7 @@ fn is_sanitizer(call_name: &str, node_id_patterns: &[&str]) -> bool {
     let lower = call_name.to_ascii_lowercase();
     node_id_patterns.iter().any(|p| {
         let p_lower = p.to_ascii_lowercase();
-        let method = p_lower.split('#').last().unwrap_or(&p_lower);
+        let method = p_lower.split('#').next_back().unwrap_or(&p_lower);
         lower == method
     })
 }

@@ -1,44 +1,80 @@
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+# CIH — Code Intelligence for this repo
 
-This project is indexed by GitNexus as **yummy-cih** (6812 symbols, 16545 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project (yummy-cih) is itself a Code Intelligence Hub: a Rust MCP server that
+indexes a codebase into a graph and answers structural questions over it. When an
+agent has the **CIH MCP server** connected, prefer its tools over grep/read for
+understanding structure, assessing change impact, and navigating safely.
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+> Connect (HTTP): `claude mcp add --transport http cih http://localhost:8080/mcp`
+> Index/refresh a repo: `index_repo(repo_path="/abs/path")` → poll `index_status(job_id=...)`,
+> or from the CLI `cih-engine analyze <repo>`.
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "master"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+- **Run impact analysis before editing a symbol.** `impact(name="OrderService", direction="upstream")`
+  and report the blast radius (callers, affected processes, risk) before changing a
+  function/class/method. Warn on HIGH/CRITICAL risk before proceeding.
+- **Run `detect_changes` before committing** to confirm the change only touches the
+  expected symbols. For a branch: `detect_changes(scope="base_ref", base_ref="main")`.
+- **Explore by query, not grep**: `search_code(query="concept")` or `query(...)` to find
+  relevant symbols; `context(name="Symbol")` for callers/callees/processes;
+  `trace_flow(entry_point="Route:POST /path")` to follow a request end-to-end.
+- **Security review**: `taint_paths(category="sql"|"exec"|"file"|"html")` for source→sink
+  flows; `refine=true` for flow-sensitive confirmation. See `docs/agent-workflows/security.md`.
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+- NEVER edit a function/class/method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk from impact analysis.
+- NEVER commit without running `detect_changes` to check the affected scope.
+
+## NodeId format
+
+Full: `Kind:fully.qualified.Name` (e.g. `Class:com.acme.OrderService`,
+`Method:com.acme.OrderService#save/1`, `Route:POST /api/orders`). Short names
+(e.g. `OrderService`) also work and trigger disambiguation — the tool returns
+`{"status":"ambiguous","candidates":[...]}` when several match.
+
+## Tools
+
+| Task | Tool |
+|------|------|
+| Symbol context (callers/callees/processes) | `context` |
+| Blast radius of a change | `impact` |
+| End-to-end request/execution chain | `trace_flow` |
+| All HTTP routes (OpenAPI export) | `route_map` |
+| Keyword/semantic search | `search_code`, `query` |
+| Business keyword → code clusters | `feature_map`, `communities` |
+| Git-aware change impact | `detect_changes` |
+| Tests to re-run / coverage gaps | `regression_scope`, `test_coverage`, `untested_paths` |
+| Source→sink taint (SQLi, exec, file, XSS) | `taint_paths` |
+| Complexity / duplication | `complexity_hotspots`, `find_duplicates` |
+| Cross-repo contracts | `group_contracts`, `api_impact`, `shape_check` |
+| Read source (size-capped) | `read_file` |
+| Registry / freshness | `list_repos`, `status` |
+| Index a repo | `index_repo`, `index_status` |
 
 ## Resources
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/yummy-cih/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/yummy-cih/clusters` | All functional areas |
-| `gitnexus://repo/yummy-cih/processes` | All execution flows |
-| `gitnexus://repo/yummy-cih/process/{name}` | Step-by-step execution trace |
+| `cih://repo/{name}/context` | Registry entry, stats, index freshness |
+| `cih://repo/{name}/communities` | Functional module clusters |
+| `cih://repo/{name}/processes` | Named execution flows |
+| `cih://repo/{name}/schema` | Graph node kinds + edge kinds |
 
-## CLI
+## Workflow guides
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+Persona playbooks (when-to-use, step-by-step tool calls, output shape) live in
+`docs/agent-workflows/`: `exploring.md`, `impact-analysis.md`, `debugging.md`,
+`product-owner.md`, `tester.md`, `security.md`. Parser assumptions and known graph
+limitations are in `docs/ARCHITECTURE.md`.
 
-<!-- gitnexus:end -->
+## Developing CIH itself
+
+- Build/test: `cargo build`, `cargo test --workspace`. CI gates fmt (non-blocking
+  today), clippy `-D warnings` on the backend crates, and the full test suite —
+  see `.github/workflows/ci.yml`.
+- Local services: FalkorDB on **6380** (Homebrew redis squats 6379), Postgres on 5433.
+  `FALKOR_URL=redis://127.0.0.1:6380`.
+- Security posture (auth, LLM egress): see `SECURITY.md`.

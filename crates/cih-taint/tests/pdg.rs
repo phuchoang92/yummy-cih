@@ -87,11 +87,10 @@ class Foo {
     let param_def = param_def_id(&id, "x");
     for (stmt_id, rd) in &reaching {
         let x_defs = rd.get("x").cloned().unwrap_or_default();
-        if stmt_id.as_str().contains("stmt") {
-            if !x_defs.contains(&param_def) {
+        if stmt_id.as_str().contains("stmt")
+            && !x_defs.contains(&param_def) {
                 return;
             }
-        }
     }
     assert!(
         reaching.values().any(|rd| rd.get("x").map(|defs| defs.contains(&param_def)).unwrap_or(false)),

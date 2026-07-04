@@ -224,7 +224,7 @@ impl<'src> CfgBuilder<'src> {
     }
 
     fn is_terminated(&self, block: &BlockId) -> bool {
-        self.block_idx(block).map_or(false, |idx| self.blocks[idx].is_terminated)
+        self.block_idx(block).is_some_and(|idx| self.blocks[idx].is_terminated)
     }
 
     // ── Statement node factories ────────────────────────────────────────────
@@ -628,12 +628,11 @@ impl<'src> CfgBuilder<'src> {
         let try_exit = {
             let mut cur = try_entry.clone();
             for child in &children {
-                if child.kind() == "block" || child.kind() == "resource_specification" {
-                    if child.kind() == "block" {
+                if (child.kind() == "block" || child.kind() == "resource_specification")
+                    && child.kind() == "block" {
                         cur = self.build_block_node(*child, cur);
                         break;
                     }
-                }
             }
             cur
         };

@@ -161,3 +161,76 @@ fn scan_file_extracts_package_and_spring_framework() {
     assert!(scan.frameworks.contains("spring"));
     assert_eq!(scan.frameworks.len(), 1);
 }
+
+// ── Route heuristic edge cases ──────────────────────────────────────────────
+// These pin the path-composition behavior that impact/route_map/taint depend on.
+
+fn route_names(src: &str) -> BTreeSet<String> {
+    route_nodes(src).into_iter().map(|n| n.name).collect()
+}
+
+#[test]
+fn class_prefix_and_method_path_slashes_are_normalized() {
+    // Trailing slash on the class prefix + leading slash on the method path must
+    // collapse to a single separator, not `/owners//{id}`.
+    let src = r#"
+        package com.example;
+        @RestController
+        @RequestMapping("/owners/")
+        class OwnerController {
+          @GetMapping("/{id}")
+          Object findOwner(Long id) { return null; }
+        }
+    "#;
+    let names = route_names(src);
+    assert!(names.contains("GET /owners/{id}"), "names={names:?}");
+}
+
+#[test]
+fn method_annotation_without_path_inherits_class_prefix() {
+    // A bare @GetMapping under a class @RequestMapping resolves to the prefix alone.
+    let src = r#"
+        package com.example;
+        @RestController
+        @RequestMapping("/owners")
+        class OwnerController {
+          @GetMapping
+          Object all() { return null; }
+        }
+    "#;
+    let names = route_names(src);
+    assert!(names.contains("GET /owners"), "names={names:?}");
+}
+
+#[test]
+fn multiple_paths_in_one_annotation_emit_multiple_routes() {
+    let src = r#"
+        package com.example;
+        @RestController
+        class OwnerController {
+          @GetMapping({"/owners", "/members"})
+          Object all() { return null; }
+        }
+    "#;
+    let names = route_names(src);
+    assert!(names.contains("GET /owners"), "names={names:?}");
+    assert!(names.contains("GET /members"), "names={names:?}");
+}
+
+#[test]
+fn method_level_request_mapping_emits_no_route() {
+    // KNOWN LIMITATION: only the five @*Mapping shortcuts are recognized as verbs.
+    // A method annotated only with @RequestMapping(method = RequestMethod.POST)
+    // produces no Route node. Documented in docs/ARCHITECTURE.md; pinned here so
+    // the day it changes, this test flags it deliberately.
+    let src = r#"
+        package com.example;
+        @RestController
+        @RequestMapping("/owners")
+        class OwnerController {
+          @RequestMapping(method = RequestMethod.POST)
+          Object create() { return null; }
+        }
+    "#;
+    assert!(route_nodes(src).is_empty(), "expected no routes from method-level @RequestMapping");
+}

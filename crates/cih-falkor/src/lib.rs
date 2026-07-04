@@ -555,7 +555,7 @@ impl GraphStore for FalkorStore {
             .filter_map(|row| row.first().cloned())
             .collect();
         let community = self
-            .symbol_communities(&[id.clone()])
+            .symbol_communities(std::slice::from_ref(id))
             .await?
             .into_iter()
             .find_map(|(nid, info)| if &nid == id { Some(info) } else { None });
@@ -834,7 +834,7 @@ impl GraphStore for FalkorStore {
         _min_jaccard: f32,
         limit: usize,
     ) -> Result<Vec<SimilarMethod>> {
-        let id_lit = cstr(id.as_str());
+        let _id_lit = cstr(id.as_str());
         let lim = limit.clamp(1, 50) as i64;
         // SIMILAR_TO edges carry confidence = Jaccard score.
         let q = format!(

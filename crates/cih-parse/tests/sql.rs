@@ -119,3 +119,26 @@ fn left_join_reads_table() {
     assert!(r.contains(&"TABLE_A".to_string()));
     assert!(r.contains(&"TABLE_B".to_string()));
 }
+
+#[test]
+fn insert_select_writes_target_reads_source() {
+    let sql = "INSERT INTO DEST_TABLE (a) SELECT a FROM SRC_TABLE WHERE x = 1";
+    let w = writes(sql);
+    let r = reads(sql);
+    assert!(w.contains(&"DEST_TABLE".to_string()), "got writes: {w:?}");
+    assert!(r.contains(&"SRC_TABLE".to_string()), "got reads: {r:?}");
+    assert!(!r.contains(&"DEST_TABLE".to_string()), "target must not be a read");
+}
+
+#[test]
+fn nested_subquery_extracts_innermost_table() {
+    let r = reads("SELECT * FROM (SELECT id FROM (SELECT id FROM DEEP_TABLE) inner1) t");
+    assert!(r.contains(&"DEEP_TABLE".to_string()), "got: {r:?}");
+}
+
+#[test]
+fn union_reads_both_branches() {
+    let r = reads("SELECT a FROM TABLE_A UNION SELECT a FROM TABLE_B");
+    assert!(r.contains(&"TABLE_A".to_string()), "got: {r:?}");
+    assert!(r.contains(&"TABLE_B".to_string()), "got: {r:?}");
+}
