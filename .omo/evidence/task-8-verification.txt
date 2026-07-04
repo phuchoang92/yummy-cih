@@ -1,0 +1,16 @@
+# Task 8 Evidence
+
+## All tests pass
+- cargo test -p cih-engine: 104 passed, 0 failed
+
+## CLI works
+- start --help: shows options
+- start --dry-run --non-interactive --repo /tmp --repo-name demo: EXIT 0, shows command plan
+- start --dry-run --non-interactive --repo /tmp/nonexistent12345: EXIT 1, clear error
+
+## Docs-viewer builds
+- npm install && npm run build: SUCCESS
+
+## Pre-existing
+- 1 pre-existing test failure in cih-wiki (render_dev_community_shows_classes) - unrelated to our changes
+- cargo fmt reformatted pre-existing code across workspace

@@ -1,0 +1,9 @@
+target/
+.git/
+.cih/
+docs/
+*.md
+!README.md
+# graph-ui source is built in Stage 1; node_modules must not enter the context
+graph-ui/node_modules/
+graph-ui/dist/

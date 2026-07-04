@@ -1,0 +1,13 @@
+# TypeScript entry-point annotation/decorator patterns consumed by the discover pass.
+# Names match the `route_annotations` prop emitted by the TypeScript extractor (without @).
+
+[http]
+annotations = [
+  "Get", "Post", "Put", "Delete", "Patch", "Head", "Options", "All",
+]
+
+[event]
+annotations = ["MessagePattern", "EventPattern"]
+
+[scheduled]
+annotations = ["Cron", "Interval", "Timeout"]

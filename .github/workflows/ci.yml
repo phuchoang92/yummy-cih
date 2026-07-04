@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain (channel + components) is pinned by rust-toolchain.toml.
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The existing tree predates any rustfmt run (~150 files drift from default
+      # style). Reported for awareness but non-blocking until a one-shot
+      # `cargo fmt --all` normalization commit lands.
+      # TODO: make this blocking after that commit.
+      - name: Format (non-blocking)
+        run: cargo fmt --all --check || true
+
+      # Deny warnings only on the backend crates the MCP tools compute over.
+      # These are clean today, so the gate catches *new* warnings in the code
+      # paths that back impact/taint/graph answers.
+      - name: Clippy (gated crates, deny warnings)
+        run: |
+          cargo clippy --all-targets \
+            -p cih-core \
+            -p cih-graph-store \
+            -p cih-falkor \
+            -p cih-taint \
+            -- -D warnings
+
+      # The remaining crates carry a pre-existing dead_code/unused-import backlog
+      # (notably cih-server's lib/bin module duplication and superseded browser/
+      # layout UI code). Linted here but not gated until a cleanup pass lands.
+      # TODO: promote cih-server into the gated job after that cleanup.
+      - name: Clippy (rest of workspace, non-blocking)
+        run: cargo clippy --workspace --all-targets || true
+
+      # No test in the workspace requires FalkorDB/Postgres — unit and
+      # artifact-fixture tests (e.g. taint::tests) run without services.
+      - name: Test
+        run: cargo test --workspace

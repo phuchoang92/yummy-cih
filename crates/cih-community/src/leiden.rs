@@ -1,0 +1,54 @@
+use cih_core::NodeId;
+use petgraph::graph::UnGraph;
+use petgraph::visit::EdgeRef;
+
+use crate::constants::MIN_EDGE_WEIGHT;
+use crate::leiden_impl::{GraphDataBuilder, Leiden, LeidenConfig, QualityType};
+
+pub(crate) fn leiden(
+    graph: &UnGraph<NodeId, f32>,
+    resolution: f64,
+    max_iterations: usize,
+    seed: u64,
+) -> Vec<usize> {
+    let n = graph.node_count();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut builder = GraphDataBuilder::new(n);
+    for edge in graph.edge_references() {
+        let u = edge.source().index();
+        let v = edge.target().index();
+        let w = (*edge.weight() as f64).max(MIN_EDGE_WEIGHT as f64);
+        if u != v {
+            let _ = builder.add_edge(u, v, w);
+        }
+    }
+    let graph_data = match builder.build() {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "leiden graph build failed; returning singleton partition");
+            return (0..n).collect();
+        }
+    };
+
+    let config = LeidenConfig::builder()
+        .resolution(resolution)
+        .max_iterations(max_iterations)
+        .seed(seed)
+        .quality(QualityType::Modularity)
+        .build();
+
+    match Leiden::new(config).run(&graph_data) {
+        Ok(output) => (0..n).map(|i| output.partition.community_of(i)).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "leiden algorithm failed; returning singleton partition");
+            (0..n).collect()
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "leiden_tests.rs"]
+mod tests;

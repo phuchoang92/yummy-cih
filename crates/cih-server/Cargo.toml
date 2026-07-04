@@ -8,10 +8,17 @@ license.workspace = true
 name = "cih-server"
 path = "src/main.rs"
 
+[lib]
+name = "cih_server_lib"
+path = "src/lib.rs"
+
 [dependencies]
 cih-core.workspace = true
+cih-embed.workspace = true
 cih-graph-store.workspace = true
 cih-falkor.workspace = true
+cih-search.workspace = true
+cih-taint.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,10 +27,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 async-trait.workspace = true
 
-axum = "0.8"
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "trace", "timeout"] }
 # NOTE: rmcp iterates fast. Pin and verify the macro/transport API against
 # https://docs.rs/rmcp for the exact version you resolve. The tool LOGIC in
 # main.rs is SDK-agnostic; only the #[tool]/ServerHandler wiring is version-sensitive.
 rmcp = { version = "0.7", features = ["server", "macros", "transport-streamable-http-server"] }
 # Must match rmcp's schemars major (rmcp 0.7 → schemars 1.x) or JsonSchema derives the wrong trait.
 schemars = "1"
+reqwest.workspace = true

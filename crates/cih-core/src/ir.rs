@@ -7,11 +7,14 @@ use crate::{NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};
 
 /// Everything the parser extracts from one source file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedFile {
     /// Repo-relative path of the source file.
     pub file: String,
-    /// Declared Java package (`None` = default package).
+    /// Language identifier: `"java"`, `"typescript"`, `"python"`, etc.
+    #[serde(default)]
+    pub language: String,
+    /// Declared package/module (`None` = default/unknown).
     pub package: Option<String>,
     /// Type / method / constructor / field definitions declared in this file.
     pub defs: Vec<SymbolDef>,
@@ -19,6 +22,102 @@ pub struct ParsedFile {
     pub imports: Vec<RawImport>,
     /// Unresolved usage sites (calls, field access, heritage); resolved in Phase 4.
     pub reference_sites: Vec<ReferenceSite>,
+    /// Receiver-name → raw-type bindings (params, locals, fields, `var` inference,
+    /// patterns, aliases) scoped to their enclosing callable. Phase 4 uses these,
+    /// precedence-ordered, to resolve a receiver's type. Raw (unresolved) names.
+    pub type_bindings: Vec<TypeBinding>,
+    /// Inter-service communication sites discovered in this file. Phase 21 turns
+    /// these into ExternalEndpoint/KafkaTopic nodes plus cross-service edges.
+    #[serde(default)]
+    pub contract_sites: Vec<ContractSite>,
+    /// Static SQL constant fields (`private static final String QUERY_... = "..."`).
+    /// Used by the DB-access emit pass to link execution sites to SQL text.
+    #[serde(default)]
+    pub sql_constants: Vec<SqlConstant>,
+    /// Sites where a known DB execution API is called (DBUtil, JdbcTemplate, etc.).
+    #[serde(default)]
+    pub sql_execution_sites: Vec<SqlExecutionSite>,
+    /// All `static final String` fields (superset of sql_constants); used by constant propagation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub string_constants: Vec<StringConstant>,
+}
+
+/// A `static final String` field with its folded literal value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StringConstant {
+    /// Field name, e.g. `"BASE_URL"`.
+    pub const_name: String,
+    /// FQCN of the declaring class.
+    pub owner_fqcn: String,
+    /// Folded literal value (adjacent string literals concatenated).
+    pub value: String,
+    /// True when concat included non-literals.
+    pub dynamic: bool,
+    pub range: Range,
+}
+
+/// A `private static final String` field whose initializer is (or folds to) a SQL string.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlConstant {
+    /// Field name, e.g. `"QUERY_GETCUSTOMOVERDRAFTTYPEBYCODE"`.
+    pub const_name: String,
+    /// FQCN of the declaring class.
+    pub owner_fqcn: String,
+    /// Folded SQL text (adjacent string literals concatenated).
+    pub sql_text: String,
+    /// True when any non-literal expression appeared in the initializer concat chain.
+    pub dynamic: bool,
+    pub range: Range,
+}
+
+/// A site where a DB execution API (DBUtil, JdbcTemplate, PreparedStatement) is called.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlExecutionSite {
+    /// Simple method name: `"executeQuery"`, `"prepareStatement"`, `"query"`, etc.
+    pub api_name: String,
+    /// Field-name argument referencing a SQL constant in the same class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub const_ref: Option<String>,
+    /// Inline SQL literal passed directly as an argument (not via a named constant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_sql: Option<String>,
+    /// Graph id of the enclosing callable — the `EXECUTES_QUERY` edge source.
+    pub in_callable: NodeId,
+    pub range: Range,
+}
+
+/// A source location that participates in an inter-service contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractSite {
+    pub kind: ContractKind,
+    /// URL template for HTTP calls, e.g. `/api/orders/{id}`.
+    #[serde(default)]
+    pub url_template: Option<String>,
+    /// Kafka/Spring topic name or Spring event class simple name.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// HTTP method for HTTP calls.
+    #[serde(default)]
+    pub http_method: Option<String>,
+    /// Graph id of the enclosing callable that makes/listens to this contract.
+    pub in_callable: NodeId,
+    pub range: Range,
+}
+
+/// Type of contract site discovered by the parser.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContractKind {
+    /// HTTP call via RestTemplate / WebClient.
+    HttpCall,
+    /// Declarative HTTP client proxy (e.g. Feign/OpenFeign interface).
+    HttpClientProxy,
+    /// KafkaTemplate.send() / ApplicationEventPublisher.publishEvent().
+    EventPublish,
+    /// @KafkaListener / @EventListener method.
+    EventListen,
+    /// Language-specific contract kind emitted by a parser (e.g. `"grpc_stub"`, `"graphql_query"`).
+    /// Not resolved to edges automatically; consumers check the inner key.
+    Custom(String),
 }
 
 /// A declared symbol — a type, method, constructor, or field.
@@ -38,6 +137,64 @@ pub struct SymbolDef {
     pub range: Range,
     /// Source modifiers (`public`, `static`, `abstract`, …).
     pub modifiers: Vec<String>,
+    /// Parameter types for methods/constructors, ordered, raw (simple/unresolved)
+    /// names — empty for non-callables. Phase 4 uses these for overload narrowing.
+    #[serde(default)]
+    pub param_types: Vec<String>,
+    /// Return type for methods, raw name (`None` for `void`/non-methods).
+    #[serde(default)]
+    pub return_type: Option<String>,
+    /// Declared type for fields, raw name (`None` for non-fields).
+    #[serde(default)]
+    pub declared_type: Option<String>,
+    /// Framework role for type-kind defs emitted by language parsers.
+    /// Java examples: `"service"`, `"repository"`, `"controller"`, `"entity"`.
+    /// `None` for non-types and unannotated classes.
+    #[serde(default, rename = "stereotype")]
+    pub framework_role: Option<String>,
+    /// Optional complexity analysis (Gap 1). None = language provider did not compute this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<ComplexityRecord>,
+    /// Optional MinHash body fingerprint (Gap 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_fingerprint: Option<BodyFingerprint>,
+    /// Language-specific metadata not part of the universal IR.
+    /// Parsers may write arbitrary JSON here; consumers must check the `language` field
+    /// of the enclosing `ParsedFile` before reading. `None` for parsers that don't use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang_meta: Option<serde_json::Value>,
+}
+
+/// Semantic import binding kind — more structured than raw text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportBindingKind {
+    /// `import com.example.Class` (Java explicit) or `import { X } from './m'` (TS named)
+    Named,
+    /// `import X from './m'` (TS/ES default)
+    Default,
+    /// `import * as ns from './m'` (TS namespace)
+    Namespace,
+    /// `import './m'` (side-effect only)
+    Module,
+    /// `import static com.example.Util.helper` (Java static member)
+    StaticMember,
+    /// `import com.example.*` (Java wildcard) or `from pkg import *` (Python)
+    Wildcard,
+}
+
+/// A structured import binding produced by the language parser.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportBinding {
+    /// Module/package path as written: `"com.example.Class"`, `"./service"`, `"orders.service"`
+    pub module: String,
+    /// The imported name (for Named/StaticMember): `"Class"`, `"helper"`, `"X"`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<String>,
+    /// Local alias: `import X as Y` → local = "Y"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+    pub kind: ImportBindingKind,
+    pub range: Range,
 }
 
 /// A raw import statement, pre-resolution.
@@ -52,6 +209,88 @@ pub struct RawImport {
     pub range: Range,
 }
 
+/// One call-site record stored per CALLS edge (multiple calls to same target → list).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallSiteRecord {
+    pub range: Range,
+    /// Resolved (constant-propagated) arg texts, <= 120 chars each.
+    pub args: Vec<String>,
+}
+
+/// Optional complexity analysis. None = language provider did not compute this.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComplexityRecord {
+    /// e.g., "java"
+    pub provider: String,
+    pub cyclomatic: u16,
+    pub cognitive: u16,
+    pub loop_depth: u8,
+    /// Set during transitive loop depth propagation pass.
+    pub is_recursive: bool,
+    /// Control-flow statement counts used to build the class-level StructuralProfile.
+    /// All default to 0 so old serialised records remain valid.
+    #[serde(default)] pub if_count: u16,
+    #[serde(default)] pub for_count: u16,
+    #[serde(default)] pub while_count: u16,
+    #[serde(default)] pub switch_count: u16,
+    #[serde(default)] pub try_count: u16,
+    #[serde(default)] pub return_count: u16,
+    #[serde(default)] pub throw_count: u16,
+}
+
+/// 25-float structural fingerprint of a class node.
+///
+/// Features (fixed order — index = feature):
+///  0  method_count        1  field_count          2  constructor_count
+///  3  avg_cyclomatic      4  max_cyclomatic        5  avg_cognitive
+///  6  max_cognitive       7  avg_loop_depth        8  max_loop_depth
+///  9  if_count (sum)     10  for_count (sum)      11  while_count (sum)
+/// 12  switch_count (sum) 13  try_count (sum)      14  return_count (sum)
+/// 15  throw_count (sum)  16  annotation_count     17  has_framework_stereotype
+/// 18  is_interface       19  is_abstract          20  is_enum
+/// 21  implements_count   22  extends_count        23  is_test
+/// 24  loc_normalized (LOC/1000, clamped 1.0)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StructuralProfile {
+    pub features: [f32; 25],
+}
+
+impl StructuralProfile {
+    pub fn cosine_similarity(&self, other: &Self) -> f32 {
+        let dot: f32 = self.features.iter().zip(other.features.iter()).map(|(a, b)| a * b).sum();
+        let na: f32 = self.features.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = other.features.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 { 0.0 } else { (dot / (na * nb)).clamp(-1.0, 1.0) }
+    }
+
+    pub fn to_json_array(&self) -> serde_json::Value {
+        serde_json::Value::Array(self.features.iter().map(|&f| {
+            serde_json::Value::Number(serde_json::Number::from_f64(f as f64).unwrap_or(serde_json::Number::from(0)))
+        }).collect())
+    }
+
+    pub fn from_json_array(v: &serde_json::Value) -> Option<Self> {
+        let arr = v.as_array()?;
+        if arr.len() != 25 { return None; }
+        let mut features = [0f32; 25];
+        for (i, val) in arr.iter().enumerate() {
+            features[i] = val.as_f64()? as f32;
+        }
+        Some(Self { features })
+    }
+}
+
+/// Optional MinHash fingerprint for near-clone detection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BodyFingerprint {
+    /// e.g., "java"
+    pub provider: String,
+    /// Leaf AST node count; size gate.
+    pub leaf_token_count: u32,
+    /// K=64 MinHash values.
+    pub minhash: Vec<u32>,
+}
+
 /// A usage site (call / field access / heritage) before resolution. Phase 4 turns
 /// each into a graph edge — or drops it if the target is out of scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,8 +303,21 @@ pub struct ReferenceSite {
     /// Argument count for calls; `None` for non-call references.
     pub arity: Option<u16>,
     pub range: Range,
-    /// FQCN of the enclosing callable — the edge SOURCE Phase 4 attributes this to.
+    /// Signature of the enclosing callable (`fqcn#name/arity`); kept for debugging
+    /// and as a fallback. Prefer [`ReferenceSite::in_callable`] for the edge source.
     pub in_fqcn: String,
+    /// Graph node id of the enclosing callable — the edge SOURCE Phase 4 attributes
+    /// this reference to. A real [`NodeId`] (not the `in_fqcn` string), so resolved
+    /// `CALLS`/`ACCESSES` edges never dangle.
+    #[serde(default = "unknown_callable_id")]
+    pub in_callable: NodeId,
+    /// Raw argument texts captured at parse time (for Call sites only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arg_texts: Vec<String>,
+}
+
+fn unknown_callable_id() -> NodeId {
+    NodeId::new("Method:<unknown>")
 }
 
 /// What a [`ReferenceSite`] represents → the graph-edge kind emitted after resolution.
@@ -78,4 +330,56 @@ pub enum RefKind {
     Extends,
     Implements,
     TypeRef,
+}
+
+/// A receiver-name → raw-type binding scoped to its enclosing callable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeBinding {
+    /// Bound identifier — the receiver name (`service`, `u`, …).
+    pub name: String,
+    /// Raw (unresolved) type name as written (`OwnerService`, `List`); or, for
+    /// `var` call-result inference, the invoked method name whose return type the
+    /// resolver must follow.
+    pub raw_type: String,
+    /// How the binding was introduced — drives Phase 4 resolution precedence and
+    /// whether `raw_type` is a type or a method/alias to chase.
+    pub kind: BindingKind,
+    /// Signature of the enclosing callable (`fqcn#name/arity`), or the type FQCN for
+    /// a field binding — the lexical scope this binding lives in.
+    pub in_fqcn: String,
+    pub range: Range,
+}
+
+/// Per-file parse output: graph nodes/edges produced for this file, plus the
+/// unresolved IR that the resolution phase consumes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParsedUnit {
+    pub rel: String,
+    pub nodes: Vec<crate::Node>,
+    pub edges: Vec<crate::Edge>,
+    pub parsed_file: ParsedFile,
+    /// Normalized import bindings (language-aware). Added in V2 alongside `imports`.
+    /// Stored here to avoid breaking existing ParsedFile struct literal construction.
+    #[serde(default)]
+    pub import_bindings: Vec<ImportBinding>,
+}
+
+/// Origin of a [`TypeBinding`] — determines resolution precedence (nearest
+/// param/local beats a field) and how `raw_type` is interpreted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BindingKind {
+    /// Method/constructor formal parameter (`void f(User u)`).
+    Param,
+    /// Local variable with an explicit type (`User u = …`).
+    Local,
+    /// Class field (`private User user;`).
+    Field,
+    /// `var x = svc.get();` — `raw_type` is the invoked method name to follow.
+    CallResult,
+    /// `var y = x;` — `raw_type` is another bound name to alias.
+    Alias,
+    /// Pattern binding (`if (o instanceof User u)`, `case User u ->`).
+    Pattern,
+    /// Method return-type binding.
+    Return,
 }

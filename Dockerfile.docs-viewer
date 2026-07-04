@@ -1,0 +1,20 @@
+# ── Deps: install node_modules ────────────────────────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY docs-viewer/package.json docs-viewer/package-lock.json ./
+RUN npm ci
+
+# ── Runtime: copy source + pre-installed deps ─────────────────────────────────
+FROM node:20-alpine AS runtime
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY docs-viewer/ .
+
+# Multi-repo default: each subdir under /wiki is one repo.
+# Override with CIH_WIKI_PATH=/wiki for single-repo mode.
+ENV CIH_WIKI_REPOS_DIR=/wiki
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
+EXPOSE 3001
+
+CMD ["npm", "run", "start:prod"]

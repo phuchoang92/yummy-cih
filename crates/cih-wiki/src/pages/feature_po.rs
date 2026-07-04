@@ -1,0 +1,396 @@
+use std::collections::{BTreeMap, HashMap};
+
+use cih_core::Node;
+
+use crate::graph::{route_http_method, route_path, WikiGraph};
+use crate::slugify::slugify;
+use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
+
+
+/// Render the feature-level PO (business overview) page.
+/// Aggregates routes, tables, and LLM summaries from all communities in the feature.
+pub fn render_feature_po(
+    feature: &str,
+    community_ids: &[String],
+    graph: &WikiGraph,
+    llm_summaries: Option<&HashMap<String, CommunityLlmSummary>>,
+    llm_full: Option<&HashMap<String, CommunityLlmFull>>,
+    feature_llm: Option<&FeatureLlmSummary>,
+    flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
+    scheduled_count: usize,
+    listener_count: usize,
+) -> String {
+    let title = format!("{} — Business Overview", capitalize(feature));
+    let mut md = String::new();
+    md.push_str(&format!("---\ntitle: {}\nsidebar_position: 1\n---\n\n", title));
+    md.push_str(&format!("# {}\n\n", title));
+
+    // Feature-level LLM overview (highest quality — one call across all communities).
+    if let Some(flm) = feature_llm {
+        if !flm.po_overview.is_empty() {
+            md.push_str("## Overview\n\n");
+            md.push_str(&flm.po_overview);
+            md.push_str("\n\n");
+        }
+        if !flm.po_capabilities.is_empty() {
+            md.push_str("## Capabilities\n\n");
+            md.push_str(&flm.po_capabilities);
+            md.push_str("\n\n");
+        }
+    } else {
+        // llm-full mode: richer sections per community
+        let full_entries: Vec<&CommunityLlmFull> = community_ids
+            .iter()
+            .filter_map(|cid| llm_full.and_then(|m| m.get(cid)))
+            .collect();
+
+        if !full_entries.is_empty() {
+            let summaries: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_summary.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !summaries.is_empty() {
+                md.push_str("## Overview\n\n");
+                for s in &summaries {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let caps: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_capabilities.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !caps.is_empty() {
+                md.push_str("## Capabilities\n\n");
+                for s in &caps {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let workflows: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_workflows.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !workflows.is_empty() {
+                md.push_str("## Workflows\n\n");
+                for s in &workflows {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+            let questions: Vec<&str> = full_entries
+                .iter()
+                .map(|f| f.po_open_questions.as_str())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !questions.is_empty() {
+                md.push_str("## Open Questions\n\n");
+                for s in &questions {
+                    md.push_str(s);
+                    md.push_str("\n\n");
+                }
+            }
+        } else {
+            // llm-summary mode fallback
+            let po_texts: Vec<String> = community_ids
+                .iter()
+                .filter_map(|cid| llm_summaries.and_then(|m| m.get(cid)).map(|s| s.po.clone()))
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !po_texts.is_empty() {
+                md.push_str("## Overview\n\n");
+                for text in &po_texts {
+                    md.push_str(text);
+                    md.push_str("\n\n");
+                }
+            }
+        }
+    } // end feature_llm / community-level LLM
+
+    let total_routes: usize = community_ids
+        .iter()
+        .map(|cid| {
+            graph
+                .community_routes
+                .get(cid)
+                .map(|r| r.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let total_procs: usize = community_ids
+        .iter()
+        .map(|cid| graph.processes_for_community(cid, true).len())
+        .sum();
+
+    // Aggregate messaging topics across all communities
+    let mut publishes: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut consumes: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for cid in community_ids {
+        let (pub_topics, con_topics) = graph.community_messaging(cid);
+        for (name, kind) in pub_topics {
+            publishes.insert(name, kind);
+        }
+        for (name, kind) in con_topics {
+            consumes.insert(name, kind);
+        }
+    }
+    let total_topics = publishes.len() + consumes.len();
+
+    let topics_part = if total_topics > 0 {
+        format!(" · **Topics:** {}", total_topics)
+    } else {
+        String::new()
+    };
+
+    md.push_str(&format!(
+        "**Modules:** {} · **Routes:** {}{} · **Processes:** {}\n\n",
+        community_ids.len(),
+        total_routes,
+        topics_part,
+        total_procs,
+    ));
+
+    // Aggregated routes
+    let mut all_routes: Vec<(String, String)> = Vec::new();
+    for cid in community_ids {
+        if let Some(routes) = graph.community_routes.get(cid) {
+            for (_, route) in routes {
+                all_routes.push((
+                    route_http_method(route).to_string(),
+                    route_path(route).to_string(),
+                ));
+            }
+        }
+    }
+    if !all_routes.is_empty() {
+        md.push_str("## API Routes\n\n");
+        md.push_str("| Method | Path |\n");
+        md.push_str("|---|---|\n");
+        for (method, path) in &all_routes {
+            md.push_str(&format!("| `{}` | `{}` |\n", method, path));
+        }
+        md.push('\n');
+    }
+
+    // Aggregated DB tables
+    let mut tables: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for cid in community_ids {
+        if let Some(ts) = graph.community_db_tables.get(cid) {
+            for t in ts {
+                let e = tables.entry(t.table_name.clone()).or_default();
+                e.0 |= t.reads;
+                e.1 |= t.writes;
+            }
+        }
+    }
+    if !tables.is_empty() {
+        md.push_str("## Core Tables\n\n");
+        md.push_str("| Table | Access |\n");
+        md.push_str("|---|---|\n");
+        for (name, (reads, writes)) in &tables {
+            let access = match (reads, writes) {
+                (true, true) => "Read + Write",
+                (true, false) => "Read",
+                (false, true) => "Write",
+                _ => "—",
+            };
+            md.push_str(&format!("| `{}` | {} |\n", name, access));
+        }
+        md.push('\n');
+    }
+
+    // Messaging topics
+    if !publishes.is_empty() || !consumes.is_empty() {
+        md.push_str("## Topics\n\n");
+        md.push_str("| Direction | Topic | Type |\n");
+        md.push_str("|---|---|---|\n");
+        for (name, kind) in &publishes {
+            md.push_str(&format!(
+                "| Publishes | `{}` | {} |\n",
+                name,
+                capitalize(kind)
+            ));
+        }
+        for (name, kind) in &consumes {
+            md.push_str(&format!(
+                "| Consumes | `{}` | {} |\n",
+                name,
+                capitalize(kind)
+            ));
+        }
+        md.push('\n');
+    }
+
+    // Key Workflows section — per-flow narrative + collapsible step table
+    if let Some(flow_map) = flow_llm_summaries {
+        let mut any_flows = false;
+        for cid in community_ids {
+            let procs = graph.processes_for_community(cid, true);
+            for proc_id in &procs {
+                let Some(fs) = flow_map.get(proc_id.as_str()) else { continue };
+                if fs.business_impact.is_empty() && fs.narrative.is_empty() {
+                    continue;
+                }
+                if !any_flows {
+                    md.push_str("## Key Workflows\n\n");
+                    any_flows = true;
+                }
+                if let Some(proc_node) = graph.nodes_by_id.get(proc_id.as_str()) {
+                    md.push_str(&format!("### {}\n\n", proc_node.name));
+                }
+                if !fs.business_impact.is_empty() {
+                    md.push_str(&fs.business_impact);
+                    md.push_str("\n\n");
+                }
+                if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
+                    if !steps.is_empty() {
+                        md.push_str("<details>\n<summary>Steps</summary>\n\n");
+                        md.push_str("| Step | What it does |\n");
+                        md.push_str("|---|---|\n");
+                        for (i, step) in steps.iter().enumerate() {
+                            let desc = fs.step_descriptions.get(i).map(|s| s.as_str()).unwrap_or("");
+                            md.push_str(&format!("| `{}` | {} |\n", step.symbol.name, desc));
+                        }
+                        md.push_str("\n</details>\n\n");
+                    }
+                }
+            }
+        }
+    }
+
+    // Controllers section — one entry per controller class in this feature
+    let mut feature_controllers: Vec<(&String, &Vec<(Node, Node)>)> = graph
+        .routes_by_controller
+        .iter()
+        .filter(|(ctrl, _)| {
+            graph
+                .controller_feature
+                .get(*ctrl)
+                .map(|f| f.as_str() == feature)
+                .unwrap_or(false)
+        })
+        .collect();
+    feature_controllers.sort_by_key(|(ctrl, _)| ctrl.as_str());
+
+    if !feature_controllers.is_empty() || scheduled_count > 0 || listener_count > 0 {
+        md.push_str("## API Surface\n\n");
+        md.push_str("| Endpoint Group | Count |\n");
+        md.push_str("|---|---|\n");
+        for (ctrl_name, routes) in &feature_controllers {
+            let slug = slugify(ctrl_name);
+            let display = controller_display_name(ctrl_name);
+            md.push_str(&format!(
+                "| [{}](api/{}/index.md) | {} routes |\n",
+                display,
+                slug,
+                routes.len()
+            ));
+        }
+        if scheduled_count > 0 {
+            md.push_str(&format!(
+                "| [Scheduled Jobs](api/scheduled/) | {} jobs |\n",
+                scheduled_count
+            ));
+        }
+        if listener_count > 0 {
+            md.push_str(&format!(
+                "| [Event Listeners](api/events/) | {} listeners |\n",
+                listener_count
+            ));
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
+/// Strips the "Controller" suffix and returns a human-friendly display name.
+/// E.g. "CartController" → "Cart API", "AdminOrderController" → "Admin Order API".
+pub fn controller_display_name(controller_name: &str) -> String {
+    let base = controller_name
+        .strip_suffix("Controller")
+        .unwrap_or(controller_name);
+    // Insert spaces before uppercase letters (PascalCase → words)
+    let mut words = String::new();
+    for (i, ch) in base.chars().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            words.push(' ');
+        }
+        words.push(ch);
+    }
+    format!("{} API", words)
+}
+
+/// Render a single controller's route page (PO-facing).
+pub fn render_controller_page(
+    controller_name: &str,
+    routes: &[(Node, Node)],
+    description: Option<&str>,
+    method_descriptions: &HashMap<String, String>,
+) -> String {
+    let display_name = controller_display_name(controller_name);
+    let route_count = routes.len();
+    let mut md = String::new();
+    md.push_str(&format!(
+        "---\ntitle: {}\nrole: po\n---\n\n",
+        display_name
+    ));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
+    md.push_str(&format!("# {}\n\n", display_name));
+    if let Some(desc) = description.filter(|s| !s.is_empty()) {
+        md.push_str(desc);
+        md.push_str("\n\n");
+    }
+    md.push_str(&format!(
+        "**{} route{}**\n\n",
+        route_count,
+        if route_count == 1 { "" } else { "s" }
+    ));
+    let has_method_descs = !method_descriptions.is_empty();
+    if has_method_descs {
+        md.push_str("| Method | Path | Handler | Description |\n");
+        md.push_str("|---|---|---|---|\n");
+    } else {
+        md.push_str("| Method | Path | Handler |\n");
+        md.push_str("|---|---|---|\n");
+    }
+    for (handler, route) in routes {
+        let method_name = handler_method_name(handler.id.as_str());
+        if has_method_descs {
+            let desc = method_descriptions.get(method_name).map(|s| s.as_str()).unwrap_or("");
+            md.push_str(&format!(
+                "| `{}` | `{}` | `{}` | {} |\n",
+                route_http_method(route),
+                route_path(route),
+                method_name,
+                desc,
+            ));
+        } else {
+            md.push_str(&format!(
+                "| `{}` | `{}` | `{}` |\n",
+                route_http_method(route),
+                route_path(route),
+                method_name,
+            ));
+        }
+    }
+    md.push('\n');
+    md
+}
+
+fn handler_method_name(handler_id: &str) -> &str {
+    handler_id
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(handler_id)
+}
+
+
+

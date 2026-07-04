@@ -1,0 +1,18 @@
+# Java entry-point annotation patterns consumed by the discover pass.
+# Annotation names match the `route_annotations` prop emitted by the Java extractor.
+
+[http]
+annotations = [
+  "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping",
+  "RequestMapping",
+  "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+]
+
+[event]
+annotations = [
+  "KafkaListener", "EventListener", "RabbitListener",
+  "JmsListener", "SqsListener", "StreamListener",
+]
+
+[scheduled]
+annotations = ["Scheduled", "Cron"]

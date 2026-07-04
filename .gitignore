@@ -1,5 +1,8 @@
 # Rust build output
 /target/
+
+# Node / Docusaurus
+node_modules/
 **/*.rs.bk
 
 # Environment and secrets
@@ -20,3 +23,9 @@
 # Local temp/cache
 .cache/
 tmp/
+
+# CIH analysis artifacts
+.cih/
+.gitnexus
+
+.fastembed_cache/

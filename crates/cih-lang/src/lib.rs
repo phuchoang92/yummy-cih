@@ -1,0 +1,114 @@
+use std::collections::{BTreeSet, HashMap};
+use std::sync::OnceLock;
+
+pub mod constant_resolver;
+pub mod fingerprint;
+pub mod generic_parse;
+
+pub use constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
+
+/// Declares all language modules and generates `all_providers()`.
+/// To add a new language: add one line here (plus the implementation files).
+macro_rules! languages {
+    ($($lang:ident : $provider:ident),* $(,)?) => {
+        $(pub mod $lang;)*
+
+        pub fn all_providers() -> Vec<Box<dyn LanguageProvider>> {
+            vec![$(Box::new($lang::$provider::new())),*]
+        }
+    }
+}
+
+languages! {
+    java: JavaProvider,
+    typescript: TypescriptProvider,
+    python: PythonProvider,
+    kotlin: KotlinProvider,
+    go: GoProvider,
+    rust_lang: RustProvider,
+    csharp: CSharpProvider,
+    ruby: RubyProvider,
+    php: PhpProvider,
+    scala: ScalaProvider,
+    cpp: CppProvider,
+    bash: BashProvider,
+    elixir: ElixirProvider,
+}
+
+/// Maps a file path to its syntax-highlight language tag via the provider registry.
+/// Returns `""` for unrecognized extensions.
+pub fn lang_for_path(path: &str) -> &'static str {
+    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        let mut m = HashMap::new();
+        for p in all_providers() {
+            let tag = p.lang_tag();
+            for &ext in p.extensions() {
+                m.insert(ext, tag);
+            }
+        }
+        m
+    });
+    let ext = path.rfind('.').map(|i| &path[i..]).unwrap_or("");
+    map.get(ext).copied().unwrap_or("")
+}
+
+/// Returns the single-line comment prefix for a language id (e.g. `"#"` for python, `"//"` for java).
+pub fn comment_prefix_for_lang(lang: &str) -> &'static str {
+    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        let mut m = HashMap::new();
+        for p in all_providers() {
+            m.insert(p.language_id(), p.comment_prefix());
+        }
+        m
+    });
+    map.get(lang).copied().unwrap_or("//")
+}
+
+/// Lightweight per-file scan metadata (no tree-sitter parse).
+/// Returned by [`LanguageProvider::scan_file`] during the scan phase.
+#[derive(Clone, Debug, Default)]
+pub struct SourceScan {
+    /// Lines of code (newline count).
+    pub loc: u64,
+    /// Best-effort namespace / package declaration, if any.
+    pub package: Option<String>,
+    /// Framework identifiers detected from cheap string matching.
+    /// Normalized to a fixed set: `"spring"`, `"nestjs"`, `"flask"`, `"fastapi"`.
+    pub frameworks: BTreeSet<String>,
+}
+
+pub trait LanguageProvider: Send + Sync {
+    fn language(&self) -> tree_sitter::Language;
+    /// Short lowercase identifier for this language, e.g. `"java"`, `"typescript"`, `"python"`.
+    fn language_id(&self) -> &'static str;
+    fn extensions(&self) -> &'static [&'static str];
+    fn scope_query(&self) -> &tree_sitter::Query;
+    fn package_of(&self, root: tree_sitter::Node<'_>, src: &str) -> Option<String>;
+    fn stereotype(&self, def_text: &str) -> Option<Stereotype>;
+    fn parse_file(&self, rel: &str, src: &str) -> anyhow::Result<cih_core::ParsedUnit>;
+
+    /// Cheap per-file scan: LOC, package/namespace, framework hints.
+    /// Called during the scan phase — no tree-sitter, just string matching.
+    fn scan_file(&self, rel: &str, src: &str) -> anyhow::Result<SourceScan>;
+
+    /// Single-line comment prefix. Default: `"//"`. Override for `"#"` languages.
+    fn comment_prefix(&self) -> &'static str {
+        "//"
+    }
+
+    /// Language tag used for markdown syntax highlighting. Default: same as `language_id()`.
+    fn lang_tag(&self) -> &'static str {
+        self.language_id()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stereotype {
+    Spring,
+    JaxRs,
+    NestJs,
+    Flask,
+    FastApi,
+}

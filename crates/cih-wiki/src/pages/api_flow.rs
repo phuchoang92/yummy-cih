@@ -1,0 +1,533 @@
+use std::collections::{BTreeMap, HashMap};
+
+use crate::graph::{route_http_method, route_path, WikiGraph};
+use crate::mermaid;
+use crate::FlowLlmSummary;
+
+/// camelCase method name from a handler node ID → "Title Case Words"
+pub fn handler_title(handler_id: &str) -> String {
+    let method_name = handler_id
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(handler_id);
+    let mut out = String::new();
+    for (i, ch) in method_name.chars().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            out.push(' ');
+        }
+        if i == 0 {
+            out.extend(ch.to_uppercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// camelCase method name from a handler node ID → "kebab-case"
+pub fn handler_slug(handler_id: &str) -> String {
+    let method_name = handler_id
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(handler_id);
+    let mut out = String::new();
+    for (i, ch) in method_name.chars().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            out.push('-');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    if out.is_empty() { "flow".to_string() } else { out }
+}
+
+fn method_name_from_id(method_id: &str) -> &str {
+    method_id
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(method_id)
+}
+
+fn class_simple_name_from_method_id(method_id: &str) -> &str {
+    let without_kind = method_id
+        .strip_prefix("Method:")
+        .or_else(|| method_id.strip_prefix("Constructor:"))
+        .or_else(|| method_id.strip_prefix("Function:"))
+        .unwrap_or(method_id);
+    let fqcn = without_kind.split('#').next().unwrap_or(without_kind);
+    fqcn.rsplit('.').next().unwrap_or(fqcn)
+}
+
+pub fn class_id_from_method_id(method_id: &str, graph: &WikiGraph) -> String {
+    let without_kind = method_id
+        .strip_prefix("Method:")
+        .or_else(|| method_id.strip_prefix("Constructor:"))
+        .or_else(|| method_id.strip_prefix("Function:"))
+        .unwrap_or(method_id);
+    let fqcn = without_kind.split('#').next().unwrap_or(without_kind);
+    for prefix in &["Class:", "Interface:", "Enum:", "Record:"] {
+        let candidate = format!("{}{}", prefix, fqcn);
+        if graph.nodes_by_id.contains_key(candidate.as_str())
+            || graph.methods_by_class.contains_key(candidate.as_str())
+        {
+            return candidate;
+        }
+    }
+    format!("Class:{}", fqcn)
+}
+
+/// BFS from handler through calls_out, returning method node IDs in traversal order.
+/// Only includes methods whose class exists in the project graph.
+
+/// DB table access for a single method node ID.
+fn db_access(method_id: &str, graph: &WikiGraph) -> Vec<(String, bool, bool)> {
+    let mut tables: HashMap<String, (bool, bool)> = HashMap::new();
+    if let Some(query_ids) = graph.executes_query.get(method_id) {
+        for qid in query_ids {
+            for tid in graph.query_reads_table.get(qid.as_str()).into_iter().flatten() {
+                let name = graph.nodes_by_id.get(tid.as_str())
+                    .map(|n| n.name.clone())
+                    .unwrap_or_else(|| tid.clone());
+                tables.entry(name).or_default().0 = true;
+            }
+            for tid in graph.query_writes_table.get(qid.as_str()).into_iter().flatten() {
+                let name = graph.nodes_by_id.get(tid.as_str())
+                    .map(|n| n.name.clone())
+                    .unwrap_or_else(|| tid.clone());
+                tables.entry(name).or_default().1 = true;
+            }
+        }
+    }
+    let mut v: Vec<(String, bool, bool)> =
+        tables.into_iter().map(|(n, (r, w))| (n, r, w)).collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
+pub fn render_api_flow_page(
+    handler: &cih_core::Node,
+    route: &cih_core::Node,
+    position: usize,
+    flow_summary: Option<&FlowLlmSummary>,
+    graph: &WikiGraph,
+    class_dev_slugs: &HashMap<String, String>,
+    method_desc: &HashMap<String, String>,
+) -> String {
+    let http_method = route_http_method(route);
+    let path = route_path(route);
+    let title = handler_title(handler.id.as_str());
+
+    let mut md = String::new();
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: {}\nrole: po\n---\n\n",
+        title, position
+    ));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
+    md.push_str(&format!("# {}\n\n", title));
+    md.push_str(&format!("> `{}` `{}`\n\n", http_method, path));
+
+    // Business impact (LLM).
+    if let Some(fs) = flow_summary {
+        if !fs.business_impact.is_empty() {
+            md.push_str(&fs.business_impact);
+            md.push_str("\n\n");
+        }
+    }
+    // Handler-level description from method_desc (controller LLM enrichment).
+    if let Some(desc) = method_desc.get(handler.id.as_str()) {
+        if !desc.is_empty() {
+            md.push_str(desc);
+            md.push_str("\n\n");
+        }
+    }
+
+    // Call chain via BFS from handler through calls_out.
+    let chain = graph.build_call_chain(handler.id.as_str(), 4);
+
+    if !chain.is_empty() {
+        // Sequence diagram — shown when multiple classes are involved.
+        if let Some(diagram) = mermaid::call_sequence_diagram(&chain, &graph.calls_out, &http_method, &path) {
+            md.push_str("## Sequence\n\n");
+            md.push_str("```mermaid\n");
+            md.push_str(&diagram);
+            md.push_str("```\n\n");
+        }
+
+        md.push_str("## Flow\n\n");
+
+        // LLM narrative if available.
+        if let Some(fs) = flow_summary {
+            if !fs.narrative.is_empty() {
+                md.push_str(&fs.narrative);
+                md.push_str("\n\n");
+            }
+        }
+
+        // Collect per-step DB access.
+        let step_dbs: Vec<Vec<(String, bool, bool)>> =
+            chain.iter().map(|id| db_access(id.as_str(), graph)).collect();
+        let has_db = step_dbs.iter().any(|v| !v.is_empty());
+
+        // Only show "What it does" when real LLM descriptions exist — stereotype labels
+        // ("service", "controller", etc.) are not meaningful as method descriptions.
+        let has_desc = flow_summary
+            .map(|fs| fs.step_descriptions.iter().any(|s| !s.is_empty()))
+            .unwrap_or(false)
+            || chain
+                .iter()
+                .any(|mid| method_desc.get(mid.as_str()).map(|s| !s.is_empty()).unwrap_or(false));
+
+        match (has_desc, has_db) {
+            (true, true) => {
+                md.push_str("| # | Class | Method | What it does | DB access |\n");
+                md.push_str("|---|---|---|---|---|\n");
+            }
+            (true, false) => {
+                md.push_str("| # | Class | Method | What it does |\n");
+                md.push_str("|---|---|---|---|\n");
+            }
+            (false, true) => {
+                md.push_str("| # | Class | Method | DB access |\n");
+                md.push_str("|---|---|---|---|\n");
+            }
+            (false, false) => {
+                md.push_str("| # | Class | Method |\n");
+                md.push_str("|---|---|---|\n");
+            }
+        }
+
+        let mut seen_class_ids: Vec<String> = Vec::new();
+        for (i, mid) in chain.iter().enumerate() {
+            let cls = class_simple_name_from_method_id(mid.as_str());
+            let meth = method_name_from_id(mid.as_str());
+            let cls_id = class_id_from_method_id(mid.as_str(), graph);
+            if !seen_class_ids.contains(&cls_id) {
+                seen_class_ids.push(cls_id.clone());
+            }
+
+            let raw_desc = if has_desc {
+                flow_summary
+                    .and_then(|fs| fs.step_descriptions.get(i))
+                    .map(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| method_desc.get(mid.as_str()).map(|s| s.as_str()))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("—")
+            } else {
+                ""
+            };
+            let cleaned_desc;
+            let desc = if has_desc && raw_desc != "—" {
+                cleaned_desc = crate::clean_method_desc(raw_desc, &cls, &meth);
+                cleaned_desc.as_str()
+            } else {
+                raw_desc
+            };
+
+            if has_desc && has_db {
+                let db_str = if step_dbs[i].is_empty() {
+                    "—".to_string()
+                } else {
+                    step_dbs[i]
+                        .iter()
+                        .map(|(name, r, w)| match (r, w) {
+                            (true, true) => format!("`{}` R+W", name),
+                            (true, false) => format!("`{}` R", name),
+                            (false, true) => format!("`{}` W", name),
+                            _ => format!("`{}`", name),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} | {} |\n",
+                    i + 1, cls, meth, desc, db_str
+                ));
+            } else if has_desc {
+                md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} |\n",
+                    i + 1, cls, meth, desc
+                ));
+            } else if has_db {
+                let db_str = if step_dbs[i].is_empty() {
+                    "—".to_string()
+                } else {
+                    step_dbs[i]
+                        .iter()
+                        .map(|(name, r, w)| match (r, w) {
+                            (true, true) => format!("`{}` R+W", name),
+                            (true, false) => format!("`{}` R", name),
+                            (false, true) => format!("`{}` W", name),
+                            _ => format!("`{}`", name),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} |\n",
+                    i + 1, cls, meth, db_str
+                ));
+            } else {
+                md.push_str(&format!("| {} | `{}` | `{}` |\n", i + 1, cls, meth));
+            }
+        }
+        md.push('\n');
+
+        // Events published by any method in the chain.
+        let mut published: BTreeMap<String, ()> = BTreeMap::new();
+        for mid in &chain {
+            for eid in graph.publishes.get(mid.as_str()).into_iter().flatten() {
+                let name = graph.nodes_by_id.get(eid.as_str())
+                    .map(|n| n.name.clone())
+                    .unwrap_or_else(|| eid.clone());
+                published.insert(name, ());
+            }
+        }
+        if !published.is_empty() {
+            md.push_str("## Events\n\n");
+            md.push_str("| Direction | Topic |\n");
+            md.push_str("|---|---|\n");
+            for topic in published.keys() {
+                md.push_str(&format!("| Publishes | `{}` |\n", topic));
+            }
+            md.push('\n');
+        }
+
+        // Technical Reference links — relative ../../dev/{slug} from api/{ctrl}/{handler}.
+        let ref_links: Vec<String> = seen_class_ids
+            .iter()
+            .filter_map(|cls_id| {
+                class_dev_slugs.get(cls_id.as_str()).map(|slug| {
+                    let simple = cls_id
+                        .trim_start_matches("Class:")
+                        .trim_start_matches("Interface:")
+                        .trim_start_matches("Enum:")
+                        .trim_start_matches("Record:")
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(cls_id.as_str());
+                    format!("- [{}](../../dev/{}.md)", simple, slug)
+                })
+            })
+            .collect();
+
+        if !ref_links.is_empty() {
+            md.push_str("## Technical Reference\n\n");
+            for link in &ref_links {
+                md.push_str(link);
+                md.push('\n');
+            }
+            md.push('\n');
+        }
+    }
+
+    md
+}
+
+/// Shared inner body for Scheduled and EventListener flow pages.
+/// Writes the call-chain table, events section, and Technical Reference links.
+fn render_entrypoint_body(
+    method_id: &str,
+    graph: &WikiGraph,
+    class_dev_slugs: &HashMap<String, String>,
+    method_desc: &HashMap<String, String>,
+) -> String {
+    let mut md = String::new();
+    let chain = graph.build_call_chain(method_id, 4);
+    if chain.is_empty() {
+        return md;
+    }
+
+    // Sequence diagram (no HTTP method/path for scheduled/listener entry points).
+    if let Some(diagram) = mermaid::call_sequence_diagram(&chain, &graph.calls_out, "", "") {
+        md.push_str("## Sequence\n\n");
+        md.push_str("```mermaid\n");
+        md.push_str(&diagram);
+        md.push_str("```\n\n");
+    }
+
+    md.push_str("## Flow\n\n");
+
+    let step_dbs: Vec<Vec<(String, bool, bool)>> =
+        chain.iter().map(|id| db_access(id.as_str(), graph)).collect();
+    let has_db = step_dbs.iter().any(|v| !v.is_empty());
+    let has_desc = chain.iter().any(|mid| {
+        method_desc.get(mid.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+    });
+
+    match (has_desc, has_db) {
+        (true, true) => {
+            md.push_str("| # | Class | Method | What it does | DB access |\n");
+            md.push_str("|---|---|---|---|---|\n");
+        }
+        (true, false) => {
+            md.push_str("| # | Class | Method | What it does |\n");
+            md.push_str("|---|---|---|---|\n");
+        }
+        (false, true) => {
+            md.push_str("| # | Class | Method | DB access |\n");
+            md.push_str("|---|---|---|---|\n");
+        }
+        (false, false) => {
+            md.push_str("| # | Class | Method |\n");
+            md.push_str("|---|---|---|\n");
+        }
+    }
+
+    let mut seen_class_ids: Vec<String> = Vec::new();
+    for (i, mid) in chain.iter().enumerate() {
+        let cls = class_simple_name_from_method_id(mid.as_str());
+        let meth = method_name_from_id(mid.as_str());
+        let cls_id = class_id_from_method_id(mid.as_str(), graph);
+        if !seen_class_ids.contains(&cls_id) {
+            seen_class_ids.push(cls_id);
+        }
+        let raw_desc2 = if has_desc {
+            method_desc.get(mid.as_str()).map(|s| s.as_str()).filter(|s| !s.is_empty()).unwrap_or("—")
+        } else {
+            ""
+        };
+        let cleaned_desc2;
+        let desc = if has_desc && raw_desc2 != "—" {
+            cleaned_desc2 = crate::clean_method_desc(raw_desc2, &cls, &meth);
+            cleaned_desc2.as_str()
+        } else {
+            raw_desc2
+        };
+        if has_db {
+            let db_str = if step_dbs[i].is_empty() {
+                "—".to_string()
+            } else {
+                step_dbs[i]
+                    .iter()
+                    .map(|(name, r, w)| match (r, w) {
+                        (true, true) => format!("`{}` R+W", name),
+                        (true, false) => format!("`{}` R", name),
+                        (false, true) => format!("`{}` W", name),
+                        _ => format!("`{}`", name),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            match (has_desc, true) {
+                (true, _) => md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} | {} |\n",
+                    i + 1, cls, meth, desc, db_str
+                )),
+                (false, _) => md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} |\n",
+                    i + 1, cls, meth, db_str
+                )),
+            }
+        } else {
+            match has_desc {
+                true => md.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} |\n",
+                    i + 1, cls, meth, desc
+                )),
+                false => md.push_str(&format!(
+                    "| {} | `{}` | `{}` |\n",
+                    i + 1, cls, meth
+                )),
+            }
+        }
+    }
+    md.push('\n');
+
+    // Events published
+    let mut published: BTreeMap<String, ()> = BTreeMap::new();
+    for mid in &chain {
+        for eid in graph.publishes.get(mid.as_str()).into_iter().flatten() {
+            let name = graph.nodes_by_id.get(eid.as_str())
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| eid.clone());
+            published.insert(name, ());
+        }
+    }
+    if !published.is_empty() {
+        md.push_str("## Events\n\n");
+        md.push_str("| Direction | Topic |\n");
+        md.push_str("|---|---|\n");
+        for topic in published.keys() {
+            md.push_str(&format!("| Publishes | `{}` |\n", topic));
+        }
+        md.push('\n');
+    }
+
+    // Technical Reference
+    let ref_links: Vec<String> = seen_class_ids
+        .iter()
+        .filter_map(|cls_id| {
+            class_dev_slugs.get(cls_id.as_str()).map(|slug| {
+                let simple = cls_id
+                    .trim_start_matches("Class:")
+                    .trim_start_matches("Interface:")
+                    .trim_start_matches("Enum:")
+                    .trim_start_matches("Record:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(cls_id.as_str());
+                format!("- [{}](../../dev/{}.md)", simple, slug)
+            })
+        })
+        .collect();
+
+    if !ref_links.is_empty() {
+        md.push_str("## Technical Reference\n\n");
+        for link in &ref_links {
+            md.push_str(link);
+            md.push('\n');
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
+pub fn render_scheduled_flow_page(
+    method_id: &str,
+    position: usize,
+    graph: &WikiGraph,
+    class_dev_slugs: &HashMap<String, String>,
+    method_desc: &HashMap<String, String>,
+) -> String {
+    let title = handler_title(method_id);
+    let mut md = String::new();
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: {}\nrole: po\n---\n\n",
+        title, position
+    ));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
+    md.push_str(&format!("# {}\n\n", title));
+    md.push_str("> Scheduled job\n\n");
+    md.push_str(&render_entrypoint_body(method_id, graph, class_dev_slugs, method_desc));
+    md
+}
+
+pub fn render_listener_flow_page(
+    method_id: &str,
+    topics: &[String],
+    position: usize,
+    graph: &WikiGraph,
+    class_dev_slugs: &HashMap<String, String>,
+    method_desc: &HashMap<String, String>,
+) -> String {
+    let title = handler_title(method_id);
+    let mut md = String::new();
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: {}\nrole: po\n---\n\n",
+        title, position
+    ));
+    md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
+    md.push_str(&format!("# {}\n\n", title));
+    if topics.is_empty() {
+        md.push_str("> Event listener\n\n");
+    } else {
+        let topic_list = topics.iter().map(|t| format!("`{}`", t)).collect::<Vec<_>>().join(", ");
+        md.push_str(&format!("> Listens to: {}\n\n", topic_list));
+    }
+    md.push_str(&render_entrypoint_body(method_id, graph, class_dev_slugs, method_desc));
+    md
+}

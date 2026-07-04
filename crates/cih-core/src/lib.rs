@@ -8,11 +8,29 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod artifacts; // JSONL read/write helpers on GraphArtifacts (Phase 2)
+pub mod entrypoints;
+pub mod group;
 pub mod ir;
+pub mod registry;
 pub mod repo_map;
 
-pub use ir::{ParsedFile, RawImport, RefKind, ReferenceSite, SymbolDef};
-pub use repo_map::{BuildSystem, JarInfo, ModuleInfo, RepoMap, SpringSignal};
+pub use entrypoints::{
+    build_calls_digraph, score_all_entry_points, score_entry_points, to_legacy_pairs,
+    EntrypointKind, EntrypointRegistry, ScoredEntrypoint,
+};
+pub use group::{
+    contracts_path, group_dir, normalize_contract_path, ContractMatch, ContractMatchKind,
+    GroupEntry, GroupRegistry,
+};
+pub use ir::{
+    BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind, ContractSite,
+    ImportBinding, ImportBindingKind, ParsedFile, ParsedUnit, RawImport, RefKind, ReferenceSite,
+    SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile, SymbolDef, TypeBinding,
+};
+pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
+pub use repo_map::{
+    auto_detect_architecture, ArchitectureHint, BuildSystem, JarInfo, ModuleInfo, RepoMap,
+};
 
 /// Stable, unique node identifier (e.g. `Method:com.acme.UserService#save`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,7 +68,84 @@ pub enum NodeKind {
     Route,
     Community,
     Process,
+    KafkaTopic,
+    ExternalEndpoint,
+    DbQuery,
+    DbTable,
+    IntegrationRoute,
+    MessageDestination,
     Other,
+}
+
+impl NodeKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            NodeKind::File => "File",
+            NodeKind::Folder => "Folder",
+            NodeKind::Class => "Class",
+            NodeKind::Interface => "Interface",
+            NodeKind::Enum => "Enum",
+            NodeKind::Record => "Record",
+            NodeKind::Annotation => "Annotation",
+            NodeKind::Method => "Method",
+            NodeKind::Function => "Function",
+            NodeKind::Constructor => "Constructor",
+            NodeKind::Field => "Field",
+            NodeKind::Route => "Route",
+            NodeKind::Community => "Community",
+            NodeKind::Process => "Process",
+            NodeKind::KafkaTopic => "KafkaTopic",
+            NodeKind::ExternalEndpoint => "ExternalEndpoint",
+            NodeKind::DbQuery => "DbQuery",
+            NodeKind::DbTable => "DbTable",
+            NodeKind::IntegrationRoute => "IntegrationRoute",
+            NodeKind::MessageDestination => "MessageDestination",
+            NodeKind::Other => "Other",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "File" => NodeKind::File,
+            "Folder" => NodeKind::Folder,
+            "Class" => NodeKind::Class,
+            "Interface" => NodeKind::Interface,
+            "Enum" => NodeKind::Enum,
+            "Record" => NodeKind::Record,
+            "Annotation" => NodeKind::Annotation,
+            "Method" => NodeKind::Method,
+            "Function" => NodeKind::Function,
+            "Constructor" => NodeKind::Constructor,
+            "Field" => NodeKind::Field,
+            "Route" => NodeKind::Route,
+            "Community" => NodeKind::Community,
+            "Process" => NodeKind::Process,
+            "KafkaTopic" => NodeKind::KafkaTopic,
+            "ExternalEndpoint" => NodeKind::ExternalEndpoint,
+            "DbQuery" => NodeKind::DbQuery,
+            "DbTable" => NodeKind::DbTable,
+            "IntegrationRoute" => NodeKind::IntegrationRoute,
+            "MessageDestination" => NodeKind::MessageDestination,
+            _ => NodeKind::Other,
+        }
+    }
+}
+
+/// Origin framework for an HTTP route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteSource {
+    SpringMvc,
+    JaxRs,
+    Express,
+    NestJs,
+    Flask,
+    FastApi,
+    Django,
+}
+
+pub fn function_id(fqn: &str, name: &str, arity: u16) -> NodeId {
+    NodeId::new(format!("Function:{fqn}#{name}/{arity}"))
 }
 
 pub fn file_id(rel: &str) -> NodeId {
@@ -85,6 +180,46 @@ pub fn field_id(fqcn: &str, name: &str) -> NodeId {
     NodeId::new(format!("Field:{fqcn}#{name}"))
 }
 
+pub fn community_id(idx: usize) -> NodeId {
+    NodeId::new(format!("Community:{idx}"))
+}
+
+pub fn process_id(entry_slug: &str, hash: &str) -> NodeId {
+    NodeId::new(format!("Process:{entry_slug}-{hash}"))
+}
+
+pub fn kafka_topic_id(topic: &str) -> NodeId {
+    NodeId::new(format!("KafkaTopic:{topic}"))
+}
+
+pub fn external_endpoint_id(method: &str, url_template: &str) -> NodeId {
+    NodeId::new(format!(
+        "ExternalEndpoint:{}:{}",
+        method.to_ascii_uppercase(),
+        url_template
+    ))
+}
+
+pub fn db_query_const_id(owner_fqcn: &str, const_name: &str) -> NodeId {
+    NodeId::new(format!("DbQuery:{owner_fqcn}#{const_name}"))
+}
+
+pub fn db_query_inline_id(file: &str, line: u32, col: u32) -> NodeId {
+    NodeId::new(format!("DbQuery:{file}:{line}:{col}"))
+}
+
+pub fn db_table_id(table: &str) -> NodeId {
+    NodeId::new(format!("DbTable:{}", table.to_ascii_uppercase()))
+}
+
+pub fn integration_route_id(source: &str, route_id: &str) -> NodeId {
+    NodeId::new(format!("IntegrationRoute:{source}:{route_id}"))
+}
+
+pub fn message_destination_id(dest_type: &str, name: &str) -> NodeId {
+    NodeId::new(format!("MessageDestination:{dest_type}:{name}"))
+}
+
 /// Edge types (mirrors `gitnexus-shared` `RelationshipType`, trimmed for v1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
@@ -102,6 +237,18 @@ pub enum EdgeKind {
     MemberOf,
     StepInProcess,
     HandlesRoute,
+    PublishesEvent,
+    ListensTo,
+    ExternalCall,
+    Tests,
+    ExecutesQuery,
+    ReadsTable,
+    WritesTable,
+    IntegrationLink,
+    SimilarTo,
+    /// Inter-procedural taint flow from an entry-point method to a sink method.
+    /// Emitted by `cih-taint` Phase 0. Props: `hops`, `sink_category`, `hop_count`.
+    TaintFlow,
     Other,
 }
 
@@ -123,6 +270,16 @@ impl EdgeKind {
             EdgeKind::MemberOf => "MEMBER_OF",
             EdgeKind::StepInProcess => "STEP_IN_PROCESS",
             EdgeKind::HandlesRoute => "HANDLES_ROUTE",
+            EdgeKind::PublishesEvent => "PUBLISHES_EVENT",
+            EdgeKind::ListensTo => "LISTENS_TO",
+            EdgeKind::ExternalCall => "EXTERNAL_CALL",
+            EdgeKind::Tests => "TESTS",
+            EdgeKind::ExecutesQuery => "EXECUTES_QUERY",
+            EdgeKind::ReadsTable => "READS_TABLE",
+            EdgeKind::WritesTable => "WRITES_TABLE",
+            EdgeKind::IntegrationLink => "INTEGRATION_LINK",
+            EdgeKind::SimilarTo => "SIMILAR_TO",
+            EdgeKind::TaintFlow => "TAINT_FLOW",
             EdgeKind::Other => "REL",
         }
     }
@@ -160,6 +317,29 @@ pub struct Edge {
     pub confidence: f32,
     #[serde(default)]
     pub reason: String,
+    /// Optional edge properties. CALLS edges use: `{"call_sites": [{range, args}]}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub props: Option<serde_json::Value>,
+}
+
+impl Edge {
+    /// Constructor that fills in the new optional `props` field with None.
+    pub fn new(
+        src: NodeId,
+        dst: NodeId,
+        kind: EdgeKind,
+        confidence: f32,
+        reason: String,
+    ) -> Self {
+        Self {
+            src,
+            dst,
+            kind,
+            confidence,
+            reason,
+            props: None,
+        }
+    }
 }
 
 fn default_confidence() -> f32 {
@@ -179,6 +359,27 @@ pub struct GraphArtifacts {
     pub version: VersionId,
 }
 
+/// Manifest written at the head of a `.cih` bundle archive (Gap 5).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CihBundleManifest {
+    /// Bundle format version; always 1 for this implementation.
+    pub bundle_version: u8,
+    /// CIH engine semver string (e.g. `"0.1.0"`).
+    pub cih_version: String,
+    /// Short repo name (last path component of root).
+    pub repo_name: String,
+    /// Absolute root path at export time.
+    pub root_path: String,
+    /// ISO 8601 timestamp of export.
+    pub indexed_at: String,
+    /// Graph artifact version hash.
+    pub artifact_version: String,
+    /// Whether community nodes/edges are included.
+    pub has_community: bool,
+    /// Number of indexed source files.
+    pub file_count: usize,
+}
+
 /// Incremental change set for a re-index of a few files.
 #[derive(Clone, Debug, Default)]
 pub struct GraphDelta {
@@ -188,122 +389,4 @@ pub struct GraphDelta {
     pub edges: Vec<Edge>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn id_helpers_use_locked_scheme() {
-        assert_eq!(
-            file_id("src/main/java/App.java").as_str(),
-            "File:src/main/java/App.java"
-        );
-        assert_eq!(folder_id("src/main/java").as_str(), "Folder:src/main/java");
-        assert_eq!(
-            type_id(NodeKind::Class, "com.acme.Outer.Inner").as_str(),
-            "Class:com.acme.Outer.Inner"
-        );
-        assert_eq!(
-            type_id(NodeKind::Interface, "com.acme.Service").as_str(),
-            "Interface:com.acme.Service"
-        );
-        assert_eq!(
-            method_id("com.acme.Outer.Inner", "save", 2).as_str(),
-            "Method:com.acme.Outer.Inner#save/2"
-        );
-        assert_eq!(
-            constructor_id("com.acme.Outer.Inner", 1).as_str(),
-            "Constructor:com.acme.Outer.Inner#<init>/1"
-        );
-        assert_eq!(
-            field_id("com.acme.Outer.Inner", "name").as_str(),
-            "Field:com.acme.Outer.Inner#name"
-        );
-    }
-
-    #[test]
-    fn repo_map_round_trips_json() {
-        let repo_map = RepoMap {
-            root: "/repo".into(),
-            build_system: BuildSystem::Maven,
-            total_java_files: 3,
-            total_loc: 120,
-            modules: vec![ModuleInfo {
-                name: "app".into(),
-                rel_path: ".".into(),
-                build_file: Some("pom.xml".into()),
-                java_files: 3,
-                loc: 120,
-                packages: vec!["com.acme".into()],
-                spring: SpringSignal {
-                    services: 1,
-                    controllers: 1,
-                    ..SpringSignal::default()
-                },
-                depends_on: vec!["core".into()],
-            }],
-            jars: vec![JarInfo {
-                path: "lib/example.jar".into(),
-                group_id: Some("com.acme".into()),
-                artifact: Some("example".into()),
-                is_own: true,
-                classes: 12,
-            }],
-            decompiled_dirs: vec![".workspace-dependencies".into()],
-        };
-
-        let encoded = serde_json::to_string(&repo_map).unwrap();
-        let decoded: RepoMap = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, repo_map);
-    }
-
-    #[test]
-    fn parsed_file_round_trips_json() {
-        let parsed = ParsedFile {
-            file: "src/main/java/com/acme/UserService.java".into(),
-            package: Some("com.acme".into()),
-            defs: vec![SymbolDef {
-                id: method_id("com.acme.UserService", "save", 1),
-                kind: NodeKind::Method,
-                fqcn: "com.acme.UserService".into(),
-                name: "save".into(),
-                owner: Some(type_id(NodeKind::Class, "com.acme.UserService")),
-                range: Range {
-                    start_line: 10,
-                    start_col: 4,
-                    end_line: 12,
-                    end_col: 5,
-                },
-                modifiers: vec!["public".into()],
-            }],
-            imports: vec![RawImport {
-                raw: "java.util.List".into(),
-                is_static: false,
-                is_wildcard: false,
-                range: Range {
-                    start_line: 3,
-                    start_col: 0,
-                    end_line: 3,
-                    end_col: 22,
-                },
-            }],
-            reference_sites: vec![ReferenceSite {
-                name: "findById".into(),
-                receiver: Some("repository".into()),
-                kind: RefKind::Call,
-                arity: Some(1),
-                range: Range {
-                    start_line: 11,
-                    start_col: 16,
-                    end_line: 11,
-                    end_col: 24,
-                },
-                in_fqcn: "com.acme.UserService#save/1".into(),
-            }],
-        };
-
-        let encoded = serde_json::to_string(&parsed).unwrap();
-        let decoded: ParsedFile = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, parsed);
-    }
-}

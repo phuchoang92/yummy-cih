@@ -1,12 +1,44 @@
 # CIH — Code Intelligence Hub (Rust engine + MCP service)
-# Milestone 1 scaffold: rmcp+axum MCP server with a pluggable GraphStore (FalkorDB adapter).
+#
+# Crate layers (each layer may only depend on layers above it):
+#
+#  Foundation   cih-core          IR, artifacts, group/registry types
+#
+#  Language     cih-lang          LanguageProvider trait + Java/Python/TS impls
+#               cih-parse         tree-sitter parse → IR  (uses cih-lang)
+#               cih-jar           JAR/class bytecode → API-surface nodes
+#
+#  Analysis     cih-resolve       edge resolution, DI-wiring, Spring/XML/SQL passes
+#               cih-community     Leiden communities, entry-points, process detection
+#               cih-search        BM25, RRF, tokenizer
+#               cih-embed         fastembed/ort embeddings + pgvector store
+#
+#  Storage      cih-graph-store   GraphStore + BulkLoader ports  (traits only — no impl)
+#               cih-falkor        FalkorDB adapter  (openCypher over redis protocol)
+#
+#  Product      cih-engine        CLI orchestrator: scan/analyze/discover/embed/wiki/group
+#               cih-wiki          wiki page generation library
+#               cih-grouping      feature grouping strategies (package, LLM, embed, hybrid)
+#               cih-server        rmcp+axum MCP server; exposes all tools over Streamable HTTP
+
 [workspace]
 resolver = "2"
 members = [
   "crates/cih-core",
+  "crates/cih-lang",
+  "crates/cih-parse",
+  "crates/cih-jar",
+  "crates/cih-resolve",
+  "crates/cih-community",
+  "crates/cih-search",
+  "crates/cih-embed",
   "crates/cih-graph-store",
   "crates/cih-falkor",
+  "crates/cih-taint",
+  "crates/cih-engine",
+  "crates/cih-wiki",
   "crates/cih-server",
+  "crates/cih-grouping",
 ]
 
 [workspace.package]
@@ -17,15 +49,67 @@ license = "PolyForm-Noncommercial-1.0.0"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+streaming-iterator = "0.1"
 async-trait = "0.1"
 thiserror = "2"
 anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+blake3 = "1"
+globset = "0.4"
+ignore = "0.4"
+once_cell = "1"
+quick-xml = "0.38"
+rayon = "1"
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tree-sitter = "0.24"
+tree-sitter-java = "0.23.5"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-kotlin-updated = "0.1.0"
+tree-sitter-go      = "0.25.0"
+tree-sitter-rust    = "0.24.0"
+tree-sitter-c-sharp = "0.23.0"
+tree-sitter-ruby    = "0.23.0"
+tree-sitter-php     = "0.24.0"
+tree-sitter-cpp     = "0.23.0"
+tree-sitter-scala   = "0.23.0"
+tree-sitter-elixir  = "0.3.0"
+tree-sitter-bash    = "0.23.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "0.27", features = ["tokio-comp"] }
+cafebabe = "0.9"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+petgraph = "0.6"
+rand = "0.9"
+rustc-hash = "2"
+fastembed = { version = "4", default-features = false, features = ["ort-download-binaries", "hf-hub-native-tls"] }
+tokio-postgres = "0.7"
+pgvector = { version = "0.4", features = ["postgres"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+indicatif = "0.17"
+console = "0.15"
+zstd = "0.13"
 
 # internal crates
 cih-core = { path = "crates/cih-core" }
+cih-taint = { path = "crates/cih-taint" }
+cih-grouping = { path = "crates/cih-grouping" }
+cih-engine = { path = "crates/cih-engine" }
+cih-lang = { path = "crates/cih-lang" }
+cih-parse = { path = "crates/cih-parse" }
+cih-resolve = { path = "crates/cih-resolve" }
+cih-jar = { path = "crates/cih-jar" }
+cih-community = { path = "crates/cih-community" }
+cih-search = { path = "crates/cih-search" }
+cih-embed = { path = "crates/cih-embed" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }
+cih-wiki = { path = "crates/cih-wiki" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
