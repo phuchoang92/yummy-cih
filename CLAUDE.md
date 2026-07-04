@@ -1,9 +1,17 @@
 # CIH — Code Intelligence for this repo
 
 This project (yummy-cih) is itself a Code Intelligence Hub: a Rust MCP server that
-indexes a codebase into a graph and answers structural questions over it. When an
-agent has the **CIH MCP server** connected, prefer its tools over grep/read for
-understanding structure, assessing change impact, and navigating safely.
+indexes a codebase into a graph and answers structural questions over it.
+
+There are two ways an agent works here — read the section that matches your task:
+
+- **Using CIH** (a CIH MCP server is connected, pointed at some target codebase):
+  prefer its tools over grep/read for structure, impact, and navigation. See
+  *Always/Never Do*, *Tools*, *Resources* below.
+- **Developing yummy-cih** (editing this Rust repo): see *Developing CIH itself* at
+  the bottom for build/lint/test conventions and repo layout. The *Using CIH* rules
+  ("run impact before editing") only apply when a CIH instance has actually indexed
+  this repo — don't assume one is running.
 
 > Connect (HTTP): `claude mcp add --transport http cih http://localhost:8080/mcp`
 > Index/refresh a repo: `index_repo(repo_path="/abs/path")` → poll `index_status(job_id=...)`,
@@ -72,12 +80,34 @@ limitations are in `docs/ARCHITECTURE.md`.
 
 ## Developing CIH itself
 
-- Build/test: `cargo build`, `cargo test --workspace`. CI gates fmt (non-blocking
-  today), clippy `-D warnings` on the backend crates, and the full test suite —
-  see `.github/workflows/ci.yml`.
-- Local services: FalkorDB on **6380** (Homebrew redis squats 6379), Postgres on 5433.
-  `FALKOR_URL=redis://127.0.0.1:6380`.
-- Command defaults: `analyze`/`discover`/`wiki` flags can be persisted in `<repo>/cih.toml`
-  or `~/.cih/config.toml` (precedence: flag > env > repo > home > default). `cih config init`
-  scaffolds it, `cih config show` prints effective values + source. See README "Configuration".
-- Security posture (auth, LLM egress): see `SECURITY.md`.
+**Layout.** ~16 crates under `crates/`; two binaries: `cih-engine` (CLI — the
+`scan → parse → resolve → load → discover → embed → wiki` pipeline, writes `.cih/`
+artifacts) and `cih-server` (the MCP server, streamable HTTP via rmcp 0.7). MCP tools
+live in `crates/cih-server/src/main.rs`; the graph store trait is `cih-graph-store`
+with the `cih-falkor` adapter.
+
+**Build/test.** `cargo build`, `cargo test --workspace`. Workspace tests are hermetic
+— no FalkorDB/Postgres needed (integration paths use artifact fixtures). Local services
+when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgres on
+5433 → `FALKOR_URL=redis://127.0.0.1:6380`.
+
+**Lint gate** (`.github/workflows/ci.yml`). Blocking: clippy `-D warnings` on the
+backend crates only (`cih-core`, `cih-graph-store`, `cih-falkor`, `cih-taint`) plus
+`cargo test --workspace`. Non-blocking (documented TODOs): `cargo fmt` (the tree
+predates a fmt pass) and clippy on the rest — notably `cih-server` still carries a
+lib/bin module-duplication backlog and dead UI code (`browser.rs`, `layout.rs`), so
+warnings there are expected. Keep new code in the gated crates warning-clean.
+
+**Config files** (per-repo, at the target repo root): `cih.toml` (analyze/discover/wiki
+option defaults — layered flag > env > repo `cih.toml` > `~/.cih/config.toml` > default;
+`cih config init`/`show` manage it), `cih.scope.toml` (analyze scope), `cih.taint.toml`
+(taint rules), `cih.decompile.toml` (decompile). `.env` holds infra + LLM keys. Adding a
+new persisted option means making its clap flag `Option<T>`, adding it to
+`crates/cih-engine/src/settings.rs`, and resolving it at the dispatch arm.
+
+**Conventions.**
+- Write implementation plans as markdown in `docs/plans/`; parser assumptions/known
+  graph limits are documented in `docs/ARCHITECTURE.md`.
+- Security posture (mandatory auth on non-loopback bind, `ask_codebase` LLM egress):
+  see `SECURITY.md`. Keep `ask_codebase` off for sensitive codebases.
+- Don't commit on the default branch — branch first; commits/PRs only when asked.

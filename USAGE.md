@@ -106,6 +106,60 @@ Use it to search symbols, inspect context, render impact graphs, trace flows,
 view communities, and browse indexed routes while the full `yummy` frontend is
 being developed.
 
+## Configuration (`cih.toml`)
+
+`analyze`, `discover`, and `wiki` accept many option flags. Persist the ones you use so
+you don't retype them each run. Settings are layered, highest wins:
+
+```text
+CLI flag  >  env var  >  <repo>/cih.toml  >  ~/.cih/config.toml  >  built-in default
+```
+
+```bash
+# Scaffold a commented starter (every option at its default, all commented out)
+cargo run -p cih-engine -- config init --repo "$REPO"        # writes $REPO/cih.toml
+cargo run -p cih-engine -- config init --global              # writes ~/.cih/config.toml
+
+# See effective values and which layer each came from
+cargo run -p cih-engine -- config show --repo "$REPO"        # add --json for machine output
+```
+
+Edit `$REPO/cih.toml`:
+
+```toml
+[analyze]
+languages = ["java"]
+
+[discover]
+feature_strategy = "hybrid"
+feature_llm_provider = "gemini"
+max_trace_depth = 12
+
+[wiki]
+llm = true
+llm_provider = "gemini"
+wiki_mode = "llm-summary"
+```
+
+Now `discover "$REPO"` and `wiki "$REPO" --llm` use those values without the flags; a flag
+still overrides for a one-off. Use `~/.cih/config.toml` (`--global`) for cross-repo defaults
+like your LLM provider. This is separate from `cih.scope.toml` (analyze scope),
+`cih.taint.toml` (taint rules), and `cih.decompile.toml`, which keep their own files.
+
+### Running in Docker
+
+Run these through the `engine` service (`docker compose run --rm engine config init --repo /repo`, etc.):
+
+- **Repo-level `cih.toml` is the clean path** — `/repo` is a bind mount, so the file lands at
+  `$REPO_PATH/cih.toml` and is host-editable. Prefer this.
+- **`--global` writes into the `cih-home` named volume** (`/home/cih/.cih/config.toml`, alongside
+  `registry.json`). It persists but isn't a host file; to make it host-editable, bind-mount over it:
+  `- ./cih.config.toml:/home/cih/.cih/config.toml:ro` (the engine only reads it).
+- **File ownership (native Linux):** the engine runs as uid 1001; files it writes to `/repo` are
+  owned by 1001. `sudo`/`chown` to edit, pre-create an empty `cih.toml` on the host, or run with
+  `--user $(id -u):$(id -g)`. Docker Desktop (macOS/Windows) virtualizes this away.
+- Infra (`FALKOR_URL`, `CIH_GRAPH_KEY`, `CIH_PG_URL`) stays in compose env / `.env`, not `cih.toml`.
+
 ## LLM Enrichment
 
 The `wiki` command can call an LLM to generate richer documentation (descriptions, business summaries, feature grouping). See **[docs/llm-providers.md](docs/llm-providers.md)** for the full provider guide, including:
@@ -115,6 +169,17 @@ The `wiki` command can call an LLM to generate richer documentation (description
 - `--wiki-mode` options (`graph`, `llm-summary`, `llm-full`).
 
 ## CLI Commands
+
+### Config
+
+`config init` writes a commented starter settings file; `config show` prints the effective
+values with the source of each. See [Configuration](#configuration-cihtoml) above.
+
+```bash
+cargo run -p cih-engine -- config init  --repo "$REPO"    # or --global, --force
+cargo run -p cih-engine -- config show  --repo "$REPO"    # or --json
+cargo run -p cih-engine -- config decompile --repo "$REPO" # interactive cih.decompile.toml editor
+```
 
 ### Scan
 

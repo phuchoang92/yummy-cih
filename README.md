@@ -118,6 +118,20 @@ docker compose run --rm engine embed /repo
 > files, use `--module payment,order` to index specific modules only, or drop a
 > `cih.scope.toml` at the repo root (see [Scoping](#scoping-large-repos) below).
 
+> **Set your defaults once (recommended).** `analyze`, `discover`, and `wiki` take many
+> flags. Instead of retyping them every run, persist them in a `cih.toml` at your repo root:
+>
+> ```bash
+> docker compose run --rm engine config init --repo /repo   # writes $REPO_PATH/cih.toml
+> # edit cih.toml (e.g. [discover] feature_strategy = "hybrid", [wiki] llm = true, ...)
+> docker compose run --rm engine config show --repo /repo    # effective values + source
+> ```
+>
+> Precedence is **CLI flag > env > `cih.toml` > `~/.cih/config.toml` > default**, so a flag
+> still overrides the file for a one-off. Add `--global` to `config init` to write
+> `~/.cih/config.toml` (shared across repos, e.g. your LLM provider). See
+> [Configuration](#configuration--cihtoml).
+
 ### 5. Generate wiki docs
 
 ```bash
@@ -167,6 +181,18 @@ docker compose run --rm engine wiki /repo \
   --llm --llm-provider openai-compatible \
   --llm-base-url http://localhost:11434/v1 --llm-model llama3:8b
 ```
+
+> **Tip:** put the provider/model/token settings in `cih.toml` once and the command
+> collapses to `docker compose run --rm engine wiki /repo --llm`:
+>
+> ```toml
+> [wiki]
+> llm_provider = "deepseek"
+> llm_model = "deepseek-chat"
+> llm_max_tokens = 4096
+> ```
+>
+> (The API key still comes from the environment / `.env`, never `cih.toml`.)
 
 See **[docs/llm-providers.md](docs/llm-providers.md)** for the full provider reference,
 API key env var names, and recommended `--llm-max-tokens` values.
@@ -281,6 +307,20 @@ cih-engine config show            # or --json
 A CLI flag always overrides the file (`--feature-strategy package` wins over `cih.toml`).
 The specialized files `cih.scope.toml` (scope), `cih.taint.toml` (taint rules), and
 `cih.decompile.toml` (decompile) remain separate.
+
+**Running in Docker.** Use the `engine` service (it mounts your repo read-write and the
+`cih-home` volume for `~/.cih`):
+
+- **Repo-level `cih.toml` is the clean path** — it's a bind mount, so `config init --repo /repo`
+  writes `$REPO_PATH/cih.toml` and you edit it on the host with any editor.
+- **`--global` writes into the `cih-home` volume** (`/home/cih/.cih/config.toml`), not a host
+  file — it persists but isn't host-editable. Prefer repo-level `cih.toml`, or bind-mount a
+  host file over it in `docker-compose.yml`:
+  `- ./cih.config.toml:/home/cih/.cih/config.toml:ro` (read-only is fine; the engine only reads it).
+- **File ownership (native Linux):** the engine runs as uid 1001, so files it writes to `/repo`
+  are owned by 1001 — `sudo`/`chown` to edit, or create an empty `cih.toml` on the host first, or
+  run with `--user $(id -u):$(id -g)`. (Docker Desktop on macOS/Windows virtualizes this away.)
+- Infra (`FALKOR_URL`, `CIH_GRAPH_KEY`, `CIH_PG_URL`) stays in `.env`/compose env, **not** `cih.toml`.
 
 ---
 
