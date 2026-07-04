@@ -3,8 +3,16 @@ services:
     image: falkordb/falkordb:latest
     ports:
       - "6380:6379"
+    environment:
+      # Enable AOF so the graph is persisted continuously (~1s fsync) and survives
+      # a hard power-off, not just a graceful shutdown. REDIS_ARGS is the FalkorDB
+      # image's supported way to pass extra redis-server config.
+      REDIS_ARGS: "--appendonly yes"
     volumes:
-      - falkordb-data:/data
+      # Mount the volume at the image's ACTUAL data dir (`config get dir` →
+      # /var/lib/falkordb/data). The old `/data` path is not where this image
+      # writes, so RDB/AOF landed on the ephemeral layer and was lost on recreate.
+      - falkordb-data:/var/lib/falkordb/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "6379", "ping"]
