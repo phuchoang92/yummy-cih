@@ -19,6 +19,7 @@ pub mod registry;
 pub mod runtime;
 pub mod scan;
 pub mod scope;
+pub mod settings;
 pub mod start;
 pub mod start_env;
 pub mod tui;

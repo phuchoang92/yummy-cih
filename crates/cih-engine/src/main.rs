@@ -14,6 +14,7 @@ mod registry;
 mod runtime;
 mod scan;
 mod scope;
+mod settings;
 mod start;
 mod start_env;
 
@@ -126,8 +127,9 @@ enum Command {
         /// Community detection strategy.
         /// "package" (default): groups by package/module structure — one community per feature.
         /// "graph": Leiden graph-clustering — groups by call-graph connectivity.
-        #[arg(long, default_value = "package")]
-        community_strategy: String,
+        /// Falls back to cih.toml [discover].community_strategy, then "package".
+        #[arg(long)]
+        community_strategy: Option<String>,
         /// Leiden resolution (only used with --community-strategy graph).
         /// Higher = more, smaller communities; lower = fewer, larger ones. Default: 1.0.
         #[arg(long)]
@@ -155,8 +157,9 @@ enum Command {
         /// Feature classification strategy: package (default), structural, hybrid, llm.
         /// "hybrid" runs structural → package → embed → llm (if --feature-llm-provider set).
         /// "llm" requires --feature-llm-provider.
-        #[arg(long, default_value = "package")]
-        feature_strategy: String,
+        /// Falls back to cih.toml [discover].feature_strategy, then "package".
+        #[arg(long)]
+        feature_strategy: Option<String>,
         /// LLM provider for feature classification.
         /// One of: deepseek, gemini, anthropic, bedrock, openai-compatible.
         /// Required when --feature-strategy is llm or hybrid with LLM stage.
@@ -166,21 +169,21 @@ enum Command {
         /// Defaults: deepseek-chat (deepseek), gemini-2.5-flash (gemini),
         /// claude-haiku-4-5-20251001 (anthropic), us.anthropic.claude-haiku-4-5-20251001 (bedrock),
         /// gpt-4o-mini (openai-compatible).
-        #[arg(long, default_value = "")]
-        feature_llm_model: String,
+        #[arg(long)]
+        feature_llm_model: Option<String>,
         /// Base URL for --feature-llm-provider openai-compatible.
-        #[arg(long, default_value = "https://api.openai.com/v1")]
-        feature_llm_base_url: String,
+        #[arg(long)]
+        feature_llm_base_url: Option<String>,
         /// Override which env var holds the API key for feature LLM.
         /// Defaults to auto-detect (CIH_LLM_API_KEY, DEEPSEEK_API_KEY, etc.).
         #[arg(long)]
         feature_llm_api_key_env: Option<String>,
         /// Maximum output tokens per feature LLM call.
-        #[arg(long, default_value = "2048")]
-        feature_llm_max_tokens: u32,
+        #[arg(long)]
+        feature_llm_max_tokens: Option<u32>,
         /// Timeout in seconds per feature LLM API call.
-        #[arg(long, default_value = "60")]
-        feature_llm_timeout_secs: u64,
+        #[arg(long)]
+        feature_llm_timeout_secs: Option<u64>,
     },
     /// Embed searchable graph nodes from the latest analyzed artifacts into pgvector.
     Embed {
@@ -236,8 +239,9 @@ enum Command {
         ///   bedrock           — AWS Bedrock Converse API (AWS_BEARER_TOKEN_BEDROCK, model: us.anthropic.claude-haiku-4-5-20251001)
         ///   openai-compatible — Any OpenAI-compatible endpoint (use with --llm-base-url)
         ///   http-json         — Custom HTTP adapter (use with --llm-provider-config)
-        #[arg(long, default_value = "openai-compatible")]
-        llm_provider: String,
+        /// Falls back to cih.toml [wiki].llm_provider, then "openai-compatible".
+        #[arg(long)]
+        llm_provider: Option<String>,
         /// JSON config file for --llm-provider http-json.
         #[arg(long)]
         llm_provider_config: Option<PathBuf>,
@@ -248,25 +252,25 @@ enum Command {
         #[arg(long = "evidence")]
         evidence: Vec<PathBuf>,
         /// Base URL for --llm-provider openai-compatible. Ignored for deepseek/gemini/anthropic.
-        #[arg(long, default_value = "https://api.openai.com/v1")]
-        llm_base_url: String,
+        #[arg(long)]
+        llm_base_url: Option<String>,
         /// Model name for LLM enrichment. Provider-specific defaults:
         ///   deepseek-chat (deepseek), gemini-2.5-flash (gemini),
         ///   claude-haiku-4-5-20251001 (anthropic), gpt-4o-mini (openai-compatible).
-        #[arg(long, default_value = "")]
-        llm_model: String,
+        #[arg(long)]
+        llm_model: Option<String>,
         /// Maximum output tokens per LLM call. Increase to 4096 for Gemini to avoid truncation.
-        #[arg(long, default_value = "600")]
-        llm_max_tokens: u32,
+        #[arg(long)]
+        llm_max_tokens: Option<u32>,
         /// Timeout in seconds per LLM API call.
-        #[arg(long, default_value = "30")]
-        llm_timeout_secs: u64,
+        #[arg(long)]
+        llm_timeout_secs: Option<u64>,
         /// Retries on transient LLM failures.
-        #[arg(long, default_value = "2")]
-        llm_retries: u32,
+        #[arg(long)]
+        llm_retries: Option<u32>,
         /// Maximum concurrent LLM calls.
-        #[arg(long, default_value = "8")]
-        llm_concurrency: usize,
+        #[arg(long)]
+        llm_concurrency: Option<usize>,
         /// Print evidence packs to stdout instead of calling the LLM.
         #[arg(long)]
         llm_debug_evidence: bool,
@@ -274,14 +278,14 @@ enum Command {
         #[arg(long)]
         llm_dry_run: bool,
         /// Documentation language for LLM-generated text.
-        #[arg(long, default_value = "en")]
-        wiki_language: String,
+        #[arg(long)]
+        wiki_language: Option<String>,
         /// Wiki generation mode: graph (no LLM), llm-summary, or llm-full.
-        #[arg(long, default_value = "graph")]
-        wiki_mode: String,
+        #[arg(long)]
+        wiki_mode: Option<String>,
         /// Community grouping strategy: package (by Java package path, default), graph (Leiden communities), or llm (LLM-proposed).
-        #[arg(long, default_value = "package")]
-        grouping: String,
+        #[arg(long)]
+        grouping: Option<String>,
         /// Write a standalone index.html viewer alongside the Markdown files.
         #[arg(long)]
         html: bool,
@@ -415,6 +419,28 @@ enum ArtifactCommand {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
+    /// Show effective settings for a repo, annotated with the layer each value
+    /// came from (default / ~/.cih/config.toml / cih.toml).
+    Show {
+        /// Repository root. Reads `<repo>/cih.toml` and `~/.cih/config.toml`.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Print as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a commented starter settings file with every option at its default.
+    Init {
+        /// Repository root. Writes `<repo>/cih.toml` (unless --global).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Write `~/.cih/config.toml` (cross-repo defaults) instead of `<repo>/cih.toml`.
+        #[arg(long)]
+        global: bool,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
     /// Interactively edit decompile settings (JAR directories, prefixes, tool path).
     Decompile {
         /// Repository root. Reads and writes `<repo>/cih.decompile.toml`.
@@ -542,6 +568,27 @@ fn main() -> Result<()> {
                     "failed to determine current working directory — pass an explicit repo path or run from a valid directory"
                 })?,
             };
+            // Layer flags over <repo>/cih.toml and ~/.cih/config.toml (see settings.rs).
+            let layers = settings::Layers::load(&repo);
+            let (h, r) = (&layers.home.analyze, &layers.repo.analyze);
+            // Empty --language means "unset" → fall back to config, then "all".
+            let languages = if languages.is_empty() {
+                r.languages.clone().or_else(|| h.languages.clone()).unwrap_or_default()
+            } else {
+                languages
+            };
+            let skip_xml_integration = settings::resolve_bool(
+                skip_xml_integration,
+                r.skip_xml_integration,
+                h.skip_xml_integration,
+            )
+            .value;
+            let include_decompiled = settings::resolve_bool(
+                include_decompiled,
+                r.include_decompiled,
+                h.include_decompiled,
+            )
+            .value;
             analyze::run_analyze(
                 repo,
                 AnalyzeFlags {
@@ -585,6 +632,69 @@ fn main() -> Result<()> {
             feature_llm_max_tokens,
             feature_llm_timeout_secs,
         } => {
+            // Layer flags over <repo>/cih.toml and ~/.cih/config.toml (see settings.rs).
+            let layers = settings::Layers::load(&repo);
+            let (h, r) = (&layers.home.discover, &layers.repo.discover);
+
+            let community_strategy = settings::resolve(
+                community_strategy,
+                None,
+                r.community_strategy.clone(),
+                h.community_strategy.clone(),
+                settings::DEFAULT_COMMUNITY_STRATEGY.to_string(),
+            )
+            .value;
+            let feature_strategy_str = settings::resolve(
+                feature_strategy,
+                None,
+                r.feature_strategy.clone(),
+                h.feature_strategy.clone(),
+                settings::DEFAULT_FEATURE_STRATEGY.to_string(),
+            )
+            .value;
+            let resolution = resolution.or(r.resolution).or(h.resolution);
+            let min_community_size =
+                min_community_size.or(r.min_community_size).or(h.min_community_size);
+            let max_trace_depth = max_trace_depth.or(r.max_trace_depth).or(h.max_trace_depth);
+            let max_processes = max_processes.or(r.max_processes).or(h.max_processes);
+            let max_branching = max_branching.or(r.max_branching).or(h.max_branching);
+            let min_trace_confidence =
+                min_trace_confidence.or(r.min_trace_confidence).or(h.min_trace_confidence);
+            let feature_llm_provider = feature_llm_provider
+                .or_else(|| r.feature_llm_provider.clone())
+                .or_else(|| h.feature_llm_provider.clone());
+            let feature_llm_model = feature_llm_model
+                .or_else(|| r.feature_llm_model.clone())
+                .or_else(|| h.feature_llm_model.clone())
+                .unwrap_or_default();
+            let feature_llm_base_url = settings::resolve(
+                feature_llm_base_url,
+                None,
+                r.feature_llm_base_url.clone(),
+                h.feature_llm_base_url.clone(),
+                settings::DEFAULT_FEATURE_LLM_BASE_URL.to_string(),
+            )
+            .value;
+            let feature_llm_api_key_env = feature_llm_api_key_env
+                .or_else(|| r.feature_llm_api_key_env.clone())
+                .or_else(|| h.feature_llm_api_key_env.clone());
+            let feature_llm_max_tokens = settings::resolve(
+                feature_llm_max_tokens,
+                None,
+                r.feature_llm_max_tokens,
+                h.feature_llm_max_tokens,
+                settings::DEFAULT_FEATURE_LLM_MAX_TOKENS,
+            )
+            .value;
+            let feature_llm_timeout_secs = settings::resolve(
+                feature_llm_timeout_secs,
+                None,
+                r.feature_llm_timeout_secs,
+                h.feature_llm_timeout_secs,
+                settings::DEFAULT_FEATURE_LLM_TIMEOUT_SECS,
+            )
+            .value;
+
             // Build optional LLM config when a provider is specified.
             let feature_llm = feature_llm_provider
                 .map(|s| s.parse::<llm::LlmProvider>())
@@ -625,7 +735,7 @@ fn main() -> Result<()> {
                     max_processes,
                     max_branching,
                     min_trace_confidence,
-                    feature_strategy: feature_strategy.parse().unwrap_or_default(),
+                    feature_strategy: feature_strategy_str.parse().unwrap_or_default(),
                     feature_llm,
                 },
             )
@@ -783,36 +893,129 @@ fn main() -> Result<()> {
             filter_feature,
             filter_route,
             json,
-        } => wiki::run_wiki(wiki::WikiConfig {
-            repo,
-            out,
-            run_llm: llm || llm_enrich,
-            llm: llm::LlmCallConfig {
-                provider: llm_provider.parse()?,
-                base_url: llm_base_url,
-                model: llm_model,
-                api_key_env: llm_api_key_env,
-                max_tokens: llm_max_tokens,
-                timeout_secs: llm_timeout_secs,
-                retries: llm_retries,
-            },
-            llm_provider_config,
-            evidence_paths: evidence,
-            llm_concurrency,
-            llm_debug_evidence,
-            llm_dry_run,
-            wiki_language,
-            wiki_mode: wiki_mode.parse()?,
-            grouping: grouping.parse()?,
-            html,
-            incremental,
-            save_evidence,
-            filter_community,
-            max_communities,
-            filter_feature,
-            filter_route,
-            json,
-        }),
+        } => {
+            // Layer flags over <repo>/cih.toml and ~/.cih/config.toml (see settings.rs).
+            let layers = settings::Layers::load(&repo);
+            let (h, r) = (&layers.home.wiki, &layers.repo.wiki);
+
+            let run_llm = settings::resolve_bool(llm || llm_enrich, r.llm, h.llm).value;
+            let llm_provider = settings::resolve(
+                llm_provider,
+                None,
+                r.llm_provider.clone(),
+                h.llm_provider.clone(),
+                settings::DEFAULT_WIKI_LLM_PROVIDER.to_string(),
+            )
+            .value;
+            let llm_base_url = settings::resolve(
+                llm_base_url,
+                None,
+                r.llm_base_url.clone(),
+                h.llm_base_url.clone(),
+                settings::DEFAULT_WIKI_LLM_BASE_URL.to_string(),
+            )
+            .value;
+            let llm_model = settings::resolve(
+                llm_model,
+                None,
+                r.llm_model.clone(),
+                h.llm_model.clone(),
+                settings::DEFAULT_WIKI_LLM_MODEL.to_string(),
+            )
+            .value;
+            let llm_api_key_env = llm_api_key_env
+                .or_else(|| r.llm_api_key_env.clone())
+                .or_else(|| h.llm_api_key_env.clone());
+            let llm_max_tokens = settings::resolve(
+                llm_max_tokens,
+                None,
+                r.llm_max_tokens,
+                h.llm_max_tokens,
+                settings::DEFAULT_WIKI_LLM_MAX_TOKENS,
+            )
+            .value;
+            let llm_timeout_secs = settings::resolve(
+                llm_timeout_secs,
+                None,
+                r.llm_timeout_secs,
+                h.llm_timeout_secs,
+                settings::DEFAULT_WIKI_LLM_TIMEOUT_SECS,
+            )
+            .value;
+            let llm_retries = settings::resolve(
+                llm_retries,
+                None,
+                r.llm_retries,
+                h.llm_retries,
+                settings::DEFAULT_WIKI_LLM_RETRIES,
+            )
+            .value;
+            let llm_concurrency = settings::resolve(
+                llm_concurrency,
+                None,
+                r.llm_concurrency,
+                h.llm_concurrency,
+                settings::DEFAULT_WIKI_LLM_CONCURRENCY,
+            )
+            .value;
+            let wiki_language = settings::resolve(
+                wiki_language,
+                None,
+                r.wiki_language.clone(),
+                h.wiki_language.clone(),
+                settings::DEFAULT_WIKI_LANGUAGE.to_string(),
+            )
+            .value;
+            let wiki_mode = settings::resolve(
+                wiki_mode,
+                None,
+                r.wiki_mode.clone(),
+                h.wiki_mode.clone(),
+                settings::DEFAULT_WIKI_MODE.to_string(),
+            )
+            .value;
+            let grouping = settings::resolve(
+                grouping,
+                None,
+                r.grouping.clone(),
+                h.grouping.clone(),
+                settings::DEFAULT_WIKI_GROUPING.to_string(),
+            )
+            .value;
+            let html = settings::resolve_bool(html, r.html, h.html).value;
+            let incremental = settings::resolve_bool(incremental, r.incremental, h.incremental).value;
+
+            wiki::run_wiki(wiki::WikiConfig {
+                repo,
+                out,
+                run_llm,
+                llm: llm::LlmCallConfig {
+                    provider: llm_provider.parse()?,
+                    base_url: llm_base_url,
+                    model: llm_model,
+                    api_key_env: llm_api_key_env,
+                    max_tokens: llm_max_tokens,
+                    timeout_secs: llm_timeout_secs,
+                    retries: llm_retries,
+                },
+                llm_provider_config,
+                evidence_paths: evidence,
+                llm_concurrency,
+                llm_debug_evidence,
+                llm_dry_run,
+                wiki_language,
+                wiki_mode: wiki_mode.parse()?,
+                grouping: grouping.parse()?,
+                html,
+                incremental,
+                save_evidence,
+                filter_community,
+                max_communities,
+                filter_feature,
+                filter_route,
+                json,
+            })
+        }
         Command::Taint { repo, db, intra_proc, cfg, pdg, json } => cmd::taint::run_taint(
             repo,
             cmd::taint::TaintFlags {
@@ -843,6 +1046,10 @@ fn main() -> Result<()> {
         }),
         Command::Artifact { command } => run_artifact(command),
         Command::Config { command } => match command {
+            ConfigCommand::Show { repo, json } => cmd::config::run_config_show(&repo, json),
+            ConfigCommand::Init { repo, global, force } => {
+                cmd::config::run_config_init(&repo, global, force)
+            }
             ConfigCommand::Decompile { repo } => cmd::config::run_config_decompile(&repo),
         },
         // Handled above before the match; unreachable at runtime.

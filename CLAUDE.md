@@ -77,4 +77,7 @@ limitations are in `docs/ARCHITECTURE.md`.
   see `.github/workflows/ci.yml`.
 - Local services: FalkorDB on **6380** (Homebrew redis squats 6379), Postgres on 5433.
   `FALKOR_URL=redis://127.0.0.1:6380`.
+- Command defaults: `analyze`/`discover`/`wiki` flags can be persisted in `<repo>/cih.toml`
+  or `~/.cih/config.toml` (precedence: flag > env > repo > home > default). `cih config init`
+  scaffolds it, `cih config show` prints effective values + source. See README "Configuration".
 - Security posture (auth, LLM egress): see `SECURITY.md`.

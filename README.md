@@ -232,6 +232,58 @@ Available MCP tools:
 
 ---
 
+## Configuration — `cih.toml`
+
+`analyze`, `discover`, and `wiki` accept a lot of flags. To avoid retyping the non-default
+ones every run, set them once in a settings file. Values are layered, highest wins:
+
+```text
+CLI flag  >  env var  >  <repo>/cih.toml  >  ~/.cih/config.toml  >  built-in default
+```
+
+- `<repo>/cih.toml` — per-repo defaults (auto-discovered, like `cih.scope.toml`).
+- `~/.cih/config.toml` — cross-repo defaults (LLM provider/model, etc.).
+
+Scaffold a commented starter (every option shown at its default, all commented out so an
+empty file changes nothing):
+
+```bash
+cih-engine config init            # writes <repo>/cih.toml
+cih-engine config init --global   # writes ~/.cih/config.toml
+```
+
+Example `cih.toml`:
+
+```toml
+[analyze]
+languages = ["java"]
+
+[discover]
+feature_strategy = "hybrid"
+feature_llm_provider = "gemini"
+max_trace_depth = 12
+
+[wiki]
+llm = true
+llm_provider = "gemini"
+wiki_mode = "llm-summary"
+```
+
+See what's actually in effect and where each value comes from:
+
+```bash
+cih-engine config show            # or --json
+# [discover]
+#   community_strategy  package   (default)
+#   feature_strategy    hybrid    (cih.toml)
+```
+
+A CLI flag always overrides the file (`--feature-strategy package` wins over `cih.toml`).
+The specialized files `cih.scope.toml` (scope), `cih.taint.toml` (taint rules), and
+`cih.decompile.toml` (decompile) remain separate.
+
+---
+
 ## Scoping Large Repos
 
 `--all` indexes every Java file. For projects with decompiled dependencies or generated
