@@ -154,9 +154,10 @@ enum Command {
         min_trace_confidence: Option<f32>,
 
         // ── Feature grouping strategy ──────────────────────────────────────
-        /// Feature classification strategy: package (default), structural, hybrid, llm.
-        /// "hybrid" runs structural → package → embed → llm (if --feature-llm-provider set).
+        /// Feature classification strategy: package (default), structural, hybrid, llm, embed.
+        /// "hybrid" runs structural → package → embed-filler → llm (if --feature-llm-provider set).
         /// "llm" requires --feature-llm-provider.
+        /// "embed" clusters by semantic similarity (k-NN + Leiden); requires --pg-url and a prior `cih embed`.
         /// Falls back to cih.toml [discover].feature_strategy, then "package".
         #[arg(long)]
         feature_strategy: Option<String>,
@@ -184,6 +185,21 @@ enum Command {
         /// Timeout in seconds per feature LLM API call.
         #[arg(long)]
         feature_llm_timeout_secs: Option<u64>,
+
+        // ── Embedding feature clustering (--feature-strategy embed) ────────
+        /// Postgres URL for --feature-strategy embed. Defaults to $CIH_PG_URL.
+        /// Requires a prior `cih embed` against the same repo.
+        #[arg(long, env = "CIH_PG_URL")]
+        pg_url: Option<String>,
+        /// embed strategy: minimum cosine similarity for a k-NN edge (0.0–1.0). Default: 0.65.
+        #[arg(long)]
+        embed_similarity_threshold: Option<f32>,
+        /// embed strategy: number of nearest neighbors per node. Default: 15.
+        #[arg(long)]
+        embed_knn: Option<usize>,
+        /// embed strategy: Leiden resolution — higher = more, smaller clusters. Default: 0.8.
+        #[arg(long)]
+        embed_leiden_resolution: Option<f64>,
     },
     /// Embed searchable graph nodes from the latest analyzed artifacts into pgvector.
     Embed {
@@ -631,6 +647,10 @@ fn main() -> Result<()> {
             feature_llm_api_key_env,
             feature_llm_max_tokens,
             feature_llm_timeout_secs,
+            pg_url,
+            embed_similarity_threshold,
+            embed_knn,
+            embed_leiden_resolution,
         } => {
             // Layer flags over <repo>/cih.toml and ~/.cih/config.toml (see settings.rs).
             let layers = settings::Layers::load(&repo);
@@ -694,6 +714,15 @@ fn main() -> Result<()> {
                 settings::DEFAULT_FEATURE_LLM_TIMEOUT_SECS,
             )
             .value;
+            // Embed clusterer knobs: keep as Option so unset falls through to EmbedClusterConfig
+            // defaults inside discover; config layers still apply.
+            let embed_similarity_threshold = embed_similarity_threshold
+                .or(r.embed_similarity_threshold)
+                .or(h.embed_similarity_threshold);
+            let embed_knn = embed_knn.or(r.embed_knn).or(h.embed_knn);
+            let embed_leiden_resolution = embed_leiden_resolution
+                .or(r.embed_leiden_resolution)
+                .or(h.embed_leiden_resolution);
 
             // Build optional LLM config when a provider is specified.
             let feature_llm = feature_llm_provider
@@ -737,6 +766,10 @@ fn main() -> Result<()> {
                     min_trace_confidence,
                     feature_strategy: feature_strategy_str.parse().unwrap_or_default(),
                     feature_llm,
+                    pg_url,
+                    embed_similarity_threshold,
+                    embed_knn,
+                    embed_leiden_resolution,
                 },
             )
         }

@@ -25,6 +25,11 @@ pub const DEFAULT_FEATURE_LLM_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_FEATURE_LLM_MAX_TOKENS: u32 = 2048;
 pub const DEFAULT_FEATURE_LLM_TIMEOUT_SECS: u64 = 60;
 
+// Embed clusterer knobs (--feature-strategy embed). Must match `EmbedClusterConfig::default`.
+pub const DEFAULT_EMBED_SIMILARITY_THRESHOLD: f32 = 0.65;
+pub const DEFAULT_EMBED_KNN: usize = 15;
+pub const DEFAULT_EMBED_LEIDEN_RESOLUTION: f64 = 0.8;
+
 pub const DEFAULT_WIKI_LLM_PROVIDER: &str = "openai-compatible";
 pub const DEFAULT_WIKI_LLM_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_WIKI_LLM_MODEL: &str = "";
@@ -131,6 +136,9 @@ pub struct DiscoverSettings {
     pub feature_llm_api_key_env: Option<String>,
     pub feature_llm_max_tokens: Option<u32>,
     pub feature_llm_timeout_secs: Option<u64>,
+    pub embed_similarity_threshold: Option<f32>,
+    pub embed_knn: Option<usize>,
+    pub embed_leiden_resolution: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -286,6 +294,9 @@ pub fn effective_rows(layers: &Layers) -> Vec<ShowRow> {
     rows.push(opt("discover", "feature_llm_api_key_env", rd.feature_llm_api_key_env.clone(), hd.feature_llm_api_key_env.clone(), "(auto-detect)"));
     rows.push(req("discover", "feature_llm_max_tokens", rd.feature_llm_max_tokens, hd.feature_llm_max_tokens, DEFAULT_FEATURE_LLM_MAX_TOKENS.to_string()));
     rows.push(req("discover", "feature_llm_timeout_secs", rd.feature_llm_timeout_secs, hd.feature_llm_timeout_secs, DEFAULT_FEATURE_LLM_TIMEOUT_SECS.to_string()));
+    rows.push(req("discover", "embed_similarity_threshold", rd.embed_similarity_threshold, hd.embed_similarity_threshold, DEFAULT_EMBED_SIMILARITY_THRESHOLD.to_string()));
+    rows.push(req("discover", "embed_knn", rd.embed_knn, hd.embed_knn, DEFAULT_EMBED_KNN.to_string()));
+    rows.push(req("discover", "embed_leiden_resolution", rd.embed_leiden_resolution, hd.embed_leiden_resolution, DEFAULT_EMBED_LEIDEN_RESOLUTION.to_string()));
 
     // [wiki]
     rows.push(bool_row("wiki", "llm", rw.llm, hw.llm));
@@ -321,7 +332,7 @@ pub fn starter_toml() -> String {
 
 [discover]
 # community_strategy = "{cs}"      # package | graph
-# feature_strategy = "{fs}"        # package | structural | hybrid | llm
+# feature_strategy = "{fs}"        # package | structural | hybrid | llm | embed
 # resolution = 1.0                 # graph strategy only
 # min_community_size = 2           # graph strategy only
 # max_trace_depth = 10
@@ -334,6 +345,9 @@ pub fn starter_toml() -> String {
 # feature_llm_api_key_env = ""     # auto-detect when empty
 # feature_llm_max_tokens = {flmt}
 # feature_llm_timeout_secs = {flts}
+# embed_similarity_threshold = {est}  # embed strategy: min cosine similarity for a k-NN edge
+# embed_knn = {ekn}                    # embed strategy: neighbors per node
+# embed_leiden_resolution = {elr}      # embed strategy: higher = more, smaller clusters
 
 [wiki]
 # llm = false
@@ -356,6 +370,9 @@ pub fn starter_toml() -> String {
         flbu = DEFAULT_FEATURE_LLM_BASE_URL,
         flmt = DEFAULT_FEATURE_LLM_MAX_TOKENS,
         flts = DEFAULT_FEATURE_LLM_TIMEOUT_SECS,
+        est = DEFAULT_EMBED_SIMILARITY_THRESHOLD,
+        ekn = DEFAULT_EMBED_KNN,
+        elr = DEFAULT_EMBED_LEIDEN_RESOLUTION,
         wp = DEFAULT_WIKI_LLM_PROVIDER,
         wbu = DEFAULT_WIKI_LLM_BASE_URL,
         wmt = DEFAULT_WIKI_LLM_MAX_TOKENS,

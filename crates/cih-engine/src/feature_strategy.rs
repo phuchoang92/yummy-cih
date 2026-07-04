@@ -125,6 +125,15 @@ pub fn build_feature_strategy(
 
             Ok(Box::new(HybridStrategy::new(strategies, catch_all)))
         }
+        FeatureStrategyKind::Embed => {
+            // The embed clusterer needs Postgres + Leiden orchestration, which happens in
+            // `discover::run_discover_core` before this builder is reached. If we get here the
+            // pg path was unavailable, so fall back to package.
+            tracing::warn!(
+                "--feature-strategy embed reached the generic builder (no pg path) — falling back to package"
+            );
+            Ok(Box::new(PackageStrategy::new(pkg_cfg)))
+        }
         FeatureStrategyKind::Package => Ok(Box::new(PackageStrategy::new(pkg_cfg))),
     }
 }

@@ -417,6 +417,70 @@ pub fn detect_communities(
     out
 }
 
+/// Cluster nodes from a precomputed cosine-similarity k-NN edge list using weighted Leiden.
+///
+/// Used by `cih discover --feature-strategy embed`: the engine builds `edges`
+/// (`(src, dst, similarity)`) from pgvector, and this runs the same Leiden implementation that
+/// `detect_communities` uses internally — just over a semantic graph instead of the call graph.
+/// petgraph stays encapsulated here so the engine needs no direct dependency on it.
+///
+/// The k-NN relation is asymmetric, so edges are collapsed into an undirected graph keyed by
+/// `(min(src,dst), max(src,dst))`, keeping the **maximum** similarity when both directions occur.
+/// Returns `(node_id, cluster_id)` for every node that has at least one edge; isolated nodes
+/// (no neighbor above threshold) are absent and left for the caller to treat as unclustered.
+pub fn cluster_similarity_edges(
+    edges: &[(NodeId, NodeId, f32)],
+    resolution: f64,
+    seed: u32,
+    max_iterations: u32,
+) -> Vec<(NodeId, usize)> {
+    use petgraph::graph::UnGraph;
+
+    // Assign each distinct node a graph index; dedup undirected edges keeping the max similarity.
+    let mut index_of: HashMap<NodeId, NodeIndex> = HashMap::new();
+    let mut graph: UnGraph<NodeId, f32> = UnGraph::new_undirected();
+    let mut edge_weight: HashMap<(NodeIndex, NodeIndex), f32> = HashMap::new();
+
+    for (src, dst, sim) in edges {
+        if src == dst {
+            continue;
+        }
+        let a = *index_of
+            .entry(src.clone())
+            .or_insert_with(|| graph.add_node(src.clone()));
+        let b = *index_of
+            .entry(dst.clone())
+            .or_insert_with(|| graph.add_node(dst.clone()));
+        let key = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        edge_weight
+            .entry(key)
+            .and_modify(|w| {
+                if *sim > *w {
+                    *w = *sim;
+                }
+            })
+            .or_insert(*sim);
+    }
+
+    for ((a, b), w) in &edge_weight {
+        graph.add_edge(*a, *b, *w);
+    }
+
+    if graph.node_count() == 0 {
+        return Vec::new();
+    }
+
+    let assignments = leiden::leiden(&graph, resolution, max_iterations as usize, seed as u64);
+    graph
+        .node_indices()
+        .filter_map(|idx| {
+            assignments
+                .get(idx.index())
+                .map(|&cluster| (graph[idx].clone(), cluster))
+        })
+        .collect()
+}
+
 /// Derive communities from package/module structure rather than graph clustering.
 ///
 /// `feature_of` maps a file path to a feature slug (e.g. "order", "payment", "shared").

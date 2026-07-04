@@ -20,6 +20,8 @@ pub enum FeatureStrategyKind {
     Structural,
     Hybrid,
     Llm,
+    /// Primary embedding clusterer (k-NN + Leiden over pgvector). Requires a prior `cih embed`.
+    Embed,
 }
 
 impl std::fmt::Display for FeatureStrategyKind {
@@ -29,6 +31,7 @@ impl std::fmt::Display for FeatureStrategyKind {
             Self::Structural => "structural",
             Self::Hybrid => "hybrid",
             Self::Llm => "llm",
+            Self::Embed => "embed",
         })
     }
 }
@@ -41,8 +44,9 @@ impl std::str::FromStr for FeatureStrategyKind {
             "structural" => Ok(Self::Structural),
             "hybrid" => Ok(Self::Hybrid),
             "llm" => Ok(Self::Llm),
+            "embed" => Ok(Self::Embed),
             other => anyhow::bail!(
-                "unknown --feature-strategy '{}'; expected package | structural | hybrid | llm",
+                "unknown --feature-strategy '{}'; expected package | structural | hybrid | llm | embed",
                 other
             ),
         }
@@ -70,6 +74,12 @@ pub struct DiscoverOverrides {
     pub feature_strategy: FeatureStrategyKind,
     /// LLM config — required when feature_strategy is "llm" or "hybrid".
     pub feature_llm: Option<LlmCallConfig>,
+    /// Postgres URL for `--feature-strategy embed` (falls back to $CIH_PG_URL upstream).
+    pub pg_url: Option<String>,
+    /// Embed clusterer knobs (None → EmbedClusterConfig defaults).
+    pub embed_similarity_threshold: Option<f32>,
+    pub embed_knn: Option<usize>,
+    pub embed_leiden_resolution: Option<f64>,
 }
 
 pub fn run_discover(
@@ -354,17 +364,35 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         None
     };
 
-    let feature_strategy = match build_feature_strategy(feature_strategy_kind, pkg_cfg, llm_opts) {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::warn!(
-                strategy = %feature_strategy_kind,
-                error = %err,
-                "feature strategy failed to load — falling back to package"
-            );
-            Box::new(cih_grouping::PackageStrategy::new(
-                PackageConfig::load_or_default(repo),
-            ))
+    let feature_strategy = if feature_strategy_kind == FeatureStrategyKind::Embed {
+        // Embedding clusterer: owns the Postgres + Leiden work, then hands assignments to the
+        // (Postgres-free) grouping strategy. Any failure degrades cleanly to package.
+        match build_embed_cluster_strategy(&nodes, overrides) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    error = %format!("{err:#}"),
+                    "embed feature strategy unavailable — falling back to package \
+                     (did you run `cih embed --pg-url` first?)"
+                );
+                Box::new(cih_grouping::PackageStrategy::new(
+                    PackageConfig::load_or_default(repo),
+                ))
+            }
+        }
+    } else {
+        match build_feature_strategy(feature_strategy_kind, pkg_cfg, llm_opts) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    strategy = %feature_strategy_kind,
+                    error = %err,
+                    "feature strategy failed to load — falling back to package"
+                );
+                Box::new(cih_grouping::PackageStrategy::new(
+                    PackageConfig::load_or_default(repo),
+                ))
+            }
         }
     };
     let strategy_input = StrategyInput {
@@ -440,6 +468,112 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         edge_count: output_edges.len(),
         feature_count,
     })
+}
+
+/// Build the embedding clusterer: connect to pgvector, fetch per-node vectors + k-NN edges, run
+/// weighted Leiden, and hand the precomputed assignments to the Postgres-free
+/// `EmbedClusterStrategy`. All async DB work runs on `crate::runtime::block_on` — the codebase's
+/// single shared Tokio runtime — which sidesteps the nested-runtime panics a fresh
+/// `Runtime::new().block_on()` would cause if discover were ever driven from within a runtime.
+fn build_embed_cluster_strategy(
+    nodes: &[cih_core::Node],
+    overrides: &DiscoverOverrides,
+) -> Result<Box<dyn FeatureStrategy>> {
+    use std::collections::{HashMap, HashSet};
+
+    let pg_url = overrides
+        .pg_url
+        .clone()
+        .or_else(|| std::env::var("CIH_PG_URL").ok())
+        .context(
+            "--feature-strategy embed requires Postgres: pass --pg-url or set CIH_PG_URL, \
+             and run `cih embed` first",
+        )?;
+
+    let mut cfg = cih_grouping::EmbedClusterConfig::default();
+    if let Some(v) = overrides.embed_similarity_threshold {
+        cfg.similarity_threshold = v;
+    }
+    if let Some(v) = overrides.embed_knn {
+        cfg.knn = v;
+    }
+    if let Some(v) = overrides.embed_leiden_resolution {
+        cfg.leiden_resolution = v;
+    }
+
+    // The current embeddable node ids define both the clustered universe and the prune authority.
+    let node_ids: Vec<String> = cih_embed::embeddable_nodes(nodes)
+        .iter()
+        .map(|n| n.id.as_str().to_string())
+        .collect();
+    if node_ids.is_empty() {
+        anyhow::bail!("no embeddable nodes in the current graph");
+    }
+
+    let knn = cfg.knn;
+    let thr = cfg.similarity_threshold;
+    let (vectors_raw, edges) = crate::runtime::block_on(async {
+        let store =
+            cih_embed::EmbedStore::connect(&pg_url, cih_embed::EmbedModelKind::MiniLm).await?;
+        store.ensure_schema().await?;
+        // Self-heal: an older `cih embed` may predate cih_node_vectors — backfill if empty.
+        if store.node_vector_count().await? == 0 {
+            tracing::info!("cih_node_vectors empty — backfilling from cih_embeddings");
+            store.upsert_node_vectors(&node_ids).await?;
+            store.prune_node_vectors(&node_ids).await?;
+        }
+        let vectors = store.node_vectors(&node_ids).await?;
+        let edges = store.knn_edges(knn, thr).await?;
+        anyhow::Ok((vectors, edges))
+    })?;
+
+    if vectors_raw.is_empty() {
+        anyhow::bail!("no embeddings found for current nodes — run `cih embed` first");
+    }
+    tracing::info!(
+        embedded = vectors_raw.len(),
+        total = node_ids.len(),
+        edges = edges.len(),
+        "embed clustering: fetched per-node vectors and k-NN edges"
+    );
+    if edges.is_empty() {
+        tracing::warn!(
+            threshold = thr,
+            "no k-NN edges above similarity threshold — lower --embed-similarity-threshold; \
+             all nodes will be unclustered (shared)"
+        );
+    }
+
+    // Weighted Leiden over the semantic k-NN graph (petgraph stays inside cih-community).
+    let clusters =
+        cih_community::cluster_similarity_edges(&edges, cfg.leiden_resolution, cfg.leiden_seed, 10);
+    let cluster_count = clusters.iter().map(|(_, c)| *c).collect::<HashSet<_>>().len();
+    tracing::info!(
+        clusters = cluster_count,
+        assigned = clusters.len(),
+        "embed clustering: Leiden produced clusters"
+    );
+
+    // Split the fetched rows into the (vectors, meta) maps the strategy needs.
+    let mut vectors: HashMap<String, Vec<f32>> = HashMap::with_capacity(vectors_raw.len());
+    let mut meta: HashMap<String, cih_grouping::NodeMeta> =
+        HashMap::with_capacity(vectors_raw.len());
+    for nv in vectors_raw {
+        let id = nv.node_id.as_str().to_string();
+        meta.insert(
+            id.clone(),
+            cih_grouping::NodeMeta { kind: nv.node_kind, name: nv.name, file: nv.file },
+        );
+        vectors.insert(id, nv.vector);
+    }
+    let clusters: Vec<(String, usize)> = clusters
+        .into_iter()
+        .map(|(id, c)| (id.as_str().to_string(), c))
+        .collect();
+
+    Ok(Box::new(cih_grouping::EmbedClusterStrategy::new(
+        clusters, vectors, meta, cfg,
+    )))
 }
 
 /// Everything `run_discover_core` produced (DB-free), used to load + report.

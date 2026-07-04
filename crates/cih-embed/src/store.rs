@@ -38,6 +38,17 @@ pub struct SemanticHit {
     pub score: f32,
 }
 
+/// A per-node averaged embedding plus its metadata, read from `cih_node_vectors`.
+/// Used by feature clustering (`cih discover --feature-strategy embed`).
+#[derive(Clone, Debug)]
+pub struct NodeVector {
+    pub node_id: NodeId,
+    pub node_kind: String,
+    pub name: String,
+    pub file: String,
+    pub vector: Vec<f32>,
+}
+
 #[derive(Clone, Debug)]
 struct PendingChunk {
     node_id: String,
@@ -80,7 +91,7 @@ impl EmbedStore {
                   start_line INTEGER NOT NULL,
                   end_line INTEGER NOT NULL,
                   content_hash TEXT NOT NULL,
-                  embedding vector({}),
+                  embedding vector({0}),
                   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                   PRIMARY KEY (node_id, chunk_idx)
                 );
@@ -88,6 +99,20 @@ impl EmbedStore {
                   ON cih_embeddings (node_id);
                 CREATE INDEX IF NOT EXISTS cih_embeddings_hnsw_idx
                   ON cih_embeddings USING hnsw (embedding vector_cosine_ops);
+                -- Per-node materialized vectors: the mean of a node's chunk vectors, with its
+                -- own HNSW index. Feature clustering (`cih discover --feature-strategy embed`)
+                -- runs k-NN at node granularity against this table, not the per-chunk table.
+                CREATE TABLE IF NOT EXISTS cih_node_vectors (
+                  node_id     TEXT PRIMARY KEY,
+                  node_kind   TEXT NOT NULL,
+                  name        TEXT NOT NULL,
+                  file        TEXT NOT NULL,
+                  embedding   vector({0}) NOT NULL,
+                  chunk_count INTEGER NOT NULL,
+                  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS cih_node_vectors_hnsw_idx
+                  ON cih_node_vectors USING hnsw (embedding vector_cosine_ops);
                 "#,
                 self.model.dimension()
             ))
@@ -138,10 +163,6 @@ impl EmbedStore {
             }
         }
 
-        if pending.is_empty() {
-            return Ok(summary);
-        }
-
         for batch in pending.chunks(64) {
             let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
             let embeddings = self.model.embed(&texts)?;
@@ -150,7 +171,154 @@ impl EmbedStore {
                 summary.chunks_embedded += 1;
             }
         }
+
+        // Refresh the per-node vector table. Re-aggregate only nodes whose chunks changed
+        // this run (`changed`), then prune the table to the current embeddable set (`node_ids`)
+        // so it always equals the current graph — this is what lets `knn_edges` run without a
+        // per-query node filter (an HNSW post-filter would drop it below k). The prune keys off
+        // the current node set (not "has any chunk"), because `cih_embeddings` may still hold
+        // orphan chunk rows for renamed/deleted classes until a future `cih embed --prune`.
+        let mut changed: Vec<String> =
+            pending.iter().map(|c| c.node_id.clone()).collect();
+        changed.sort();
+        changed.dedup();
+        self.upsert_node_vectors(&changed).await?;
+        self.prune_node_vectors(&node_ids).await?;
         Ok(summary)
+    }
+
+    /// Re-aggregate `cih_node_vectors` rows for `node_ids` as the mean of their chunk vectors.
+    /// No-op for ids with no chunk rows. Uses pgvector's `avg(vector)` aggregate.
+    pub async fn upsert_node_vectors(&self, node_ids: &[String]) -> Result<u64> {
+        if node_ids.is_empty() {
+            return Ok(0);
+        }
+        let n = self
+            .client
+            .execute(
+                r#"
+                INSERT INTO cih_node_vectors
+                  (node_id, node_kind, name, file, embedding, chunk_count, updated_at)
+                SELECT node_id, min(node_kind), min(name), min(file),
+                       avg(embedding)::vector, count(*)::int, now()
+                FROM cih_embeddings
+                WHERE node_id = ANY($1)
+                GROUP BY node_id
+                ON CONFLICT (node_id) DO UPDATE SET
+                  node_kind = EXCLUDED.node_kind,
+                  name = EXCLUDED.name,
+                  file = EXCLUDED.file,
+                  embedding = EXCLUDED.embedding,
+                  chunk_count = EXCLUDED.chunk_count,
+                  updated_at = now()
+                "#,
+                &[&node_ids],
+            )
+            .await
+            .with_context(|| "failed to refresh cih_node_vectors")?;
+        Ok(n)
+    }
+
+    /// Drop `cih_node_vectors` rows whose node_id is not in `keep` (the current graph's node
+    /// set), so the table always equals the current graph.
+    pub async fn prune_node_vectors(&self, keep: &[String]) -> Result<u64> {
+        // Empty `keep` would delete everything; treat as "nothing current" only when the caller
+        // genuinely passes an empty graph. Guard against accidental wipe of a populated table.
+        if keep.is_empty() {
+            return Ok(0);
+        }
+        let n = self
+            .client
+            .execute(
+                "DELETE FROM cih_node_vectors WHERE node_id <> ALL($1)",
+                &[&keep],
+            )
+            .await
+            .with_context(|| "failed to prune cih_node_vectors")?;
+        Ok(n)
+    }
+
+    /// Number of rows in `cih_node_vectors` (used to detect an un-populated table so discover
+    /// can self-heal against an older `cih embed` that predates this table).
+    pub async fn node_vector_count(&self) -> Result<i64> {
+        let count: i64 = self
+            .client
+            .query_one("SELECT COUNT(*) FROM cih_node_vectors", &[])
+            .await?
+            .get(0);
+        Ok(count)
+    }
+
+    /// Fetch per-node vectors + metadata for `node_ids` from `cih_node_vectors`.
+    pub async fn node_vectors(&self, node_ids: &[String]) -> Result<Vec<NodeVector>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT node_id, node_kind, name, file, embedding
+                FROM cih_node_vectors
+                WHERE node_id = ANY($1)
+                "#,
+                &[&node_ids],
+            )
+            .await
+            .with_context(|| "failed to read cih_node_vectors")?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let vector: Vector = row.get(4);
+                NodeVector {
+                    node_id: NodeId::new(row.get::<_, String>(0)),
+                    node_kind: row.get(1),
+                    name: row.get(2),
+                    file: row.get(3),
+                    vector: vector.to_vec(),
+                }
+            })
+            .collect())
+    }
+
+    /// Build the cosine k-NN similarity graph over `cih_node_vectors` in one batched query.
+    /// Returns `(src, dst, similarity)` edges with `similarity >= min_sim`, `k` neighbors per
+    /// node. No node filter — the table is kept == the current graph by the embed-time prune,
+    /// so an HNSW post-filter (which could drop results below `k`) is unnecessary.
+    pub async fn knn_edges(&self, k: usize, min_sim: f32) -> Result<Vec<(NodeId, NodeId, f32)>> {
+        let max_distance = (1.0 - min_sim) as f64;
+        let k = k as i64;
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT q.node_id AS src,
+                       nbr.node_id AS dst,
+                       (1.0 - (q.embedding <=> nbr.embedding))::real AS sim
+                FROM cih_node_vectors q
+                CROSS JOIN LATERAL (
+                    SELECT n.node_id, n.embedding
+                    FROM cih_node_vectors n
+                    WHERE n.node_id <> q.node_id
+                    ORDER BY n.embedding <=> q.embedding, n.node_id
+                    LIMIT $1
+                ) nbr
+                WHERE (q.embedding <=> nbr.embedding) <= $2
+                "#,
+                &[&k, &max_distance],
+            )
+            .await
+            .with_context(|| "failed to run k-NN query over cih_node_vectors")?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    NodeId::new(row.get::<_, String>(0)),
+                    NodeId::new(row.get::<_, String>(1)),
+                    row.get::<_, f32>(2),
+                )
+            })
+            .collect())
     }
 
     pub async fn semantic_search(
