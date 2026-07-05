@@ -747,6 +747,7 @@ dependencies = [
  "cih-embed",
  "cih-falkor",
  "cih-graph-store",
+ "cih-grouping",
  "cih-search",
  "cih-taint",
  "reqwest",

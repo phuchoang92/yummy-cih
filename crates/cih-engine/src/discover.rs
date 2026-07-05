@@ -367,7 +367,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     let feature_strategy = if feature_strategy_kind == FeatureStrategyKind::Embed {
         // Embedding clusterer: owns the Postgres + Leiden work, then hands assignments to the
         // (Postgres-free) grouping strategy. Any failure degrades cleanly to package.
-        match build_embed_cluster_strategy(&nodes, overrides) {
+        match build_embed_cluster_strategy(&nodes, overrides, repo, &source.version.0) {
             Ok(s) => s,
             Err(err) => {
                 tracing::warn!(
@@ -497,6 +497,8 @@ fn is_project_node(n: &cih_core::Node) -> bool {
 fn build_embed_cluster_strategy(
     nodes: &[cih_core::Node],
     overrides: &DiscoverOverrides,
+    repo: &Path,
+    source_version: &str,
 ) -> Result<Box<dyn FeatureStrategy>> {
     use std::collections::{HashMap, HashSet};
 
@@ -616,8 +618,41 @@ fn build_embed_cluster_strategy(
         .map(|(id, c)| (id.as_str().to_string(), c))
         .collect();
 
+    // Opt-in LLM labeling: build a caller only when a feature-LLM provider is configured. Also load
+    // the prior run's embed entries so unchanged clusters reuse their prior LLM name (stability).
+    let (llm_caller, prior_entries) = match &overrides.feature_llm {
+        Some(llm_cfg) => match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
+            Ok(adapter) => {
+                let api_key = crate::llm::resolve_api_key(llm_cfg.api_key_env.as_deref())
+                    .ok()
+                    .flatten();
+                let caller = crate::feature_strategy::make_feature_llm_caller(
+                    adapter,
+                    api_key,
+                    llm_cfg.model.clone(),
+                    llm_cfg.max_tokens,
+                    llm_cfg.timeout_secs,
+                );
+                let prior = find_feature_artifact_dir(repo, source_version)
+                    .and_then(|dir| read_feature_artifact(&dir).ok())
+                    .unwrap_or_default();
+                (Some(caller), prior)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "embed LLM labeling disabled — adapter failed to build");
+                (None, Vec::new())
+            }
+        },
+        None => (None, Vec::new()),
+    };
+
     Ok(Box::new(cih_grouping::EmbedClusterStrategy::new(
-        clusters, vectors, meta, cfg,
+        clusters,
+        vectors,
+        meta,
+        cfg,
+        llm_caller,
+        prior_entries,
     )))
 }
 

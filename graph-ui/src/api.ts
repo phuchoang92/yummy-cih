@@ -32,5 +32,6 @@ export const api = {
   impact: (id: string, direction: string, depth: number) => fetchJson<any>(`/api/graph/impact?id=${encodeURIComponent(id)}&direction=${direction}&depth=${depth}`),
   flow: (id: string, depth: number) => fetchJson<any>(`/api/graph/flow?id=${encodeURIComponent(id)}&depth=${depth}`),
   communities: () => fetchJson<any>("/api/graph/communities"),
+  features: () => fetchJson<any>("/api/graph/features"),
   routes: (prefix: string) => fetchJson<any>(`/api/graph/routes?limit=500${prefix ? `&prefix=${encodeURIComponent(prefix)}` : ""}`),
 };

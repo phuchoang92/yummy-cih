@@ -55,6 +55,18 @@ impl FeatureLlmCaller for EngineLlmCaller {
     }
 }
 
+/// Wrap an LLM adapter as a `FeatureLlmCaller` — used by the embed clusterer's optional labeling
+/// pass so it builds a caller the same way the `hybrid`/`llm` strategies do.
+pub fn make_feature_llm_caller(
+    adapter: Box<dyn LlmAdapter>,
+    api_key: Option<String>,
+    model: String,
+    max_tokens: u32,
+    timeout_secs: u64,
+) -> Arc<dyn FeatureLlmCaller> {
+    Arc::new(EngineLlmCaller { adapter, api_key, model, max_tokens, timeout_secs })
+}
+
 /// Build the feature classification strategy selected by the `--feature-strategy` flag.
 ///
 /// - `"package"` (default): fast file-path heuristic, zero cost.

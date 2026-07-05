@@ -62,6 +62,7 @@ export function ClassicViews({ tab, selectedId, onSelectedId }: { tab: Exclude<T
   const [direction, setDirection] = useState("upstream"); const [depth, setDepth] = useState(4);
   const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null);
   const [exportValue, setExportValue] = useState("");
+  const [clusters, setClusters] = useState<any[]>([]); const [selectedCluster, setSelectedCluster] = useState<string | null>(null); const [note, setNote] = useState("");
 
   const run = async (action: () => Promise<any>, project: (data: any) => void) => {
     setLoading(true); setError(null);
@@ -70,7 +71,23 @@ export function ClassicViews({ tab, selectedId, onSelectedId }: { tab: Exclude<T
   };
   const loadCommunities = () => run(api.communities, (data) => { setGraph(normalizeGraph(data)); setItems(data.nodes ?? []); });
   const loadRoutes = () => run(() => api.routes(prefix), (data) => { setItems(data.routes ?? []); setExportValue(JSON.stringify(data.openapi ?? {}, null, 2)); setGraph({ nodes: [], edges: [] }); });
-  useEffect(() => { setError(null); setItems([]); setGraph({ nodes: [], edges: [] }); if (tab === "communities") void loadCommunities(); if (tab === "routes") void loadRoutes(); }, [tab]);
+  const loadClusters = () => run(api.features, (data) => { const list = data.clusters ?? []; setClusters(list); setNote(data.note ?? ""); setSelectedCluster((prev) => (prev && list.some((c: any) => c.name === prev) ? prev : list[0]?.name ?? null)); });
+  useEffect(() => { setError(null); setItems([]); setGraph({ nodes: [], edges: [] }); setClusters([]); setSelectedCluster(null); setNote(""); if (tab === "communities") void loadCommunities(); if (tab === "routes") void loadRoutes(); if (tab === "clusters") void loadClusters(); }, [tab]);
+
+  if (tab === "clusters") {
+    const current = clusters.find((c) => c.name === selectedCluster);
+    return <div className="classic-shell">
+      <Toolbar><div><span>{tab}</span><h1>Embedding clusters</h1></div><div className="classic-controls"><button onClick={() => void loadClusters()}>Refresh clusters</button></div></Toolbar>
+      <div className="classic-body">
+        <aside className="result-rail"><div className="result-heading"><span>Clusters</span><b>{clusters.length}</b></div>{clusters.map((c) => <button key={c.name} onClick={() => setSelectedCluster(c.name)} className={c.name === selectedCluster ? "is-active" : ""}><small>{c.node_count} nodes · {Math.round((c.avg_confidence ?? 0) * 100)}% avg</small><strong>{c.name}</strong></button>)}</aside>
+        <main className="classic-stage">{loading ? <div className="graph-empty"><span className="spinner"/><strong>Loading clusters</strong></div>
+          : error ? <div className="graph-empty error-state"><strong>Request failed</strong><span>{error}</span></div>
+          : !clusters.length ? <div className="graph-empty"><strong>No embedding clusters</strong><span>{note || "Run `cih-engine discover <repo> --feature-strategy embed` to generate them."}</span></div>
+          : !current ? <div className="graph-empty"><strong>Select a cluster</strong><span>Pick a cluster to inspect its member nodes.</span></div>
+          : <div className="cluster-members"><div className="cluster-members-head"><h2>{current.name}</h2><span>{current.node_count} nodes · {Math.round((current.avg_confidence ?? 0) * 100)}% avg confidence · lowest-confidence first</span></div><ul>{current.members.map((m: any) => { const kind = m.node_id.split(":")[0] || "Node"; const conf = Math.round((m.confidence ?? 0) * 100); const weak = (m.confidence ?? 0) < 0.5; return <li key={m.node_id} className={m.node_id === selectedId ? "is-active" : ""} onClick={() => onSelectedId(m.node_id)} title={m.evidence}><span className="member-kind" style={{ color: KIND_COLORS[kind] ?? "#64748b" }}>{kind}</span><span className="member-name">{shortLabel(m.node_id)}</span>{m.pinned && <span className="member-pin">pinned</span>}<span className={weak ? "member-conf is-weak" : "member-conf"}>{conf}%</span></li>; })}</ul></div>}</main>
+      </div>
+    </div>;
+  }
 
   const controls = tab === "search" ? <form onSubmit={(event) => { event.preventDefault(); if (query.trim()) void run(() => api.search(query.trim()), (data) => { setItems(data.hits ?? []); setGraph(normalizeGraph(data.subgraph)); }); }}><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search symbol, route, table, or feature"/><button>Search</button></form>
     : tab === "impact" ? <><select value={direction} onChange={(event) => setDirection(event.target.value)}><option value="upstream">Upstream</option><option value="downstream">Downstream</option><option value="both">Both</option></select><input type="number" min="1" max="8" value={depth} onChange={(event) => setDepth(Number(event.target.value))}/><button disabled={!selectedId} onClick={() => selectedId && void run(() => api.impact(selectedId, direction, depth), (data) => setGraph(normalizeGraph(data)))}>Load impact</button></>

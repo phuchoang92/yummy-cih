@@ -3,6 +3,7 @@
 //! This is intentionally CIH-only and read-only. It serves a small static UI and
 //! bounded JSON endpoints backed by the existing `GraphStore` domain methods.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::{
@@ -30,11 +31,22 @@ const STYLES_CSS: &str = include_str!("../assets/graph/styles.css");
 pub(crate) struct BrowserState {
     store: Arc<dyn GraphStore>,
     search: SearchState,
+    /// Artifacts root (`CIH_ARTIFACTS_DIR`, e.g. `<repo>/.cih/artifacts`). Used to locate the
+    /// sibling embedding-cluster artifacts under `<repo>/.cih/artifacts-features/<version>`.
+    artifacts_dir: Option<PathBuf>,
 }
 
 impl BrowserState {
-    pub(crate) fn new(store: Arc<dyn GraphStore>, search: SearchState) -> Self {
-        Self { store, search }
+    pub(crate) fn new(
+        store: Arc<dyn GraphStore>,
+        search: SearchState,
+        artifacts_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            search,
+            artifacts_dir,
+        }
     }
 }
 
@@ -51,6 +63,7 @@ pub(crate) fn router(state: BrowserState) -> Router {
         .route("/api/graph/impact", get(graph_impact))
         .route("/api/graph/flow", get(graph_flow))
         .route("/api/graph/communities", get(graph_communities))
+        .route("/api/graph/features", get(graph_features))
         .route("/api/graph/routes", get(graph_routes))
         .with_state(state)
 }
@@ -261,6 +274,107 @@ async fn graph_communities(
     Ok(Json(render_community_diagram(&communities, &edges)))
 }
 
+/// Embedding clusters (feature groups) for the current repo. Reads the
+/// `groups.jsonl` artifact written by `cih-engine discover --feature-strategy embed`
+/// and returns clusters with their member nodes, sorted so low-confidence outliers
+/// surface first — the signal for eyeballing grouping quality.
+///
+/// Always returns 200: when no embedding run exists it returns an empty list plus a
+/// `note` explaining how to generate one, so the UI can render a friendly empty state.
+async fn graph_features(State(state): State<BrowserState>) -> Json<serde_json::Value> {
+    match load_feature_clusters(state.artifacts_dir.as_deref()) {
+        Ok(clusters) => Json(json!({ "clusters": clusters })),
+        Err(err) => Json(json!({ "clusters": [], "note": err.to_string() })),
+    }
+}
+
+#[derive(Serialize)]
+struct ClusterMember {
+    node_id: String,
+    confidence: f32,
+    evidence: String,
+    strategy: String,
+    pinned: bool,
+}
+
+#[derive(Serialize)]
+struct ClusterInfo {
+    name: String,
+    node_count: usize,
+    avg_confidence: f32,
+    members: Vec<ClusterMember>,
+}
+
+fn load_feature_clusters(artifacts_dir: Option<&Path>) -> anyhow::Result<Vec<ClusterInfo>> {
+    let Some(dir) = artifacts_dir else {
+        anyhow::bail!(
+            "CIH_ARTIFACTS_DIR is not set — cannot locate embedding-cluster artifacts"
+        );
+    };
+    // `dir` is the artifacts root (`<repo>/.cih/artifacts`); the source graph version names the
+    // sibling `<repo>/.cih/artifacts-features/<version>` that discover writes clusters into.
+    let artifacts = cih_core::GraphArtifacts::latest_in_dir(dir)?;
+    let version = artifacts.version.0.clone();
+    let repo = dir.parent().and_then(Path::parent).ok_or_else(|| {
+        anyhow::anyhow!("cannot derive repo root from artifacts dir {}", dir.display())
+    })?;
+    let feat_dir = cih_grouping::find_feature_artifact_dir(repo, &version).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no embedding clusters found for graph version {version} — run \
+             `cih-engine discover <repo> --feature-strategy embed` first"
+        )
+    })?;
+    let entries = cih_grouping::read_feature_artifact(&feat_dir)?;
+    Ok(build_clusters(entries))
+}
+
+fn build_clusters(entries: Vec<cih_grouping::FeatureGroupEntry>) -> Vec<ClusterInfo> {
+    use std::collections::BTreeMap;
+
+    let mut by_name: BTreeMap<String, Vec<cih_grouping::FeatureGroupEntry>> = BTreeMap::new();
+    for entry in entries {
+        by_name.entry(entry.name.clone()).or_default().push(entry);
+    }
+
+    let mut clusters: Vec<ClusterInfo> = by_name
+        .into_iter()
+        .map(|(name, mut group)| {
+            // Ascending confidence → weakly-attached (outlier) members appear first.
+            group.sort_by(|a, b| {
+                a.confidence
+                    .partial_cmp(&b.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let node_count = group.len();
+            let avg_confidence = if node_count == 0 {
+                0.0
+            } else {
+                group.iter().map(|e| e.confidence).sum::<f32>() / node_count as f32
+            };
+            let members = group
+                .into_iter()
+                .map(|e| ClusterMember {
+                    node_id: e.node_id,
+                    confidence: e.confidence,
+                    evidence: e.evidence,
+                    strategy: e.strategy,
+                    pinned: e.pinned,
+                })
+                .collect();
+            ClusterInfo {
+                name,
+                node_count,
+                avg_confidence,
+                members,
+            }
+        })
+        .collect();
+
+    // Largest clusters first; stable tiebreak on name.
+    clusters.sort_by(|a, b| b.node_count.cmp(&a.node_count).then(a.name.cmp(&b.name)));
+    clusters
+}
+
 async fn graph_routes(
     State(state): State<BrowserState>,
     Query(params): Query<RoutesParams>,
@@ -425,6 +539,46 @@ impl IntoResponse for BrowserError {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_grouping::FeatureGroupEntry;
+
+    fn entry(name: &str, node_id: &str, confidence: f32) -> FeatureGroupEntry {
+        FeatureGroupEntry {
+            id: format!("feature:{name}"),
+            name: name.to_string(),
+            node_id: node_id.to_string(),
+            strategy: "embed".to_string(),
+            confidence,
+            pinned: false,
+            evidence: String::new(),
+            node_content_hash: 0,
+        }
+    }
+
+    #[test]
+    fn build_clusters_orders_by_size_then_confidence() {
+        let clusters = build_clusters(vec![
+            entry("payment", "Class:a.Pay", 0.9),
+            entry("payment", "Class:a.PayHelper", 0.3),
+            entry("order", "Class:a.Order", 0.8),
+        ]);
+
+        // Largest cluster first.
+        assert_eq!(clusters[0].name, "payment");
+        assert_eq!(clusters[0].node_count, 2);
+        assert_eq!(clusters[1].name, "order");
+
+        // Members sorted ascending by confidence — outlier surfaces first.
+        assert_eq!(clusters[0].members[0].node_id, "Class:a.PayHelper");
+        assert!(clusters[0].members[0].confidence < clusters[0].members[1].confidence);
+
+        // Average confidence is the mean of the members.
+        assert!((clusters[0].avg_confidence - 0.6).abs() < 1e-6);
     }
 }
 

@@ -684,7 +684,11 @@ async fn main() -> Result<()> {
         },
         agent,
     );
-    let browser_state = browser::BrowserState::new(cih.store.clone(), cih.search.clone());
+    let browser_state = browser::BrowserState::new(
+        cih.store.clone(),
+        cih.search.clone(),
+        cfg.artifacts_dir.clone(),
+    );
 
     let service = StreamableHttpService::new(
         move || Ok(cih.clone()),

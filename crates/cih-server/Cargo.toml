@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 cih-core.workspace = true
 cih-embed.workspace = true
+cih-grouping.workspace = true
 cih-graph-store.workspace = true
 cih-falkor.workspace = true
 cih-search.workspace = true

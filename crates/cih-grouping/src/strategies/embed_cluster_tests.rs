@@ -173,8 +173,14 @@ fn assign_emits_slugs_and_shared() {
         ),
     );
 
-    let strategy =
-        EmbedClusterStrategy::new(clusters, vectors, m, EmbedClusterConfig::default());
+    let strategy = EmbedClusterStrategy::new(
+        clusters,
+        vectors,
+        m,
+        EmbedClusterConfig::default(),
+        None,
+        Vec::new(),
+    );
     let input = StrategyInput {
         nodes: &nodes,
         edges: &[],
@@ -203,31 +209,33 @@ fn assign_emits_slugs_and_shared() {
 }
 
 #[test]
-fn colliding_slugs_are_disambiguated() {
-    // Two clusters whose label nodes derive the same base slug must not collapse.
+fn colliding_base_disambiguated_by_subpackage_never_counter() {
+    // Two clusters both under modules/product but different sub-packages (dto vs services) must get
+    // meaningful names (product-dto / product-services) — NEVER a numeric counter.
+    let dto = "Class:com.shop.modules.product.dto.ProductDto";
+    let svc = "Class:com.shop.modules.product.services.ProductService";
+    let dto_file = "src/main/java/com/shop/modules/product/dto/ProductDto.java";
+    let svc_file = "src/main/java/com/shop/modules/product/services/ProductService.java";
     let nodes = vec![
-        make_node("Class:a.Payment", "Payment", "a/com/x/Payment.java"),
-        make_node("Class:b.Payment", "Payment", "b/com/y/Payment.java"),
+        make_node(dto, "ProductDto", dto_file),
+        make_node(svc, "ProductService", svc_file),
     ];
-    let clusters = vec![
-        ("Class:a.Payment".to_string(), 0usize),
-        ("Class:b.Payment".to_string(), 1usize),
-    ];
+    let clusters = vec![(dto.to_string(), 0usize), (svc.to_string(), 1usize)];
     let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
-    vectors.insert("Class:a.Payment".into(), vec![1.0, 0.0]);
-    vectors.insert("Class:b.Payment".into(), vec![0.0, 1.0]);
+    vectors.insert(dto.into(), vec![1.0, 0.0]);
+    vectors.insert(svc.into(), vec![0.0, 1.0]);
     let mut m: HashMap<String, NodeMeta> = HashMap::new();
-    m.insert(
-        "Class:a.Payment".into(),
-        meta("Class", "Payment", "a/com/x/Payment.java"),
-    );
-    m.insert(
-        "Class:b.Payment".into(),
-        meta("Class", "Payment", "b/com/y/Payment.java"),
-    );
+    m.insert(dto.into(), meta("Class", "ProductDto", dto_file));
+    m.insert(svc.into(), meta("Class", "ProductService", svc_file));
 
-    let strategy =
-        EmbedClusterStrategy::new(clusters, vectors, m, EmbedClusterConfig::default());
+    let strategy = EmbedClusterStrategy::new(
+        clusters,
+        vectors,
+        m,
+        EmbedClusterConfig::default(),
+        None,
+        Vec::new(),
+    );
     let input = StrategyInput {
         nodes: &nodes,
         edges: &[],
@@ -237,8 +245,151 @@ fn colliding_slugs_are_disambiguated() {
     let entries = strategy.assign(&input);
     let names: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.name.as_str()).collect();
-    // "payment" and "payment-1" — distinct.
     assert_eq!(names.len(), 2, "slugs must be disambiguated: {names:?}");
-    assert!(names.contains("payment"));
-    assert!(names.contains("payment-1"));
+    assert!(names.contains("product-dto"), "got {names:?}");
+    assert!(names.contains("product-services"), "got {names:?}");
+    // Never a numeric counter.
+    assert!(
+        !names.iter().any(|n| n
+            .rsplit('-')
+            .next()
+            .is_some_and(|last| last.chars().all(|c| c.is_ascii_digit()))),
+        "no name should end in -<digit>: {names:?}"
+    );
+}
+
+struct StubLlm {
+    reply: String,
+}
+impl crate::strategies::llm::FeatureLlmCaller for StubLlm {
+    fn classify_batch(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+        Ok(self.reply.clone())
+    }
+}
+
+#[test]
+fn llm_labeling_overrides_deterministic_name() {
+    let dto = "Class:com.shop.modules.product.dto.ProductDto";
+    let svc = "Class:com.shop.modules.product.services.ProductService";
+    let dto_file = "src/main/java/com/shop/modules/product/dto/ProductDto.java";
+    let svc_file = "src/main/java/com/shop/modules/product/services/ProductService.java";
+    let nodes = vec![
+        make_node(dto, "ProductDto", dto_file),
+        make_node(svc, "ProductService", svc_file),
+    ];
+    let clusters = vec![(dto.to_string(), 0usize), (svc.to_string(), 1usize)];
+    let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
+    vectors.insert(dto.into(), vec![1.0, 0.0]);
+    vectors.insert(svc.into(), vec![0.0, 1.0]);
+    let mut m: HashMap<String, NodeMeta> = HashMap::new();
+    m.insert(dto.into(), meta("Class", "ProductDto", dto_file));
+    m.insert(svc.into(), meta("Class", "ProductService", svc_file));
+
+    // LLM echoes the deterministic cluster anchors and renames them.
+    let reply = "{\"cluster\":\"product-dto\",\"name\":\"product-catalog\"}\n\
+                 {\"cluster\":\"product-services\",\"name\":\"Product Ordering\"}";
+    let strategy = EmbedClusterStrategy::new(
+        clusters,
+        vectors,
+        m,
+        EmbedClusterConfig::default(),
+        Some(std::sync::Arc::new(StubLlm { reply: reply.into() })),
+        Vec::new(),
+    );
+    let input = StrategyInput {
+        nodes: &nodes,
+        edges: &[],
+        graph_version: "v1",
+        prior_assignments: &[],
+    };
+    let names: std::collections::HashSet<String> = strategy
+        .assign(&input)
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    // LLM slug used verbatim; a non-slug reply is slugified defensively.
+    assert!(names.contains("product-catalog"), "got {names:?}");
+    assert!(names.contains("product-ordering"), "got {names:?}");
+}
+
+struct CountingLlm {
+    reply: String,
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl crate::strategies::llm::FeatureLlmCaller for CountingLlm {
+    fn classify_batch(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(self.reply.clone())
+    }
+}
+
+fn single_product_cluster() -> (Vec<cih_core::Node>, Vec<(String, usize)>, HashMap<String, Vec<f32>>, HashMap<String, NodeMeta>) {
+    let id = "Class:com.shop.modules.product.dto.ProductDto";
+    let file = "src/main/java/com/shop/modules/product/dto/ProductDto.java";
+    let nodes = vec![make_node(id, "ProductDto", file)];
+    let clusters = vec![(id.to_string(), 0usize)];
+    let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
+    vectors.insert(id.into(), vec![1.0, 0.0]);
+    let mut m: HashMap<String, NodeMeta> = HashMap::new();
+    m.insert(id.into(), meta("Class", "ProductDto", file));
+    (nodes, clusters, vectors, m)
+}
+
+fn prior_entry(name: &str, node_id: &str, evidence: &str) -> FeatureGroupEntry {
+    FeatureGroupEntry {
+        id: format!("feature:{name}"),
+        name: name.to_string(),
+        node_id: node_id.to_string(),
+        strategy: "embed".to_string(),
+        confidence: 1.0,
+        pinned: false,
+        evidence: evidence.to_string(),
+        node_content_hash: 0,
+    }
+}
+
+#[test]
+fn cache_reuses_only_llm_marked_prior() {
+    let member = "Class:com.shop.modules.product.dto.ProductDto";
+    let reply = "{\"cluster\":\"product\",\"name\":\"fresh-label\"}";
+
+    // (a) Prior is LLM-marked and matches the member set → reuse it, LLM NOT called.
+    let (nodes, clusters, vectors, m) = single_product_cluster();
+    let llm = std::sync::Arc::new(CountingLlm {
+        reply: reply.into(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let strategy = EmbedClusterStrategy::new(
+        clusters,
+        vectors,
+        m,
+        EmbedClusterConfig::default(),
+        Some(llm.clone()),
+        vec![prior_entry("product-catalog", member, "labeler=llm knn-leiden sim=1.000")],
+    );
+    let input = StrategyInput { nodes: &nodes, edges: &[], graph_version: "v1", prior_assignments: &[] };
+    let names: std::collections::HashSet<String> =
+        strategy.assign(&input).into_iter().map(|e| e.name).collect();
+    assert!(names.contains("product-catalog"), "cache hit expected: {names:?}");
+    assert_eq!(llm.calls.load(std::sync::atomic::Ordering::Relaxed), 0, "LLM must not be called on cache hit");
+
+    // (b) Prior is deterministic (labeler=path) → ignored, LLM IS called (first-enable relabel).
+    let (nodes_b, clusters, vectors, m) = single_product_cluster();
+    let llm = std::sync::Arc::new(CountingLlm {
+        reply: reply.into(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let strategy = EmbedClusterStrategy::new(
+        clusters,
+        vectors,
+        m,
+        EmbedClusterConfig::default(),
+        Some(llm.clone()),
+        vec![prior_entry("product-dto", member, "labeler=path knn-leiden sim=1.000")],
+    );
+    let input_b = StrategyInput { nodes: &nodes_b, edges: &[], graph_version: "v1", prior_assignments: &[] };
+    let names: std::collections::HashSet<String> =
+        strategy.assign(&input_b).into_iter().map(|e| e.name).collect();
+    assert!(names.contains("fresh-label"), "deterministic prior must be ignored → LLM relabels: {names:?}");
+    assert_eq!(llm.calls.load(std::sync::atomic::Ordering::Relaxed), 1, "LLM must be called when prior is path-labeled");
 }
