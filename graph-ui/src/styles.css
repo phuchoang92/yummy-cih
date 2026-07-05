@@ -56,3 +56,5 @@ button { color: inherit; }
 .member-pin { flex: none; font-size: 8px; text-transform: uppercase; color: #f5c451; border: 1px solid rgba(245,196,81,.4); border-radius: 4px; padding: 1px 4px; }
 .member-conf { flex: none; width: 42px; text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; color: #4bc7a4; }
 .member-conf.is-weak { color: #fda4af; font-weight: 600; }
+.result-rail > button.is-unclustered { opacity: .6; }
+.result-rail > button.is-unclustered strong { color: var(--faint); font-style: italic; }

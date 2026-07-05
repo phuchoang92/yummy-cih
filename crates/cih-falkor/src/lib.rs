@@ -386,7 +386,8 @@ impl GraphStore for FalkorStore {
                  OPTIONAL MATCH (n)-[r]-(:Symbol) \
                  WITH n, count(r) AS degree \
                  ORDER BY degree DESC, n.id ASC \
-                 LIMIT {max_nodes}"
+                 LIMIT {max_nodes} \
+                 RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
             );
             for row in self.rows(&node_query).await? {
                 if row.len() < 7 { continue; }
@@ -449,7 +450,8 @@ impl GraphStore for FalkorStore {
                      OPTIONAL MATCH (n)-[r]-(:Symbol) \
                      WITH n, count(r) AS degree \
                      ORDER BY degree DESC, n.id ASC \
-                     LIMIT {remaining}"
+                     LIMIT {remaining} \
+                     RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
                 );
                 for row in self.rows(&pass2_query).await? {
                     if row.len() < 7 { continue; }

@@ -324,8 +324,41 @@ fn load_feature_clusters(artifacts_dir: Option<&Path>) -> anyhow::Result<Vec<Clu
              `cih-engine discover <repo> --feature-strategy embed` first"
         )
     })?;
-    let entries = cih_grouping::read_feature_artifact(&feat_dir)?;
+    let mut entries = cih_grouping::read_feature_artifact(&feat_dir)?;
+
+    // Third-party (jar/external) and test nodes are indexed only as call-graph boundary
+    // stubs; the clusterer can't place them, so they flood the "shared" bucket. Drop them
+    // so the cluster view shows only first-party code. Mirrors discover's `is_project_node`.
+    // Best-effort: if nodes can't be read, fall back to showing everything.
+    if let Ok(nodes) = artifacts.read_nodes() {
+        let excluded: std::collections::HashSet<&str> = nodes
+            .iter()
+            .filter(|n| !is_project_node(n))
+            .map(|n| n.id.as_str())
+            .collect();
+        entries.retain(|e| !excluded.contains(e.node_id.as_str()));
+    }
+
     Ok(build_clusters(entries))
+}
+
+/// A first-party node eligible for feature clustering: not a third-party jar/external stub
+/// and not test source. Kept in sync with `cih-engine`'s discover-side filter of the same name.
+fn is_project_node(n: &Node) -> bool {
+    let is_external = n
+        .props
+        .as_ref()
+        .map(|p| {
+            p.get("external").and_then(|v| v.as_bool()).unwrap_or(false)
+                || p.get("fromJar").and_then(|v| v.as_bool()).unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let f = n.file.as_str();
+    let is_test = f.ends_with(".jar")
+        || f.contains("src/test/")
+        || f.contains("/test/java/")
+        || f.contains("/test/kotlin/");
+    !is_external && !is_test
 }
 
 fn build_clusters(entries: Vec<cih_grouping::FeatureGroupEntry>) -> Vec<ClusterInfo> {
