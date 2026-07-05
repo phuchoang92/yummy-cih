@@ -529,6 +529,44 @@ enum FeaturesCommand {
         #[arg(long, default_value = "")]
         reason: String,
     },
+    /// LLM-review the current embedding clusters and auto-write pin overrides for weakly-assigned
+    /// nodes (e.g. a utility mis-clustered into the wrong feature, or a boundary node left in
+    /// `shared`). Writes `.cih/feature-overrides.json`; re-run `discover` to apply.
+    /// Use `--dry-run` to preview without writing.
+    Review {
+        /// Repository root with `.cih/artifacts-features/` from a prior discover run.
+        repo: PathBuf,
+        /// LLM provider: deepseek, gemini, anthropic, bedrock, openai-compatible, http-json.
+        #[arg(long)]
+        llm_provider: String,
+        /// LLM model. Empty uses the provider default (e.g. claude-haiku-4-5-20251001 for anthropic).
+        #[arg(long, default_value = "")]
+        llm_model: String,
+        /// Base URL for --llm-provider openai-compatible.
+        #[arg(long)]
+        llm_base_url: Option<String>,
+        /// Env var holding the API key. Defaults to auto-detect (ANTHROPIC_API_KEY, etc.).
+        #[arg(long)]
+        llm_api_key_env: Option<String>,
+        /// Max output tokens per LLM call.
+        #[arg(long, default_value_t = 2048)]
+        llm_max_tokens: u32,
+        /// Timeout in seconds per LLM call.
+        #[arg(long, default_value_t = 60)]
+        llm_timeout_secs: u64,
+        /// Preview proposed overrides without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Maximum candidate nodes to review (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// Also review the lowest-confidence *in-cluster* members, not just `shared`/boundary nodes.
+        #[arg(long)]
+        include_weak_members: bool,
+        /// Minimum LLM confidence to accept a reassignment (0.0–1.0).
+        #[arg(long, default_value_t = 0.7)]
+        min_confidence: f32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -897,6 +935,31 @@ fn main() -> Result<()> {
                 feature,
                 reason,
             } => cmd::features::run_features_override(repo, node_id, feature, reason),
+            FeaturesCommand::Review {
+                repo,
+                llm_provider,
+                llm_model,
+                llm_base_url,
+                llm_api_key_env,
+                llm_max_tokens,
+                llm_timeout_secs,
+                dry_run,
+                limit,
+                include_weak_members,
+                min_confidence,
+            } => cmd::features::run_features_review(cmd::features::ReviewFlags {
+                repo,
+                provider: llm_provider,
+                model: llm_model,
+                base_url: llm_base_url,
+                api_key_env: llm_api_key_env,
+                max_tokens: llm_max_tokens,
+                timeout_secs: llm_timeout_secs,
+                dry_run,
+                limit: if limit == 0 { None } else { Some(limit) },
+                include_weak_members,
+                min_confidence,
+            }),
         },
         Command::Wiki {
             repo,
