@@ -387,17 +387,39 @@ impl FeatureStrategy for EmbedClusterStrategy {
             .map(|node| {
                 let node_id = node.id.as_str();
                 match labels.get(node_id) {
-                    Some((slug, confidence, from_llm)) => FeatureGroupEntry {
-                        id: format!("feature:{slug}"),
-                        name: slug.clone(),
+                    // Confident member: similarity to its cluster centroid clears the same
+                    // threshold used to build the k-NN graph.
+                    Some((slug, confidence, from_llm))
+                        if *confidence >= self.config.similarity_threshold =>
+                    {
+                        FeatureGroupEntry {
+                            id: format!("feature:{slug}"),
+                            name: slug.clone(),
+                            node_id: node_id.to_string(),
+                            strategy: "embed".to_string(),
+                            confidence: *confidence,
+                            pinned: false,
+                            evidence: format!(
+                                "labeler={} {ev} sim={:.3}",
+                                if *from_llm { "llm" } else { "path" },
+                                confidence
+                            ),
+                            node_content_hash: fnv64_node(node),
+                        }
+                    }
+                    // Labeled but too weak a fit to trust — a low-signal node (e.g. a generic
+                    // utility) that Leiden placed into a community its faint edges happened to
+                    // touch. Treat as unclustered so a cluster means "confidently grouped".
+                    Some((_, confidence, _)) => FeatureGroupEntry {
+                        id: "feature:shared".to_string(),
+                        name: "shared".to_string(),
                         node_id: node_id.to_string(),
                         strategy: "embed".to_string(),
                         confidence: *confidence,
                         pinned: false,
                         evidence: format!(
-                            "labeler={} {ev} sim={:.3}",
-                            if *from_llm { "llm" } else { "path" },
-                            confidence
+                            "below-confidence-threshold (sim={:.3} < thr={:.2})",
+                            confidence, self.config.similarity_threshold
                         ),
                         node_content_hash: fnv64_node(node),
                     },
