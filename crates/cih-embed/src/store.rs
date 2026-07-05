@@ -282,12 +282,27 @@ impl EmbedStore {
     }
 
     /// Build the cosine k-NN similarity graph over `cih_node_vectors` in one batched query.
-    /// Returns `(src, dst, similarity)` edges with `similarity >= min_sim`, `k` neighbors per
-    /// node. No node filter — the table is kept == the current graph by the embed-time prune,
-    /// so an HNSW post-filter (which could drop results below `k`) is unnecessary.
+    /// Returns `(src, dst, similarity)` edges with `similarity >= min_sim`, up to `k` neighbors
+    /// per node.
+    ///
+    /// The inner LATERAL is the **pure** `ORDER BY embedding <=> q LIMIT` form so the cosine HNSW
+    /// index (`cih_node_vectors_hnsw_idx`) is used. A compound `ORDER BY` (e.g. a `node_id`
+    /// tiebreak) silently disables the index and forces an exact O(N²) scan — ~46 min on a
+    /// 77k-vector graph. Self-exclusion and the similarity threshold are applied **outside** the
+    /// LATERAL, and we fetch `k+1` so dropping the self-match still leaves `k` neighbors.
+    ///
+    /// HNSW is approximate vs a brute-force scan, but deterministic for a fixed index +
+    /// `ef_search` (the randomness is at index-build time), so clustering stays reproducible.
     pub async fn knn_edges(&self, k: usize, min_sim: f32) -> Result<Vec<(NodeId, NodeId, f32)>> {
         let max_distance = (1.0 - min_sim) as f64;
-        let k = k as i64;
+        // Fetch one extra neighbor to absorb the self-match we filter out below.
+        let limit = (k + 1) as i64;
+        // Recall knob for the HNSW traversal; must be >= LIMIT. Higher = better recall, more work.
+        let ef_search = (4 * (k + 1)).max(64);
+        self.client
+            .batch_execute(&format!("SET hnsw.ef_search = {ef_search}"))
+            .await
+            .with_context(|| "failed to set hnsw.ef_search")?;
         let rows = self
             .client
             .query(
@@ -299,13 +314,13 @@ impl EmbedStore {
                 CROSS JOIN LATERAL (
                     SELECT n.node_id, n.embedding
                     FROM cih_node_vectors n
-                    WHERE n.node_id <> q.node_id
-                    ORDER BY n.embedding <=> q.embedding, n.node_id
+                    ORDER BY n.embedding <=> q.embedding
                     LIMIT $1
                 ) nbr
-                WHERE (q.embedding <=> nbr.embedding) <= $2
+                WHERE nbr.node_id <> q.node_id
+                  AND (q.embedding <=> nbr.embedding) <= $2
                 "#,
-                &[&k, &max_distance],
+                &[&limit, &max_distance],
             )
             .await
             .with_context(|| "failed to run k-NN query over cih_node_vectors")?;
