@@ -92,9 +92,12 @@ impl EmbedClusterStrategy {
             // Centroid = mean of member vectors that we actually have.
             let centroid = self.centroid(&members);
 
-            // Label node = member closest to the centroid (max cosine similarity), file/name
-            // tiebroken by node_id for stability.
-            let mut best_label: Option<(&String, f32)> = None;
+            // Label node = member closest to the centroid (max cosine similarity), but **prefer a
+            // type-level member** (Class/Interface/Enum/Record/Annotation) so the slug comes from a
+            // type name rather than an arbitrary method/field. Fall back to any member only if the
+            // cluster has no type-level member. node_id tiebreaks for stability (members is sorted).
+            let mut best_type: Option<(&String, f32)> = None;
+            let mut best_any: Option<(&String, f32)> = None;
             let mut sims: HashMap<&String, f32> = HashMap::new();
             for node_id in &members {
                 let sim = self
@@ -103,18 +106,25 @@ impl EmbedClusterStrategy {
                     .map(|v| cosine_similarity(v, &centroid))
                     .unwrap_or(0.0);
                 sims.insert(*node_id, sim);
-                match best_label {
-                    Some((_, best_sim)) if sim <= best_sim => {}
-                    _ => best_label = Some((node_id, sim)),
+                if !matches!(best_any, Some((_, s)) if sim <= s) {
+                    best_any = Some((node_id, sim));
+                }
+                let is_type = self
+                    .meta
+                    .get(*node_id)
+                    .map(|m| is_type_level(&m.kind))
+                    .unwrap_or(false);
+                if is_type && !matches!(best_type, Some((_, s)) if sim <= s) {
+                    best_type = Some((node_id, sim));
                 }
             }
 
-            let slug = match best_label {
+            let slug = match best_type.or(best_any) {
                 Some((label_id, _)) => {
                     let base = self
                         .meta
                         .get(label_id)
-                        .map(|m| derive_slug(&m.file, &m.name, cluster_id))
+                        .map(|m| derive_slug(label_id, &m.file, &m.name, cluster_id))
                         .unwrap_or_else(|| format!("cluster-{cluster_id}"));
                     // Disambiguate slug collisions across clusters.
                     let count = used_slugs.entry(base.clone()).or_insert(0);
@@ -213,6 +223,23 @@ impl FeatureStrategy for EmbedClusterStrategy {
     }
 }
 
+/// Type-level node kinds — preferred as cluster labels so slugs come from a type name.
+fn is_type_level(kind: &str) -> bool {
+    matches!(
+        kind,
+        "Class" | "Interface" | "Enum" | "Record" | "Annotation"
+    )
+}
+
+/// Directory names that commonly *contain* per-feature packages: the segment immediately after
+/// one of these is the feature name (`.../modules/product/...` → `product`).
+fn is_feature_container(seg: &str) -> bool {
+    matches!(
+        seg,
+        "modules" | "module" | "feature" | "features" | "domain" | "domains"
+    )
+}
+
 /// Generic class-name suffixes stripped when deriving a feature slug from a label node.
 const STRIP_SUFFIXES: [&str; 6] = [
     "Controller",
@@ -223,22 +250,21 @@ const STRIP_SUFFIXES: [&str; 6] = [
     "Manager",
 ];
 
-/// Path/package segments that carry no feature meaning and are skipped during slug derivation.
+/// Path/package segments and stripped class names that carry no feature meaning — skipped so slug
+/// derivation falls through to a more informative source (feature-container/package segment).
 fn is_generic_segment(seg: &str) -> bool {
     matches!(
         seg,
-        "src" | "main"
-            | "test"
-            | "java"
-            | "kotlin"
-            | "scala"
-            | "resources"
-            | "com"
-            | "org"
-            | "net"
-            | "io"
-            | "target"
-            | "build"
+        // path/package scaffolding
+        "src" | "main" | "test" | "java" | "kotlin" | "scala" | "resources"
+            | "com" | "org" | "net" | "io" | "target" | "build"
+            // generic method/field/DTO tokens that leaked in as slugs
+            | "list" | "get" | "set" | "is" | "name" | "id" | "value" | "values"
+            | "data" | "type" | "types" | "request" | "response" | "req" | "res"
+            | "dto" | "dtos" | "entity" | "entities" | "model" | "models"
+            | "mapper" | "mappers" | "util" | "utils" | "helper" | "helpers"
+            | "base" | "abstract" | "application" | "app" | "tests" | "action" | "actions"
+            | "config" | "common" | "core" | "shared" | "api" | "impl"
             | ""
     ) || seg.len() <= 1
 }
@@ -246,18 +272,35 @@ fn is_generic_segment(seg: &str) -> bool {
 /// Derive a feature slug from a cluster's label node.
 ///
 /// Order (first that yields something usable wins):
-/// 1. A Maven-style module directory (a path segment containing `-`, e.g. `banking-overdraft`).
-/// 2. The label class name with generic suffixes stripped (`PaymentService` → `payment`).
-/// 3. The immediate package directory of the file (last non-generic path segment).
-/// 4. `cluster-{id}` fallback.
-fn derive_slug(file: &str, name: &str, cluster_id: usize) -> String {
+/// 1. Feature-container segment: the path element after `modules`/`feature`/`domain`
+///    (`.../modules/product/...` → `product`). Highest signal for module-per-feature layouts.
+/// 2. A Maven-style module directory (a path segment containing `-`, e.g. `banking-overdraft`).
+/// 3. The label class name with generic suffixes stripped (`PaymentService` → `payment`), when not
+///    itself generic.
+/// 4. Owner-class simple name when the label is a member (`Method:...Foo#bar` → `foo`), when not
+///    generic.
+/// 5. The immediate package directory (last non-generic path segment).
+/// 6. `cluster-{id}` fallback.
+fn derive_slug(node_id: &str, file: &str, name: &str, cluster_id: usize) -> String {
     let dirs: Vec<&str> = {
         let mut d: Vec<&str> = file.split('/').collect();
         d.pop(); // drop filename
         d
     };
 
-    // 1. module dir
+    // 1. feature-container segment (modules/<feature>/...)
+    for (i, seg) in dirs.iter().enumerate() {
+        if is_feature_container(seg) {
+            if let Some(feat) = dirs.get(i + 1) {
+                let slug = slugify(feat);
+                if !slug.is_empty() && !is_generic_segment(&slug) {
+                    return slug;
+                }
+            }
+        }
+    }
+
+    // 2. module dir (hyphenated)
     if let Some(module) = dirs.iter().rev().find(|s| s.contains('-') && s.len() > 1) {
         let slug = slugify(module);
         if !slug.is_empty() {
@@ -265,16 +308,30 @@ fn derive_slug(file: &str, name: &str, cluster_id: usize) -> String {
         }
     }
 
-    // 2. stripped class name
-    let stripped = strip_suffixes(name);
-    if !stripped.is_empty() && !is_generic_segment(&stripped.to_lowercase()) {
-        let slug = slugify(&stripped);
-        if !slug.is_empty() {
-            return slug;
+    // 3. stripped class simple name — only for type-level labels; for a member label `name` is the
+    //    member's own name (e.g. "getName"), which is not a class name, so skip to step 4.
+    if !node_id.contains('#') {
+        let stripped = strip_suffixes(simple_name(name));
+        if !stripped.is_empty() && !is_generic_segment(&stripped.to_lowercase()) {
+            let slug = slugify(&stripped);
+            if !slug.is_empty() {
+                return slug;
+            }
         }
     }
 
-    // 3. immediate (last non-generic) package dir
+    // 4. owner-class simple name (for member labels: `Kind:owner.fqn#member/arity`)
+    if let Some(owner) = owner_simple_name(node_id) {
+        let stripped = strip_suffixes(&owner);
+        if !stripped.is_empty() && !is_generic_segment(&stripped.to_lowercase()) {
+            let slug = slugify(&stripped);
+            if !slug.is_empty() {
+                return slug;
+            }
+        }
+    }
+
+    // 5. immediate (last non-generic) package dir
     if let Some(seg) = dirs.iter().rev().find(|s| !is_generic_segment(s)) {
         let slug = slugify(seg);
         if !slug.is_empty() {
@@ -282,8 +339,24 @@ fn derive_slug(file: &str, name: &str, cluster_id: usize) -> String {
         }
     }
 
-    // 4. fallback
+    // 6. fallback
     format!("cluster-{cluster_id}")
+}
+
+/// Last dotted segment of a (possibly qualified) name: `a.b.Foo` → `Foo`, `Foo` → `Foo`.
+fn simple_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+/// For a member NodeId `Kind:owner.fully.Qualified#member/arity`, return the owner's simple name.
+/// Returns `None` when the id has no `#` (i.e. it is already a type-level node).
+fn owner_simple_name(node_id: &str) -> Option<String> {
+    let after_colon = node_id.split_once(':').map(|(_, r)| r).unwrap_or(node_id);
+    let owner_fqn = after_colon.split('#').next().unwrap_or(after_colon);
+    if owner_fqn == after_colon {
+        return None; // no '#' → not a member
+    }
+    Some(simple_name(owner_fqn).to_string())
 }
 
 /// Repeatedly strip a trailing generic suffix (handles `PaymentServiceImpl` → `Payment`).

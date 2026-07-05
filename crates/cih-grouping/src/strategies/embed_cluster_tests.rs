@@ -39,8 +39,29 @@ fn strip_suffixes_handles_stacked() {
 }
 
 #[test]
+fn derive_slug_prefers_feature_container_segment() {
+    // The `modules/<feature>/` convention wins over class-name stripping.
+    let slug = derive_slug(
+        "Class:org.phuc.commerce.modules.product.services.CategoryService",
+        "src/main/java/org/phuc/commerce/modules/product/services/CategoryService.java",
+        "CategoryService",
+        0,
+    );
+    assert_eq!(slug, "product");
+    // `domain/<feature>/` too.
+    let slug = derive_slug(
+        "Class:com.acme.domain.billing.Invoice",
+        "src/main/java/com/acme/domain/billing/Invoice.java",
+        "Invoice",
+        1,
+    );
+    assert_eq!(slug, "billing");
+}
+
+#[test]
 fn derive_slug_prefers_module_dir() {
     let slug = derive_slug(
+        "Class:com.bank.OverdraftService",
         "banking-overdraft/src/main/java/com/bank/OverdraftService.java",
         "OverdraftService",
         0,
@@ -50,8 +71,9 @@ fn derive_slug_prefers_module_dir() {
 
 #[test]
 fn derive_slug_falls_back_to_class_name() {
-    // No hyphenated module dir → strip class suffix.
+    // No feature container / hyphenated module dir → strip class suffix.
     let slug = derive_slug(
+        "Class:com.bank.PaymentService",
         "src/main/java/com/bank/PaymentService.java",
         "PaymentService",
         3,
@@ -60,13 +82,48 @@ fn derive_slug_falls_back_to_class_name() {
 }
 
 #[test]
+fn derive_slug_uses_owner_class_for_member_labels() {
+    // A method label with a generic simple name ("list") derives from its owner class instead.
+    let slug = derive_slug(
+        "Method:com.bank.OrderProcessor#list/0",
+        "src/main/java/com/bank/OrderProcessor.java",
+        "list",
+        4,
+    );
+    assert_eq!(slug, "orderprocessor");
+    // A method whose owner is a *Service falls through the stripped suffix cleanly.
+    let slug = derive_slug(
+        "Method:com.bank.PaymentService#getName/0",
+        "src/main/java/com/bank/PaymentService.java",
+        "getName",
+        5,
+    );
+    assert_eq!(slug, "payment");
+}
+
+#[test]
 fn derive_slug_uses_package_then_cluster_id() {
     // Generic class name + no module dir → immediate package dir.
-    let slug = derive_slug("src/main/java/com/bank/billing/Impl.java", "Impl", 7);
+    let slug = derive_slug(
+        "Class:com.bank.billing.Impl",
+        "src/main/java/com/bank/billing/Impl.java",
+        "Impl",
+        7,
+    );
     assert_eq!(slug, "billing");
     // Nothing usable at all → cluster id.
-    let slug = derive_slug("Service.java", "Service", 9);
+    let slug = derive_slug("Class:Service", "Service.java", "Service", 9);
     assert_eq!(slug, "cluster-9");
+}
+
+#[test]
+fn generic_tokens_are_blocklisted() {
+    assert!(is_generic_segment("list"));
+    assert!(is_generic_segment("name"));
+    assert!(is_generic_segment("is"));
+    assert!(is_generic_segment("dto"));
+    assert!(!is_generic_segment("product"));
+    assert!(!is_generic_segment("payment"));
 }
 
 #[test]

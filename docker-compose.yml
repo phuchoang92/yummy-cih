@@ -54,6 +54,9 @@ services:
       CIH_PG_URL: postgres://${POSTGRES_USER:-cih}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cih}
       # Optional: set to protect /mcp and /graph with a bearer token
       # CIH_API_TOKEN: ${CIH_API_TOKEN}
+      # Local/trusted deployment: allow the network-exposed bind without a token.
+      # Remove this and set CIH_API_TOKEN to require auth.
+      CIH_ALLOW_INSECURE: "1"
       # Optional: enable ask_codebase tool
       # CIH_AGENT_API_KEY: ${CIH_AGENT_API_KEY}
       HF_HOME: /data/hf-cache

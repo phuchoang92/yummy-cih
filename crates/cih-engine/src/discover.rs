@@ -470,6 +470,25 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     })
 }
 
+/// A node eligible for embed feature clustering: first-party (not from a jar / not `external`) and
+/// not a test source. Third-party and test nodes are excluded so they don't form junk features.
+fn is_project_node(n: &cih_core::Node) -> bool {
+    let is_external = n
+        .props
+        .as_ref()
+        .map(|p| {
+            p.get("external").and_then(|v| v.as_bool()).unwrap_or(false)
+                || p.get("fromJar").and_then(|v| v.as_bool()).unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let f = n.file.as_str();
+    let is_test = f.ends_with(".jar")
+        || f.contains("src/test/")
+        || f.contains("/test/java/")
+        || f.contains("/test/kotlin/");
+    !is_external && !is_test
+}
+
 /// Build the embedding clusterer: connect to pgvector, fetch per-node vectors + k-NN edges, run
 /// weighted Leiden, and hand the precomputed assignments to the Postgres-free
 /// `EmbedClusterStrategy`. All async DB work runs on `crate::runtime::block_on` — the codebase's
@@ -501,7 +520,8 @@ fn build_embed_cluster_strategy(
         cfg.leiden_resolution = v;
     }
 
-    // The current embeddable node ids define both the clustered universe and the prune authority.
+    // Full embeddable set (used for the cih_node_vectors backfill/prune authority — it must match
+    // what `cih embed` maintains, so semantic search keeps working).
     let node_ids: Vec<String> = cih_embed::embeddable_nodes(nodes)
         .iter()
         .map(|n| n.id.as_str().to_string())
@@ -510,9 +530,23 @@ fn build_embed_cluster_strategy(
         anyhow::bail!("no embeddable nodes in the current graph");
     }
 
+    // Clustering universe: project, non-test nodes only. Third-party types (jsoup/AWS SDK/...) are
+    // flagged `props.external`/`fromJar` and otherwise cluster into junk features; test sources
+    // pollute domain features. We keep the k-NN computed over the full table (recall) but restrict
+    // clustering to this subset by filtering edges below.
+    let project_ids: std::collections::HashSet<String> = cih_embed::embeddable_nodes(nodes)
+        .iter()
+        .filter(|n| is_project_node(n))
+        .map(|n| n.id.as_str().to_string())
+        .collect();
+    if project_ids.is_empty() {
+        anyhow::bail!("no project (non-external, non-test) embeddable nodes to cluster");
+    }
+    let project_vec: Vec<String> = project_ids.iter().cloned().collect();
+
     let knn = cfg.knn;
     let thr = cfg.similarity_threshold;
-    let (vectors_raw, edges) = crate::runtime::block_on(async {
+    let (vectors_raw, mut edges) = crate::runtime::block_on(async {
         let store =
             cih_embed::EmbedStore::connect(&pg_url, cih_embed::EmbedModelKind::MiniLm).await?;
         store.ensure_schema().await?;
@@ -522,19 +556,30 @@ fn build_embed_cluster_strategy(
             store.upsert_node_vectors(&node_ids).await?;
             store.prune_node_vectors(&node_ids).await?;
         }
-        let vectors = store.node_vectors(&node_ids).await?;
+        // Only fetch vectors/meta for the project subset we actually cluster.
+        let vectors = store.node_vectors(&project_vec).await?;
         let edges = store.knn_edges(knn, thr).await?;
         anyhow::Ok((vectors, edges))
     })?;
 
     if vectors_raw.is_empty() {
-        anyhow::bail!("no embeddings found for current nodes — run `cih embed` first");
+        anyhow::bail!("no embeddings found for current project nodes — run `cih embed` first");
     }
+
+    // Keep only edges whose endpoints are both in the project subset. External types are
+    // semantically self-similar, so dropping their edges cleanly removes junk clusters without
+    // starving project clusters.
+    let edges_before = edges.len();
+    edges.retain(|(s, d, _)| {
+        project_ids.contains(s.as_str()) && project_ids.contains(d.as_str())
+    });
     tracing::info!(
-        embedded = vectors_raw.len(),
-        total = node_ids.len(),
+        project = project_ids.len(),
+        embeddable = node_ids.len(),
+        vectors = vectors_raw.len(),
         edges = edges.len(),
-        "embed clustering: fetched per-node vectors and k-NN edges"
+        edges_dropped = edges_before - edges.len(),
+        "embed clustering: fetched per-node vectors and k-NN edges (project subset)"
     );
     if edges.is_empty() {
         tracing::warn!(
