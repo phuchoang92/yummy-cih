@@ -477,17 +477,18 @@ pub fn analyze_from_scope_with_options(
     all_nodes.extend(db_nodes);
     all_nodes.extend(xml_nodes);
 
-    // Prepend CXF <jaxrs:server> base paths (+ the servlet prefix) onto Java Route nodes.
-    // The base-path override is resolved at the dispatch arm (flag > cih.toml > home).
-    let servlet_prefix = cih_resolve::resolve_cxf_servlet_prefix(
-        &repo_root,
-        &all_nodes,
-        cache.cxf_base_path.as_deref(),
-    );
-    cih_resolve::resolve_jaxrs_xml_prefixes(
+    // Language-specific post-processing over the assembled graph (e.g. the Java resolver
+    // rewrites HTTP route paths from framework config). The base-path override is resolved
+    // at the dispatch arm (flag > cih.toml > home) and passed through generically.
+    let post_opts = cih_resolve::PostProcessOptions {
+        route_base_path: cache.cxf_base_path.clone(),
+    };
+    resolvers.post_process(
+        Some(&repo_root),
+        &parse_output.parsed_files,
         &mut all_nodes,
         &mut edges,
-        servlet_prefix.as_ref().map(|(p, s)| (p.as_str(), *s)),
+        &post_opts,
     );
 
     cih_resolve::propagate_loop_depths(&mut all_nodes, &edges);

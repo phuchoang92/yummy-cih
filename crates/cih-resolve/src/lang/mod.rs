@@ -103,6 +103,28 @@ pub trait LanguageResolver: Send + Sync {
         let _ = (binding, from_file, index);
         None
     }
+
+    /// Post-process the fully-assembled graph, once every phase's nodes/edges are merged.
+    /// Unlike [`extra_edges`], this may *mutate* existing nodes/edges (e.g. rewriting HTTP
+    /// route paths from framework config). Default no-op.
+    fn post_process(
+        &self,
+        repo_root: Option<&Path>,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        options: &PostProcessOptions,
+    ) {
+        let _ = (repo_root, nodes, edges, options);
+    }
+}
+
+/// Language-agnostic knobs handed to [`LanguageResolver::post_process`]. Each resolver
+/// interprets the fields relevant to it (e.g. the Java resolver maps `route_base_path`
+/// to a CXF servlet prefix).
+#[derive(Clone, Debug, Default)]
+pub struct PostProcessOptions {
+    /// Explicit base path prepended to HTTP route paths, overriding auto-detection.
+    pub route_base_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +191,25 @@ impl ResolverRegistry {
             all_edges.extend(edges);
         }
         (all_nodes, all_edges)
+    }
+
+    /// Invoke `post_process` for each present language's resolver, over the whole graph.
+    /// Deterministic order; languages absent from `parsed` are skipped.
+    pub fn post_process(
+        &self,
+        repo_root: Option<&Path>,
+        parsed: &[ParsedFile],
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        options: &PostProcessOptions,
+    ) {
+        let mut lang_ids: Vec<&str> = parsed.iter().map(|pf| pf.language.as_str()).collect();
+        lang_ids.sort();
+        lang_ids.dedup();
+        for lang in lang_ids {
+            self.for_language(lang)
+                .post_process(repo_root, nodes, edges, options);
+        }
     }
 }
 

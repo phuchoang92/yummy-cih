@@ -33,11 +33,8 @@ pub use similarity::emit_similar_to_edges;
 pub use contracts::resolve_contract_edges;
 pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
-pub use integration_xml::{
-    extract_integration_xml, resolve_cxf_servlet_prefix, resolve_jaxrs_xml_prefixes,
-    IntegrationXmlOutput,
-};
-pub use lang::{all_resolvers, ResolverRegistry};
+pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
+pub use lang::{all_resolvers, PostProcessOptions, ResolverRegistry};
 pub use reports::write_unresolved_reports;
 
 /// Per-site diagnostic record for a reference that could not be resolved.

@@ -3,9 +3,10 @@ use std::path::Path;
 use cih_core::{Edge, Node, ParsedFile, SymbolDef};
 
 use crate::common::index::CommonIndex;
-use crate::lang::{InheritanceModel, LanguageResolver};
+use crate::lang::{InheritanceModel, LanguageResolver, PostProcessOptions};
 use crate::types::class_of;
 
+mod cxf;
 pub mod di;
 
 pub struct JavaResolver;
@@ -62,5 +63,18 @@ impl LanguageResolver for JavaResolver {
             edges.extend(result.edges);
         }
         (nodes, edges)
+    }
+
+    fn post_process(
+        &self,
+        repo_root: Option<&Path>,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        options: &PostProcessOptions,
+    ) {
+        // Prepend CXF <jaxrs:server> base paths (+ servlet prefix) onto Java Route nodes.
+        if let Some(root) = repo_root {
+            cxf::stitch_route_prefixes(root, nodes, edges, options.route_base_path.as_deref());
+        }
     }
 }
