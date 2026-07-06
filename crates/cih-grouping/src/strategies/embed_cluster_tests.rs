@@ -147,14 +147,14 @@ fn assign_emits_slugs_and_shared() {
         ),
     ];
 
-    // Two clustered nodes in cluster 0; identical vectors so the centroid == them.
+    // Two clustered nodes in cluster 0; both sit at their cluster centroid (sim ~1.0).
     let clusters = vec![
         ("Class:com.bank.PaymentService".to_string(), 0usize),
         ("Class:com.bank.BillingController".to_string(), 0usize),
     ];
-    let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
-    vectors.insert("Class:com.bank.PaymentService".into(), vec![1.0, 0.0, 0.0]);
-    vectors.insert("Class:com.bank.BillingController".into(), vec![1.0, 0.0, 0.0]);
+    let mut sims: HashMap<String, f32> = HashMap::new();
+    sims.insert("Class:com.bank.PaymentService".into(), 1.0);
+    sims.insert("Class:com.bank.BillingController".into(), 1.0);
     let mut m: HashMap<String, NodeMeta> = HashMap::new();
     m.insert(
         "Class:com.bank.PaymentService".into(),
@@ -175,7 +175,7 @@ fn assign_emits_slugs_and_shared() {
 
     let strategy = EmbedClusterStrategy::new(
         clusters,
-        vectors,
+        sims,
         m,
         EmbedClusterConfig::default(),
         None,
@@ -221,16 +221,16 @@ fn colliding_base_disambiguated_by_subpackage_never_counter() {
         make_node(svc, "ProductService", svc_file),
     ];
     let clusters = vec![(dto.to_string(), 0usize), (svc.to_string(), 1usize)];
-    let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
-    vectors.insert(dto.into(), vec![1.0, 0.0]);
-    vectors.insert(svc.into(), vec![0.0, 1.0]);
+    let mut sims: HashMap<String, f32> = HashMap::new();
+    sims.insert(dto.into(), 1.0);
+    sims.insert(svc.into(), 1.0);
     let mut m: HashMap<String, NodeMeta> = HashMap::new();
     m.insert(dto.into(), meta("Class", "ProductDto", dto_file));
     m.insert(svc.into(), meta("Class", "ProductService", svc_file));
 
     let strategy = EmbedClusterStrategy::new(
         clusters,
-        vectors,
+        sims,
         m,
         EmbedClusterConfig::default(),
         None,
@@ -278,9 +278,9 @@ fn llm_labeling_overrides_deterministic_name() {
         make_node(svc, "ProductService", svc_file),
     ];
     let clusters = vec![(dto.to_string(), 0usize), (svc.to_string(), 1usize)];
-    let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
-    vectors.insert(dto.into(), vec![1.0, 0.0]);
-    vectors.insert(svc.into(), vec![0.0, 1.0]);
+    let mut sims: HashMap<String, f32> = HashMap::new();
+    sims.insert(dto.into(), 1.0);
+    sims.insert(svc.into(), 1.0);
     let mut m: HashMap<String, NodeMeta> = HashMap::new();
     m.insert(dto.into(), meta("Class", "ProductDto", dto_file));
     m.insert(svc.into(), meta("Class", "ProductService", svc_file));
@@ -290,7 +290,7 @@ fn llm_labeling_overrides_deterministic_name() {
                  {\"cluster\":\"product-services\",\"name\":\"Product Ordering\"}";
     let strategy = EmbedClusterStrategy::new(
         clusters,
-        vectors,
+        sims,
         m,
         EmbedClusterConfig::default(),
         Some(std::sync::Arc::new(StubLlm { reply: reply.into() })),
@@ -323,16 +323,16 @@ impl crate::strategies::llm::FeatureLlmCaller for CountingLlm {
     }
 }
 
-fn single_product_cluster() -> (Vec<cih_core::Node>, Vec<(String, usize)>, HashMap<String, Vec<f32>>, HashMap<String, NodeMeta>) {
+fn single_product_cluster() -> (Vec<cih_core::Node>, Vec<(String, usize)>, HashMap<String, f32>, HashMap<String, NodeMeta>) {
     let id = "Class:com.shop.modules.product.dto.ProductDto";
     let file = "src/main/java/com/shop/modules/product/dto/ProductDto.java";
     let nodes = vec![make_node(id, "ProductDto", file)];
     let clusters = vec![(id.to_string(), 0usize)];
-    let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
-    vectors.insert(id.into(), vec![1.0, 0.0]);
+    let mut sims: HashMap<String, f32> = HashMap::new();
+    sims.insert(id.into(), 1.0);
     let mut m: HashMap<String, NodeMeta> = HashMap::new();
     m.insert(id.into(), meta("Class", "ProductDto", file));
-    (nodes, clusters, vectors, m)
+    (nodes, clusters, sims, m)
 }
 
 fn prior_entry(name: &str, node_id: &str, evidence: &str) -> FeatureGroupEntry {
@@ -354,14 +354,14 @@ fn cache_reuses_only_llm_marked_prior() {
     let reply = "{\"cluster\":\"product\",\"name\":\"fresh-label\"}";
 
     // (a) Prior is LLM-marked and matches the member set → reuse it, LLM NOT called.
-    let (nodes, clusters, vectors, m) = single_product_cluster();
+    let (nodes, clusters, sims, m) = single_product_cluster();
     let llm = std::sync::Arc::new(CountingLlm {
         reply: reply.into(),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let strategy = EmbedClusterStrategy::new(
         clusters,
-        vectors,
+        sims,
         m,
         EmbedClusterConfig::default(),
         Some(llm.clone()),
@@ -374,14 +374,14 @@ fn cache_reuses_only_llm_marked_prior() {
     assert_eq!(llm.calls.load(std::sync::atomic::Ordering::Relaxed), 0, "LLM must not be called on cache hit");
 
     // (b) Prior is deterministic (labeler=path) → ignored, LLM IS called (first-enable relabel).
-    let (nodes_b, clusters, vectors, m) = single_product_cluster();
+    let (nodes_b, clusters, sims, m) = single_product_cluster();
     let llm = std::sync::Arc::new(CountingLlm {
         reply: reply.into(),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let strategy = EmbedClusterStrategy::new(
         clusters,
-        vectors,
+        sims,
         m,
         EmbedClusterConfig::default(),
         Some(llm.clone()),

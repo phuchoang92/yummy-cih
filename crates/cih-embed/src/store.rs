@@ -13,6 +13,9 @@ use crate::text::{content_hash, embeddable_nodes, embedding_text, source_bodies}
 
 const CHUNK_BYTES: usize = 4_000;
 const OVERLAP_BYTES: usize = 500;
+/// Chunks embedded + upserted per flush. Bounded so `embed_nodes` never holds the whole repo's
+/// chunk texts in memory (multiple GB at 600k nodes); also amortizes the model call.
+const EMBED_BATCH: usize = 256;
 
 pub struct EmbedStore {
     client: Client,
@@ -134,7 +137,11 @@ impl EmbedStore {
             nodes_considered: embeddable.len(),
             ..EmbedSummary::default()
         };
-        let mut pending = Vec::new();
+        // Embed in bounded batches, flushing (embed + upsert) as we go so we never hold every
+        // chunk's text in memory — at 600k nodes that would be several GB. Track only the small
+        // set of changed node ids for the per-node vector refresh.
+        let mut pending: Vec<PendingChunk> = Vec::with_capacity(EMBED_BATCH);
+        let mut changed: HashSet<String> = HashSet::new();
 
         for node in embeddable {
             let body = bodies.get(node.id.as_str()).map(|s| s.as_str());
@@ -147,6 +154,7 @@ impl EmbedStore {
                     summary.chunks_skipped += 1;
                     continue;
                 }
+                changed.insert(node.id.as_str().to_string());
                 // Use the node's actual source file lines, not the chunk's line
                 // position within the embedding text string.
                 pending.push(PendingChunk {
@@ -160,17 +168,13 @@ impl EmbedStore {
                     text: chunk.text,
                     hash,
                 });
+                if pending.len() >= EMBED_BATCH {
+                    self.embed_and_upsert(&pending, &mut summary).await?;
+                    pending.clear();
+                }
             }
         }
-
-        for batch in pending.chunks(64) {
-            let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
-            let embeddings = self.model.embed(&texts)?;
-            for (chunk, embedding) in batch.iter().zip(embeddings) {
-                self.upsert_chunk(chunk, embedding).await?;
-                summary.chunks_embedded += 1;
-            }
-        }
+        self.embed_and_upsert(&pending, &mut summary).await?;
 
         // Refresh the per-node vector table. Re-aggregate only nodes whose chunks changed
         // this run (`changed`), then prune the table to the current embeddable set (`node_ids`)
@@ -178,13 +182,30 @@ impl EmbedStore {
         // per-query node filter (an HNSW post-filter would drop it below k). The prune keys off
         // the current node set (not "has any chunk"), because `cih_embeddings` may still hold
         // orphan chunk rows for renamed/deleted classes until a future `cih embed --prune`.
-        let mut changed: Vec<String> =
-            pending.iter().map(|c| c.node_id.clone()).collect();
+        let mut changed: Vec<String> = changed.into_iter().collect();
         changed.sort();
-        changed.dedup();
         self.upsert_node_vectors(&changed).await?;
         self.prune_node_vectors(&node_ids).await?;
         Ok(summary)
+    }
+
+    /// Embed one batch of chunks and upsert them. Kept separate so `embed_nodes` can flush
+    /// incrementally without accumulating the whole repo's chunk texts in memory.
+    async fn embed_and_upsert(
+        &self,
+        batch: &[PendingChunk],
+        summary: &mut EmbedSummary,
+    ) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
+        let embeddings = self.model.embed(&texts)?;
+        for (chunk, embedding) in batch.iter().zip(embeddings) {
+            self.upsert_chunk(chunk, embedding).await?;
+            summary.chunks_embedded += 1;
+        }
+        Ok(())
     }
 
     /// Re-aggregate `cih_node_vectors` rows for `node_ids` as the mean of their chunk vectors.
@@ -331,6 +352,109 @@ impl EmbedStore {
                     NodeId::new(row.get::<_, String>(0)),
                     NodeId::new(row.get::<_, String>(1)),
                     row.get::<_, f32>(2),
+                )
+            })
+            .collect())
+    }
+
+    /// Streaming variant of [`knn_edges`]: invokes `on_edge(src, dst, sim)` per row without ever
+    /// materializing the full result (9M+ rows on a 600k-node graph). The caller interns ids to a
+    /// compact index inside the closure, so peak memory stays flat regardless of edge count. `src`
+    /// and `dst` borrow the row and are only valid for the callback.
+    pub async fn knn_edges_streamed<F>(&self, k: usize, min_sim: f32, mut on_edge: F) -> Result<()>
+    where
+        F: FnMut(&str, &str, f32),
+    {
+        use futures_util::TryStreamExt;
+        use tokio_postgres::types::ToSql;
+
+        let max_distance = (1.0 - min_sim) as f64;
+        let limit = (k + 1) as i64;
+        let ef_search = (4 * (k + 1)).max(64);
+        self.client
+            .batch_execute(&format!("SET hnsw.ef_search = {ef_search}"))
+            .await
+            .with_context(|| "failed to set hnsw.ef_search")?;
+
+        let params: Vec<&(dyn ToSql + Sync)> = vec![&limit, &max_distance];
+        let stream = self
+            .client
+            .query_raw(
+                r#"
+                SELECT q.node_id AS src,
+                       nbr.node_id AS dst,
+                       (1.0 - (q.embedding <=> nbr.embedding))::real AS sim
+                FROM cih_node_vectors q
+                CROSS JOIN LATERAL (
+                    SELECT n.node_id, n.embedding
+                    FROM cih_node_vectors n
+                    ORDER BY n.embedding <=> q.embedding
+                    LIMIT $1
+                ) nbr
+                WHERE nbr.node_id <> q.node_id
+                  AND (q.embedding <=> nbr.embedding) <= $2
+                "#,
+                params,
+            )
+            .await
+            .with_context(|| "failed to start streamed k-NN query over cih_node_vectors")?;
+        futures_util::pin_mut!(stream);
+        while let Some(row) = stream
+            .try_next()
+            .await
+            .with_context(|| "k-NN row stream error")?
+        {
+            let src: &str = row.get(0);
+            let dst: &str = row.get(1);
+            let sim: f32 = row.get(2);
+            on_edge(src, dst, sim);
+        }
+        Ok(())
+    }
+
+    /// Compute each node's cosine similarity to its cluster centroid **in Postgres** — so the 600k
+    /// per-node vectors never enter Rust. Given `(node_id, cluster_id)` assignments (as parallel
+    /// arrays), returns `(node_id, node_kind, name, file, sim)` for each assigned node. Centroids
+    /// are the mean embedding per cluster (pgvector `avg`), sim is `1 - cosine_distance`.
+    pub async fn node_confidences(
+        &self,
+        node_ids: &[String],
+        cluster_ids: &[i32],
+    ) -> Result<Vec<(String, String, String, String, f32)>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .client
+            .query(
+                r#"
+                WITH asn(node_id, cluster_id) AS (
+                    SELECT * FROM unnest($1::text[], $2::int[])
+                ),
+                cent AS (
+                    SELECT a.cluster_id, avg(v.embedding)::vector AS centroid
+                    FROM asn a JOIN cih_node_vectors v USING (node_id)
+                    GROUP BY a.cluster_id
+                )
+                SELECT v.node_id, v.node_kind, v.name, v.file,
+                       (1.0 - (v.embedding <=> c.centroid))::real AS sim
+                FROM asn a
+                JOIN cih_node_vectors v USING (node_id)
+                JOIN cent c USING (cluster_id)
+                "#,
+                &[&node_ids, &cluster_ids],
+            )
+            .await
+            .with_context(|| "failed to compute per-node confidences in Postgres")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<_, String>(0),
+                    r.get::<_, String>(1),
+                    r.get::<_, String>(2),
+                    r.get::<_, String>(3),
+                    r.get::<_, f32>(4),
                 )
             })
             .collect())

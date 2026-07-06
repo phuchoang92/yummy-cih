@@ -481,6 +481,55 @@ pub fn cluster_similarity_edges(
         .collect()
 }
 
+/// Index-based sibling of [`cluster_similarity_edges`] for large graphs: edges reference nodes by
+/// a caller-assigned `u32` id instead of `NodeId` strings, so a 600k-node k-NN graph stays
+/// ~100 MB rather than ~1.3 GB. Returns `(node_u32, cluster)` for every node that appears in an
+/// edge; nodes absent from all edges are omitted (the caller leaves them unclustered). Undirected
+/// edges are deduplicated keeping the max similarity — identical semantics to the `NodeId` version.
+pub fn cluster_indexed_edges(
+    edges: &[(u32, u32, f32)],
+    resolution: f64,
+    seed: u32,
+    max_iterations: u32,
+) -> Vec<(u32, usize)> {
+    use petgraph::graph::UnGraph;
+
+    let mut index_of: HashMap<u32, NodeIndex> = HashMap::new();
+    let mut graph: UnGraph<u32, f32> = UnGraph::new_undirected();
+    let mut edge_weight: HashMap<(NodeIndex, NodeIndex), f32> = HashMap::new();
+
+    for &(src, dst, sim) in edges {
+        if src == dst {
+            continue;
+        }
+        let a = *index_of.entry(src).or_insert_with(|| graph.add_node(src));
+        let b = *index_of.entry(dst).or_insert_with(|| graph.add_node(dst));
+        let key = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        edge_weight
+            .entry(key)
+            .and_modify(|w| {
+                if sim > *w {
+                    *w = sim;
+                }
+            })
+            .or_insert(sim);
+    }
+
+    for ((a, b), w) in &edge_weight {
+        graph.add_edge(*a, *b, *w);
+    }
+
+    if graph.node_count() == 0 {
+        return Vec::new();
+    }
+
+    let assignments = leiden::leiden(&graph, resolution, max_iterations as usize, seed as u64);
+    graph
+        .node_indices()
+        .filter_map(|idx| assignments.get(idx.index()).map(|&cluster| (graph[idx], cluster)))
+        .collect()
+}
+
 /// Derive communities from package/module structure rather than graph clustering.
 ///
 /// `feature_of` maps a file path to a feature slug (e.g. "order", "payment", "shared").
@@ -1069,5 +1118,52 @@ fn slugify(name: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod indexed_leiden_tests {
+    use super::*;
 
+    #[test]
+    fn cluster_indexed_edges_matches_nodeid_version() {
+        // Two triangles joined by a weak bridge — an unambiguous 2-cluster structure.
+        let ids = ["a", "b", "c", "d", "e", "f"];
+        let raw = [
+            (0, 1, 0.9),
+            (1, 2, 0.9),
+            (0, 2, 0.9), // triangle 1
+            (3, 4, 0.9),
+            (4, 5, 0.9),
+            (3, 5, 0.9), // triangle 2
+            (2, 3, 0.66), // weak bridge
+        ];
+        let nid_edges: Vec<(NodeId, NodeId, f32)> = raw
+            .iter()
+            .map(|&(a, b, w)| (NodeId::new(ids[a].to_string()), NodeId::new(ids[b].to_string()), w))
+            .collect();
+        let idx_edges: Vec<(u32, u32, f32)> =
+            raw.iter().map(|&(a, b, w)| (a as u32, b as u32, w)).collect();
+
+        let via_nodeid = cluster_similarity_edges(&nid_edges, 1.0, 0xc0de, 10);
+        let via_index = cluster_indexed_edges(&idx_edges, 1.0, 0xc0de, 10);
+
+        let am: HashMap<String, usize> =
+            via_nodeid.into_iter().map(|(id, c)| (id.as_str().to_string(), c)).collect();
+        let bm: HashMap<String, usize> =
+            via_index.into_iter().map(|(u, c)| (ids[u as usize].to_string(), c)).collect();
+
+        assert_eq!(am.len(), bm.len(), "both should cluster the same node set");
+        // Cluster ids may be numbered differently; assert the *partition* is identical.
+        let keys: Vec<&String> = am.keys().collect();
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_eq!(
+                    am[keys[i]] == am[keys[j]],
+                    bm[keys[i]] == bm[keys[j]],
+                    "partition mismatch for {} vs {}",
+                    keys[i],
+                    keys[j]
+                );
+            }
+        }
+    }
+}
 

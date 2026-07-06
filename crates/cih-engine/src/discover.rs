@@ -548,7 +548,18 @@ fn build_embed_cluster_strategy(
 
     let knn = cfg.knn;
     let thr = cfg.similarity_threshold;
-    let (vectors_raw, mut edges) = crate::runtime::block_on(async {
+
+    // Intern project node ids to compact u32 indices: at 600k-node scale the k-NN edge list is
+    // ~9M edges, which as `(NodeId,NodeId,f32)` would be ~1.3 GB of heap strings but as
+    // `(u32,u32,f32)` is ~100 MB. `idx_to_id` is index→id; `id_to_idx` is id→index.
+    let idx_to_id: Vec<String> = project_vec;
+    let id_to_idx: std::collections::HashMap<String, u32> = idx_to_id
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), i as u32))
+        .collect();
+
+    let (clusters, sims, meta) = crate::runtime::block_on(async {
         let store =
             cih_embed::EmbedStore::connect(&pg_url, cih_embed::EmbedModelKind::MiniLm).await?;
         store.ensure_schema().await?;
@@ -558,65 +569,77 @@ fn build_embed_cluster_strategy(
             store.upsert_node_vectors(&node_ids).await?;
             store.prune_node_vectors(&node_ids).await?;
         }
-        // Only fetch vectors/meta for the project subset we actually cluster.
-        let vectors = store.node_vectors(&project_vec).await?;
-        let edges = store.knn_edges(knn, thr).await?;
-        anyhow::Ok((vectors, edges))
+
+        // Stream the k-NN edges, interning + filtering to the project subset inline. Endpoints not
+        // in the interner (external/test types) are dropped here — no post-fetch retain, and the
+        // full 9M-row Postgres result is never materialized.
+        let mut edges: Vec<(u32, u32, f32)> = Vec::new();
+        let mut dropped: u64 = 0;
+        store
+            .knn_edges_streamed(knn, thr, |src, dst, sim| {
+                match (id_to_idx.get(src), id_to_idx.get(dst)) {
+                    (Some(&a), Some(&b)) => edges.push((a, b, sim)),
+                    _ => dropped += 1,
+                }
+            })
+            .await?;
+        tracing::info!(
+            project = idx_to_id.len(),
+            embeddable = node_ids.len(),
+            edges = edges.len(),
+            edges_dropped = dropped,
+            "embed clustering: streamed + interned k-NN edges (project subset)"
+        );
+        if edges.is_empty() {
+            tracing::warn!(
+                threshold = thr,
+                "no k-NN edges above similarity threshold — lower --embed-similarity-threshold; \
+                 all nodes will be unclustered (shared)"
+            );
+        }
+
+        // Weighted Leiden over the interned semantic k-NN graph.
+        let leiden_out = cih_community::cluster_indexed_edges(
+            &edges,
+            cfg.leiden_resolution,
+            cfg.leiden_seed,
+            10,
+        );
+        drop(edges);
+        let cluster_count = leiden_out.iter().map(|(_, c)| *c).collect::<HashSet<_>>().len();
+        tracing::info!(
+            clusters = cluster_count,
+            assigned = leiden_out.len(),
+            "embed clustering: Leiden produced clusters"
+        );
+
+        // Map compact indices back to node ids.
+        let clusters: Vec<(String, usize)> = leiden_out
+            .iter()
+            .map(|&(u, c)| (idx_to_id[u as usize].clone(), c))
+            .collect();
+
+        // Compute per-node centroid confidence + fetch metadata **in Postgres** — the 600k vectors
+        // never enter Rust. Returns (id, kind, name, file, sim) for each clustered node.
+        let asn_ids: Vec<String> = clusters.iter().map(|(id, _)| id.clone()).collect();
+        let asn_clusters: Vec<i32> = clusters.iter().map(|(_, c)| *c as i32).collect();
+        let rows = store.node_confidences(&asn_ids, &asn_clusters).await?;
+        let mut sims: HashMap<String, f32> = HashMap::with_capacity(rows.len());
+        let mut meta: HashMap<String, cih_grouping::NodeMeta> = HashMap::with_capacity(rows.len());
+        for (id, kind, name, file, sim) in rows {
+            sims.insert(id.clone(), sim);
+            meta.insert(id, cih_grouping::NodeMeta { kind, name, file });
+        }
+
+        anyhow::Ok((clusters, sims, meta))
     })?;
 
-    if vectors_raw.is_empty() {
-        anyhow::bail!("no embeddings found for current project nodes — run `cih embed` first");
-    }
-
-    // Keep only edges whose endpoints are both in the project subset. External types are
-    // semantically self-similar, so dropping their edges cleanly removes junk clusters without
-    // starving project clusters.
-    let edges_before = edges.len();
-    edges.retain(|(s, d, _)| {
-        project_ids.contains(s.as_str()) && project_ids.contains(d.as_str())
-    });
-    tracing::info!(
-        project = project_ids.len(),
-        embeddable = node_ids.len(),
-        vectors = vectors_raw.len(),
-        edges = edges.len(),
-        edges_dropped = edges_before - edges.len(),
-        "embed clustering: fetched per-node vectors and k-NN edges (project subset)"
-    );
-    if edges.is_empty() {
-        tracing::warn!(
-            threshold = thr,
-            "no k-NN edges above similarity threshold — lower --embed-similarity-threshold; \
-             all nodes will be unclustered (shared)"
+    if clusters.is_empty() {
+        anyhow::bail!(
+            "no clusters produced — no k-NN edges above threshold, or no embeddings for project \
+             nodes; run `cih embed` first"
         );
     }
-
-    // Weighted Leiden over the semantic k-NN graph (petgraph stays inside cih-community).
-    let clusters =
-        cih_community::cluster_similarity_edges(&edges, cfg.leiden_resolution, cfg.leiden_seed, 10);
-    let cluster_count = clusters.iter().map(|(_, c)| *c).collect::<HashSet<_>>().len();
-    tracing::info!(
-        clusters = cluster_count,
-        assigned = clusters.len(),
-        "embed clustering: Leiden produced clusters"
-    );
-
-    // Split the fetched rows into the (vectors, meta) maps the strategy needs.
-    let mut vectors: HashMap<String, Vec<f32>> = HashMap::with_capacity(vectors_raw.len());
-    let mut meta: HashMap<String, cih_grouping::NodeMeta> =
-        HashMap::with_capacity(vectors_raw.len());
-    for nv in vectors_raw {
-        let id = nv.node_id.as_str().to_string();
-        meta.insert(
-            id.clone(),
-            cih_grouping::NodeMeta { kind: nv.node_kind, name: nv.name, file: nv.file },
-        );
-        vectors.insert(id, nv.vector);
-    }
-    let clusters: Vec<(String, usize)> = clusters
-        .into_iter()
-        .map(|(id, c)| (id.as_str().to_string(), c))
-        .collect();
 
     // Opt-in LLM labeling: build a caller only when a feature-LLM provider is configured. Also load
     // the prior run's embed entries so unchanged clusters reuse their prior LLM name (stability).
@@ -648,7 +671,7 @@ fn build_embed_cluster_strategy(
 
     Ok(Box::new(cih_grouping::EmbedClusterStrategy::new(
         clusters,
-        vectors,
+        sims,
         meta,
         cfg,
         llm_caller,

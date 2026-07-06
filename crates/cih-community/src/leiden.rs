@@ -1,12 +1,14 @@
-use cih_core::NodeId;
 use petgraph::graph::UnGraph;
 use petgraph::visit::EdgeRef;
 
 use crate::constants::MIN_EDGE_WEIGHT;
 use crate::leiden_impl::{GraphDataBuilder, Leiden, LeidenConfig, QualityType};
 
-pub(crate) fn leiden(
-    graph: &UnGraph<NodeId, f32>,
+/// Leiden over an undirected `f32`-weighted graph. Generic over the node weight `N` (unused here —
+/// only graph structure + edge weights matter), so callers can key nodes by `NodeId` or a compact
+/// `u32` index. Returns the community id per petgraph node index (0..node_count).
+pub(crate) fn leiden<N>(
+    graph: &UnGraph<N, f32>,
     resolution: f64,
     max_iterations: usize,
     seed: u64,

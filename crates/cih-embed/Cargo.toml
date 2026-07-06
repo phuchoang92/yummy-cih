@@ -13,3 +13,4 @@ pgvector.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
+futures-util = "0.3"

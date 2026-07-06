@@ -44,13 +44,14 @@ pub struct NodeMeta {
 
 /// Primary embedding clusterer: turns precomputed Leiden cluster assignments (over a semantic
 /// k-NN graph) into named `FeatureGroupEntry` records. It performs **no** DB or graph work —
-/// the engine hands it cluster assignments, per-node vectors, and metadata, keeping
-/// `cih-grouping` free of Postgres and heavy compute (see the plan's architecture note).
+/// the engine hands it cluster assignments, each node's precomputed similarity to its cluster
+/// centroid, and metadata, keeping `cih-grouping` free of Postgres and heavy compute. Centroid +
+/// cosine are computed in Postgres so 600k vectors never enter Rust (see the plan's memory note).
 pub struct EmbedClusterStrategy {
     /// node_id → cluster id.
     clusters: HashMap<String, usize>,
-    /// node_id → averaged embedding.
-    vectors: HashMap<String, Vec<f32>>,
+    /// node_id → cosine similarity to its cluster centroid (confidence), precomputed in Postgres.
+    sims: HashMap<String, f32>,
     /// node_id → metadata.
     meta: HashMap<String, NodeMeta>,
     config: EmbedClusterConfig,
@@ -71,7 +72,7 @@ struct ClusterInfo<'a> {
 impl EmbedClusterStrategy {
     pub fn new(
         clusters: Vec<(String, usize)>,
-        vectors: HashMap<String, Vec<f32>>,
+        sims: HashMap<String, f32>,
         meta: HashMap<String, NodeMeta>,
         config: EmbedClusterConfig,
         llm: Option<Arc<dyn FeatureLlmCaller>>,
@@ -79,7 +80,7 @@ impl EmbedClusterStrategy {
     ) -> Self {
         Self {
             clusters: clusters.into_iter().collect(),
-            vectors,
+            sims,
             meta,
             config,
             llm,
@@ -262,19 +263,15 @@ impl EmbedClusterStrategy {
         for cluster_id in cluster_ids {
             let mut members = members_by_cluster.remove(&cluster_id).unwrap_or_default();
             members.sort();
-            let centroid = self.centroid(&members);
 
             // Label node = member closest to the centroid (max cosine sim), preferring a type-level
             // member (Class/Interface/...) so the slug comes from a type name. node_id tiebreaks.
+            // Similarities are precomputed in Postgres (see `EmbedClusterStrategy::sims`).
             let mut best_type: Option<(&String, f32)> = None;
             let mut best_any: Option<(&String, f32)> = None;
             let mut sims: HashMap<&String, f32> = HashMap::new();
             for node_id in &members {
-                let sim = self
-                    .vectors
-                    .get(*node_id)
-                    .map(|v| cosine_similarity(v, &centroid))
-                    .unwrap_or(0.0);
+                let sim = self.sims.get(*node_id).copied().unwrap_or(0.0);
                 sims.insert(*node_id, sim);
                 if !matches!(best_any, Some((_, s)) if sim <= s) {
                     best_any = Some((node_id, sim));
@@ -338,30 +335,6 @@ impl EmbedClusterStrategy {
         out
     }
 
-    fn centroid(&self, members: &[&String]) -> Vec<f32> {
-        let mut sum: Vec<f32> = Vec::new();
-        let mut n = 0usize;
-        for node_id in members {
-            if let Some(v) = self.vectors.get(*node_id) {
-                if sum.is_empty() {
-                    sum = vec![0.0; v.len()];
-                }
-                if sum.len() == v.len() {
-                    for (acc, x) in sum.iter_mut().zip(v) {
-                        *acc += x;
-                    }
-                    n += 1;
-                }
-            }
-        }
-        if n > 0 {
-            let scale = 1.0 / n as f32;
-            for x in &mut sum {
-                *x *= scale;
-            }
-        }
-        sum
-    }
 }
 
 impl FeatureStrategy for EmbedClusterStrategy {
@@ -733,20 +706,6 @@ fn slugify(input: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || b.is_empty() || a.len() != b.len() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
-    }
 }
 
 /// Kinds this strategy expects to cluster (mirrors `cih-embed::is_embeddable_kind` intent).

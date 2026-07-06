@@ -580,6 +580,7 @@ dependencies = [
  "blake3",
  "cih-core",
  "fastembed",
+ "futures-util",
  "pgvector",
  "serde",
  "tokio",

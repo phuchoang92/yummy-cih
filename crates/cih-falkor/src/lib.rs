@@ -22,8 +22,9 @@ use cih_graph_store::{
 };
 use redis::Value;
 
-/// Rows per UNWIND batch during bulk load.
-const BATCH: usize = 1000;
+/// Rows per UNWIND batch during bulk load. Larger batches cut Redis round-trips on big graphs
+/// (~2M edges at 600k nodes) at the cost of bigger per-statement strings — 4000 is a good balance.
+const BATCH: usize = 4000;
 
 pub struct FalkorStore {
     client: redis::Client,
