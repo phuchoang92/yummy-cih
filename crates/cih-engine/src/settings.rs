@@ -117,6 +117,9 @@ pub struct AnalyzeSettings {
     pub languages: Option<Vec<String>>,
     pub skip_xml_integration: Option<bool>,
     pub include_decompiled: Option<bool>,
+    /// Explicit CXF servlet base path (e.g. `/rest`) prepended to `<jaxrs:server>`
+    /// route paths. Overrides auto-detection when set.
+    pub cxf_base_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -278,6 +281,7 @@ pub fn effective_rows(layers: &Layers) -> Vec<ShowRow> {
     ));
     rows.push(bool_row("analyze", "skip_xml_integration", ra.skip_xml_integration, ha.skip_xml_integration));
     rows.push(bool_row("analyze", "include_decompiled", ra.include_decompiled, ha.include_decompiled));
+    rows.push(opt("analyze", "cxf_base_path", ra.cxf_base_path.clone(), ha.cxf_base_path.clone(), "(auto-detect)"));
 
     // [discover]
     rows.push(req("discover", "community_strategy", rd.community_strategy.clone(), hd.community_strategy.clone(), DEFAULT_COMMUNITY_STRATEGY.to_string()));
@@ -329,6 +333,7 @@ pub fn starter_toml() -> String {
 # languages = ["java"]            # default: all detected
 # skip_xml_integration = false
 # include_decompiled = false
+# cxf_base_path = "/rest"          # CXF servlet base path for <jaxrs:server> routes; default: auto-detect
 
 [discover]
 # community_strategy = "{cs}"      # package | graph

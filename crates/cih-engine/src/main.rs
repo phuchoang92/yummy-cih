@@ -101,6 +101,10 @@ enum Command {
         /// Example: --language java,typescript
         #[arg(long = "language", value_delimiter = ',')]
         languages: Vec<String>,
+        /// CXF servlet base path (e.g. /rest) prepended to <jaxrs:server> route paths.
+        /// Overrides auto-detection. Default: cih.toml `cxf_base_path`, else auto-detect.
+        #[arg(long)]
+        cxf_base_path: Option<String>,
     },
     /// Re-run the resolve pass using the saved scope (.cih/scope.json), without re-scanning.
     /// Useful when the resolver changes but the source files have not.
@@ -615,6 +619,7 @@ fn main() -> Result<()> {
             no_cache,
             skip_xml_integration,
             languages,
+            cxf_base_path,
         } => {
             let repo = match repo {
                 Some(r) => r,
@@ -643,6 +648,10 @@ fn main() -> Result<()> {
                 h.include_decompiled,
             )
             .value;
+            // flag > repo cih.toml > home config (no env binding for this option).
+            let cxf_base_path = cxf_base_path
+                .or_else(|| r.cxf_base_path.clone())
+                .or_else(|| h.cxf_base_path.clone());
             analyze::run_analyze(
                 repo,
                 AnalyzeFlags {
@@ -659,6 +668,7 @@ fn main() -> Result<()> {
                     no_cache,
                     skip_xml_integration,
                     languages,
+                    cxf_base_path,
                 },
             )
         }

@@ -37,6 +37,8 @@ pub struct AnalyzeFlags {
     pub skip_xml_integration: bool,
     /// Language filter: only include files for these languages (empty = all).
     pub languages: Vec<String>,
+    /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
+    pub cxf_base_path: Option<String>,
 }
 
 pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -70,6 +72,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
             use_cache: !flags.no_cache,
             allow_noop: !flags.no_cache,
             skip_xml_integration: flags.skip_xml_integration,
+            cxf_base_path: flags.cxf_base_path.clone(),
         },
     )?;
 
@@ -139,6 +142,16 @@ pub fn run_resolve(
     };
 
     let jars = load_jars_from_repo_map(&repo);
+    // No CLI flags on `resolve`; honor the repo/home cih.toml layers for the base path.
+    let cxf_base_path = {
+        let layers = crate::settings::Layers::load(&repo);
+        layers
+            .repo
+            .analyze
+            .cxf_base_path
+            .clone()
+            .or_else(|| layers.home.analyze.cxf_base_path.clone())
+    };
     let emit = analyze_from_scope_with_options(
         scope_file,
         scope_path,
@@ -147,6 +160,7 @@ pub fn run_resolve(
             use_cache: true,
             allow_noop: false,
             skip_xml_integration: false,
+            cxf_base_path,
         },
     )?;
 
@@ -193,6 +207,7 @@ pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<Em
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
+            cxf_base_path: None,
         },
     )
 }
@@ -221,6 +236,7 @@ pub fn analyze_from_scope(
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
+            cxf_base_path: None,
         },
     )
 }
@@ -287,7 +303,7 @@ pub fn analyze_from_scope_with_options(
     );
     ui.spin(format!("Parsing {} files", files_to_parse.len()));
 
-    let incremental = parse_scope(&repo_root, &cih_dir, files_to_parse, cache)?;
+    let incremental = parse_scope(&repo_root, &cih_dir, files_to_parse, cache.clone())?;
     if let ParseScopeOutcome::Reused {
         artifacts,
         parsed_files_path,
@@ -461,6 +477,19 @@ pub fn analyze_from_scope_with_options(
     all_nodes.extend(db_nodes);
     all_nodes.extend(xml_nodes);
 
+    // Prepend CXF <jaxrs:server> base paths (+ the servlet prefix) onto Java Route nodes.
+    // The base-path override is resolved at the dispatch arm (flag > cih.toml > home).
+    let servlet_prefix = cih_resolve::resolve_cxf_servlet_prefix(
+        &repo_root,
+        &all_nodes,
+        cache.cxf_base_path.as_deref(),
+    );
+    cih_resolve::resolve_jaxrs_xml_prefixes(
+        &mut all_nodes,
+        &mut edges,
+        servlet_prefix.as_ref().map(|(p, s)| (p.as_str(), *s)),
+    );
+
     cih_resolve::propagate_loop_depths(&mut all_nodes, &edges);
 
     let similar_edges = cih_resolve::emit_similar_to_edges(&all_nodes);
@@ -539,12 +568,16 @@ pub fn analyze_from_scope_with_options(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
 pub struct AnalyzeCacheOptions {
     pub use_cache: bool,
     pub allow_noop: bool,
     /// Skip the integration + DI XML walk (faster on large repos).
     pub skip_xml_integration: bool,
+    /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
+    /// Resolved at the dispatch arm (flag > `cih.toml` > `~/.cih/config.toml`); `None`
+    /// falls back to auto-detection.
+    pub cxf_base_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
