@@ -150,7 +150,7 @@ fn process_site(
         kind: EdgeKind::ExecutesQuery,
         confidence: 1.0,
         reason: site.api_name.clone(),
-            props: None,
+        props: None,
     });
 
     // Emit DbTable nodes + READS_TABLE / WRITES_TABLE edges.
@@ -214,7 +214,10 @@ pub fn emit_jpa_tables(nodes: &[Node]) -> (Vec<Node>, Vec<Edge>) {
     let mut seen_tables: HashSet<String> = HashSet::new();
 
     for node in nodes {
-        if !matches!(node.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Record) {
+        if !matches!(
+            node.kind,
+            NodeKind::Class | NodeKind::Interface | NodeKind::Record
+        ) {
             continue;
         }
         let Some(props) = &node.props else { continue };
@@ -317,4 +320,3 @@ fn detect_sql_op(sql: &str) -> &'static str {
         "UNKNOWN"
     }
 }
-

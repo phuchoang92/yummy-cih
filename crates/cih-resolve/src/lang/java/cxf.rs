@@ -79,7 +79,9 @@ pub(crate) fn stitch_route_prefixes(
         if n.kind != NodeKind::IntegrationRoute {
             continue;
         }
-        let Some(props) = n.props.as_ref() else { continue };
+        let Some(props) = n.props.as_ref() else {
+            continue;
+        };
         let source = props.get("source").and_then(|s| s.as_str()).unwrap_or("");
         if source != "spring_xml" && source != "blueprint_xml" {
             continue;
@@ -99,7 +101,9 @@ pub(crate) fn stitch_route_prefixes(
         if n.kind != NodeKind::IntegrationRoute {
             continue;
         }
-        let Some(props) = n.props.as_ref() else { continue };
+        let Some(props) = n.props.as_ref() else {
+            continue;
+        };
         if props.get("source").and_then(|s| s.as_str()) != Some("cxf_jaxrs_server") {
             continue;
         }
@@ -178,11 +182,11 @@ pub(crate) fn stitch_route_prefixes(
     }
 
     // Only now (there is CXF to stitch) resolve the outermost servlet base path.
-    let (servlet_prefix, servlet_source) = match resolve_servlet_prefix(repo_root, nodes, route_base_path)
-    {
-        Some((p, s)) => (p, s),
-        None => (String::new(), "none"),
-    };
+    let (servlet_prefix, servlet_source) =
+        match resolve_servlet_prefix(repo_root, nodes, route_base_path) {
+            Some((p, s)) => (p, s),
+            None => (String::new(), "none"),
+        };
 
     let mut id_remap: HashMap<NodeId, NodeId> = HashMap::new();
 
@@ -190,7 +194,9 @@ pub(crate) fn stitch_route_prefixes(
         if n.kind != NodeKind::Route {
             continue;
         }
-        let Some(props) = n.props.as_mut() else { continue };
+        let Some(props) = n.props.as_mut() else {
+            continue;
+        };
         let handler = props
             .get("handler")
             .and_then(|h| h.as_str())
@@ -370,14 +376,16 @@ fn scan_web_xml_cxf_prefix(repo_root: &Path) -> Option<String> {
 }
 
 fn web_xml_cxf_url_pattern(content: &str) -> Option<String> {
-    let servlet_name = element_blocks(content, "servlet").into_iter().find_map(|blk| {
-        let class = inner_text(blk, "servlet-class")?;
-        if class.contains("CXFServlet") {
-            inner_text(blk, "servlet-name")
-        } else {
-            None
-        }
-    })?;
+    let servlet_name = element_blocks(content, "servlet")
+        .into_iter()
+        .find_map(|blk| {
+            let class = inner_text(blk, "servlet-class")?;
+            if class.contains("CXFServlet") {
+                inner_text(blk, "servlet-name")
+            } else {
+                None
+            }
+        })?;
     for blk in element_blocks(content, "servlet-mapping") {
         if inner_text(blk, "servlet-name").as_deref().map(str::trim) == Some(servlet_name.trim()) {
             if let Some(p) = inner_text(blk, "url-pattern") {
@@ -496,7 +504,10 @@ mod tests {
             id: NodeId::new(format!("IntegrationRoute:{source}:{name}")),
             kind: NodeKind::IntegrationRoute,
             name: name.to_string(),
-            qualified_name: extra.get("class").and_then(|v| v.as_str()).map(String::from),
+            qualified_name: extra
+                .get("class")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             file: "beans.xml".to_string(),
             range: Range::default(),
             props: Some(props),
@@ -585,7 +596,11 @@ mod tests {
     fn stitch_full_prefix_rewrites_route() {
         let dir = temp_dir("stitch");
         // servlet prefix comes from an osgi_servlet node (no filesystem needed).
-        let mut nodes = server_and_bean("/v1/services", "restServiceEndPointImpl", " com.acme.RestServiceEndPointImpl");
+        let mut nodes = server_and_bean(
+            "/v1/services",
+            "restServiceEndPointImpl",
+            " com.acme.RestServiceEndPointImpl",
+        );
         nodes.push(integration_route(
             "/rest/*",
             "osgi_servlet",
@@ -593,7 +608,11 @@ mod tests {
         ));
         let handler = "com.acme.RestServiceEndPointImpl#onOffVoice/1";
         nodes.push(route_node("POST", "/sound-box/on-off-voice", handler));
-        let mut edges = vec![handles_route_edge(handler, "POST", "/sound-box/on-off-voice")];
+        let mut edges = vec![handles_route_edge(
+            handler,
+            "POST",
+            "/sound-box/on-off-voice",
+        )];
 
         stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
         std::fs::remove_dir_all(&dir).ok();
@@ -603,7 +622,10 @@ mod tests {
         assert_eq!(prop(route, "path"), Some(full));
         assert_eq!(route.id.as_str(), &format!("Route:POST {full}"));
         assert_eq!(prop(route, "local_path"), Some("/sound-box/on-off-voice"));
-        assert_eq!(prop(route, "servlet_prefix_source"), Some("osgi_whiteboard"));
+        assert_eq!(
+            prop(route, "servlet_prefix_source"),
+            Some("osgi_whiteboard")
+        );
 
         let hr = edges
             .iter()
@@ -621,17 +643,23 @@ mod tests {
     #[test]
     fn stitch_without_servlet_layer_uses_address_only() {
         let dir = temp_dir("addr");
-        let mut nodes =
-            server_and_bean("/v1/services", "impl", "com.acme.RestServiceEndPointImpl");
+        let mut nodes = server_and_bean("/v1/services", "impl", "com.acme.RestServiceEndPointImpl");
         let handler = "com.acme.RestServiceEndPointImpl#onOffVoice/1";
         nodes.push(route_node("POST", "/sound-box/on-off-voice", handler));
-        let mut edges = vec![handles_route_edge(handler, "POST", "/sound-box/on-off-voice")];
+        let mut edges = vec![handles_route_edge(
+            handler,
+            "POST",
+            "/sound-box/on-off-voice",
+        )];
 
         stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
         std::fs::remove_dir_all(&dir).ok();
 
         let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
-        assert_eq!(prop(route, "path"), Some("/v1/services/sound-box/on-off-voice"));
+        assert_eq!(
+            prop(route, "path"),
+            Some("/v1/services/sound-box/on-off-voice")
+        );
         assert_eq!(prop(route, "servlet_prefix_source"), Some("none"));
     }
 
@@ -640,8 +668,16 @@ mod tests {
         let dir = temp_dir("nomatch");
         let mut nodes = server_and_bean("/v1/services", "impl", "com.acme.RestServiceEndPointImpl");
         // A route on an unrelated class — must not be rewritten.
-        nodes.push(route_node("GET", "/other", "com.acme.OtherController#get/0"));
-        let mut edges = vec![handles_route_edge("com.acme.OtherController#get/0", "GET", "/other")];
+        nodes.push(route_node(
+            "GET",
+            "/other",
+            "com.acme.OtherController#get/0",
+        ));
+        let mut edges = vec![handles_route_edge(
+            "com.acme.OtherController#get/0",
+            "GET",
+            "/other",
+        )];
 
         stitch_route_prefixes(&dir, &mut nodes, &mut edges, Some("/rest"));
         std::fs::remove_dir_all(&dir).ok();
@@ -700,7 +736,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
-        assert_eq!(prop(route, "path"), Some("/customers/{id}"), "ambiguous name must not stitch");
+        assert_eq!(
+            prop(route, "path"),
+            Some("/customers/{id}"),
+            "ambiguous name must not stitch"
+        );
         assert!(!edges.iter().any(|e| e.reason == "cxf-jaxrs-prefix"));
     }
 
@@ -759,7 +799,10 @@ mod tests {
 
     #[test]
     fn join_url_variants() {
-        assert_eq!(join_url(&["rest", "/v1/services", "/a/b"]), "/rest/v1/services/a/b");
+        assert_eq!(
+            join_url(&["rest", "/v1/services", "/a/b"]),
+            "/rest/v1/services/a/b"
+        );
         assert_eq!(join_url(&["", "/crm", "/x"]), "/crm/x"); // empty servlet prefix collapses
         assert_eq!(join_url(&["/a/", "/b/", "c"]), "/a/b/c"); // dup/trailing slashes normalized
         assert_eq!(join_url(&["", "", ""]), "/");
@@ -854,7 +897,11 @@ mod tests {
             std::fs::write(dir.join("application.properties"), body).unwrap();
             let out = resolve_servlet_prefix(&dir, &[], None);
             std::fs::remove_dir_all(&dir).ok();
-            assert_eq!(out, Some((expect.to_string(), "spring_boot")), "body={body:?}");
+            assert_eq!(
+                out,
+                Some((expect.to_string(), "spring_boot")),
+                "body={body:?}"
+            );
         }
     }
 
@@ -918,7 +965,10 @@ mod tests {
                 .and_then(|n| prop(n, "path").map(String::from))
         };
         assert_eq!(by_handler("com.acme.Crm#a/0").as_deref(), Some("/crm/a"));
-        assert_eq!(by_handler("com.acme.Billing#b/0").as_deref(), Some("/billing/b"));
+        assert_eq!(
+            by_handler("com.acme.Billing#b/0").as_deref(),
+            Some("/billing/b")
+        );
     }
 
     #[test]
@@ -926,12 +976,23 @@ mod tests {
         // Route.path already carries a class-level @Path ("/customerservice"); stitch prepends only.
         let dir = temp_dir("classprefix");
         let mut nodes = server_and_bean("/crm", "svc", "com.acme.Svc");
-        nodes.push(route_node("GET", "/customerservice/customers/{id}", "com.acme.Svc#get/1"));
-        let mut edges = vec![handles_route_edge("com.acme.Svc#get/1", "GET", "/customerservice/customers/{id}")];
+        nodes.push(route_node(
+            "GET",
+            "/customerservice/customers/{id}",
+            "com.acme.Svc#get/1",
+        ));
+        let mut edges = vec![handles_route_edge(
+            "com.acme.Svc#get/1",
+            "GET",
+            "/customerservice/customers/{id}",
+        )];
         stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
         std::fs::remove_dir_all(&dir).ok();
         let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
-        assert_eq!(prop(route, "path"), Some("/crm/customerservice/customers/{id}"));
+        assert_eq!(
+            prop(route, "path"),
+            Some("/crm/customerservice/customers/{id}")
+        );
     }
 
     #[test]
@@ -944,7 +1005,11 @@ mod tests {
                 "cxf_jaxrs_server",
                 serde_json::json!({ "address": "/api", "beans": ["svc"] }),
             ),
-            integration_route("svc", "blueprint_xml", serde_json::json!({ "class": "com.acme.Bp" })),
+            integration_route(
+                "svc",
+                "blueprint_xml",
+                serde_json::json!({ "class": "com.acme.Bp" }),
+            ),
         ];
         nodes.push(route_node("GET", "/x", "com.acme.Bp#x/0"));
         let mut edges = vec![handles_route_edge("com.acme.Bp#x/0", "GET", "/x")];
@@ -994,23 +1059,45 @@ mod tests {
         stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
         std::fs::remove_dir_all(&dir).ok();
         let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
-        assert_eq!(prop(route, "path"), Some("/api/x"), "simple inline class should resolve");
+        assert_eq!(
+            prop(route, "path"),
+            Some("/api/x"),
+            "simple inline class should resolve"
+        );
     }
 
     #[test]
     fn bean_class_edge_deduped_when_bean_shared_by_two_servers() {
         let dir = temp_dir("dedup");
         let mut nodes = vec![
-            integration_route("/a", "cxf_jaxrs_server", serde_json::json!({ "address": "/a", "beans": ["svc"] })),
-            integration_route("/b", "cxf_jaxrs_server", serde_json::json!({ "address": "/b", "beans": ["svc"] })),
-            integration_route("svc", "spring_xml", serde_json::json!({ "class": "com.acme.Svc" })),
+            integration_route(
+                "/a",
+                "cxf_jaxrs_server",
+                serde_json::json!({ "address": "/a", "beans": ["svc"] }),
+            ),
+            integration_route(
+                "/b",
+                "cxf_jaxrs_server",
+                serde_json::json!({ "address": "/b", "beans": ["svc"] }),
+            ),
+            integration_route(
+                "svc",
+                "spring_xml",
+                serde_json::json!({ "class": "com.acme.Svc" }),
+            ),
             class_node("com.acme.Svc"),
         ];
         nodes.push(route_node("GET", "/x", "com.acme.Svc#x/0"));
         let mut edges = vec![handles_route_edge("com.acme.Svc#x/0", "GET", "/x")];
         stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
         std::fs::remove_dir_all(&dir).ok();
-        let bean_class_edges = edges.iter().filter(|e| e.reason == "cxf-bean-class").count();
-        assert_eq!(bean_class_edges, 1, "bean → Class edge must be deduped across servers");
+        let bean_class_edges = edges
+            .iter()
+            .filter(|e| e.reason == "cxf-bean-class")
+            .count();
+        assert_eq!(
+            bean_class_edges, 1,
+            "bean → Class edge must be deduped across servers"
+        );
     }
 }

@@ -49,7 +49,11 @@ impl LanguageResolver for TypeScriptResolver {
         // Build directory from the source file path
         let dir = {
             let parts: Vec<&str> = from_file.rsplitn(2, '/').collect();
-            if parts.len() == 2 { parts[1] } else { "" }
+            if parts.len() == 2 {
+                parts[1]
+            } else {
+                ""
+            }
         };
         let resolved_path = resolve_relative(dir, module);
         match binding.kind {
@@ -66,13 +70,11 @@ impl LanguageResolver for TypeScriptResolver {
                     None
                 }
             }
-            ImportBindingKind::Default => {
-                index.resolve_type_in_language(
-                    binding.local.as_deref().unwrap_or(""),
-                    from_file,
-                    "typescript",
-                )
-            }
+            ImportBindingKind::Default => index.resolve_type_in_language(
+                binding.local.as_deref().unwrap_or(""),
+                from_file,
+                "typescript",
+            ),
             ImportBindingKind::Wildcard
             | ImportBindingKind::Namespace
             | ImportBindingKind::Module

@@ -606,7 +606,11 @@ fn build_embed_cluster_strategy(
             10,
         );
         drop(edges);
-        let cluster_count = leiden_out.iter().map(|(_, c)| *c).collect::<HashSet<_>>().len();
+        let cluster_count = leiden_out
+            .iter()
+            .map(|(_, c)| *c)
+            .collect::<HashSet<_>>()
+            .len();
         tracing::info!(
             clusters = cluster_count,
             assigned = leiden_out.len(),
@@ -644,7 +648,8 @@ fn build_embed_cluster_strategy(
     // Opt-in LLM labeling: build a caller only when a feature-LLM provider is configured. Also load
     // the prior run's embed entries so unchanged clusters reuse their prior LLM name (stability).
     let (llm_caller, prior_entries) = match &overrides.feature_llm {
-        Some(llm_cfg) => match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
+        Some(llm_cfg) => match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None)
+        {
             Ok(adapter) => {
                 let api_key = crate::llm::resolve_api_key(llm_cfg.api_key_env.as_deref())
                     .ok()
@@ -748,7 +753,6 @@ impl DiscoverOutcome {
         eprintln!();
     }
 }
-
 
 #[derive(Serialize)]
 struct DiscoverSummary<'a> {

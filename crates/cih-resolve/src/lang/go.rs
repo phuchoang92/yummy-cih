@@ -20,18 +20,6 @@ impl LanguageResolver for GoResolver {
         false
     }
 
-    fn inheritance_model(&self) -> InheritanceModel {
-        InheritanceModel::None
-    }
-
-    fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
-        None
-    }
-
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
-        None
-    }
-
     fn resolve_self_receiver(
         &self,
         _keyword: &str,
@@ -39,5 +27,17 @@ impl LanguageResolver for GoResolver {
         _index: &CommonIndex,
     ) -> Option<String> {
         None
+    }
+
+    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+        None
+    }
+
+    fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
+        None
+    }
+
+    fn inheritance_model(&self) -> InheritanceModel {
+        InheritanceModel::None
     }
 }

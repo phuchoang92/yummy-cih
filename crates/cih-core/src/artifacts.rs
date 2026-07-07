@@ -123,8 +123,7 @@ const BUNDLE_MAGIC: &[u8; 8] = b"CIHPACK1";
 
 /// Write one entry to a bundle: 4-byte LE length + zstd-compressed content.
 fn write_bundle_entry(w: &mut impl Write, content: &[u8]) -> io::Result<()> {
-    let compressed = zstd::encode_all(content, 3)
-        .map_err(io::Error::other)?;
+    let compressed = zstd::encode_all(content, 3).map_err(io::Error::other)?;
     let len = compressed.len() as u32;
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&compressed)?;
@@ -282,9 +281,7 @@ impl GraphArtifacts {
         let repo_map_bytes = read_bundle_entry(&mut r)?;
 
         // Restore into cih_dir.
-        let art_dir = cih_dir
-            .join("artifacts")
-            .join(&manifest.artifact_version);
+        let art_dir = cih_dir.join("artifacts").join(&manifest.artifact_version);
         fs::create_dir_all(&art_dir)?;
 
         let nodes_path = art_dir.join("nodes.jsonl");

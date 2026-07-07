@@ -1,6 +1,6 @@
-use cih_core::SymbolDef;
-use crate::common::index::CommonIndex;
 use super::{InheritanceModel, LanguageResolver};
+use crate::common::index::CommonIndex;
+use cih_core::SymbolDef;
 
 pub struct RustResolver;
 
@@ -29,15 +29,15 @@ impl LanguageResolver for RustResolver {
         parts.get(1).map(|s| s.to_string())
     }
 
-    fn inheritance_model(&self) -> InheritanceModel {
-        InheritanceModel::None
+    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+        None
     }
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
-        None
+    fn inheritance_model(&self) -> InheritanceModel {
+        InheritanceModel::None
     }
 }

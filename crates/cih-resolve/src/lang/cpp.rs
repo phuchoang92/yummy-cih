@@ -1,6 +1,6 @@
-use cih_core::SymbolDef;
-use crate::common::index::CommonIndex;
 use super::{InheritanceModel, LanguageResolver};
+use crate::common::index::CommonIndex;
+use cih_core::SymbolDef;
 
 pub struct CppResolver;
 
@@ -27,15 +27,15 @@ impl LanguageResolver for CppResolver {
         in_fqcn.rsplitn(2, "::").nth(1).map(str::to_string)
     }
 
-    fn inheritance_model(&self) -> InheritanceModel {
-        InheritanceModel::None
+    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+        None
     }
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
-        None
+    fn inheritance_model(&self) -> InheritanceModel {
+        InheritanceModel::None
     }
 }

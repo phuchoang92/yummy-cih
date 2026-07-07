@@ -325,13 +325,7 @@ pub struct Edge {
 
 impl Edge {
     /// Constructor that fills in the new optional `props` field with None.
-    pub fn new(
-        src: NodeId,
-        dst: NodeId,
-        kind: EdgeKind,
-        confidence: f32,
-        reason: String,
-    ) -> Self {
+    pub fn new(src: NodeId, dst: NodeId, kind: EdgeKind, confidence: f32, reason: String) -> Self {
         Self {
             src,
             dst,
@@ -389,5 +383,3 @@ pub struct GraphDelta {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
-
-

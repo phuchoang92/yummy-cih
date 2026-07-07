@@ -127,7 +127,10 @@ mod tests {
         assert_eq!(rules.routes[0].fixed_method().as_deref(), Some("POST"));
         assert_eq!(rules.routes[1].path_attr, "url");
         assert_eq!(rules.routes[1].method_attr.as_deref(), Some("verb"));
-        assert_eq!(rules.routes[1].class_prefix_annotation.as_deref(), Some("BankResource"));
+        assert_eq!(
+            rules.routes[1].class_prefix_annotation.as_deref(),
+            Some("BankResource")
+        );
     }
 
     #[test]

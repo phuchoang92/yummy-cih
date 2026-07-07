@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::common::emit::EdgeEmitter;
 use crate::common::index::CommonIndex;
 
-pub(crate) mod confidence;
 pub(crate) mod common;
 pub(crate) mod complexity;
+pub(crate) mod confidence;
 pub(crate) mod constant_propagation;
 pub(crate) mod lang;
 pub(crate) mod similarity;
@@ -30,14 +30,14 @@ pub(crate) mod reports;
 mod types;
 pub use complexity::propagate_loop_depths;
 pub use constant_propagation::build_java_constant_resolver;
-pub use similarity::emit_similar_to_edges;
 pub use contracts::resolve_contract_edges;
 pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
-pub use patterns::apply_pattern_rules;
 pub use lang::{all_resolvers, PostProcessOptions, ResolverRegistry};
+pub use patterns::apply_pattern_rules;
 pub use reports::write_unresolved_reports;
+pub use similarity::emit_similar_to_edges;
 
 /// Per-site diagnostic record for a reference that could not be resolved.
 #[derive(Clone, Debug, Serialize, Deserialize)]

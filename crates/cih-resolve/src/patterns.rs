@@ -59,7 +59,9 @@ pub fn apply_pattern_rules(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>, rules: 
         let owner_fqcn = handler.split('#').next().unwrap_or("");
 
         for rule in &rules.routes {
-            let Some(ann) = anns.iter().find(|a| ann_name(a) == Some(rule.annotation.as_str()))
+            let Some(ann) = anns
+                .iter()
+                .find(|a| ann_name(a) == Some(rule.annotation.as_str()))
             else {
                 continue;
             };
@@ -128,7 +130,10 @@ fn ann_name(ann: &serde_json::Value) -> Option<&str> {
 
 /// Read a string attribute from a retained annotation snapshot (`{name, attrs:{...}}`).
 fn attr_str(ann: &serde_json::Value, key: &str) -> Option<String> {
-    ann.get("attrs")?.get(key).and_then(|v| v.as_str()).map(String::from)
+    ann.get("attrs")?
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// Join an optional class prefix and a method path into a single normalized route path.
@@ -192,18 +197,26 @@ mod tests {
             serde_json::json!([{ "name": "BankEndpoint", "attrs": { "value": "/pay" } }]),
         )];
         let mut edges = Vec::new();
-        let rules = PatternRules { routes: vec![route_rule("BankEndpoint", Some("POST"))] };
+        let rules = PatternRules {
+            routes: vec![route_rule("BankEndpoint", Some("POST"))],
+        };
 
         apply_pattern_rules(&mut nodes, &mut edges, &rules);
 
-        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).expect("route");
+        let route = nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Route)
+            .expect("route");
         assert_eq!(route.id.as_str(), "Route:POST /pay");
         let props = route.props.as_ref().unwrap();
         assert_eq!(props["httpMethod"], "POST");
         assert_eq!(props["path"], "/pay");
         assert_eq!(props["source"], "custom_pattern");
         assert_eq!(props["handler"], "com.acme.Foo#pay/1");
-        let hr = edges.iter().find(|e| e.kind == EdgeKind::HandlesRoute).unwrap();
+        let hr = edges
+            .iter()
+            .find(|e| e.kind == EdgeKind::HandlesRoute)
+            .unwrap();
         assert_eq!(hr.src.as_str(), "Method:com.acme.Foo#pay/1");
         assert_eq!(hr.dst.as_str(), "Route:POST /pay");
     }
@@ -271,7 +284,13 @@ mod tests {
             serde_json::json!([{ "name": "Other", "attrs": { "value": "/pay" } }]),
         )];
         let mut edges = Vec::new();
-        apply_pattern_rules(&mut nodes, &mut edges, &PatternRules { routes: vec![route_rule("BankEndpoint", Some("POST"))] });
+        apply_pattern_rules(
+            &mut nodes,
+            &mut edges,
+            &PatternRules {
+                routes: vec![route_rule("BankEndpoint", Some("POST"))],
+            },
+        );
         assert!(!nodes.iter().any(|n| n.kind == NodeKind::Route));
         assert!(edges.is_empty());
     }
@@ -295,7 +314,16 @@ mod tests {
             ),
         ];
         let mut edges = Vec::new();
-        apply_pattern_rules(&mut nodes, &mut edges, &PatternRules { routes: vec![route_rule("BankEndpoint", Some("POST"))] });
-        assert_eq!(nodes.iter().filter(|n| n.kind == NodeKind::Route).count(), 1);
+        apply_pattern_rules(
+            &mut nodes,
+            &mut edges,
+            &PatternRules {
+                routes: vec![route_rule("BankEndpoint", Some("POST"))],
+            },
+        );
+        assert_eq!(
+            nodes.iter().filter(|n| n.kind == NodeKind::Route).count(),
+            1
+        );
     }
 }

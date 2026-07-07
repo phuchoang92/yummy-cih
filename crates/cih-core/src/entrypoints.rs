@@ -64,14 +64,29 @@ impl EntrypointRegistry {
 
     fn java_defaults(reg: &mut Self) {
         for ann in [
-            "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping",
-            "RequestMapping", "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+            "GetMapping",
+            "PostMapping",
+            "PutMapping",
+            "DeleteMapping",
+            "PatchMapping",
+            "RequestMapping",
+            "GET",
+            "POST",
+            "PUT",
+            "DELETE",
+            "PATCH",
+            "HEAD",
+            "OPTIONS",
         ] {
             reg.http.insert(ann.to_string());
         }
         for ann in [
-            "KafkaListener", "EventListener", "RabbitListener",
-            "JmsListener", "SqsListener", "StreamListener",
+            "KafkaListener",
+            "EventListener",
+            "RabbitListener",
+            "JmsListener",
+            "SqsListener",
+            "StreamListener",
         ] {
             reg.event.insert(ann.to_string());
         }
@@ -81,7 +96,9 @@ impl EntrypointRegistry {
     }
 
     fn typescript_defaults(reg: &mut Self) {
-        for ann in ["Get", "Post", "Put", "Delete", "Patch", "Head", "Options", "All"] {
+        for ann in [
+            "Get", "Post", "Put", "Delete", "Patch", "Head", "Options", "All",
+        ] {
             reg.http.insert(ann.to_string());
         }
         for ann in ["MessagePattern", "EventPattern"] {
@@ -94,8 +111,17 @@ impl EntrypointRegistry {
 
     fn python_defaults(reg: &mut Self) {
         for ann in [
-            "app.route", "app.get", "app.post", "app.put", "app.delete", "app.patch",
-            "router.get", "router.post", "router.put", "router.delete", "router.patch",
+            "app.route",
+            "app.get",
+            "app.post",
+            "app.put",
+            "app.delete",
+            "app.patch",
+            "router.get",
+            "router.post",
+            "router.put",
+            "router.delete",
+            "router.patch",
             "blueprint.route",
         ] {
             reg.http.insert(ann.to_string());
@@ -166,7 +192,10 @@ impl EntrypointKind {
     }
 
     pub fn business_flow(&self) -> bool {
-        matches!(self, EntrypointKind::HttpRoute | EntrypointKind::EventListener)
+        matches!(
+            self,
+            EntrypointKind::HttpRoute | EntrypointKind::EventListener
+        )
     }
 
     pub fn business_surface(&self) -> &'static str {
@@ -224,7 +253,10 @@ pub fn build_calls_digraph(
 }
 
 fn is_callable(kind: NodeKind) -> bool {
-    matches!(kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function)
+    matches!(
+        kind,
+        NodeKind::Method | NodeKind::Constructor | NodeKind::Function
+    )
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
@@ -279,7 +311,10 @@ pub fn score_entry_points(
                             .unwrap_or(e.dst.as_str())
                             .to_string()
                     });
-                listens_edges.entry(e.src.clone()).or_default().push(topic_name);
+                listens_edges
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(topic_name);
             }
             _ => {}
         }
@@ -292,10 +327,12 @@ pub fn score_entry_points(
 
     let mut scored = Vec::new();
 
-    for node in nodes
-        .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function))
-    {
+    for node in nodes.iter().filter(|n| {
+        matches!(
+            n.kind,
+            NodeKind::Method | NodeKind::Constructor | NodeKind::Function
+        )
+    }) {
         if is_test_method(node, &by_id) {
             continue;
         }
@@ -312,7 +349,12 @@ pub fn score_entry_points(
 
         let (kind, route_method, route_path, event_topics) =
             if let Some(ri) = route_edges.get(&node.id) {
-                (EntrypointKind::HttpRoute, Some(ri.method.clone()), Some(ri.path.clone()), Vec::new())
+                (
+                    EntrypointKind::HttpRoute,
+                    Some(ri.method.clone()),
+                    Some(ri.path.clone()),
+                    Vec::new(),
+                )
             } else if let Some(topics) = listens_edges.get(&node.id) {
                 (EntrypointKind::EventListener, None, None, topics.clone())
             } else if node_annotation_matches(node, registry.http_annotations()) {
@@ -320,7 +362,12 @@ pub fn score_entry_points(
                 let path = prop_str(node, "path")
                     .unwrap_or_else(|| node.name.split_once(' ').map(|x| x.1).unwrap_or(""))
                     .to_string();
-                (EntrypointKind::HttpRoute, Some(method), Some(path), Vec::new())
+                (
+                    EntrypointKind::HttpRoute,
+                    Some(method),
+                    Some(path),
+                    Vec::new(),
+                )
             } else if node_annotation_matches(node, registry.event_annotations()) {
                 (EntrypointKind::EventListener, None, None, Vec::new())
             } else if node_annotation_matches(node, registry.scheduled_annotations())
@@ -355,7 +402,14 @@ pub fn score_entry_points(
         };
 
         let score = (callees / (callers + 1.0)) * multiplier;
-        scored.push(ScoredEntrypoint { id: node.id.clone(), score, kind, route_method, route_path, event_topics });
+        scored.push(ScoredEntrypoint {
+            id: node.id.clone(),
+            score,
+            kind,
+            route_method,
+            route_path,
+            event_topics,
+        });
     }
 
     scored.sort_by(|a, b| {
@@ -411,7 +465,11 @@ fn is_test_method(node: &Node, by_id: &HashMap<&NodeId, &Node>) -> bool {
     }
     let class_name = extract_class_name(node.id.as_str());
     if let Some(cn) = &class_name {
-        if cn.ends_with("Test") || cn.ends_with("Tests") || cn.ends_with("IT") || cn.ends_with("Spec") {
+        if cn.ends_with("Test")
+            || cn.ends_with("Tests")
+            || cn.ends_with("IT")
+            || cn.ends_with("Spec")
+        {
             return true;
         }
         let class_id_candidates = [
@@ -455,7 +513,9 @@ fn extract_class_name(id: &str) -> Option<String> {
 
 fn is_scheduled_name(name: &str) -> bool {
     const SCHEDULED_PREFIXES: &[&str] = &["run", "execute", "schedule", "batch"];
-    SCHEDULED_PREFIXES.iter().any(|p| starts_word_boundary(name, p))
+    SCHEDULED_PREFIXES
+        .iter()
+        .any(|p| starts_word_boundary(name, p))
 }
 
 fn starts_word_boundary(name: &str, prefix: &str) -> bool {
@@ -463,7 +523,11 @@ fn starts_word_boundary(name: &str, prefix: &str) -> bool {
         return false;
     };
     rest.is_empty()
-        || rest.chars().next().map(|c| c == '_' || c.is_ascii_uppercase()).unwrap_or(false)
+        || rest
+            .chars()
+            .next()
+            .map(|c| c == '_' || c.is_ascii_uppercase())
+            .unwrap_or(false)
 }
 
 fn is_entry_name(name: &str) -> bool {
@@ -494,7 +558,9 @@ fn node_annotation_matches(node: &Node, set: &BTreeSet<String>) -> bool {
     let Some(anns) = props.get("route_annotations").and_then(|v| v.as_array()) else {
         return false;
     };
-    anns.iter().filter_map(|v| v.as_str()).any(|a| set.contains(a))
+    anns.iter()
+        .filter_map(|v| v.as_str())
+        .any(|a| set.contains(a))
 }
 
 fn prop_str<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
@@ -504,4 +570,3 @@ fn prop_str<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 #[path = "entrypoints_tests.rs"]
 mod tests;
-

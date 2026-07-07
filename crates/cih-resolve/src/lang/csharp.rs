@@ -37,15 +37,15 @@ impl LanguageResolver for CSharpResolver {
         None
     }
 
-    fn inheritance_model(&self) -> InheritanceModel {
-        InheritanceModel::TypeScriptNominal
+    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+        None
     }
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
-        None
+    fn inheritance_model(&self) -> InheritanceModel {
+        InheritanceModel::TypeScriptNominal
     }
 }

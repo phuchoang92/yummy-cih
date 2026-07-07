@@ -784,8 +784,7 @@ mod tests {
     fn analyze_filled_repo_includes_explicit_path() {
         let mut app = analyze_app();
         let idx = app.cmd_idx();
-        app.cmds[idx].fields[0].val =
-            FieldVal::Text("/home/user/my-project".into());
+        app.cmds[idx].fields[0].val = FieldVal::Text("/home/user/my-project".into());
         let assembled = app.assembled_command();
         assert_eq!(
             assembled, "cih-engine analyze /home/user/my-project",

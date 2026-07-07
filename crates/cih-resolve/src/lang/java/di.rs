@@ -39,5 +39,9 @@ pub(crate) fn single_bean_impl(interface_fqcn: &str, index: &CommonIndex) -> Opt
             }
         }
     }
-    if beans.len() == 1 { Some(beans[0].clone()) } else { None }
+    if beans.len() == 1 {
+        Some(beans[0].clone())
+    } else {
+        None
+    }
 }

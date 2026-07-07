@@ -113,9 +113,8 @@ pub fn emit_similar_to_edges(nodes: &[Node]) -> Vec<Edge> {
     let mut edges = Vec::new();
     for (src_idx, mut neighbors) in edge_map {
         // Sort descending by Jaccard.
-        neighbors.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        neighbors
+            .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         neighbors.truncate(MAX_EDGES_PER_NODE);
         for (dst_idx, jaccard) in neighbors {
             edges.push(Edge {

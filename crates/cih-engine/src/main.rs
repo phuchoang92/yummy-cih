@@ -632,7 +632,10 @@ fn main() -> Result<()> {
             let (h, r) = (&layers.home.analyze, &layers.repo.analyze);
             // Empty --language means "unset" → fall back to config, then "all".
             let languages = if languages.is_empty() {
-                r.languages.clone().or_else(|| h.languages.clone()).unwrap_or_default()
+                r.languages
+                    .clone()
+                    .or_else(|| h.languages.clone())
+                    .unwrap_or_default()
             } else {
                 languages
             };
@@ -672,11 +675,9 @@ fn main() -> Result<()> {
                 },
             )
         }
-        Command::Resolve {
-            repo,
-            db,
-            json,
-        } => analyze::run_resolve(repo, db.falkor_url, db.graph_key, db.no_load, json),
+        Command::Resolve { repo, db, json } => {
+            analyze::run_resolve(repo, db.falkor_url, db.graph_key, db.no_load, json)
+        }
         Command::Discover {
             repo,
             db,
@@ -721,13 +722,15 @@ fn main() -> Result<()> {
             )
             .value;
             let resolution = resolution.or(r.resolution).or(h.resolution);
-            let min_community_size =
-                min_community_size.or(r.min_community_size).or(h.min_community_size);
+            let min_community_size = min_community_size
+                .or(r.min_community_size)
+                .or(h.min_community_size);
             let max_trace_depth = max_trace_depth.or(r.max_trace_depth).or(h.max_trace_depth);
             let max_processes = max_processes.or(r.max_processes).or(h.max_processes);
             let max_branching = max_branching.or(r.max_branching).or(h.max_branching);
-            let min_trace_confidence =
-                min_trace_confidence.or(r.min_trace_confidence).or(h.min_trace_confidence);
+            let min_trace_confidence = min_trace_confidence
+                .or(r.min_trace_confidence)
+                .or(h.min_trace_confidence);
             let feature_llm_provider = feature_llm_provider
                 .or_else(|| r.feature_llm_provider.clone())
                 .or_else(|| h.feature_llm_provider.clone());
@@ -782,7 +785,9 @@ fn main() -> Result<()> {
                             llm::LlmProvider::DeepSeek => "deepseek-chat".to_string(),
                             llm::LlmProvider::Gemini => "gemini-2.5-flash".to_string(),
                             llm::LlmProvider::Anthropic => "claude-haiku-4-5-20251001".to_string(),
-                            llm::LlmProvider::Bedrock => "us.anthropic.claude-haiku-4-5-20251001".to_string(),
+                            llm::LlmProvider::Bedrock => {
+                                "us.anthropic.claude-haiku-4-5-20251001".to_string()
+                            }
                             _ => "gpt-4o-mini".to_string(),
                         }
                     } else {
@@ -1089,7 +1094,8 @@ fn main() -> Result<()> {
             )
             .value;
             let html = settings::resolve_bool(html, r.html, h.html).value;
-            let incremental = settings::resolve_bool(incremental, r.incremental, h.incremental).value;
+            let incremental =
+                settings::resolve_bool(incremental, r.incremental, h.incremental).value;
 
             wiki::run_wiki(wiki::WikiConfig {
                 repo,
@@ -1122,7 +1128,14 @@ fn main() -> Result<()> {
                 json,
             })
         }
-        Command::Taint { repo, db, intra_proc, cfg, pdg, json } => cmd::taint::run_taint(
+        Command::Taint {
+            repo,
+            db,
+            intra_proc,
+            cfg,
+            pdg,
+            json,
+        } => cmd::taint::run_taint(
             repo,
             cmd::taint::TaintFlags {
                 falkor_url: db.falkor_url,
@@ -1153,9 +1166,11 @@ fn main() -> Result<()> {
         Command::Artifact { command } => run_artifact(command),
         Command::Config { command } => match command {
             ConfigCommand::Show { repo, json } => cmd::config::run_config_show(&repo, json),
-            ConfigCommand::Init { repo, global, force } => {
-                cmd::config::run_config_init(&repo, global, force)
-            }
+            ConfigCommand::Init {
+                repo,
+                global,
+                force,
+            } => cmd::config::run_config_init(&repo, global, force),
             ConfigCommand::Decompile { repo } => cmd::config::run_config_decompile(&repo),
         },
         // Handled above before the match; unreachable at runtime.

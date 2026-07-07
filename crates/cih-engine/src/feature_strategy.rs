@@ -64,7 +64,13 @@ pub fn make_feature_llm_caller(
     max_tokens: u32,
     timeout_secs: u64,
 ) -> Arc<dyn FeatureLlmCaller> {
-    Arc::new(EngineLlmCaller { adapter, api_key, model, max_tokens, timeout_secs })
+    Arc::new(EngineLlmCaller {
+        adapter,
+        api_key,
+        model,
+        max_tokens,
+        timeout_secs,
+    })
 }
 
 /// Build the feature classification strategy selected by the `--feature-strategy` flag.

@@ -89,7 +89,8 @@ fn is_internal_scheme(scheme: &str) -> bool {
 fn is_message_scheme(scheme: &str) -> bool {
     matches!(
         scheme,
-        "jms" | "activemq"
+        "jms"
+            | "activemq"
             | "kafka"
             | "amqp"
             | "rabbitmq"
@@ -226,7 +227,7 @@ fn extract_camel_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput {
                     kind: EdgeKind::IntegrationLink,
                     confidence: 0.8,
                     reason: format!("camel-{scheme}"),
-            props: None,
+                    props: None,
                 });
             }
         } else if is_message_scheme(scheme) {
@@ -256,7 +257,7 @@ fn extract_camel_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput {
                     kind: EdgeKind::PublishesEvent,
                     confidence: 0.9,
                     reason: format!("camel-{scheme}-to"),
-            props: None,
+                    props: None,
                 });
             }
         }
@@ -283,7 +284,11 @@ struct JaxrsServerAcc {
 /// `<entry>` (source `osgi_servlet`). Matching `<server>` by namespace URI handles any prefix
 /// alias; nested traversal captures inline service beans; comments/CDATA/entities are handled by
 /// the parser. Best-effort: a parse error stops the walk with whatever was collected.
-fn extract_structured_xml(rel_path: &str, content: &str, source_label: &str) -> IntegrationXmlOutput {
+fn extract_structured_xml(
+    rel_path: &str,
+    content: &str,
+    source_label: &str,
+) -> IntegrationXmlOutput {
     use quick_xml::events::{BytesStart, Event};
     use quick_xml::name::{Namespace, ResolveResult};
     use quick_xml::reader::NsReader;
@@ -473,7 +478,6 @@ fn push_jaxrs_server_node(rel_path: &str, acc: JaxrsServerAcc, nodes: &mut Vec<N
     });
 }
 
-
 /// Extract a named XML attribute value from a tag fragment.
 /// Handles both single and double quoted values.
 fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
@@ -490,4 +494,3 @@ fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
         None
     }
 }
-

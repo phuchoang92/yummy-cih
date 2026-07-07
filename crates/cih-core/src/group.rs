@@ -139,4 +139,3 @@ impl GroupRegistry {
         self.groups.len() != before
     }
 }
-

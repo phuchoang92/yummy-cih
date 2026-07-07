@@ -366,7 +366,10 @@ pub fn run_preflight_checks(workspace: &Path, repo_path: &Path, dry_run: bool) -
             workspace.display()
         );
     }
-    step_line(&format!("docker-compose.yml found: {}", compose_file.display()));
+    step_line(&format!(
+        "docker-compose.yml found: {}",
+        compose_file.display()
+    ));
 
     let docker_ok = std::process::Command::new("docker")
         .args(["compose", "version"])
@@ -438,7 +441,11 @@ pub fn execute_command_plan(
 
     for cmd in plan {
         step_blank();
-        let tag = if cmd.optional { "(optional)" } else { "(required)" };
+        let tag = if cmd.optional {
+            "(optional)"
+        } else {
+            "(required)"
+        };
         step_line(&format!("[{}] {}", cmd.label, cmd.command));
         step_line(tag);
 
@@ -509,8 +516,12 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
         let plan = build_command_plan(&cfg);
 
         let llm_key_line = cfg.llm.env_var().map(|key| format!("{}=", key));
-        let content =
-            start_env::render_env(&repo_canonical, &repo_name, &pg_password, llm_key_line.as_deref());
+        let content = start_env::render_env(
+            &repo_canonical,
+            &repo_name,
+            &pg_password,
+            llm_key_line.as_deref(),
+        );
 
         start_env::write_env_file(&cfg.workspace, &content, cfg.dry_run)?;
 
@@ -528,7 +539,11 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
     } else {
         // ── Interactive mode ──
         println!();
-        let title = paint(palette().has_color, "1", "══ CIH Interactive Setup Wizard ══");
+        let title = paint(
+            palette().has_color,
+            "1",
+            "══ CIH Interactive Setup Wizard ══",
+        );
         println!("{title}");
 
         // Step 1: Workspace
@@ -723,8 +738,12 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
         // Step 9: Preflight checks & write .env
         run_preflight_checks(&cfg.workspace, &repo_canonical, false)?;
 
-        let content =
-            start_env::render_env(&repo_canonical, &repo_name, &pg_password, llm_key_line.as_deref());
+        let content = start_env::render_env(
+            &repo_canonical,
+            &repo_name,
+            &pg_password,
+            llm_key_line.as_deref(),
+        );
         start_env::write_env_file(&cfg.workspace, &content, false)?;
         step_line(&format!(".env written to {}/.env", cfg.workspace.display()));
 

@@ -257,7 +257,10 @@ fn event_match_kind(provider: &EventContract, consumer: &EventContract) -> Contr
 
 fn dedup_matches(matches: Vec<ContractMatch>) -> Vec<ContractMatch> {
     let mut seen = std::collections::HashSet::new();
-    matches.into_iter().filter(|m| seen.insert(m.clone())).collect()
+    matches
+        .into_iter()
+        .filter(|m| seen.insert(m.clone()))
+        .collect()
 }
 
 pub fn normalize_contract_path(path: &str) -> String {
@@ -297,8 +300,14 @@ mod tests {
     }
 
     fn matched_kind(publisher: EventContract, listener: EventContract) -> ContractMatchKind {
-        let provider = RepoContracts { publishes: vec![publisher], ..Default::default() };
-        let consumer = RepoContracts { listens: vec![listener], ..Default::default() };
+        let provider = RepoContracts {
+            publishes: vec![publisher],
+            ..Default::default()
+        };
+        let consumer = RepoContracts {
+            listens: vec![listener],
+            ..Default::default()
+        };
         let matches = match_contracts(&[provider, consumer]);
         assert_eq!(matches.len(), 1, "expected exactly one event match");
         matches[0].kind

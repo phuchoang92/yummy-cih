@@ -43,7 +43,9 @@ impl LanguageResolver for JavaResolver {
             return Some(bean);
         }
         // Fallback: single concrete implementor in the workspace (annotation-driven wiring).
-        index.single_programmatic_impl(type_qname, "java").map(str::to_string)
+        index
+            .single_programmatic_impl(type_qname, "java")
+            .map(str::to_string)
     }
 
     fn type_metadata(&self, def: &SymbolDef) -> Option<String> {
@@ -54,7 +56,11 @@ impl LanguageResolver for JavaResolver {
         InheritanceModel::JavaNominal
     }
 
-    fn extra_edges(&self, repo_root: Option<&Path>, parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
+    fn extra_edges(
+        &self,
+        repo_root: Option<&Path>,
+        parsed: &[ParsedFile],
+    ) -> (Vec<Node>, Vec<Edge>) {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         if let Some(root) = repo_root {
