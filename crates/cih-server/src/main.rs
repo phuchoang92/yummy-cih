@@ -22,6 +22,7 @@ mod files;
 mod indexing;
 mod jobs;
 mod layout;
+mod patterns;
 mod resources;
 mod search;
 mod server;
@@ -544,6 +545,37 @@ impl CihServer {
                 None,
             )),
         }
+    }
+
+    #[tool(
+        description = "Teach CIH a repository's own framework convention so its endpoints become \
+            visible without any code change. Writes a rule to <repo>/cih.patterns.toml and \
+            re-indexes. Use when route_map misses endpoints because the repo uses a custom/proprietary \
+            annotation (e.g. @BankEndpoint(\"/pay\")) that the built-in Spring/JAX-RS detectors don't \
+            know. First inspect the code (search_code/read_file) to find the annotation, its \
+            path attribute, and any class-level prefix annotation, then call this. \
+            kind=\"route\": annotation=the method annotation name (no @); path_attr=attribute holding \
+            the URL (default \"value\"); method=fixed verb OR method_attr=attribute holding the verb; \
+            class_prefix_annotation=optional class-level prefix annotation. Poll index_status with the \
+            returned reindex_job_id, then re-run route_map."
+    )]
+    async fn add_resolve_pattern(
+        &self,
+        Parameters(args): Parameters<AddResolvePatternArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        patterns::add_resolve_pattern(&self.falkor_url, &self.graph_key, &self.jobs, args).await
+    }
+
+    #[tool(
+        description = "List the custom resolve patterns (cih.patterns.toml) currently taught for a \
+            repo. Use before add_resolve_pattern to avoid duplicates and see what conventions are \
+            already recognized."
+    )]
+    async fn list_resolve_patterns(
+        &self,
+        Parameters(args): Parameters<ListResolvePatternsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        patterns::list_resolve_patterns(&self.graph_key, args).await
     }
 
     #[tool(

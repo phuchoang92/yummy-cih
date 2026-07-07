@@ -491,6 +491,19 @@ pub fn analyze_from_scope_with_options(
         &post_opts,
     );
 
+    // Apply user-defined resolve patterns (cih.patterns.toml) — teach CIH a repo's own framework
+    // conventions (custom route annotations, …) without a hardcoded handler. Fail-soft: no file → no-op.
+    let pattern_rules = cih_patterns::load_patterns(&repo_root);
+    if !pattern_rules.is_empty() {
+        let before = all_nodes.len();
+        cih_resolve::apply_pattern_rules(&mut all_nodes, &mut edges, &pattern_rules);
+        tracing::info!(
+            route_rules = pattern_rules.routes.len(),
+            synthesized_nodes = all_nodes.len() - before,
+            "applied cih.patterns.toml resolve patterns"
+        );
+    }
+
     cih_resolve::propagate_loop_depths(&mut all_nodes, &edges);
 
     let similar_edges = cih_resolve::emit_similar_to_edges(&all_nodes);

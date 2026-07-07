@@ -602,6 +602,7 @@ dependencies = [
  "cih-jar",
  "cih-lang",
  "cih-parse",
+ "cih-patterns",
  "cih-resolve",
  "cih-taint",
  "cih-wiki",
@@ -715,12 +716,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cih-patterns"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "cih-resolve"
 version = "0.1.0"
 dependencies = [
  "cih-core",
  "cih-lang",
  "cih-parse",
+ "cih-patterns",
  "ignore",
  "quick-xml",
  "rayon",
@@ -750,6 +761,7 @@ dependencies = [
  "cih-falkor",
  "cih-graph-store",
  "cih-grouping",
+ "cih-patterns",
  "cih-search",
  "cih-taint",
  "reqwest",

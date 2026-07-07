@@ -10,10 +10,29 @@ pub async fn index_repo(
     jobs: &Jobs,
     args: IndexRepoArgs,
 ) -> Result<CallToolResult, McpError> {
-    let repo = std::path::Path::new(&args.repo_path);
+    let (job_id, canonical) =
+        start_index_job(falkor_url, graph_key, jobs, &args.repo_path, &args.languages).await?;
+    json_result(&serde_json::json!({
+        "job_id": job_id,
+        "status": "running",
+        "repo": canonical,
+        "message": format!("Indexing started. Poll with index_status(job_id=\"{job_id}\")."),
+    }))
+}
+
+/// Validate `repo_path`, spawn a background `cih-engine analyze`, and return `(job_id, canonical
+/// repo path)`. Shared by the `index_repo` tool and `add_resolve_pattern`'s reindex.
+pub async fn start_index_job(
+    falkor_url: &str,
+    graph_key: &str,
+    jobs: &Jobs,
+    repo_path: &str,
+    languages: &str,
+) -> Result<(String, String), McpError> {
+    let repo = std::path::Path::new(repo_path);
     if !repo.is_dir() {
         return Err(McpError::invalid_params(
-            format!("'{}' does not exist or is not a directory", args.repo_path),
+            format!("'{repo_path}' does not exist or is not a directory"),
             None,
         ));
     }
@@ -34,7 +53,7 @@ pub async fn index_repo(
     let graph_key = graph_key.to_string();
     let jobs = jobs.clone();
     let job_id2 = job_id.clone();
-    let languages = args.languages.clone();
+    let languages = languages.to_string();
 
     tokio::spawn(async move {
         let mut cmd = tokio::process::Command::new(&engine);
@@ -98,10 +117,5 @@ pub async fn index_repo(
         }
     });
 
-    json_result(&serde_json::json!({
-        "job_id": job_id,
-        "status": "running",
-        "repo": canonical.display().to_string(),
-        "message": format!("Indexing started. Poll with index_status(job_id=\"{job_id}\")."),
-    }))
+    Ok((job_id, canonical.display().to_string()))
 }

@@ -5,8 +5,9 @@ use cih_core::{
 use tree_sitter::Node as TsNode;
 
 use super::{
-    CallableContext, FileBuilder, TypeContext, jaxrs_class_prefix, modifiers, param_type_names,
-    parameter_count, range_of, return_type_name, spring_class_prefix, text, type_fqcn, type_kind,
+    CallableContext, FileBuilder, TypeContext, annotation_metadata, jaxrs_class_prefix, modifiers,
+    param_type_names, parameter_count, range_of, return_type_name, spring_class_prefix, text,
+    type_fqcn, type_kind,
 };
 use super::metrics::{compute_complexity, java_body_fingerprint};
 use super::structural::{
@@ -173,6 +174,10 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             if let Ok(v) = serde_json::to_value(fp) {
                 obj.insert("bodyFingerprint".into(), v);
             }
+        }
+        let annotations = annotation_metadata(node, src);
+        if !annotations.is_empty() {
+            obj.insert("annotations".into(), serde_json::Value::Array(annotations));
         }
         if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
     };

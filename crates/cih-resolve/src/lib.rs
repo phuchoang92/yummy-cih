@@ -25,6 +25,7 @@ pub mod di_xml;
 mod emit;
 mod index;
 pub mod integration_xml;
+pub mod patterns;
 pub(crate) mod reports;
 mod types;
 pub use complexity::propagate_loop_depths;
@@ -34,6 +35,7 @@ pub use contracts::resolve_contract_edges;
 pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
+pub use patterns::apply_pattern_rules;
 pub use lang::{all_resolvers, PostProcessOptions, ResolverRegistry};
 pub use reports::write_unresolved_reports;
 

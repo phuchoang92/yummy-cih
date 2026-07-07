@@ -339,3 +339,23 @@ fn http_contract_sites_have_no_messaging_framework() {
         .expect("RestTemplate HTTP contract site");
     assert_eq!(site.messaging_framework, None);
 }
+
+#[test]
+fn retains_generic_annotation_metadata_on_methods() {
+    let src = r#"
+        package com.acme;
+        class C {
+            @BankEndpoint("/pay")
+            @Audited(level = "high")
+            public void pay() {}
+        }
+    "#;
+    let unit = JavaProvider::new().parse_file("C.java", src).expect("parse");
+    let method = unit.nodes.iter().find(|n| n.kind == cih_core::NodeKind::Method).expect("method");
+    let anns = method.props.as_ref().unwrap().get("annotations").expect("annotations prop");
+    let arr = anns.as_array().unwrap();
+    let be = arr.iter().find(|a| a["name"] == "BankEndpoint").expect("BankEndpoint");
+    assert_eq!(be["attrs"]["value"], "/pay");
+    let au = arr.iter().find(|a| a["name"] == "Audited").expect("Audited");
+    assert_eq!(au["attrs"]["level"], "high");
+}
