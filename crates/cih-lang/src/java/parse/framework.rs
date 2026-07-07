@@ -1,4 +1,7 @@
-use cih_core::{ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId, NodeKind, RouteSource};
+use cih_core::{
+    ContractKind, ContractSite, Edge, EdgeKind, MessagingFramework, Node, NodeId, NodeKind,
+    RouteSource,
+};
 use tree_sitter::Node as TsNode;
 
 use super::{
@@ -112,6 +115,7 @@ fn emit_feign_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) 
                 url_template: Some(url),
                 topic: None,
                 http_method: Some(route.http_method.to_string()),
+                messaging_framework: None,
                 in_callable: callable.id.clone(),
                 range: route.range,
             });
@@ -134,6 +138,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilde
                         url_template: None,
                         topic: Some(topic),
                         http_method: None,
+                        messaging_framework: Some(MessagingFramework::Kafka),
                         in_callable: callable.id.clone(),
                         range: range_of(annotation),
                     });
@@ -146,6 +151,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilde
                         url_template: None,
                         topic: Some(base_type_simple(&topic)),
                         http_method: None,
+                        messaging_framework: Some(MessagingFramework::Spring),
                         in_callable: callable.id.clone(),
                         range: range_of(annotation),
                     });
@@ -177,6 +183,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                     .map(|url| normalize_external_url(&url)),
                 topic: None,
                 http_method: Some(http_method.to_string()),
+                messaging_framework: None,
                 in_callable: callable.id,
                 range: range_of(node),
             });
@@ -193,6 +200,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                         .map(|url| normalize_external_url(&url)),
                     topic: None,
                     http_method: Some(http_method.to_string()),
+                    messaging_framework: None,
                     in_callable: callable.id,
                     range: range_of(node),
                 });
@@ -209,6 +217,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                 url_template: None,
                 topic: Some(topic),
                 http_method: None,
+                messaging_framework: Some(MessagingFramework::Kafka),
                 in_callable: callable.id,
                 range: range_of(node),
             });
@@ -230,6 +239,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                 url_template: None,
                 topic: Some(topic),
                 http_method: None,
+                messaging_framework: Some(MessagingFramework::Spring),
                 in_callable: callable.id,
                 range: range_of(node),
             });

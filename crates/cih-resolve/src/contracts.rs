@@ -82,7 +82,11 @@ pub fn resolve_contract_edges(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                         kind,
                         confidence: 0.8,
                         reason: reason.to_string(),
-                        props: None,
+                        // Carry the messaging framework as structured data so cross-repo
+                        // consumers classify Kafka vs Spring without guessing from `reason`.
+                        props: site
+                            .messaging_framework
+                            .map(|fw| serde_json::json!({ "messaging_framework": fw })),
                     });
                 }
                 ContractKind::Custom(_) => continue,

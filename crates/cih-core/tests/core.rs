@@ -206,6 +206,7 @@ fn parsed_file_round_trips_json() {
             url_template: None,
             topic: Some("user-saved".into()),
             http_method: None,
+            messaging_framework: Some(cih_core::MessagingFramework::Spring),
             in_callable: method_id("com.acme.UserService", "save", 1),
             range: Range {
                 start_line: 12,
@@ -222,4 +223,30 @@ fn parsed_file_round_trips_json() {
     let encoded = serde_json::to_string(&parsed).unwrap();
     let decoded: ParsedFile = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, parsed);
+}
+
+#[test]
+fn messaging_framework_maps_to_contract_match_kind() {
+    use cih_core::{ContractMatchKind, MessagingFramework};
+    assert_eq!(
+        ContractMatchKind::from(MessagingFramework::Kafka),
+        ContractMatchKind::KafkaTopic
+    );
+    assert_eq!(
+        ContractMatchKind::from(MessagingFramework::Spring),
+        ContractMatchKind::SpringEvent
+    );
+}
+
+#[test]
+fn messaging_framework_serializes_snake_case() {
+    use cih_core::MessagingFramework;
+    assert_eq!(
+        serde_json::to_string(&MessagingFramework::Spring).unwrap(),
+        "\"spring\""
+    );
+    assert_eq!(
+        serde_json::to_string(&MessagingFramework::Kafka).unwrap(),
+        "\"kafka\""
+    );
 }

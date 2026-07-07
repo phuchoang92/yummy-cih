@@ -23,6 +23,15 @@ pub enum ContractMatchKind {
     SpringEvent,
 }
 
+impl From<crate::MessagingFramework> for ContractMatchKind {
+    fn from(fw: crate::MessagingFramework) -> Self {
+        match fw {
+            crate::MessagingFramework::Kafka => ContractMatchKind::KafkaTopic,
+            crate::MessagingFramework::Spring => ContractMatchKind::SpringEvent,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContractMatch {
     pub kind: ContractMatchKind,

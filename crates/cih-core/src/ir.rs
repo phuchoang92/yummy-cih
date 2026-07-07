@@ -99,9 +99,23 @@ pub struct ContractSite {
     /// HTTP method for HTTP calls.
     #[serde(default)]
     pub http_method: Option<String>,
+    /// Messaging framework for event contracts (`EventPublish` / `EventListen`), so the
+    /// contract carries its own Kafka-vs-Spring identity instead of consumers guessing.
+    #[serde(default)]
+    pub messaging_framework: Option<MessagingFramework>,
     /// Graph id of the enclosing callable that makes/listens to this contract.
     pub in_callable: NodeId,
     pub range: Range,
+}
+
+/// Messaging framework behind an event contract, determined by the parser
+/// (`@KafkaListener` / `KafkaTemplate` → Kafka; `@EventListener` /
+/// `ApplicationEventPublisher` → Spring).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagingFramework {
+    Kafka,
+    Spring,
 }
 
 /// Type of contract site discovered by the parser.

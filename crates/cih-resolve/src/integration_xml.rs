@@ -349,7 +349,8 @@ fn extract_spring_beans_xml(rel_path: &str, content: &str) -> IntegrationXmlOutp
 /// Emits one `IntegrationRoute` node per `<jaxrs:server address="...">`
 /// (`source = "cxf_jaxrs_server"`, carrying the referenced bean ids) and one per
 /// OSGi HTTP-whiteboard servlet pattern (`source = "osgi_servlet"`). These are wired
-/// onto Java `Route` nodes later by [`resolve_jaxrs_xml_prefixes`].
+/// onto Java `Route` nodes later by the Java resolver's `post_process` pass
+/// (`lang::java::cxf`).
 fn extract_cxf_jaxrs(rel_path: &str, content: &str) -> Vec<Node> {
     let mut nodes = Vec::new();
     let bytes = content.as_bytes();

@@ -24,8 +24,9 @@ pub use group::{
 };
 pub use ir::{
     BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind, ContractSite,
-    ImportBinding, ImportBindingKind, ParsedFile, ParsedUnit, RawImport, RefKind, ReferenceSite,
-    SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile, SymbolDef, TypeBinding,
+    ImportBinding, ImportBindingKind, MessagingFramework, ParsedFile, ParsedUnit, RawImport,
+    RefKind, ReferenceSite, SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile,
+    SymbolDef, TypeBinding,
 };
 pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
 pub use repo_map::{

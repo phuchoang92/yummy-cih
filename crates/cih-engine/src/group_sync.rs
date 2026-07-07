@@ -5,8 +5,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use cih_core::{
-    contracts_path, ContractMatch, ContractMatchKind, EdgeKind, GraphArtifacts, Node, NodeKind,
-    Registry, RegistryEntry, VersionId,
+    contracts_path, ContractMatch, ContractMatchKind, EdgeKind, GraphArtifacts, MessagingFramework,
+    Node, NodeKind, Registry, RegistryEntry, VersionId,
 };
 use serde::Serialize;
 
@@ -40,7 +40,9 @@ pub struct EventContract {
     pub repo: String,
     pub caller_id: String,
     pub topic: String,
-    pub reason: String,
+    /// Messaging framework carried on the contract edge (`None` for pre-field artifacts
+    /// or non-Java sources); classification is data, not inferred in the engine.
+    pub framework: Option<MessagingFramework>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -146,11 +148,16 @@ fn load_repo_contracts(entry: &RegistryEntry) -> Result<RepoContracts> {
             continue;
         }
         let topic = node_prop_str(topic_node, "topic").unwrap_or_else(|| topic_node.name.clone());
+        let framework = edge
+            .props
+            .as_ref()
+            .and_then(|p| p.get("messaging_framework").cloned())
+            .and_then(|v| serde_json::from_value::<MessagingFramework>(v).ok());
         let contract = EventContract {
             repo: entry.name.clone(),
             caller_id: edge.src.as_str().to_string(),
             topic,
-            reason: edge.reason,
+            framework,
         };
         match edge.kind {
             EdgeKind::PublishesEvent => contracts.publishes.push(contract),
@@ -239,11 +246,13 @@ pub fn match_contracts(repos: &[RepoContracts]) -> Vec<ContractMatch> {
 }
 
 fn event_match_kind(provider: &EventContract, consumer: &EventContract) -> ContractMatchKind {
-    if provider.reason.contains("spring") || consumer.reason.contains("spring") {
-        ContractMatchKind::SpringEvent
-    } else {
-        ContractMatchKind::KafkaTopic
-    }
+    // The framework travels with the contract (set by the parser); the engine just reads it.
+    // Default to KafkaTopic for pre-field artifacts / edges without a framework tag.
+    provider
+        .framework
+        .or(consumer.framework)
+        .map(ContractMatchKind::from)
+        .unwrap_or(ContractMatchKind::KafkaTopic)
 }
 
 fn dedup_matches(matches: Vec<ContractMatch>) -> Vec<ContractMatch> {
@@ -272,4 +281,53 @@ fn write_jsonl(path: &Path, matches: &[ContractMatch]) -> Result<()> {
     }
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(repo: &str, topic: &str, fw: Option<MessagingFramework>) -> EventContract {
+        EventContract {
+            repo: repo.to_string(),
+            caller_id: format!("Method:{repo}#handler/1"),
+            topic: topic.to_string(),
+            framework: fw,
+        }
+    }
+
+    fn matched_kind(publisher: EventContract, listener: EventContract) -> ContractMatchKind {
+        let provider = RepoContracts { publishes: vec![publisher], ..Default::default() };
+        let consumer = RepoContracts { listens: vec![listener], ..Default::default() };
+        let matches = match_contracts(&[provider, consumer]);
+        assert_eq!(matches.len(), 1, "expected exactly one event match");
+        matches[0].kind
+    }
+
+    #[test]
+    fn spring_framework_yields_spring_event_match() {
+        let kind = matched_kind(
+            event("svc-a", "OrderPlaced", Some(MessagingFramework::Spring)),
+            event("svc-b", "OrderPlaced", Some(MessagingFramework::Spring)),
+        );
+        assert_eq!(kind, ContractMatchKind::SpringEvent);
+    }
+
+    #[test]
+    fn kafka_framework_yields_kafka_topic_match() {
+        let kind = matched_kind(
+            event("svc-a", "orders", Some(MessagingFramework::Kafka)),
+            event("svc-b", "orders", Some(MessagingFramework::Kafka)),
+        );
+        assert_eq!(kind, ContractMatchKind::KafkaTopic);
+    }
+
+    #[test]
+    fn missing_framework_defaults_to_kafka_topic() {
+        let kind = matched_kind(
+            event("svc-a", "orders", None),
+            event("svc-b", "orders", None),
+        );
+        assert_eq!(kind, ContractMatchKind::KafkaTopic);
+    }
 }

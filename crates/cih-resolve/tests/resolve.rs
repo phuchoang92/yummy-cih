@@ -1,7 +1,7 @@
 use cih_core::{
     constructor_id, external_endpoint_id, field_id, file_id, kafka_topic_id, method_id, type_id,
-    BindingKind, ContractKind, ContractSite, EdgeKind, NodeId, NodeKind, ParsedFile, Range,
-    RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    BindingKind, ContractKind, ContractSite, EdgeKind, MessagingFramework, NodeId, NodeKind,
+    ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
 };
 use cih_resolve::resolve_edges;
 
@@ -242,6 +242,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 url_template: Some("/api/orders/{id}".into()),
                 topic: None,
                 http_method: Some("get".into()),
+                messaging_framework: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -250,6 +251,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 url_template: None,
                 topic: Some("orders.created".into()),
                 http_method: None,
+                messaging_framework: Some(MessagingFramework::Kafka),
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -258,6 +260,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 url_template: None,
                 topic: Some("orders.created".into()),
                 http_method: None,
+                messaging_framework: Some(MessagingFramework::Spring),
                 in_callable: listener.clone(),
                 range: Range::default(),
             },
@@ -281,12 +284,26 @@ fn contract_sites_emit_nodes_and_edges() {
     assert!(out.edges.iter().any(|edge| {
         edge.kind == EdgeKind::ExternalCall && edge.src == caller && edge.dst == endpoint
     }));
-    assert!(out.edges.iter().any(|edge| {
-        edge.kind == EdgeKind::PublishesEvent && edge.src == caller && edge.dst == topic
-    }));
-    assert!(out.edges.iter().any(|edge| {
-        edge.kind == EdgeKind::ListensTo && edge.src == listener && edge.dst == topic
-    }));
+    let publish = out
+        .edges
+        .iter()
+        .find(|edge| edge.kind == EdgeKind::PublishesEvent && edge.src == caller && edge.dst == topic)
+        .expect("PublishesEvent edge expected");
+    assert_eq!(
+        publish.props.as_ref().and_then(|p| p.get("messaging_framework")).and_then(|v| v.as_str()),
+        Some("kafka"),
+        "Kafka publish should carry messaging_framework=kafka"
+    );
+    let listen = out
+        .edges
+        .iter()
+        .find(|edge| edge.kind == EdgeKind::ListensTo && edge.src == listener && edge.dst == topic)
+        .expect("ListensTo edge expected");
+    assert_eq!(
+        listen.props.as_ref().and_then(|p| p.get("messaging_framework")).and_then(|v| v.as_str()),
+        Some("spring"),
+        "Spring listener should carry messaging_framework=spring"
+    );
 }
 
 fn mro_workspace() -> Vec<ParsedFile> {
