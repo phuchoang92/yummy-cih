@@ -32,6 +32,28 @@ fn is_integration_xml(content: &str) -> Option<&'static str> {
     None
 }
 
+/// Remove `<!-- … -->` comment spans so commented-out config isn't parsed as live facts.
+/// An unterminated comment drops the remainder. Borrows when there are no comments.
+fn strip_xml_comments(content: &str) -> std::borrow::Cow<'_, str> {
+    if !content.contains("<!--") {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start + 4..].find("-->") {
+            Some(end) => rest = &rest[start + 4 + end + 3..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 /// Extract URI scheme and component name from a Camel endpoint URI.
 /// "jms:queue:my-queue" → ("jms", "my-queue")
 /// "direct:my-route" → ("direct", "my-route")
@@ -86,6 +108,11 @@ pub fn extract_integration_xml(rel_path: &str, content: &str) -> IntegrationXmlO
             }
         }
     };
+
+    // Strip `<!-- … -->` first so commented-out config isn't parsed as live facts (the tag
+    // scanners don't otherwise skip comments). Node ranges here are already `Range::default`.
+    let stripped = strip_xml_comments(content);
+    let content = stripped.as_ref();
 
     match kind {
         "camel" => extract_camel_xml(rel_path, content),
@@ -278,6 +305,28 @@ fn extract_blueprint_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput 
                         props: Some(serde_json::json!({
                             "interface": iface,
                             "ref": refer,
+                            "source": "blueprint_xml",
+                        })),
+                    });
+                }
+            } else if tag_name == "bean" {
+                // Blueprint `<bean id class>` — so a CXF `<jaxrs:server>` ref can resolve to the
+                // impl class. Namespaced id (`bean:<id>`) to avoid colliding with a same-named
+                // `<service>` node on repo-wide dedup.
+                let id = extract_xml_attr(&content[tag_start..], "id");
+                let class = extract_xml_attr(&content[tag_start..], "class");
+                if let (Some(id), Some(class)) = (id, class) {
+                    let node_id = cih_core::integration_route_id(rel_path, &format!("bean:{id}"));
+                    nodes.push(Node {
+                        id: node_id,
+                        kind: NodeKind::IntegrationRoute,
+                        name: id.clone(),
+                        qualified_name: Some(class.to_string()),
+                        file: rel_path.to_string(),
+                        range: Range::default(),
+                        props: Some(serde_json::json!({
+                            "bean_id": id,
+                            "class": class,
                             "source": "blueprint_xml",
                         })),
                     });

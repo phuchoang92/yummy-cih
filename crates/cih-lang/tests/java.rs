@@ -234,3 +234,108 @@ fn method_level_request_mapping_emits_no_route() {
     "#;
     assert!(route_nodes(src).is_empty(), "expected no routes from method-level @RequestMapping");
 }
+
+// ── Messaging / HTTP contract sites (ContractKind + messaging_framework) ─────
+
+fn contract_sites(src: &str) -> Vec<cih_core::ContractSite> {
+    JavaProvider::new()
+        .parse_file("Sample.java", src)
+        .expect("sample should parse")
+        .parsed_file
+        .contract_sites
+}
+
+#[test]
+fn kafka_listener_is_event_listen_kafka() {
+    let src = r#"
+        package com.acme;
+        class OrderConsumer {
+            @KafkaListener(topics = "orders.created")
+            public void onOrder(String msg) {}
+        }
+    "#;
+    let sites = contract_sites(src);
+    let site = sites
+        .iter()
+        .find(|s| s.topic.as_deref() == Some("orders.created"))
+        .expect("kafka listener contract site");
+    assert_eq!(site.kind, cih_core::ContractKind::EventListen);
+    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Kafka));
+}
+
+#[test]
+fn spring_event_listener_is_event_listen_spring() {
+    let src = r#"
+        package com.acme;
+        class UserListener {
+            @EventListener
+            public void on(UserSaved event) {}
+        }
+    "#;
+    let sites = contract_sites(src);
+    let site = sites
+        .iter()
+        .find(|s| s.kind == cih_core::ContractKind::EventListen)
+        .expect("spring @EventListener contract site");
+    assert_eq!(site.topic.as_deref(), Some("UserSaved"));
+    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Spring));
+}
+
+#[test]
+fn kafka_template_send_is_event_publish_kafka() {
+    let src = r#"
+        package com.acme;
+        class OrderPublisher {
+            private KafkaTemplate<String, String> kafkaTemplate;
+            public void publish() {
+                kafkaTemplate.send("orders.created", "payload");
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    let site = sites
+        .iter()
+        .find(|s| s.kind == cih_core::ContractKind::EventPublish)
+        .expect("KafkaTemplate.send contract site");
+    assert_eq!(site.topic.as_deref(), Some("orders.created"));
+    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Kafka));
+}
+
+#[test]
+fn application_event_publisher_is_event_publish_spring() {
+    let src = r#"
+        package com.acme;
+        class Notifier {
+            private ApplicationEventPublisher publisher;
+            public void go() {
+                publisher.publishEvent(new UserSavedEvent());
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    let site = sites
+        .iter()
+        .find(|s| s.kind == cih_core::ContractKind::EventPublish)
+        .expect("ApplicationEventPublisher.publishEvent contract site");
+    assert_eq!(site.topic.as_deref(), Some("UserSavedEvent"));
+    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Spring));
+}
+
+#[test]
+fn http_contract_sites_have_no_messaging_framework() {
+    let src = r#"
+        package com.acme;
+        class OrderClient {
+            private RestTemplate restTemplate;
+            public void call() {
+                restTemplate.getForObject("http://svc/api/orders/1", String.class);
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    let site = sites
+        .iter()
+        .find(|s| s.kind == cih_core::ContractKind::HttpCall)
+        .expect("RestTemplate HTTP contract site");
+    assert_eq!(site.messaging_framework, None);
+}

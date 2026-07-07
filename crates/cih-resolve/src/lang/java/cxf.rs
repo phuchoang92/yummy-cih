@@ -6,7 +6,7 @@
 //! onto the Java `Route` nodes, prepending `servlet_prefix + <jaxrs:server address>` to
 //! each route path. Invoked from [`super::JavaResolver::post_process`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
@@ -27,23 +27,70 @@ pub(crate) fn stitch_route_prefixes(
     edges: &mut Vec<Edge>,
     route_base_path: Option<&str>,
 ) {
-    // bean id → class FQCN (repo-wide, so a server and its bean may live in different files).
-    let mut bean_to_fqcn: HashMap<String, String> = HashMap::new();
+    // Nothing to stitch unless a <jaxrs:server> exists — bail before building maps or scanning fs.
+    let has_cxf = nodes.iter().any(|n| {
+        n.kind == NodeKind::IntegrationRoute
+            && n.props
+                .as_ref()
+                .and_then(|p| p.get("source"))
+                .and_then(|s| s.as_str())
+                == Some("cxf_jaxrs_server")
+    });
+    if !has_cxf {
+        return;
+    }
+
+    // The CommonIndex isn't in scope in `post_process`, so derive the equivalent lookups from the
+    // assembled graph: FQCN → Class node (existence + edge target) and simple name → FQCNs (for
+    // the workspace-unique-name fallback, mirroring CommonIndex).
+    let mut class_node_by_fqcn: HashMap<&str, &NodeId> = HashMap::new();
+    let mut simple_to_fqcns: HashMap<&str, Vec<&str>> = HashMap::new();
+    for n in nodes.iter() {
+        if matches!(
+            n.kind,
+            NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Record
+        ) {
+            if let Some(fqcn) = n.qualified_name.as_deref() {
+                class_node_by_fqcn.insert(fqcn, &n.id);
+                simple_to_fqcns
+                    .entry(crate::di_xml::simple_name(fqcn))
+                    .or_default()
+                    .push(fqcn);
+            }
+        }
+    }
+
+    // bean id → (bean node id, class FQCN), repo-wide. A simple-name `class` is resolved to a
+    // workspace-unique FQCN; a fully-qualified `class` is kept as-is.
+    let mut bean_index: HashMap<String, (NodeId, String)> = HashMap::new();
     for n in nodes.iter() {
         if n.kind != NodeKind::IntegrationRoute {
             continue;
         }
         let Some(props) = n.props.as_ref() else { continue };
         let source = props.get("source").and_then(|s| s.as_str()).unwrap_or("");
-        if source == "spring_xml" || source == "blueprint_xml" {
-            if let Some(fqcn) = n.qualified_name.as_ref() {
-                bean_to_fqcn.insert(n.name.clone(), fqcn.trim().to_string());
-            }
+        if source != "spring_xml" && source != "blueprint_xml" {
+            continue;
         }
+        let Some(class) = props.get("class").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        let class = class.trim();
+        let fqcn = if class.contains('.') {
+            class.to_string()
+        } else {
+            match simple_to_fqcns.get(class) {
+                Some(fqcns) if fqcns.len() == 1 => fqcns[0].to_string(),
+                _ => class.to_string(), // simple name that is absent or ambiguous — leave unresolved
+            }
+        };
+        bean_index.insert(n.name.clone(), (n.id.clone(), fqcn));
     }
 
-    // (server node id, address, class FQCN) to apply.
+    // (server node id, address, class FQCN) to apply, plus explicit bean → Class registration edges.
     let mut targets: Vec<Target> = Vec::new();
+    let mut new_edges: Vec<Edge> = Vec::new();
+    let mut bean_class_seen: HashSet<(NodeId, NodeId)> = HashSet::new();
     for n in nodes.iter() {
         if n.kind != NodeKind::IntegrationRoute {
             continue;
@@ -65,16 +112,31 @@ pub(crate) fn stitch_route_prefixes(
             })
             .unwrap_or_default();
         for bean_id in bean_ids {
-            if let Some(fqcn) = bean_to_fqcn.get(&bean_id) {
-                targets.push(Target {
-                    server_id: n.id.clone(),
-                    address: address.to_string(),
-                    fqcn: fqcn.clone(),
-                });
+            let Some((bean_node_id, fqcn)) = bean_index.get(&bean_id) else {
+                continue;
+            };
+            targets.push(Target {
+                server_id: n.id.clone(),
+                address: address.to_string(),
+                fqcn: fqcn.clone(),
+            });
+            // Make the bean → impl-class registration an explicit, queryable edge (previously the
+            // linkage was only an implicit FQCN prefix-match on Route.handler).
+            if let Some(class_id) = class_node_by_fqcn.get(fqcn.as_str()) {
+                if bean_class_seen.insert((bean_node_id.clone(), (*class_id).clone())) {
+                    new_edges.push(Edge {
+                        src: bean_node_id.clone(),
+                        dst: (*class_id).clone(),
+                        kind: EdgeKind::IntegrationLink,
+                        confidence: 0.9,
+                        reason: "cxf-bean-class".to_string(),
+                        props: None,
+                    });
+                }
             }
         }
     }
-    // No CXF servers wired to a known class ⇒ nothing to do (and skip the fs scan below).
+    // No CXF servers wired to a known bean ⇒ nothing to do (and skip the fs scan below).
     if targets.is_empty() {
         return;
     }
@@ -87,7 +149,6 @@ pub(crate) fn stitch_route_prefixes(
     };
 
     let mut id_remap: HashMap<NodeId, NodeId> = HashMap::new();
-    let mut new_edges: Vec<Edge> = Vec::new();
 
     for n in nodes.iter_mut() {
         if n.kind != NodeKind::Route {
@@ -557,5 +618,320 @@ mod tests {
                 .any(|e| e.kind == EdgeKind::IntegrationLink && e.reason == "cxf-jaxrs-prefix"),
             "no provenance edge should be emitted when nothing matched"
         );
+    }
+
+    fn class_node(fqcn: &str) -> Node {
+        Node {
+            id: NodeId::new(format!("Class:{fqcn}")),
+            kind: NodeKind::Class,
+            name: fqcn.rsplit('.').next().unwrap_or(fqcn).to_string(),
+            qualified_name: Some(fqcn.to_string()),
+            file: "com/acme/X.java".to_string(),
+            range: Range::default(),
+            props: None,
+        }
+    }
+
+    #[test]
+    fn simple_name_class_resolves_to_unique_fqcn() {
+        let dir = temp_dir("simple");
+        // bean `class` is a bare simple name, resolved via the unique Class node in the graph.
+        let mut nodes = server_and_bean("/crm", "customerSvc", "CustomerService");
+        nodes.push(class_node("com.acme.CustomerService"));
+        let handler = "com.acme.CustomerService#getCustomer/1";
+        nodes.push(route_node("GET", "/customers/{id}", handler));
+        let mut edges = vec![handles_route_edge(handler, "GET", "/customers/{id}")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/crm/customers/{id}"));
+    }
+
+    #[test]
+    fn ambiguous_simple_name_is_not_resolved() {
+        let dir = temp_dir("ambig");
+        let mut nodes = server_and_bean("/crm", "customerSvc", "CustomerService");
+        // Two classes share the simple name → ambiguous → left unresolved → no match.
+        nodes.push(class_node("com.acme.CustomerService"));
+        nodes.push(class_node("com.other.CustomerService"));
+        let handler = "com.acme.CustomerService#getCustomer/1";
+        nodes.push(route_node("GET", "/customers/{id}", handler));
+        let mut edges = vec![handles_route_edge(handler, "GET", "/customers/{id}")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/customers/{id}"), "ambiguous name must not stitch");
+        assert!(!edges.iter().any(|e| e.reason == "cxf-jaxrs-prefix"));
+    }
+
+    #[test]
+    fn emits_bean_to_class_edge() {
+        let dir = temp_dir("beanedge");
+        let mut nodes = server_and_bean("/crm", "customerSvc", "com.acme.CustomerService");
+        nodes.push(class_node("com.acme.CustomerService"));
+        let handler = "com.acme.CustomerService#getCustomer/1";
+        nodes.push(route_node("GET", "/customers/{id}", handler));
+        let mut edges = vec![handles_route_edge(handler, "GET", "/customers/{id}")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let edge = edges
+            .iter()
+            .find(|e| e.reason == "cxf-bean-class")
+            .expect("bean → Class registration edge expected");
+        assert_eq!(edge.kind, EdgeKind::IntegrationLink);
+        assert_eq!(edge.src.as_str(), "IntegrationRoute:spring_xml:customerSvc");
+        assert_eq!(edge.dst.as_str(), "Class:com.acme.CustomerService");
+    }
+
+    #[test]
+    fn no_class_node_means_no_bean_class_edge() {
+        let dir = temp_dir("noclass");
+        // FQCN bean class, but the class isn't a graph node (e.g. not indexed).
+        let mut nodes = server_and_bean("/crm", "customerSvc", "com.acme.CustomerService");
+        let handler = "com.acme.CustomerService#getCustomer/1";
+        nodes.push(route_node("GET", "/customers/{id}", handler));
+        let mut edges = vec![handles_route_edge(handler, "GET", "/customers/{id}")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Route is still stitched via the FQCN handler prefix-match …
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/crm/customers/{id}"));
+        // … but no bean → Class edge, since the class node doesn't exist.
+        assert!(!edges.iter().any(|e| e.reason == "cxf-bean-class"));
+    }
+
+    // ── normalize_prefix / join_url unit tests ───────────────────────────────
+
+    #[test]
+    fn normalize_prefix_variants() {
+        assert_eq!(normalize_prefix("/rest/*"), "rest");
+        assert_eq!(normalize_prefix("/rest/"), "rest");
+        assert_eq!(normalize_prefix("rest"), "rest");
+        assert_eq!(normalize_prefix("/api/v1/*"), "api/v1");
+        assert_eq!(normalize_prefix("*"), "");
+        assert_eq!(normalize_prefix("/"), "");
+        assert_eq!(normalize_prefix("  /rest/*  "), "rest");
+    }
+
+    #[test]
+    fn join_url_variants() {
+        assert_eq!(join_url(&["rest", "/v1/services", "/a/b"]), "/rest/v1/services/a/b");
+        assert_eq!(join_url(&["", "/crm", "/x"]), "/crm/x"); // empty servlet prefix collapses
+        assert_eq!(join_url(&["/a/", "/b/", "c"]), "/a/b/c"); // dup/trailing slashes normalized
+        assert_eq!(join_url(&["", "", ""]), "/");
+    }
+
+    // ── servlet-prefix detectors ─────────────────────────────────────────────
+
+    #[test]
+    fn servlet_prefix_priority_config_over_whiteboard() {
+        let dir = temp_dir("prio");
+        let nodes = vec![integration_route(
+            "/rest/*",
+            "osgi_servlet",
+            serde_json::json!({ "servlet_pattern": "/rest/*" }),
+        )];
+        // config override wins over an osgi_servlet node.
+        let out = resolve_servlet_prefix(&dir, &nodes, Some("/gateway"));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(out, Some(("gateway".to_string(), "config")));
+    }
+
+    #[test]
+    fn servlet_prefix_whiteboard_when_no_config() {
+        let dir = temp_dir("wb");
+        let nodes = vec![integration_route(
+            "/rest/*",
+            "osgi_servlet",
+            serde_json::json!({ "servlet_pattern": "/rest/*" }),
+        )];
+        let out = resolve_servlet_prefix(&dir, &nodes, None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(out, Some(("rest".to_string(), "osgi_whiteboard")));
+    }
+
+    #[test]
+    fn servlet_prefix_none_when_nothing_declares_one() {
+        let dir = temp_dir("nowt");
+        let out = resolve_servlet_prefix(&dir, &[], None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn web_xml_picks_cxf_servlet_among_many() {
+        let dir = temp_dir("multi-servlet");
+        let web = r#"<web-app>
+            <servlet>
+                <servlet-name>dispatcher</servlet-name>
+                <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+            </servlet>
+            <servlet-mapping><servlet-name>dispatcher</servlet-name><url-pattern>/</url-pattern></servlet-mapping>
+            <servlet>
+                <servlet-name>cxf</servlet-name>
+                <servlet-class>org.apache.cxf.transport.servlet.CXFServlet</servlet-class>
+            </servlet>
+            <servlet-mapping><servlet-name>cxf</servlet-name><url-pattern>/services/*</url-pattern></servlet-mapping>
+        </web-app>"#;
+        std::fs::create_dir_all(dir.join("WEB-INF")).unwrap();
+        std::fs::write(dir.join("WEB-INF/web.xml"), web).unwrap();
+        let out = resolve_servlet_prefix(&dir, &[], None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(out, Some(("services".to_string(), "web_xml")));
+    }
+
+    #[test]
+    fn web_xml_servlet_name_mismatch_yields_none() {
+        let dir = temp_dir("mismatch");
+        // CXFServlet present but its mapping uses a different servlet-name.
+        let web = r#"<web-app>
+            <servlet>
+                <servlet-name>cxf</servlet-name>
+                <servlet-class>org.apache.cxf.transport.servlet.CXFServlet</servlet-class>
+            </servlet>
+            <servlet-mapping><servlet-name>other</servlet-name><url-pattern>/nope/*</url-pattern></servlet-mapping>
+        </web-app>"#;
+        std::fs::create_dir_all(dir.join("WEB-INF")).unwrap();
+        std::fs::write(dir.join("WEB-INF/web.xml"), web).unwrap();
+        let out = resolve_servlet_prefix(&dir, &[], None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn spring_boot_properties_cxf_path_forms() {
+        for (body, expect) in [
+            ("cxf.path=/api", "api"),
+            ("cxf.path = /api", "api"),
+            ("cxf.path=\"/api\"", "api"),
+            ("# cxf.path=/ignored\ncxf.path=/real", "real"),
+        ] {
+            let dir = temp_dir("props");
+            std::fs::write(dir.join("application.properties"), body).unwrap();
+            let out = resolve_servlet_prefix(&dir, &[], None);
+            std::fs::remove_dir_all(&dir).ok();
+            assert_eq!(out, Some((expect.to_string(), "spring_boot")), "body={body:?}");
+        }
+    }
+
+    #[test]
+    fn spring_boot_yaml_nested_and_flat() {
+        let dir = temp_dir("yaml-nested");
+        std::fs::write(dir.join("application.yml"), "cxf:\n  path: /api\n").unwrap();
+        let out = resolve_servlet_prefix(&dir, &[], None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(out, Some(("api".to_string(), "spring_boot")));
+
+        let dir = temp_dir("yaml-flat");
+        std::fs::write(dir.join("application.yml"), "cxf.path: \"/gw\"\n").unwrap();
+        let out = resolve_servlet_prefix(&dir, &[], None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(out, Some(("gw".to_string(), "spring_boot")));
+    }
+
+    // ── stitch scenarios ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stitch_rewrites_all_routes_of_a_class() {
+        let dir = temp_dir("multiroute");
+        let mut nodes = server_and_bean("/crm", "svc", "com.acme.Svc");
+        nodes.push(route_node("GET", "/customers/{id}", "com.acme.Svc#get/1"));
+        nodes.push(route_node("POST", "/customers", "com.acme.Svc#add/1"));
+        let mut edges = vec![
+            handles_route_edge("com.acme.Svc#get/1", "GET", "/customers/{id}"),
+            handles_route_edge("com.acme.Svc#add/1", "POST", "/customers"),
+        ];
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let paths: std::collections::BTreeSet<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Route)
+            .filter_map(|n| prop(n, "path").map(String::from))
+            .collect();
+        assert!(paths.contains("/crm/customers/{id}"), "paths={paths:?}");
+        assert!(paths.contains("/crm/customers"), "paths={paths:?}");
+    }
+
+    #[test]
+    fn stitch_multiple_servers_route_to_their_own_class() {
+        let dir = temp_dir("multiserver");
+        let mut nodes = server_and_bean("/crm", "crmSvc", "com.acme.Crm");
+        nodes.extend(server_and_bean("/billing", "billSvc", "com.acme.Billing"));
+        nodes.push(route_node("GET", "/a", "com.acme.Crm#a/0"));
+        nodes.push(route_node("GET", "/b", "com.acme.Billing#b/0"));
+        let mut edges = vec![
+            handles_route_edge("com.acme.Crm#a/0", "GET", "/a"),
+            handles_route_edge("com.acme.Billing#b/0", "GET", "/b"),
+        ];
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let by_handler = |h: &str| {
+            nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Route && prop(n, "handler") == Some(h))
+                .and_then(|n| prop(n, "path").map(String::from))
+        };
+        assert_eq!(by_handler("com.acme.Crm#a/0").as_deref(), Some("/crm/a"));
+        assert_eq!(by_handler("com.acme.Billing#b/0").as_deref(), Some("/billing/b"));
+    }
+
+    #[test]
+    fn stitch_preserves_existing_class_level_prefix() {
+        // Route.path already carries a class-level @Path ("/customerservice"); stitch prepends only.
+        let dir = temp_dir("classprefix");
+        let mut nodes = server_and_bean("/crm", "svc", "com.acme.Svc");
+        nodes.push(route_node("GET", "/customerservice/customers/{id}", "com.acme.Svc#get/1"));
+        let mut edges = vec![handles_route_edge("com.acme.Svc#get/1", "GET", "/customerservice/customers/{id}")];
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/crm/customerservice/customers/{id}"));
+    }
+
+    #[test]
+    fn stitch_blueprint_source_bean_resolves() {
+        let dir = temp_dir("bp");
+        // Blueprint bean node (source blueprint_xml) + component-id-style ref via the same id.
+        let mut nodes = vec![
+            integration_route(
+                "/api",
+                "cxf_jaxrs_server",
+                serde_json::json!({ "address": "/api", "beans": ["svc"] }),
+            ),
+            integration_route("svc", "blueprint_xml", serde_json::json!({ "class": "com.acme.Bp" })),
+        ];
+        nodes.push(route_node("GET", "/x", "com.acme.Bp#x/0"));
+        let mut edges = vec![handles_route_edge("com.acme.Bp#x/0", "GET", "/x")];
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/api/x"));
+    }
+
+    #[test]
+    fn bean_class_edge_deduped_when_bean_shared_by_two_servers() {
+        let dir = temp_dir("dedup");
+        let mut nodes = vec![
+            integration_route("/a", "cxf_jaxrs_server", serde_json::json!({ "address": "/a", "beans": ["svc"] })),
+            integration_route("/b", "cxf_jaxrs_server", serde_json::json!({ "address": "/b", "beans": ["svc"] })),
+            integration_route("svc", "spring_xml", serde_json::json!({ "class": "com.acme.Svc" })),
+            class_node("com.acme.Svc"),
+        ];
+        nodes.push(route_node("GET", "/x", "com.acme.Svc#x/0"));
+        let mut edges = vec![handles_route_edge("com.acme.Svc#x/0", "GET", "/x")];
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+        let bean_class_edges = edges.iter().filter(|e| e.reason == "cxf-bean-class").count();
+        assert_eq!(bean_class_edges, 1, "bean → Class edge must be deduped across servers");
     }
 }

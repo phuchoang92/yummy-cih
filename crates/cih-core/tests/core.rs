@@ -250,3 +250,25 @@ fn messaging_framework_serializes_snake_case() {
         "\"kafka\""
     );
 }
+
+#[test]
+fn contract_site_messaging_framework_roundtrips_and_defaults() {
+    use cih_core::{ContractKind, ContractSite, MessagingFramework, NodeId, Range};
+    let site = ContractSite {
+        kind: ContractKind::EventPublish,
+        url_template: None,
+        topic: Some("orders".into()),
+        http_method: None,
+        messaging_framework: Some(MessagingFramework::Spring),
+        in_callable: NodeId::new("Method:com.acme.X#m/0"),
+        range: Range::default(),
+    };
+    let back: ContractSite = serde_json::from_str(&serde_json::to_string(&site).unwrap()).unwrap();
+    assert_eq!(back.messaging_framework, Some(MessagingFramework::Spring));
+
+    // An older artifact without the field deserializes to None (serde default).
+    let mut value = serde_json::to_value(&site).unwrap();
+    value.as_object_mut().unwrap().remove("messaging_framework");
+    let legacy: ContractSite = serde_json::from_value(value).unwrap();
+    assert_eq!(legacy.messaging_framework, None);
+}

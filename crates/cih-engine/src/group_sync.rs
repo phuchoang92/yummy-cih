@@ -330,4 +330,22 @@ mod tests {
         );
         assert_eq!(kind, ContractMatchKind::KafkaTopic);
     }
+
+    #[test]
+    fn provider_framework_used_when_consumer_missing() {
+        let kind = matched_kind(
+            event("svc-a", "OrderPlaced", Some(MessagingFramework::Spring)),
+            event("svc-b", "OrderPlaced", None),
+        );
+        assert_eq!(kind, ContractMatchKind::SpringEvent);
+    }
+
+    #[test]
+    fn consumer_framework_used_when_provider_missing() {
+        let kind = matched_kind(
+            event("svc-a", "orders", None),
+            event("svc-b", "orders", Some(MessagingFramework::Kafka)),
+        );
+        assert_eq!(kind, ContractMatchKind::KafkaTopic);
+    }
 }
