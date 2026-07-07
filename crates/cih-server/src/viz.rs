@@ -2,7 +2,7 @@
 //! No async, no store access — all inputs are already fetched by the caller.
 
 use cih_core::NodeId;
-use cih_graph_store::{CommunityEdge, CommunityInfo, FlowHop, FlowNode, Impact, RouteInfo};
+use cih_graph_store::{CommunityEdge, CommunityInfo, FlowHop, Impact, RouteInfo};
 
 // ---- Mermaid: trace_flow ----
 

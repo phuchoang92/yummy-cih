@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use cih_wiki::{
     generate_wiki, ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary,
-    ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo, WikiGraph,
+    ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo,
     WikiInput, WikiLlmInfo, WikiModuleTree,
 };
 use cih_wiki::features::group_communities_by_feature;

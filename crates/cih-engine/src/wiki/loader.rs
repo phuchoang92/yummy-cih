@@ -7,7 +7,7 @@ use cih_core::{Edge, Node, NodeKind};
 use cih_wiki::{assign_class_slugs, WikiGraph};
 use cih_wiki::graph::route_path;
 
-use super::config::{WikiArtifacts, fnv64};
+use super::config::WikiArtifacts;
 
 pub(super) fn filter_communities_by_route(
     mut communities: Vec<cih_core::Node>,

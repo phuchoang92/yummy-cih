@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cih_core::{Edge, Node, RepoMap};
 use cih_wiki::{ClassEnrichmentStore, WikiGraph, WikiMeta};
 

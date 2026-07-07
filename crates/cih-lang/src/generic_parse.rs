@@ -2,7 +2,7 @@
 //! Each language provider calls the helpers relevant to its grammar node names.
 
 use cih_core::{
-    file_id, function_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
+    function_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
     Range, RawImport, RefKind, ReferenceSite, SymbolDef,
 };
 use tree_sitter::Node as TsNode;

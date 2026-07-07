@@ -745,7 +745,10 @@ async fn main() -> Result<()> {
         .merge(protected)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(120)));
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(120),
+        ));
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     tracing::info!("MCP (Streamable HTTP) listening on http://{}/mcp", cfg.bind);

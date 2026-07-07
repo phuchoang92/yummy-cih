@@ -35,7 +35,7 @@ struct CachedIndex {
 }
 
 #[derive(Clone)]
-pub(crate) struct SearchState {
+pub struct SearchState {
     bm25: Arc<RwLock<Option<CachedIndex>>>,
     embed_store: Option<Arc<EmbedStore>>,
     artifacts_dir: Option<PathBuf>,

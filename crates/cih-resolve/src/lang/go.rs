@@ -1,4 +1,4 @@
-use cih_core::{ParsedFile, SymbolDef};
+use cih_core::SymbolDef;
 use crate::common::index::CommonIndex;
 use super::{InheritanceModel, LanguageResolver};
 

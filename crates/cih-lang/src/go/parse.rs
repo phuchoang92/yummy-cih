@@ -246,7 +246,7 @@ fn extract_method(
     src: &str,
     rel: &str,
     pkg: &str,
-    file_id: &NodeId,
+    _file_id: &NodeId,
 ) -> Option<(SymbolDef, Node, Edge)> {
     let receiver_node = node.child_by_field_name("receiver")?;
     let receiver_type = extract_receiver_type(receiver_node, src)?;

@@ -1,7 +1,6 @@
 pub mod bfs;
 mod cohesion;
 mod constants;
-mod entry_points;
 pub mod graph;
 mod label;
 mod leiden;

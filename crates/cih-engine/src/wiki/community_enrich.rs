@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 use cih_core::Node;
-use cih_wiki::{CommunityLlmFull, CommunityLlmSummary, FlowLlmSummary, WikiGraph};
+use cih_wiki::{CommunityLlmFull, FlowLlmSummary, WikiGraph};
 use rayon::prelude::*;
 
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
