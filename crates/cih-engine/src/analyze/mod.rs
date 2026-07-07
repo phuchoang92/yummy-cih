@@ -540,6 +540,12 @@ pub fn analyze_from_scope_with_options(
     prune_other_versions(&cih_dir.join("parsed"), &version)?;
     prune_other_versions(&cih_dir.join("artifacts"), &version)?;
     crate::file_cache::FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
+    // Persist the config fingerprint alongside the file hashes so the next run's no-op gate can
+    // detect a config-only change (e.g. a new --cxf-base-path or edited cih.patterns.toml).
+    AnalyzeConfigState {
+        fingerprint: analyze_config_fingerprint(&repo_root, &cache),
+    }
+    .save(&cih_dir)?;
 
     tracing::info!(
         nodes = all_nodes.len(),
@@ -592,6 +598,48 @@ pub struct AnalyzeCacheOptions {
     /// Resolved at the dispatch arm (flag > `cih.toml` > `~/.cih/config.toml`); `None`
     /// falls back to auto-detection.
     pub cxf_base_path: Option<String>,
+}
+
+/// Fingerprint of the analyze inputs that affect graph output but are **not** source-file
+/// hashes: the resolved `cxf_base_path`, `skip_xml_integration`, and the effective
+/// `cih.patterns.toml` rules. The incremental no-op reuse gate compares this against the value
+/// stored from the last run so a config-only change (e.g. a new `--cxf-base-path`) re-runs the
+/// resolve/post-process/emit path instead of silently reusing stale artifacts. Cache-control
+/// fields (`use_cache`/`allow_noop`) are intentionally excluded — they don't change output.
+pub(super) fn analyze_config_fingerprint(repo_root: &Path, cache: &AnalyzeCacheOptions) -> String {
+    let patterns = cih_patterns::load_patterns(repo_root);
+    let material = format!(
+        "cxf_base_path={:?}\nskip_xml_integration={}\npatterns=\n{}",
+        cache.cxf_base_path,
+        cache.skip_xml_integration,
+        cih_patterns::to_toml(&patterns),
+    );
+    blake3::hash(material.as_bytes()).to_hex()[..16].to_string()
+}
+
+/// The analyze config fingerprint persisted beside `file-hashes.json`, so the next run's no-op
+/// gate can detect a config-only change. Modeled on [`crate::file_cache::FileHashIndex`].
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct AnalyzeConfigState {
+    pub fingerprint: String,
+}
+
+impl AnalyzeConfigState {
+    const FILE: &'static str = "analyze-config.json";
+
+    pub(super) fn load(cih_dir: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(cih_dir.join(Self::FILE)).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    pub(super) fn save(&self, cih_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(cih_dir)
+            .with_context(|| format!("failed to create {}", cih_dir.display()))?;
+        let path = cih_dir.join(Self::FILE);
+        std::fs::write(&path, serde_json::to_string_pretty(self)?.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

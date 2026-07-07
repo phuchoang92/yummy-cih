@@ -63,9 +63,9 @@ pub fn apply_pattern_rules(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>, rules: 
             else {
                 continue;
             };
-            let Some(path) = attr_str(ann, &rule.path_attr) else {
-                continue; // no path attribute present → nothing to route
-            };
+            // A missing path attribute means the handler sits at the controller root (common for
+            // index endpoints, e.g. Micronaut's bare `@Get`); the class prefix then supplies the path.
+            let path = attr_str(ann, &rule.path_attr).unwrap_or_default();
             let method = rule
                 .fixed_method()
                 .or_else(|| {
@@ -241,6 +241,27 @@ mod tests {
         apply_pattern_rules(&mut nodes, &mut edges, &PatternRules { routes: vec![rule] });
         let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
         assert_eq!(route.id.as_str(), "Route:DELETE /x");
+    }
+
+    #[test]
+    fn pathless_annotation_routes_to_controller_root() {
+        // Micronaut-style bare `@Get` on a `@Controller("/home")` → route at the controller base.
+        let mut nodes = vec![
+            class_node(
+                "com.acme.Home",
+                serde_json::json!([{ "name": "Controller", "attrs": { "value": "/home" } }]),
+            ),
+            method_node(
+                "com.acme.Home#index/0",
+                serde_json::json!([{ "name": "Get" }]),
+            ),
+        ];
+        let mut edges = Vec::new();
+        let mut rule = route_rule("Get", Some("GET"));
+        rule.class_prefix_annotation = Some("Controller".to_string());
+        apply_pattern_rules(&mut nodes, &mut edges, &PatternRules { routes: vec![rule] });
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(route.id.as_str(), "Route:GET /home");
     }
 
     #[test]
