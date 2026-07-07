@@ -21,6 +21,18 @@ use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
 /// `local_path`, and a non-destructive `IntegrationLink` edge records provenance.
 ///
 /// Returns early (before any filesystem scan) when there are no `<jaxrs:server>` targets.
+/// Resolve a bean `class` string to a class FQCN: a fully-qualified name is kept as-is; a bare
+/// simple name resolves to a workspace-unique FQCN (else it is left as-is, unresolved).
+fn resolve_class_fqcn(raw: &str, simple_to_fqcns: &HashMap<&str, Vec<&str>>) -> String {
+    if raw.contains('.') {
+        return raw.to_string();
+    }
+    match simple_to_fqcns.get(raw) {
+        Some(fqcns) if fqcns.len() == 1 => fqcns[0].to_string(),
+        _ => raw.to_string(),
+    }
+}
+
 pub(crate) fn stitch_route_prefixes(
     repo_root: &Path,
     nodes: &mut [Node],
@@ -75,15 +87,7 @@ pub(crate) fn stitch_route_prefixes(
         let Some(class) = props.get("class").and_then(|c| c.as_str()) else {
             continue;
         };
-        let class = class.trim();
-        let fqcn = if class.contains('.') {
-            class.to_string()
-        } else {
-            match simple_to_fqcns.get(class) {
-                Some(fqcns) if fqcns.len() == 1 => fqcns[0].to_string(),
-                _ => class.to_string(), // simple name that is absent or ambiguous — leave unresolved
-            }
-        };
+        let fqcn = resolve_class_fqcn(class.trim(), &simple_to_fqcns);
         bean_index.insert(n.name.clone(), (n.id.clone(), fqcn));
     }
 
@@ -126,6 +130,38 @@ pub(crate) fn stitch_route_prefixes(
                 if bean_class_seen.insert((bean_node_id.clone(), (*class_id).clone())) {
                     new_edges.push(Edge {
                         src: bean_node_id.clone(),
+                        dst: (*class_id).clone(),
+                        kind: EdgeKind::IntegrationLink,
+                        confidence: 0.9,
+                        reason: "cxf-bean-class".to_string(),
+                        props: None,
+                    });
+                }
+            }
+        }
+
+        // Anonymous inline serviceBeans (`<jaxrs:serviceBeans><bean class=…/></...>`) have no id,
+        // so the class travels on the server node; the registration edge originates there.
+        let bean_classes = props
+            .get("bean_classes")
+            .and_then(|b| b.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for raw in bean_classes {
+            let fqcn = resolve_class_fqcn(raw.trim(), &simple_to_fqcns);
+            targets.push(Target {
+                server_id: n.id.clone(),
+                address: address.to_string(),
+                fqcn: fqcn.clone(),
+            });
+            if let Some(class_id) = class_node_by_fqcn.get(fqcn.as_str()) {
+                if bean_class_seen.insert((n.id.clone(), (*class_id).clone())) {
+                    new_edges.push(Edge {
+                        src: n.id.clone(),
                         dst: (*class_id).clone(),
                         kind: EdgeKind::IntegrationLink,
                         confidence: 0.9,
@@ -916,6 +952,49 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
         assert_eq!(prop(route, "path"), Some("/api/x"));
+    }
+
+    #[test]
+    fn stitch_inline_service_bean() {
+        // Anonymous inline serviceBean: class travels on the server via `bean_classes` (no ref/id).
+        let dir = temp_dir("inline");
+        let mut nodes = vec![integration_route(
+            "/api",
+            "cxf_jaxrs_server",
+            serde_json::json!({ "address": "/api", "beans": [], "bean_classes": ["com.acme.Inline"] }),
+        )];
+        nodes.push(class_node("com.acme.Inline"));
+        nodes.push(route_node("GET", "/x", "com.acme.Inline#x/0"));
+        let mut edges = vec![handles_route_edge("com.acme.Inline#x/0", "GET", "/x")];
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/api/x"));
+        // Inline bean has no bean node — the registration edge originates at the server node.
+        let edge = edges
+            .iter()
+            .find(|e| e.reason == "cxf-bean-class")
+            .expect("server → Class edge for inline bean");
+        assert_eq!(edge.src.as_str(), "IntegrationRoute:cxf_jaxrs_server:/api");
+        assert_eq!(edge.dst.as_str(), "Class:com.acme.Inline");
+    }
+
+    #[test]
+    fn stitch_inline_bean_simple_name_resolves() {
+        let dir = temp_dir("inline-simple");
+        let mut nodes = vec![integration_route(
+            "/api",
+            "cxf_jaxrs_server",
+            serde_json::json!({ "address": "/api", "beans": [], "bean_classes": ["Inline"] }),
+        )];
+        nodes.push(class_node("com.acme.Inline"));
+        nodes.push(route_node("GET", "/x", "com.acme.Inline#x/0"));
+        let mut edges = vec![handles_route_edge("com.acme.Inline#x/0", "GET", "/x")];
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/api/x"), "simple inline class should resolve");
     }
 
     #[test]

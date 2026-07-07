@@ -343,11 +343,9 @@ fn commented_out_bean_is_not_parsed() {
     assert!(out.nodes.iter().any(|n| prop(n, "class") == Some("com.acme.Live")));
 }
 
-// KNOWN LIMITATION: a non-`jaxrs` namespace prefix (e.g. `<s:server>` where `s` is bound to the
-// CXF jaxrs namespace) is not recognized — the scanner matches the literal tag `jaxrs:server`.
-// Convention is the `jaxrs` prefix; namespace-prefix resolution is out of scope.
 #[test]
-fn known_limitation_non_jaxrs_prefix_not_matched() {
+fn aliased_jaxrs_namespace_prefix_is_matched() {
+    // The namespace-aware parser matches <s:server> by namespace URI, not the literal `jaxrs:`.
     let xml = r#"<beans xmlns="http://www.springframework.org/schema/beans"
         xmlns:s="http://cxf.apache.org/jaxrs">
         <s:server id="s" address="/api">
@@ -356,16 +354,27 @@ fn known_limitation_non_jaxrs_prefix_not_matched() {
         <bean id="svc" class="com.acme.Svc"/>
     </beans>"#;
     let out = extract_integration_xml("beans.xml", xml);
-    assert!(
-        !out.nodes.iter().any(|n| prop(n, "source") == Some("cxf_jaxrs_server")),
-        "documents current behavior: aliased jaxrs prefix is not matched"
-    );
+    let server = out
+        .nodes
+        .iter()
+        .find(|n| prop(n, "source") == Some("cxf_jaxrs_server"))
+        .expect("aliased-prefix server should be matched");
+    assert_eq!(prop(server, "address"), Some("/api"));
+    assert_eq!(beans_of(server), vec!["svc"]);
 }
 
-// KNOWN LIMITATION: an anonymous inline `<bean class>` inside `<jaxrs:serviceBeans>` (no `<ref>`)
-// is not linked to the server (it has no id to reference). Most configs use `<ref>`.
+fn bean_classes_of<'a>(n: &'a Node) -> Vec<&'a str> {
+    n.props
+        .as_ref()
+        .and_then(|p| p.get("bean_classes"))
+        .and_then(|b| b.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default()
+}
+
 #[test]
-fn known_limitation_inline_service_bean_not_linked() {
+fn inline_service_bean_is_captured() {
+    // An anonymous inline <bean class> inside <jaxrs:serviceBeans> is now captured on the server.
     let xml = r#"<beans xmlns="http://www.springframework.org/schema/beans"
         xmlns:jaxrs="http://cxf.apache.org/jaxrs">
         <jaxrs:server id="s" address="/api">
@@ -376,5 +385,20 @@ fn known_limitation_inline_service_bean_not_linked() {
     </beans>"#;
     let out = extract_integration_xml("beans.xml", xml);
     let server = out.nodes.iter().find(|n| prop(n, "source") == Some("cxf_jaxrs_server")).unwrap();
-    assert!(beans_of(server).is_empty(), "inline serviceBean is not captured as a ref");
+    assert_eq!(bean_classes_of(server), vec!["com.acme.InlineSvc"]);
+}
+
+#[test]
+fn namespaced_beans_prefix_and_entity_are_parsed() {
+    // A prefix on the beans namespace (<beans:bean>) and an XML entity in an attribute value.
+    let xml = r#"<beans:beans xmlns:beans="http://www.springframework.org/schema/beans">
+        <beans:bean id="a&amp;b" class="com.acme.Amp"/>
+    </beans:beans>"#;
+    let out = extract_integration_xml("beans.xml", xml);
+    let bean = out
+        .nodes
+        .iter()
+        .find(|n| prop(n, "class") == Some("com.acme.Amp"))
+        .expect("namespaced <beans:bean> should parse");
+    assert_eq!(bean.name, "a&b", "entity in attribute must be decoded");
 }

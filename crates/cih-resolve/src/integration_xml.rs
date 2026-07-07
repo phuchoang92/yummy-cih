@@ -1,9 +1,11 @@
 //! Phase 1b — best-effort integration XML extraction.
 //!
 //! Reads Camel, Blueprint, Spring XML and CXF config files and emits
-//! `IntegrationRoute` / `MessageDestination` nodes plus wiring edges. This is a
-//! deliberately lightweight text scanner — we do not pull in an XML parser
-//! dependency. Malformed input simply yields fewer facts; it never panics.
+//! `IntegrationRoute` / `MessageDestination` nodes plus wiring edges. Spring/Blueprint/CXF
+//! structured config is parsed with the namespace-aware `quick-xml` `NsReader` (so aliased
+//! namespace prefixes, nested/inline elements, comments and entities are handled correctly);
+//! Camel routing is still a lightweight URI-string scanner. Best-effort throughout: malformed
+//! input simply yields fewer facts and never panics.
 
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 
@@ -116,10 +118,10 @@ pub fn extract_integration_xml(rel_path: &str, content: &str) -> IntegrationXmlO
 
     match kind {
         "camel" => extract_camel_xml(rel_path, content),
-        "blueprint" => extract_blueprint_xml(rel_path, content),
+        "blueprint" => extract_structured_xml(rel_path, content, "blueprint_xml"),
         // A CXF Spring file may declare <jaxrs:server> beside (or instead of) <bean>
-        // definitions, so route the "cxf" kind through the Spring extractor too.
-        "spring" | "cxf" => extract_spring_beans_xml(rel_path, content),
+        // definitions, so route the "cxf" kind through the Spring/structured extractor too.
+        "spring" | "cxf" => extract_structured_xml(rel_path, content, "spring_xml"),
         _ => IntegrationXmlOutput {
             nodes: vec![],
             edges: vec![],
@@ -263,244 +265,214 @@ fn extract_camel_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput {
     IntegrationXmlOutput { nodes, edges }
 }
 
-fn extract_blueprint_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput {
-    // Blueprint XML: scan for <bean>, <reference>, <service> bindings
-    // These create wiring facts between services.
-    // For now emit IntegrationRoute nodes for <service> and edges for <reference>
-    let mut nodes = Vec::new();
-    let edges = Vec::new();
-
-    // Scan for <service interface="..." ref="...">
-    let mut i = 0;
-    let bytes = content.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            let tag_start = i;
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            let name_start = i;
-            while i < bytes.len()
-                && !bytes[i].is_ascii_whitespace()
-                && bytes[i] != b'>'
-                && bytes[i] != b'/'
-            {
-                i += 1;
-            }
-            let tag_name = &content[name_start..i];
-
-            if tag_name == "service" {
-                let iface = extract_xml_attr(&content[tag_start..], "interface");
-                let refer = extract_xml_attr(&content[tag_start..], "ref");
-                if let (Some(iface), Some(refer)) = (iface, refer) {
-                    let node_id = cih_core::integration_route_id(rel_path, &refer);
-                    nodes.push(Node {
-                        id: node_id,
-                        kind: NodeKind::IntegrationRoute,
-                        name: refer.clone(),
-                        qualified_name: Some(format!("{rel_path}#service:{refer}")),
-                        file: rel_path.to_string(),
-                        range: Range::default(),
-                        props: Some(serde_json::json!({
-                            "interface": iface,
-                            "ref": refer,
-                            "source": "blueprint_xml",
-                        })),
-                    });
-                }
-            } else if tag_name == "bean" {
-                // Blueprint `<bean id class>` — so a CXF `<jaxrs:server>` ref can resolve to the
-                // impl class. Namespaced id (`bean:<id>`) to avoid colliding with a same-named
-                // `<service>` node on repo-wide dedup.
-                let id = extract_xml_attr(&content[tag_start..], "id");
-                let class = extract_xml_attr(&content[tag_start..], "class");
-                if let (Some(id), Some(class)) = (id, class) {
-                    let node_id = cih_core::integration_route_id(rel_path, &format!("bean:{id}"));
-                    nodes.push(Node {
-                        id: node_id,
-                        kind: NodeKind::IntegrationRoute,
-                        name: id.clone(),
-                        qualified_name: Some(class.to_string()),
-                        file: rel_path.to_string(),
-                        range: Range::default(),
-                        props: Some(serde_json::json!({
-                            "bean_id": id,
-                            "class": class,
-                            "source": "blueprint_xml",
-                        })),
-                    });
-                }
-            }
-        }
-        i += 1;
-    }
-
-    nodes.extend(extract_cxf_jaxrs(rel_path, content));
-    IntegrationXmlOutput { nodes, edges }
+/// Local accumulator for a `<jaxrs:server>` element while its body is streamed.
+struct JaxrsServerAcc {
+    address: String,
+    server_id: Option<String>,
+    beans: Vec<String>,
+    bean_classes: Vec<String>,
+    /// Nesting depth at which the `<server>` opened, to detect its matching close.
+    depth: i32,
 }
 
-fn extract_spring_beans_xml(rel_path: &str, content: &str) -> IntegrationXmlOutput {
-    // Spring XML beans: scan for <bean id="..." class="...">
-    // These register service beans. Emit as IntegrationRoute nodes for wiring visibility.
-    let mut nodes = Vec::new();
-    let edges = Vec::new();
-
-    let mut i = 0;
-    let bytes = content.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            let tag_start = i;
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            let name_start = i;
-            while i < bytes.len()
-                && !bytes[i].is_ascii_whitespace()
-                && bytes[i] != b'>'
-                && bytes[i] != b'/'
-            {
-                i += 1;
-            }
-            let tag_name = &content[name_start..i];
-
-            if tag_name == "bean" {
-                let id = extract_xml_attr(&content[tag_start..], "id");
-                let class = extract_xml_attr(&content[tag_start..], "class");
-                if let (Some(id), Some(class)) = (id, class) {
-                    let node_id = cih_core::integration_route_id(rel_path, &id);
-                    nodes.push(Node {
-                        id: node_id,
-                        kind: NodeKind::IntegrationRoute,
-                        name: id.clone(),
-                        qualified_name: Some(class.to_string()),
-                        file: rel_path.to_string(),
-                        range: Range::default(),
-                        props: Some(serde_json::json!({
-                            "bean_id": id,
-                            "class": class,
-                            "source": "spring_xml",
-                        })),
-                    });
-                }
-            }
-        }
-        i += 1;
-    }
-
-    nodes.extend(extract_cxf_jaxrs(rel_path, content));
-    IntegrationXmlOutput { nodes, edges }
-}
-
-/// Parse CXF JAX-RS declarations shared by the Spring and Blueprint extractors.
+/// Parse Spring / Blueprint / CXF structured config with a namespace-aware pull parser.
 ///
-/// Emits one `IntegrationRoute` node per `<jaxrs:server address="...">`
-/// (`source = "cxf_jaxrs_server"`, carrying the referenced bean ids) and one per
-/// OSGi HTTP-whiteboard servlet pattern (`source = "osgi_servlet"`). These are wired
-/// onto Java `Route` nodes later by the Java resolver's `post_process` pass
-/// (`lang::java::cxf`).
-fn extract_cxf_jaxrs(rel_path: &str, content: &str) -> Vec<Node> {
+/// Emits the same `IntegrationRoute` node shapes as the previous byte scanner — top-level
+/// `<bean>` (source = `source_label`), blueprint `<service>`, `<jaxrs:server>` (source
+/// `cxf_jaxrs_server`, carrying `beans` refs and inline `bean_classes`), and OSGi whiteboard
+/// `<entry>` (source `osgi_servlet`). Matching `<server>` by namespace URI handles any prefix
+/// alias; nested traversal captures inline service beans; comments/CDATA/entities are handled by
+/// the parser. Best-effort: a parse error stops the walk with whatever was collected.
+fn extract_structured_xml(rel_path: &str, content: &str, source_label: &str) -> IntegrationXmlOutput {
+    use quick_xml::events::{BytesStart, Event};
+    use quick_xml::name::{Namespace, ResolveResult};
+    use quick_xml::reader::NsReader;
+
+    // CXF JAX-RS namespaces (Spring and Blueprint variants) that bind a `<server>` element.
+    const CXF_JAXRS_NS: [&[u8]; 2] = [
+        b"http://cxf.apache.org/jaxrs",
+        b"http://cxf.apache.org/blueprint/jaxrs",
+    ];
+
+    fn attr_val(e: &BytesStart, local: &[u8]) -> Option<String> {
+        e.attributes().flatten().find_map(|a| {
+            if a.key.local_name().as_ref() == local {
+                a.unescape_value().ok().map(|v| v.into_owned())
+            } else {
+                None
+            }
+        })
+    }
+
     let mut nodes = Vec::new();
-    let bytes = content.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            let tag_start = i;
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            let name_start = i;
-            while i < bytes.len()
-                && !bytes[i].is_ascii_whitespace()
-                && bytes[i] != b'>'
-                && bytes[i] != b'/'
-            {
-                i += 1;
-            }
-            let tag_name = &content[name_start..i];
+    let mut reader = NsReader::from_str(content);
+    let mut depth: i32 = 0;
+    let mut server: Option<JaxrsServerAcc> = None;
 
-            if tag_name == "jaxrs:server" {
-                if let Some(address) = extract_xml_attr(&content[tag_start..], "address") {
-                    // Capture the element body to collect its <ref bean/component-id>s.
-                    let block_end = content[tag_start..]
-                        .find("</jaxrs:server>")
-                        .map(|e| tag_start + e)
-                        .unwrap_or(content.len());
-                    let beans = collect_ref_beans(&content[tag_start..block_end]);
-                    let server_id = extract_xml_attr(&content[tag_start..], "id");
-                    let node_id =
-                        cih_core::integration_route_id(rel_path, &format!("jaxrs-server-{address}"));
-                    nodes.push(Node {
-                        id: node_id,
-                        kind: NodeKind::IntegrationRoute,
-                        name: address.clone(),
-                        qualified_name: beans.first().cloned(),
-                        file: rel_path.to_string(),
-                        range: Range::default(),
-                        props: Some(serde_json::json!({
-                            "source": "cxf_jaxrs_server",
-                            "address": address,
-                            "server_id": server_id,
-                            "bean_id": beans.first().cloned(),
-                            "beans": beans,
-                        })),
-                    });
+    loop {
+        match reader.read_resolved_event() {
+            Ok((ns, ev @ (Event::Start(_) | Event::Empty(_)))) => {
+                let is_start = matches!(ev, Event::Start(_));
+                let e = match &ev {
+                    Event::Start(e) | Event::Empty(e) => e,
+                    _ => unreachable!(),
+                };
+                let is_server = matches!(ns, ResolveResult::Bound(Namespace(n)) if CXF_JAXRS_NS.contains(&n))
+                    && e.local_name().as_ref() == b"server";
+
+                if is_server {
+                    if let Some(address) = attr_val(e, b"address") {
+                        let acc = JaxrsServerAcc {
+                            address,
+                            server_id: attr_val(e, b"id"),
+                            beans: Vec::new(),
+                            bean_classes: Vec::new(),
+                            depth,
+                        };
+                        if is_start {
+                            server = Some(acc);
+                        } else {
+                            push_jaxrs_server_node(rel_path, acc, &mut nodes);
+                        }
+                    }
+                } else if let Some(acc) = server.as_mut() {
+                    // Inside a <jaxrs:server> block: collect refs and inline service beans.
+                    match e.local_name().as_ref() {
+                        b"ref" => {
+                            if let Some(b) =
+                                attr_val(e, b"bean").or_else(|| attr_val(e, b"component-id"))
+                            {
+                                acc.beans.push(b);
+                            }
+                        }
+                        b"bean" => {
+                            if let Some(c) = attr_val(e, b"class") {
+                                acc.bean_classes.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // Top-level structured elements.
+                    match e.local_name().as_ref() {
+                        b"bean" => {
+                            if let (Some(id), Some(class)) =
+                                (attr_val(e, b"id"), attr_val(e, b"class"))
+                            {
+                                // Blueprint namespaces the id to avoid colliding with a same-named
+                                // <service> node on repo-wide dedup.
+                                let key = if source_label == "blueprint_xml" {
+                                    format!("bean:{id}")
+                                } else {
+                                    id.clone()
+                                };
+                                nodes.push(Node {
+                                    id: cih_core::integration_route_id(rel_path, &key),
+                                    kind: NodeKind::IntegrationRoute,
+                                    name: id.clone(),
+                                    qualified_name: Some(class.clone()),
+                                    file: rel_path.to_string(),
+                                    range: Range::default(),
+                                    props: Some(serde_json::json!({
+                                        "bean_id": id,
+                                        "class": class,
+                                        "source": source_label,
+                                    })),
+                                });
+                            }
+                        }
+                        b"service" => {
+                            if let (Some(iface), Some(refer)) =
+                                (attr_val(e, b"interface"), attr_val(e, b"ref"))
+                            {
+                                nodes.push(Node {
+                                    id: cih_core::integration_route_id(rel_path, &refer),
+                                    kind: NodeKind::IntegrationRoute,
+                                    name: refer.clone(),
+                                    qualified_name: Some(format!("{rel_path}#service:{refer}")),
+                                    file: rel_path.to_string(),
+                                    range: Range::default(),
+                                    props: Some(serde_json::json!({
+                                        "interface": iface,
+                                        "ref": refer,
+                                        "source": "blueprint_xml",
+                                    })),
+                                });
+                            }
+                        }
+                        b"entry" => {
+                            if attr_val(e, b"key").as_deref()
+                                == Some("osgi.http.whiteboard.servlet.pattern")
+                            {
+                                if let Some(pattern) = attr_val(e, b"value") {
+                                    nodes.push(Node {
+                                        id: cih_core::integration_route_id(
+                                            rel_path,
+                                            &format!("osgi-servlet-{pattern}"),
+                                        ),
+                                        kind: NodeKind::IntegrationRoute,
+                                        name: pattern.clone(),
+                                        qualified_name: None,
+                                        file: rel_path.to_string(),
+                                        range: Range::default(),
+                                        props: Some(serde_json::json!({
+                                            "source": "osgi_servlet",
+                                            "servlet_pattern": pattern,
+                                        })),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-            } else if tag_name == "entry"
-                && extract_xml_attr(&content[tag_start..], "key").as_deref()
-                    == Some("osgi.http.whiteboard.servlet.pattern")
-            {
-                if let Some(pattern) = extract_xml_attr(&content[tag_start..], "value") {
-                    let node_id = cih_core::integration_route_id(
-                        rel_path,
-                        &format!("osgi-servlet-{pattern}"),
-                    );
-                    nodes.push(Node {
-                        id: node_id,
-                        kind: NodeKind::IntegrationRoute,
-                        name: pattern.clone(),
-                        qualified_name: None,
-                        file: rel_path.to_string(),
-                        range: Range::default(),
-                        props: Some(serde_json::json!({
-                            "source": "osgi_servlet",
-                            "servlet_pattern": pattern,
-                        })),
-                    });
+
+                if is_start {
+                    depth += 1;
                 }
             }
+            Ok((_, Event::End(_))) => {
+                depth -= 1;
+                if server.as_ref().is_some_and(|acc| depth == acc.depth) {
+                    let acc = server.take().unwrap();
+                    push_jaxrs_server_node(rel_path, acc, &mut nodes);
+                }
+            }
+            Ok((_, Event::Eof)) => break,
+            Err(_) => break, // best-effort: keep what we have
+            _ => {}
         }
-        i += 1;
     }
-    nodes
+    // Finalize an unterminated server (malformed input).
+    if let Some(acc) = server.take() {
+        push_jaxrs_server_node(rel_path, acc, &mut nodes);
+    }
+
+    IntegrationXmlOutput {
+        nodes,
+        edges: Vec::new(),
+    }
 }
 
-/// Collect bean references inside a `<jaxrs:serviceBeans>` block. Handles both the
-/// Spring form `<ref bean="..."/>` and the Blueprint form `<ref component-id="..."/>`,
-/// while skipping unrelated `<reference>` elements.
-fn collect_ref_beans(block: &str) -> Vec<String> {
-    let bytes = block.as_bytes();
-    let mut beans = Vec::new();
-    let mut search = 0;
-    while let Some(rel) = block[search..].find("<ref") {
-        let pos = search + rel;
-        let after = pos + 4;
-        search = after;
-        // Require `<ref` to be its own tag, not the start of `<reference`.
-        match bytes.get(after) {
-            Some(b) if b.is_ascii_whitespace() || *b == b'/' || *b == b'>' => {}
-            _ => continue,
-        }
-        if let Some(bean) = extract_xml_attr(&block[pos..], "bean")
-            .or_else(|| extract_xml_attr(&block[pos..], "component-id"))
-        {
-            beans.push(bean);
-        }
-    }
-    beans
+fn push_jaxrs_server_node(rel_path: &str, acc: JaxrsServerAcc, nodes: &mut Vec<Node>) {
+    nodes.push(Node {
+        id: cih_core::integration_route_id(rel_path, &format!("jaxrs-server-{}", acc.address)),
+        kind: NodeKind::IntegrationRoute,
+        name: acc.address.clone(),
+        qualified_name: acc.beans.first().cloned(),
+        file: rel_path.to_string(),
+        range: Range::default(),
+        props: Some(serde_json::json!({
+            "source": "cxf_jaxrs_server",
+            "address": acc.address,
+            "server_id": acc.server_id,
+            "bean_id": acc.beans.first().cloned(),
+            "beans": acc.beans,
+            "bean_classes": acc.bean_classes,
+        })),
+    });
 }
+
 
 /// Extract a named XML attribute value from a tag fragment.
 /// Handles both single and double quoted values.

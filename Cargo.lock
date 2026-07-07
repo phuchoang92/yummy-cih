@@ -722,6 +722,7 @@ dependencies = [
  "cih-lang",
  "cih-parse",
  "ignore",
+ "quick-xml",
  "rayon",
  "serde",
  "serde_json",
