@@ -5,7 +5,6 @@
 //! Phase 1 and Phase 3 confidence adjustments independent of each other.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{HashMap, HashSet};
 
 use cih_core::{Edge, Node, NodeId};
 

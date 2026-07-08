@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use petgraph::graph::{DiGraph, NodeIndex};

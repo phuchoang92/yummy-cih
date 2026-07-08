@@ -6,7 +6,6 @@
 //! Phase 3: PDG-based flow-sensitive, kill-aware taint (reaching defs → DataDep/ControlDep).
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};

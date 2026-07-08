@@ -143,8 +143,6 @@ pub fn refine_paths(
     resolve_src: impl Fn(&str) -> Option<String>,
     sink_name_patterns: &[&str],
 ) -> Vec<PathRefinement> {
-    use std::collections::HashMap;
-
     // Cache IntraResult per source method (multiple paths may share a source).
     let mut intra_cache: FxHashMap<NodeId, Option<IntraResult>> = FxHashMap::default();
 

@@ -5,7 +5,7 @@
 //! defined in a different class the site is emitted with `dynamic=true` props and
 //! no table edges.
 
-use rustc_hash::{FxHashSet};
+use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
 
 use cih_core::{

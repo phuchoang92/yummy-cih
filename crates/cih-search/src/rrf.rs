@@ -1,5 +1,4 @@
 use rustc_hash::{FxHashMap};
-use std::collections::HashMap;
 
 use cih_core::{NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};

@@ -6,7 +6,7 @@
 //! onto the Java `Route` nodes, prepending `servlet_prefix + <jaxrs:server address>` to
 //! each route path. Invoked from [`super::JavaResolver::post_process`].
 
-use rustc_hash::{FxHashMap};
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
