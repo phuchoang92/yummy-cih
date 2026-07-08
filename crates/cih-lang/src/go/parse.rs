@@ -298,6 +298,7 @@ fn extract_method(
     Some((def, graph_node, edge))
 }
 
+#[allow(clippy::too_many_arguments)] // recursive tree-walker signature
 fn collect_type_decls(
     type_decl: TsNode<'_>,
     src: &str,

@@ -52,6 +52,7 @@ pub fn parse_rust_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
     Ok(ParsedUnit { rel: rel.to_string(), nodes, edges, parsed_file, import_bindings: Vec::new() })
 }
 
+#[allow(clippy::too_many_arguments)] // recursive tree-walker signature
 fn walk_items(
     parent: TsNode<'_>, src: &str, rel: &str, module: &str,
     file_id: &NodeId, owner_fqcn: Option<&str>,

@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cih_core::{method_id, type_id, ContractKind, EdgeKind};
 use cih_parse::{parse_files, LanguageRegistry};
@@ -18,7 +18,7 @@ fn temp_repo() -> PathBuf {
     std::env::temp_dir().join(format!("cih-parse-test-{}-{nanos}", std::process::id()))
 }
 
-fn write_file(root: &PathBuf, rel: &str, content: &str) {
+fn write_file(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();

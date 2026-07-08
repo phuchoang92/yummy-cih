@@ -77,6 +77,9 @@ fn count_parameters(fvp: TsNode<'_>) -> u16 {
     count
 }
 
+// Not `Iterator::find`: the returned node must outlive the cursor borrow,
+// which this tree-sitter version's iterator bounds don't allow.
+#[allow(clippy::manual_find)]
 fn find_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {

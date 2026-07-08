@@ -344,8 +344,8 @@ fn refine(bodies: &mut [Body], edges: &[(usize, usize, EdgeKind)], iterations: u
         for index in 0..bodies.len() {
             octree_insert(&mut tree, 0, index, bodies, 0);
         }
-        for index in 0..bodies.len() {
-            octree_repulse(&tree, 0, index, bodies, &mut forces[index]);
+        for (index, force) in forces.iter_mut().enumerate() {
+            octree_repulse(&tree, 0, index, bodies, force);
         }
         for &(source, target, _) in edges {
             let dx = bodies[target].x - bodies[source].x;

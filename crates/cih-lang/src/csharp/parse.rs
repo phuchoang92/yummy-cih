@@ -36,6 +36,7 @@ pub fn parse_csharp_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
                   nodes, edges, defs, imports, sites))
 }
 
+#[allow(clippy::too_many_arguments)] // recursive tree-walker signature
 fn walk(
     parent: TsNode<'_>, src: &str, rel: &str, ns: &str,
     file_node_id: &cih_core::NodeId, owner_fqcn: Option<&str>,

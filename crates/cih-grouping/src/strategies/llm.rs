@@ -88,10 +88,7 @@ impl FeatureStrategy for LlmStrategy {
                     .prior_assignments
                     .iter()
                     .find(|e| e.node_id == n.id.as_str());
-                match prior {
-                    Some(e) if !catch_all.contains(e.name.as_str()) => false,
-                    _ => true,
-                }
+                !matches!(prior, Some(e) if !catch_all.contains(e.name.as_str()))
             })
             .collect();
 

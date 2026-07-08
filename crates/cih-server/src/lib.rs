@@ -1,19 +1,32 @@
-pub mod agent;
+//! CIH MCP server library.
+//!
+//! The public surface is deliberately small: [`run`] (the server entry point
+//! used by the `cih-server` binary) plus the modules exercised by integration
+//! tests (`args`, `browser`, `patterns`, `search`, `utils`, `viz`). Everything
+//! else is crate-private wiring.
+
+mod app;
+
 pub mod args;
 pub mod browser;
-pub mod changes;
-pub mod config;
-pub mod contracts;
-pub mod coverage;
-pub mod feature;
-pub mod files;
-pub mod indexing;
-pub mod jobs;
-pub mod layout;
-pub mod resources;
+pub mod patterns;
 pub mod search;
-pub mod server;
-pub mod symbol;
-pub mod taint;
 pub mod utils;
 pub mod viz;
+
+pub(crate) mod agent;
+pub(crate) mod changes;
+pub(crate) mod config;
+pub(crate) mod contracts;
+pub(crate) mod coverage;
+pub(crate) mod feature;
+pub(crate) mod files;
+pub(crate) mod indexing;
+pub(crate) mod jobs;
+pub(crate) mod layout;
+pub(crate) mod resources;
+pub(crate) mod server;
+pub(crate) mod symbol;
+pub(crate) mod taint;
+
+pub use app::run;
