@@ -108,7 +108,13 @@ impl CommonIndex {
                             .push(def.fqcn.clone());
                     }
                     idx.file_of_type.insert(def.fqcn.clone(), pf.file.clone());
-                } else if matches!(def.kind, NodeKind::Method | NodeKind::Constructor) {
+                } else if matches!(
+                    def.kind,
+                    NodeKind::Method | NodeKind::Constructor | NodeKind::Function
+                ) {
+                    // `Function` covers free functions and (for dynamic languages like Python/TS
+                    // that don't distinguish) class methods; keying by (container fqcn, name) lets
+                    // `find_member` resolve them the same way Java methods resolve.
                     idx.methods
                         .entry((def.fqcn.clone(), def.name.clone()))
                         .or_default()

@@ -63,7 +63,13 @@ impl ResolveIndex {
                         .or_default()
                         .push(def.fqcn.clone());
                     idx.file_of_type.insert(def.fqcn.clone(), pf.file.clone());
-                } else if matches!(def.kind, NodeKind::Method | NodeKind::Constructor) {
+                } else if matches!(
+                    def.kind,
+                    NodeKind::Method | NodeKind::Constructor | NodeKind::Function
+                ) {
+                    // `Function` covers free functions and (in dynamic languages like Python/TS that
+                    // don't distinguish) class methods, keyed by (container fqcn, name) so
+                    // `find_member` resolves them. Mirrors `common/index.rs`.
                     idx.methods
                         .entry((def.fqcn.clone(), def.name.clone()))
                         .or_default()

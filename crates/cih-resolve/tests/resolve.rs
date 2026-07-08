@@ -1,7 +1,7 @@
 use cih_core::{
-    constructor_id, external_endpoint_id, field_id, file_id, kafka_topic_id, method_id, type_id,
-    BindingKind, ContractKind, ContractSite, EdgeKind, MessagingFramework, NodeId, NodeKind,
-    ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    constructor_id, external_endpoint_id, field_id, file_id, function_id, kafka_topic_id,
+    method_id, type_id, BindingKind, ContractKind, ContractSite, EdgeKind, MessagingFramework,
+    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
 };
 use cih_resolve::resolve_edges;
 
@@ -1267,4 +1267,66 @@ fn callresult_factory_pattern_unresolved_when_return_type_absent() {
     assert_eq!(out.skipped, 1);
     let r = &out.unresolved_refs[0];
     assert_eq!(r.reason, "receiver_type_unknown");
+}
+
+/// A module-level function def as the Python parser emits it: `NodeKind::Function`, `owner: None`,
+/// `fqcn` = the module, empty `param_types`.
+fn py_function_def(container: &str, name: &str, arity: u16) -> SymbolDef {
+    SymbolDef {
+        id: function_id(container, name, arity),
+        kind: NodeKind::Function,
+        fqcn: container.into(),
+        name: name.into(),
+        owner: None,
+        range: Range::default(),
+        modifiers: Vec::new(),
+        param_types: Vec::new(),
+        return_type: None,
+        declared_type: None,
+        framework_role: None,
+        body_fingerprint: None,
+        complexity: None,
+        lang_meta: None,
+    }
+}
+
+#[test]
+fn python_free_function_call_resolves() {
+    // Mirrors what the Python parser now emits: `NodeKind::Function` defs (empty `param_types`) and
+    // a call ref attributed to the enclosing function `main`. Regression guard for the two Python
+    // call-graph fixes (index registers Function-kind; parser attributes calls to the caller).
+    let file = ParsedFile {
+        file: "app.py".into(),
+        language: String::new(),
+        package: None,
+        defs: vec![py_function_def("app", "helper", 1), py_function_def("app", "main", 0)],
+        imports: vec![],
+        reference_sites: vec![ReferenceSite {
+            name: "helper".into(),
+            receiver: None,
+            kind: RefKind::Call,
+            arity: Some(1),
+            range: Range::default(),
+            in_fqcn: "app#main/0".into(),
+            in_callable: function_id("app", "main", 0),
+            arg_texts: vec![],
+        }],
+        type_bindings: vec![],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+    };
+    let out = resolve_edges(&[file]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == function_id("app", "main", 0)
+            && e.dst == function_id("app", "helper", 1)),
+        "expected CALLS edge main -> helper; calls = {:?}",
+        out.edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
 }

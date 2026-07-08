@@ -246,6 +246,10 @@ struct Builder {
     fastapi_prefixes: HashMap<String, String>,
     /// variable_name → url_prefix for Flask Blueprint instances
     flask_prefixes: HashMap<String, String>,
+    /// Whether the file imports FastAPI / Flask — disambiguates `@app.get`-style decorators, which
+    /// are valid in both frameworks (mirrors `python/mod.rs` `detect_frameworks`).
+    has_fastapi: bool,
+    has_flask: bool,
 }
 
 impl Builder {
@@ -452,7 +456,16 @@ impl Builder {
         });
     }
 
-    fn emit_call_reference(&mut self, node: TsNode<'_>, src: &str) {
+    /// `enclosing` is the function that lexically contains this call — its node id and its
+    /// signature fqcn (`container#name/arity`). When present, the call is attributed to that
+    /// function so a `Calls` edge originates from the caller; module-level calls (no enclosing
+    /// function) fall back to the file / module, as before.
+    fn emit_call_reference(
+        &mut self,
+        node: TsNode<'_>,
+        src: &str,
+        enclosing: Option<(&NodeId, &str)>,
+    ) {
         let Some(func) = node.child_by_field_name("function") else {
             return;
         };
@@ -471,14 +484,18 @@ impl Builder {
         if name.is_empty() {
             return;
         }
+        let (in_fqcn, in_callable) = match enclosing {
+            Some((id, fqcn)) => (fqcn.to_string(), id.clone()),
+            None => (self.module.clone(), file_id(&self.rel)),
+        };
         self.reference_sites.push(ReferenceSite {
             name,
             receiver,
             kind: RefKind::Call,
             arity: call_arity(node),
             range: range_of(func),
-            in_fqcn: self.module.clone(),
-            in_callable: file_id(&self.rel),
+            in_fqcn,
+            in_callable,
             arg_texts: Vec::new(),
         });
     }
@@ -576,22 +593,22 @@ fn process_function_decorators(
             continue;
         }
 
-        // Flask shorthand: @app.get, @app.post, etc.
-        if let Some(http_method) = flask_http_method(attr) {
-            if obj == "app" || obj == "blueprint" {
+        // HTTP-method shorthand: @app.get / @app.post / @router.get, etc. This syntax is valid in
+        // both FastAPI and Flask 2.0+, so disambiguate by the file's imported framework: `router`
+        // is FastAPI-only (APIRouter); for `app`/`blueprint`, prefer FastAPI only when the file
+        // imports it and not Flask, else Flask.
+        if let Some(http_method) = fastapi_http_method(attr) {
+            if obj == "router" || obj == "app" || obj == "blueprint" {
                 if let Some(ref path) = dec.path_arg {
-                    builder.emit_flask_route(fn_node, fn_id, http_method, path);
+                    let is_fastapi =
+                        obj == "router" || (builder.has_fastapi && !builder.has_flask);
+                    if is_fastapi {
+                        builder.emit_fastapi_route(fn_node, fn_id, http_method, path);
+                    } else {
+                        builder.emit_flask_route(fn_node, fn_id, http_method, path);
+                    }
                 }
                 continue;
-            }
-        }
-
-        // FastAPI: @router.get, @router.post, etc.
-        if let Some(http_method) = fastapi_http_method(attr) {
-            if obj == "router" || obj == "app" {
-                if let Some(ref path) = dec.path_arg {
-                    builder.emit_fastapi_route(fn_node, fn_id, http_method, path);
-                }
             }
         }
     }
@@ -629,12 +646,21 @@ fn detect_and_store_router_prefix(node: TsNode<'_>, src: &str, builder: &mut Bui
 
 // ── AST walker ────────────────────────────────────────────────────────────────
 
-fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&str>) {
+/// `enclosing` is the function that lexically contains `node` (its node id + signature fqcn), or
+/// `None` at module / class-body scope. It is threaded so call sites can be attributed to their
+/// caller (see [`Builder::emit_call_reference`]).
+fn walk(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    class_fqn: Option<&str>,
+    enclosing: Option<(&NodeId, &str)>,
+) {
     match node.kind() {
         "module" => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, None);
+                walk(child, src, builder, None, None);
             }
         }
         "decorated_definition" => {
@@ -651,13 +677,14 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
                         continue;
                     }
                     let arity = parameter_count(child);
+                    let fn_fqcn = callable_fqcn(builder, class_fqn, &name, arity);
                     let fn_id = builder.emit_function(child, src, &name, arity, class_fqn);
                     process_function_decorators(child, &fn_id, &decorators, builder);
-                    // Walk body
+                    // Walk body — calls inside attribute to this function.
                     if let Some(body) = child.child_by_field_name("body") {
                         let mut bcursor = body.walk();
                         for bchild in body.named_children(&mut bcursor) {
-                            walk(bchild, src, builder, class_fqn);
+                            walk(bchild, src, builder, class_fqn, Some((&fn_id, &fn_fqcn)));
                         }
                     }
                 } else if child.kind() == "class_definition" {
@@ -669,11 +696,11 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
                         continue;
                     }
                     let fqn = builder.emit_class(child, src, &name, class_fqn);
-                    // Walk body
+                    // Walk body — class scope resets the enclosing function.
                     if let Some(body) = child.child_by_field_name("body") {
                         let mut bcursor = body.walk();
                         for bchild in body.named_children(&mut bcursor) {
-                            walk(bchild, src, builder, Some(&fqn));
+                            walk(bchild, src, builder, Some(&fqn), None);
                         }
                     }
                 }
@@ -691,7 +718,7 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, Some(&fqn));
+                    walk(child, src, builder, Some(&fqn), None);
                 }
             }
         }
@@ -704,11 +731,12 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
                 return;
             }
             let arity = parameter_count(node);
-            builder.emit_function(node, src, &name, arity, class_fqn);
+            let fn_fqcn = callable_fqcn(builder, class_fqn, &name, arity);
+            let fn_id = builder.emit_function(node, src, &name, arity, class_fqn);
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, class_fqn);
+                    walk(child, src, builder, class_fqn, Some((&fn_id, &fn_fqcn)));
                 }
             }
         }
@@ -716,27 +744,34 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
             detect_and_store_router_prefix(node, src, builder);
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, class_fqn);
+                walk(child, src, builder, class_fqn, enclosing);
             }
         }
         "import_statement" | "import_from_statement" => {
             builder.emit_import(node, src);
         }
         "call" => {
-            builder.emit_call_reference(node, src);
-            // recurse into arguments
+            builder.emit_call_reference(node, src, enclosing);
+            // recurse into arguments — still within the same enclosing function.
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, class_fqn);
+                walk(child, src, builder, class_fqn, enclosing);
             }
         }
         _ => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, class_fqn);
+                walk(child, src, builder, class_fqn, enclosing);
             }
         }
     }
+}
+
+/// The signature fqcn (`container#name/arity`) for a function/method being emitted — the same
+/// string as its node's `qualified_name`, used as `in_fqcn` for calls made inside it.
+fn callable_fqcn(builder: &Builder, class_fqn: Option<&str>, name: &str, arity: u16) -> String {
+    let container = class_fqn.unwrap_or(&builder.module);
+    format!("{container}#{name}/{arity}")
 }
 
 pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
@@ -774,10 +809,12 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
     let mut builder = Builder {
         rel: rel.to_string(),
         module,
+        has_fastapi: src.contains("from fastapi") || src.contains("import fastapi"),
+        has_flask: src.contains("from flask") || src.contains("import flask"),
         ..Builder::default()
     };
 
-    walk(tree.root_node(), src, &mut builder, None);
+    walk(tree.root_node(), src, &mut builder, None, None);
 
     // Convert RawImports to ImportBindings (best-effort for Python)
     let import_bindings = builder.imports.iter().map(|imp| {
