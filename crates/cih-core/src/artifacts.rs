@@ -73,14 +73,14 @@ impl GraphArtifacts {
                 GraphArtifacts {
                     nodes_path,
                     edges_path,
-                    version: VersionId(version),
+                    version: VersionId::new(version),
                 },
             ));
         }
         candidates.sort_by(|(a_mtime, a_art), (b_mtime, b_art)| {
             b_mtime
                 .cmp(a_mtime)
-                .then_with(|| b_art.version.0.cmp(&a_art.version.0))
+                .then_with(|| b_art.version.as_str().cmp(a_art.version.as_str()))
         });
         candidates
             .into_iter()
@@ -215,7 +215,7 @@ impl GraphArtifacts {
             repo_name,
             root_path,
             indexed_at: crate::registry::now_rfc3339(),
-            artifact_version: self.version.0.clone(),
+            artifact_version: self.version.to_string(),
             has_community,
             file_count,
         };
@@ -292,7 +292,7 @@ impl GraphArtifacts {
         let main_artifacts = GraphArtifacts {
             nodes_path,
             edges_path,
-            version: VersionId(manifest.artifact_version.clone()),
+            version: VersionId::new(manifest.artifact_version.clone()),
         };
 
         let community_artifacts = if manifest.has_community && !comm_nodes_bytes.is_empty() {
@@ -307,7 +307,7 @@ impl GraphArtifacts {
             Some(GraphArtifacts {
                 nodes_path: cn,
                 edges_path: ce,
-                version: VersionId(manifest.artifact_version.clone()),
+                version: VersionId::new(manifest.artifact_version.clone()),
             })
         } else {
             None

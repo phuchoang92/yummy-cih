@@ -147,7 +147,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         .with_context(|| format!("failed to read {}", source.edges_path.display()))?;
 
     tracing::info!(
-        source_version = %source.version.0,
+        source_version = %source.version,
         nodes = nodes.len(),
         edges = edges.len(),
         "source graph loaded"
@@ -299,7 +299,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     let artifacts_dir = repo.join(".cih").join("artifacts-community").join(&version);
     let artifacts = GraphArtifacts::write(
         &artifacts_dir,
-        VersionId(version.clone()),
+        VersionId::new(version.clone()),
         &output_nodes,
         &output_edges,
     )
@@ -335,7 +335,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
             Ok(adapter) => {
                 // Load prior artifact for incremental cache.
-                let prior_artifact = find_feature_artifact_dir(repo, &source.version.0)
+                let prior_artifact = find_feature_artifact_dir(repo, source.version.as_str())
                     .and_then(|dir| read_feature_artifact(&dir).ok())
                     .unwrap_or_default();
                 let prior_artifact = prior_artifact
@@ -367,7 +367,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     let feature_strategy = if feature_strategy_kind == FeatureStrategyKind::Embed {
         // Embedding clusterer: owns the Postgres + Leiden work, then hands assignments to the
         // (Postgres-free) grouping strategy. Any failure degrades cleanly to package.
-        match build_embed_cluster_strategy(&nodes, overrides, repo, &source.version.0) {
+        match build_embed_cluster_strategy(&nodes, overrides, repo, source.version.as_str()) {
             Ok(s) => s,
             Err(err) => {
                 tracing::warn!(
@@ -398,7 +398,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     let strategy_input = StrategyInput {
         nodes: &nodes,
         edges: &edges,
-        graph_version: &source.version.0,
+        graph_version: source.version.as_str(),
         prior_assignments: &[],
     };
     let raw_entries = feature_strategy.assign(&strategy_input);
@@ -416,7 +416,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         }
         names.len()
     };
-    let feat_dir = feature_artifact_dir(repo, &source.version.0);
+    let feat_dir = feature_artifact_dir(repo, source.version.as_str());
     write_feature_artifacts(
         &feat_dir,
         feature_strategy.name(),
@@ -431,7 +431,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     })?;
     prune_feature_artifacts(
         &repo.join(".cih").join("artifacts-features"),
-        &source.version.0,
+        source.version.as_str(),
     )?;
     tracing::info!(
         features = feature_count,
@@ -707,7 +707,7 @@ impl DiscoverOutcome {
 
     fn summary<'a>(&'a self, load: &'a LoadOutcome) -> DiscoverSummary<'a> {
         DiscoverSummary {
-            source_version: self.source_artifacts.version.0.as_str(),
+            source_version: self.source_artifacts.version.as_str(),
             version: &self.version,
             artifacts_path: self.artifacts_dir.display().to_string(),
             community_count: self.community_count,

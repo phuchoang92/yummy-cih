@@ -181,7 +181,7 @@ pub(super) fn load_wiki_artifacts(
             )
         })?;
         tracing::info!(
-            graph_version = %graph_artifacts.version.0,
+            graph_version = %graph_artifacts.version,
             nodes = nodes.len(),
             edges = edges.len(),
             "graph artifacts loaded (package mode)"
@@ -210,7 +210,7 @@ pub(super) fn load_wiki_artifacts(
         });
 
         let feature_lookup: Arc<std::collections::HashMap<String, String>> = Arc::new(
-            cih_grouping::find_feature_artifact_dir(repo, &graph_artifacts.version.0)
+            cih_grouping::find_feature_artifact_dir(repo, graph_artifacts.version.as_str())
                 .and_then(|dir| cih_grouping::read_feature_artifact(&dir).ok())
                 .map(|entries| entries.into_iter().map(|e| (e.node_id, e.name)).collect())
                 .unwrap_or_default(),
@@ -235,7 +235,7 @@ pub(super) fn load_wiki_artifacts(
             return Ok(None);
         }
         community_edges = Vec::new();
-        community_version = graph_artifacts.version.0.clone();
+        community_version = graph_artifacts.version.to_string();
         feature_of = Box::new(move |node_id: &str, f: &str| {
             let feat = feature_lookup
                 .get(node_id)
@@ -253,7 +253,7 @@ pub(super) fn load_wiki_artifacts(
                         a.nodes_path.display()
                     )
                 })?;
-                let ver = a.version.0.clone();
+                let ver = a.version.to_string();
                 tracing::info!(
                     community_version = %ver,
                     communities = ns.len(),
@@ -333,7 +333,7 @@ pub(super) fn load_wiki_artifacts(
             )
         })?;
         tracing::info!(
-            graph_version = %graph_artifacts.version.0,
+            graph_version = %graph_artifacts.version,
             nodes = nodes.len(),
             edges = edges.len(),
             "graph artifacts loaded"
@@ -421,7 +421,7 @@ pub(super) fn load_wiki_artifacts(
         community_nodes,
         community_edges,
         community_version,
-        graph_version: graph_artifacts.version.0,
+        graph_version: graph_artifacts.version.to_string(),
         repo_map,
         unresolved_report,
         out_dir,

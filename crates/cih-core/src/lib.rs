@@ -34,8 +34,12 @@ pub use repo_map::{
 };
 
 /// Stable, unique node identifier (e.g. `Method:com.acme.UserService#save`).
+///
+/// The canonical format is `Kind:fully.qualified.name` — construct via the
+/// `*_id()` helpers below (or `NodeId::new` when the string is already in
+/// canonical form, e.g. read back from a store).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NodeId(pub String);
+pub struct NodeId(String);
 
 impl NodeId {
     pub fn new(s: impl Into<String>) -> Self {
@@ -53,7 +57,12 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Node labels (mirrors `gitnexus-shared` `NodeLabel`, trimmed for Java/Spring v1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Graph labels are the variant names verbatim (strum's default); they are
+/// stored in FalkorDB, so renaming a variant is a breaking schema change.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr, strum::EnumString,
+)]
 pub enum NodeKind {
     File,
     Folder,
@@ -80,55 +89,13 @@ pub enum NodeKind {
 
 impl NodeKind {
     pub fn label(&self) -> &'static str {
-        match self {
-            NodeKind::File => "File",
-            NodeKind::Folder => "Folder",
-            NodeKind::Class => "Class",
-            NodeKind::Interface => "Interface",
-            NodeKind::Enum => "Enum",
-            NodeKind::Record => "Record",
-            NodeKind::Annotation => "Annotation",
-            NodeKind::Method => "Method",
-            NodeKind::Function => "Function",
-            NodeKind::Constructor => "Constructor",
-            NodeKind::Field => "Field",
-            NodeKind::Route => "Route",
-            NodeKind::Community => "Community",
-            NodeKind::Process => "Process",
-            NodeKind::KafkaTopic => "KafkaTopic",
-            NodeKind::ExternalEndpoint => "ExternalEndpoint",
-            NodeKind::DbQuery => "DbQuery",
-            NodeKind::DbTable => "DbTable",
-            NodeKind::IntegrationRoute => "IntegrationRoute",
-            NodeKind::MessageDestination => "MessageDestination",
-            NodeKind::Other => "Other",
-        }
+        (*self).into()
     }
 
+    /// Unknown labels map to `Other` (labels read back from a store may
+    /// come from a newer schema).
     pub fn from_label(label: &str) -> Self {
-        match label {
-            "File" => NodeKind::File,
-            "Folder" => NodeKind::Folder,
-            "Class" => NodeKind::Class,
-            "Interface" => NodeKind::Interface,
-            "Enum" => NodeKind::Enum,
-            "Record" => NodeKind::Record,
-            "Annotation" => NodeKind::Annotation,
-            "Method" => NodeKind::Method,
-            "Function" => NodeKind::Function,
-            "Constructor" => NodeKind::Constructor,
-            "Field" => NodeKind::Field,
-            "Route" => NodeKind::Route,
-            "Community" => NodeKind::Community,
-            "Process" => NodeKind::Process,
-            "KafkaTopic" => NodeKind::KafkaTopic,
-            "ExternalEndpoint" => NodeKind::ExternalEndpoint,
-            "DbQuery" => NodeKind::DbQuery,
-            "DbTable" => NodeKind::DbTable,
-            "IntegrationRoute" => NodeKind::IntegrationRoute,
-            "MessageDestination" => NodeKind::MessageDestination,
-            _ => NodeKind::Other,
-        }
+        label.parse().unwrap_or(NodeKind::Other)
     }
 }
 
@@ -222,7 +189,12 @@ pub fn message_destination_id(dest_type: &str, name: &str) -> NodeId {
 }
 
 /// Edge types (mirrors `gitnexus-shared` `RelationshipType`, trimmed for v1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Cypher labels are SCREAMING_SNAKE_CASE of the variant name (except `Other`
+/// → `REL`); they are stored in FalkorDB, so renaming a variant is a breaking
+/// schema change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, strum::IntoStaticStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EdgeKind {
     Contains,
     Calls,
@@ -250,39 +222,14 @@ pub enum EdgeKind {
     /// Inter-procedural taint flow from an entry-point method to a sink method.
     /// Emitted by `cih-taint` Phase 0. Props: `hops`, `sink_category`, `hop_count`.
     TaintFlow,
+    #[strum(serialize = "REL")]
     Other,
 }
 
 impl EdgeKind {
     /// openCypher relationship label used by the Cypher adapters.
     pub fn cypher_label(&self) -> &'static str {
-        match self {
-            EdgeKind::Contains => "CONTAINS",
-            EdgeKind::Calls => "CALLS",
-            EdgeKind::Extends => "EXTENDS",
-            EdgeKind::Implements => "IMPLEMENTS",
-            EdgeKind::HasMethod => "HAS_METHOD",
-            EdgeKind::HasField => "HAS_FIELD",
-            EdgeKind::Imports => "IMPORTS",
-            EdgeKind::Accesses => "ACCESSES",
-            EdgeKind::Uses => "USES",
-            EdgeKind::MethodOverrides => "METHOD_OVERRIDES",
-            EdgeKind::MethodImplements => "METHOD_IMPLEMENTS",
-            EdgeKind::MemberOf => "MEMBER_OF",
-            EdgeKind::StepInProcess => "STEP_IN_PROCESS",
-            EdgeKind::HandlesRoute => "HANDLES_ROUTE",
-            EdgeKind::PublishesEvent => "PUBLISHES_EVENT",
-            EdgeKind::ListensTo => "LISTENS_TO",
-            EdgeKind::ExternalCall => "EXTERNAL_CALL",
-            EdgeKind::Tests => "TESTS",
-            EdgeKind::ExecutesQuery => "EXECUTES_QUERY",
-            EdgeKind::ReadsTable => "READS_TABLE",
-            EdgeKind::WritesTable => "WRITES_TABLE",
-            EdgeKind::IntegrationLink => "INTEGRATION_LINK",
-            EdgeKind::SimilarTo => "SIMILAR_TO",
-            EdgeKind::TaintFlow => "TAINT_FLOW",
-            EdgeKind::Other => "REL",
-        }
+        (*self).into()
     }
 }
 
@@ -343,7 +290,22 @@ fn default_confidence() -> f32 {
 
 /// Monotonic publish version for atomic store swaps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VersionId(pub String);
+pub struct VersionId(String);
+
+impl VersionId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for VersionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Canonical bulk-load artifact the engine always emits; each `BulkLoader`
 /// transforms it into its backend's required format (S3 CSV, COPY, etc.).

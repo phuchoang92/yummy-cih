@@ -29,7 +29,7 @@ pub fn load_artifact_nodes(artifacts_dir: &str) -> std::io::Result<Vec<Node>> {
     GraphArtifacts {
         nodes_path: dir.join("nodes.jsonl"),
         edges_path: dir.join("edges.jsonl"),
-        version: VersionId(String::new()),
+        version: VersionId::new(String::new()),
     }
     .read_nodes()
 }
@@ -39,7 +39,7 @@ pub fn load_artifact_edges(artifacts_dir: &str) -> std::io::Result<Vec<Edge>> {
     GraphArtifacts {
         nodes_path: dir.join("nodes.jsonl"),
         edges_path: dir.join("edges.jsonl"),
-        version: VersionId(String::new()),
+        version: VersionId::new(String::new()),
     }
     .read_edges()
 }

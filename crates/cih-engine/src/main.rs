@@ -1194,7 +1194,7 @@ fn run_artifact(command: ArtifactCommand) -> Result<()> {
             let artifacts = GraphArtifacts {
                 nodes_path: version_dir.join("nodes.jsonl"),
                 edges_path: version_dir.join("edges.jsonl"),
-                version: cih_core::VersionId(version_id.clone()),
+                version: cih_core::VersionId::new(version_id.clone()),
             };
             let bundle_path = out.unwrap_or_else(|| cih_dir.join("graph.db.zst"));
             let manifest = artifacts.export_bundle(

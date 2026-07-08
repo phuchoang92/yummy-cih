@@ -117,7 +117,7 @@ pub(super) fn parse_scope(
                     cache_stats: CacheStats {
                         enabled: true,
                         noop: true,
-                        version: Some(reused.artifacts.version.0.clone()),
+                        version: Some(reused.artifacts.version.to_string()),
                         ..CacheStats::default()
                     },
                     artifacts: reused.artifacts,
@@ -246,7 +246,7 @@ fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts>
     let artifacts = latest_graph_artifacts(repo_root)?;
     let nodes = artifacts.read_nodes()?;
     let edges = artifacts.read_edges()?;
-    let parsed_dir = cih_dir.join("parsed").join(&artifacts.version.0);
+    let parsed_dir = cih_dir.join("parsed").join(artifacts.version.as_str());
     let parsed_files_path = parsed_dir.join("parsed-files.jsonl");
     let parsed_file_count = cih_parse::load_parsed_files(&parsed_dir)
         .map(|files| files.len())

@@ -85,6 +85,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 petgraph = "0.6"
 rand = "0.9"
 rustc-hash = "2"
+strum = { version = "0.27", features = ["derive"] }
 fastembed = { version = "4", default-features = false, features = ["ort-download-binaries", "hf-hub-native-tls"] }
 tokio-postgres = "0.7"
 pgvector = { version = "0.4", features = ["postgres"] }

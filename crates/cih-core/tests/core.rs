@@ -77,6 +77,44 @@ fn node_kind_labels_round_trip() {
     assert_eq!(NodeKind::from_label("Unknown"), NodeKind::Other);
 }
 
+/// Cypher labels are persisted in FalkorDB graphs — they must never drift.
+/// This pins every label byte-for-byte (guards the strum derive against
+/// accidental renames or serialize_all changes).
+#[test]
+fn edge_kind_cypher_labels_are_stable() {
+    use cih_core::EdgeKind;
+    let expected = [
+        (EdgeKind::Contains, "CONTAINS"),
+        (EdgeKind::Calls, "CALLS"),
+        (EdgeKind::Extends, "EXTENDS"),
+        (EdgeKind::Implements, "IMPLEMENTS"),
+        (EdgeKind::HasMethod, "HAS_METHOD"),
+        (EdgeKind::HasField, "HAS_FIELD"),
+        (EdgeKind::Imports, "IMPORTS"),
+        (EdgeKind::Accesses, "ACCESSES"),
+        (EdgeKind::Uses, "USES"),
+        (EdgeKind::MethodOverrides, "METHOD_OVERRIDES"),
+        (EdgeKind::MethodImplements, "METHOD_IMPLEMENTS"),
+        (EdgeKind::MemberOf, "MEMBER_OF"),
+        (EdgeKind::StepInProcess, "STEP_IN_PROCESS"),
+        (EdgeKind::HandlesRoute, "HANDLES_ROUTE"),
+        (EdgeKind::PublishesEvent, "PUBLISHES_EVENT"),
+        (EdgeKind::ListensTo, "LISTENS_TO"),
+        (EdgeKind::ExternalCall, "EXTERNAL_CALL"),
+        (EdgeKind::Tests, "TESTS"),
+        (EdgeKind::ExecutesQuery, "EXECUTES_QUERY"),
+        (EdgeKind::ReadsTable, "READS_TABLE"),
+        (EdgeKind::WritesTable, "WRITES_TABLE"),
+        (EdgeKind::IntegrationLink, "INTEGRATION_LINK"),
+        (EdgeKind::SimilarTo, "SIMILAR_TO"),
+        (EdgeKind::TaintFlow, "TAINT_FLOW"),
+        (EdgeKind::Other, "REL"),
+    ];
+    for (kind, label) in expected {
+        assert_eq!(kind.cypher_label(), label);
+    }
+}
+
 #[test]
 fn db_id_helpers_use_locked_scheme() {
     use cih_core::{db_query_const_id, db_query_inline_id, db_table_id};

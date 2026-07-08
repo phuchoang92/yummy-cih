@@ -612,7 +612,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
 
     let analyze_nodes = analyze.artifacts.nodes_path.clone();
     let analyze_edges = analyze.artifacts.edges_path.clone();
-    let analyze_version = analyze.artifacts.version.0.clone();
+    let analyze_version = analyze.artifacts.version.to_string();
 
     run_discover_core(
         &root,
@@ -631,7 +631,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
 
     let latest = cih_engine_lib::versioning::latest_graph_artifacts(&root).unwrap();
     assert_eq!(
-        latest.version.0, analyze_version,
+        latest.version.as_str(), analyze_version,
         "latest_graph_artifacts must still return the analyze version after discover"
     );
     assert!(
@@ -684,7 +684,7 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
         "discover.artifacts must be under .cih/artifacts-community/"
     );
     assert_ne!(
-        discover.source_artifacts.version.0, discover.artifacts.version.0,
+        discover.source_artifacts.version, discover.artifacts.version,
         "source and community versions must differ"
     );
 
@@ -718,11 +718,11 @@ fn discover_load_artifacts_are_analyze_then_community() {
         artifact_sets[0].edges_path.canonicalize().unwrap(),
         analyze.artifacts.edges_path.canonicalize().unwrap()
     );
-    assert_eq!(artifact_sets[0].version.0, analyze.artifacts.version.0);
+    assert_eq!(artifact_sets[0].version, analyze.artifacts.version);
 
     assert_eq!(artifact_sets[1].nodes_path, discover.artifacts.nodes_path);
     assert_eq!(artifact_sets[1].edges_path, discover.artifacts.edges_path);
-    assert_eq!(artifact_sets[1].version.0, discover.artifacts.version.0);
+    assert_eq!(artifact_sets[1].version, discover.artifacts.version);
 
     fs::remove_dir_all(&root).unwrap();
 }

@@ -57,7 +57,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let artifacts = latest_graph_artifacts(&repo)
         .context("no graph artifacts found — run `analyze` first")?;
 
-    tracing::info!(version = %artifacts.version.0, "loaded graph artifacts");
+    tracing::info!(version = %artifacts.version, "loaded graph artifacts");
 
     let nodes = artifacts.read_nodes().context("failed to read nodes.jsonl")?;
     let edges = artifacts.read_edges().context("failed to read edges.jsonl")?;
@@ -216,12 +216,12 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
 
     let taint_dir = cih_dir
         .join("artifacts-taint")
-        .join(&artifacts.version.0);
+        .join(artifacts.version.as_str());
 
     ui.spin("Writing taint artifacts");
     let taint_artifacts = GraphArtifacts::write(
         &taint_dir,
-        VersionId(artifacts.version.0.clone()),
+        artifacts.version.clone(),
         &empty_nodes,
         &taint_edges,
     )

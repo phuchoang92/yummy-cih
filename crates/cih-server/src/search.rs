@@ -85,7 +85,7 @@ impl SearchState {
         };
 
         let artifacts = cih_core::GraphArtifacts::latest_in_dir(artifacts_dir)?;
-        let latest_version = artifacts.version.0.clone();
+        let latest_version = artifacts.version.to_string();
 
         {
             let guard = self.bm25.read().await;
