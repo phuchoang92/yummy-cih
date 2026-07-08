@@ -33,6 +33,7 @@ globset.workspace = true
 ignore.workspace = true
 quick-xml.workspace = true
 rayon.workspace = true
+rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

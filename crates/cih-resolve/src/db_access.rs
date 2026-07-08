@@ -5,6 +5,7 @@
 //! defined in a different class the site is emitted with `dynamic=true` props and
 //! no table edges.
 
+use rustc_hash::{FxHashSet};
 use std::collections::{HashMap, HashSet};
 
 use cih_core::{
@@ -26,7 +27,7 @@ pub fn emit_db_access(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
 
     let mut nodes: Vec<Node> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();
-    let mut seen_nodes: HashSet<NodeId> = HashSet::new();
+    let mut seen_nodes: FxHashSet<NodeId> = FxHashSet::default();
 
     for pf in parsed {
         for site in &pf.sql_execution_sites {
@@ -50,7 +51,7 @@ fn process_site(
     const_index: &HashMap<(&str, &str), &cih_core::SqlConstant>,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
-    seen_nodes: &mut HashSet<NodeId>,
+    seen_nodes: &mut FxHashSet<NodeId>,
 ) {
     // Derive the owner FQCN from the callable id.
     // Method id format: `Method:<fqcn>#<name>/<arity>` or `Constructor:<fqcn>#<init>/<arity>`.

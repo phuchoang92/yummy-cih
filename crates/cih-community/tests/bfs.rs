@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use cih_community::bfs::{encode_trace, is_subtrace_of, trace_process_paths};
 use cih_community::ProcessConfig;
@@ -37,7 +37,7 @@ fn parent_pointer_bfs_prevents_cycles() {
     graph.add_edge(nodes[1], nodes[2], 1.0);
     graph.add_edge(nodes[2], nodes[0], 1.0);
 
-    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
+    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg());
 
     assert_eq!(traces.len(), 1);
     assert_eq!(
@@ -55,7 +55,7 @@ fn parent_pointer_bfs_respects_max_branching() {
     let mut cfg = cfg();
     cfg.max_branching = 2;
 
-    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg);
+    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg);
     let encoded: Vec<_> = traces
         .iter()
         .map(|trace| encode_trace(trace, &graph))
@@ -76,7 +76,7 @@ fn parent_pointer_bfs_respects_max_trace_depth() {
     let mut cfg = cfg();
     cfg.max_trace_depth = 3;
 
-    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg);
+    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg);
 
     assert_eq!(traces.len(), 1);
     assert_eq!(traces[0].len(), 3);
@@ -95,7 +95,7 @@ fn parent_pointer_bfs_respects_max_states_per_entry() {
     let mut cfg = cfg();
     cfg.max_states_per_entry = 3;
 
-    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg);
+    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg);
     let encoded: Vec<_> = traces
         .iter()
         .map(|trace| encode_trace(trace, &graph))
@@ -113,7 +113,7 @@ fn parallel_edges_to_same_target_are_deduped() {
     graph.add_edge(nodes[0], nodes[1], 1.0);
     graph.add_edge(nodes[0], nodes[1], 0.8);
 
-    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
+    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg());
     assert_eq!(
         traces.len(),
         1,
@@ -127,7 +127,7 @@ fn dedup_does_not_false_positive_on_shared_node_id_prefix() {
     graph.add_edge(nodes[0], nodes[1], 1.0);
     graph.add_edge(nodes[0], nodes[2], 1.0);
 
-    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
+    let traces = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg());
     let encoded: Vec<_> = traces.iter().map(|t| encode_trace(t, &graph)).collect();
 
     assert!(
@@ -157,8 +157,8 @@ fn parent_pointer_bfs_is_deterministic() {
     graph.add_edge(nodes[0], nodes[1], 1.0);
     graph.add_edge(nodes[0], nodes[2], 1.0);
 
-    let first = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
-    let second = trace_process_paths(&graph, &entry(&graph, nodes[0]), &HashMap::new(), &cfg());
+    let first = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg());
+    let second = trace_process_paths(&graph, &entry(&graph, nodes[0]), &FxHashMap::default(), &cfg());
 
     assert_eq!(
         first

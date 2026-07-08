@@ -20,6 +20,7 @@
 //! the goal is to cut obvious false positives from Phase 0, not to replace a
 //! full-precision analysis.
 
+use rustc_hash::{FxHashMap};
 use std::collections::HashSet;
 
 use cih_core::NodeId;
@@ -145,7 +146,7 @@ pub fn refine_paths(
     use std::collections::HashMap;
 
     // Cache IntraResult per source method (multiple paths may share a source).
-    let mut intra_cache: HashMap<NodeId, Option<IntraResult>> = HashMap::new();
+    let mut intra_cache: FxHashMap<NodeId, Option<IntraResult>> = FxHashMap::default();
 
     paths
         .iter()

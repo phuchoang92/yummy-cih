@@ -5,6 +5,7 @@
 //! Phase 2: on-demand CFG construction + dominance tree for Phase 1-confirmed source methods.
 //! Phase 3: PDG-based flow-sensitive, kill-aware taint (reaching defs → DataDep/ControlDep).
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -81,7 +82,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let sink_name_patterns_owned: Vec<String> = rules.extra_sink_name_patterns.clone();
     let sink_name_patterns: Vec<&str> =
         sink_name_patterns_owned.iter().map(|s| s.as_str()).collect();
-    let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let node_map: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
     let repo_ref = repo.as_path();
     // Snapshot Phase-0 scores before Phase 1 modifies them.
     // Phase 3 applies its multiplier against this baseline so that a Phase-1 penalty
@@ -120,7 +121,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         ui.spin("Phase 2: CFG construction + dominance tree");
 
         // Build CFG for each unique source method on a taint path.
-        let unique_sources: std::collections::HashSet<&NodeId> =
+        let unique_sources: FxHashSet<&NodeId> =
             paths.iter().map(|p| &p.source).collect();
 
         for source_id in &unique_sources {

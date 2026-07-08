@@ -15,6 +15,7 @@
 //!
 //! All data structures are purely in-memory; nothing is persisted to the main graph.
 
+use rustc_hash::{FxHashMap};
 use std::collections::HashMap;
 
 use cih_core::NodeId;
@@ -51,15 +52,15 @@ pub struct Pdg {
     /// All edges (both data and control dependence).
     pub edges: Vec<PdgEdge>,
     /// Index: target statement → incoming edges (for taint propagation).
-    by_target: HashMap<NodeId, Vec<usize>>,
+    by_target: FxHashMap<NodeId, Vec<usize>>,
     /// Index: source statement → outgoing edges (for impact analysis).
-    by_source: HashMap<NodeId, Vec<usize>>,
+    by_source: FxHashMap<NodeId, Vec<usize>>,
 }
 
 impl Pdg {
     fn new(callable_id: NodeId, edges: Vec<PdgEdge>) -> Self {
-        let mut by_target: HashMap<NodeId, Vec<usize>> = HashMap::new();
-        let mut by_source: HashMap<NodeId, Vec<usize>> = HashMap::new();
+        let mut by_target: FxHashMap<NodeId, Vec<usize>> = FxHashMap::default();
+        let mut by_source: FxHashMap<NodeId, Vec<usize>> = FxHashMap::default();
         for (i, e) in edges.iter().enumerate() {
             by_target.entry(e.to.clone()).or_default().push(i);
             by_source.entry(e.from.clone()).or_default().push(i);
@@ -100,7 +101,7 @@ impl Pdg {
 /// are live at the statement's entry point.
 ///
 /// Virtual IDs for method parameters are encoded as `"{callable_id}:param:{name}"`.
-pub type ReachingDefs = HashMap<NodeId, HashMap<String, Vec<NodeId>>>;
+pub type ReachingDefs = FxHashMap<NodeId, HashMap<String, Vec<NodeId>>>;
 
 /// Build the virtual parameter-definition node ID for `param_name` in `callable_id`.
 pub fn param_def_id(callable_id: &NodeId, param_name: &str) -> NodeId {
@@ -173,7 +174,7 @@ pub fn compute_reaching_defs(cfg: &Cfg, param_names: &[String]) -> ReachingDefs 
     }
 
     // Second pass: compute per-statement reaching defs (IN[stmt]).
-    let mut result = ReachingDefs::new();
+    let mut result = ReachingDefs::default();
 
     for block_id in &rpo {
         let block = match cfg.block(block_id) {

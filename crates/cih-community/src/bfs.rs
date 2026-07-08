@@ -1,3 +1,4 @@
+use rustc_hash::{FxHashMap};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 #[cfg(feature = "rayon")]
@@ -20,10 +21,10 @@ struct TraceState {
 pub fn trace_process_paths(
     digraph: &DiGraph<NodeId, f32>,
     entry_points: &[(NodeId, f64)],
-    memberships: &HashMap<NodeId, NodeId>,
+    memberships: &FxHashMap<NodeId, NodeId>,
     cfg: &ProcessConfig,
 ) -> Vec<Vec<NodeIndex>> {
-    let index_by_id: HashMap<NodeId, NodeIndex> = digraph
+    let index_by_id: FxHashMap<NodeId, NodeIndex> = digraph
         .node_indices()
         .map(|idx| (digraph[idx].clone(), idx))
         .collect();
@@ -57,7 +58,7 @@ pub fn trace_process_paths(
 /// BFS from a single entry point; returns all accepted traces.
 fn trace_from_entry(
     entry_id: &NodeId,
-    index_by_id: &HashMap<NodeId, NodeIndex>,
+    index_by_id: &FxHashMap<NodeId, NodeIndex>,
     digraph: &DiGraph<NodeId, f32>,
     cfg: &ProcessConfig,
 ) -> Vec<Vec<NodeIndex>> {
@@ -225,7 +226,7 @@ pub fn is_subtrace_of(candidate: &str, of: &str) -> bool {
 fn trace_crosses_communities(
     trace: &[NodeIndex],
     digraph: &DiGraph<NodeId, f32>,
-    memberships: &HashMap<NodeId, NodeId>,
+    memberships: &FxHashMap<NodeId, NodeId>,
 ) -> bool {
     let mut seen = HashSet::new();
     for idx in trace {

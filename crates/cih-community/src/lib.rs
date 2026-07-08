@@ -7,6 +7,7 @@ mod leiden;
 mod leiden_impl;
 pub mod registry;
 
+use rustc_hash::{FxHashMap};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cih_core::{community_id, process_id, Edge, EdgeKind, Node, NodeId, NodeKind, Range};
@@ -101,16 +102,16 @@ pub fn detect_communities(
         cfg.seed as u64,
     );
 
-    let source_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
     // Edge lookups for community enrichment
-    let mut route_nodes_by_handler: HashMap<NodeId, Vec<&Node>> = HashMap::new();
-    let mut queries_by_method: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut read_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut write_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut route_nodes_by_handler: FxHashMap<NodeId, Vec<&Node>> = FxHashMap::default();
+    let mut queries_by_method: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+    let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+    let mut write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
     // publishes_by_member and consumes_by_member store (topic_node, topic_kind_str)
-    let mut publishes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
-    let mut consumes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
+    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
+    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
     for e in edges {
         match e.kind {
             EdgeKind::HandlesRoute => {
@@ -436,7 +437,7 @@ pub fn cluster_similarity_edges(
     use petgraph::graph::UnGraph;
 
     // Assign each distinct node a graph index; dedup undirected edges keeping the max similarity.
-    let mut index_of: HashMap<NodeId, NodeIndex> = HashMap::new();
+    let mut index_of: FxHashMap<NodeId, NodeIndex> = FxHashMap::default();
     let mut graph: UnGraph<NodeId, f32> = UnGraph::new_undirected();
     let mut edge_weight: HashMap<(NodeIndex, NodeIndex), f32> = HashMap::new();
 
@@ -541,15 +542,15 @@ pub fn detect_communities_from_packages(
     edges: &[Edge],
     feature_of: &dyn Fn(&str) -> String,
 ) -> CommunityOutput {
-    let source_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
     // Build the same edge-lookup maps used by detect_communities.
-    let mut route_nodes_by_handler: HashMap<NodeId, Vec<&Node>> = HashMap::new();
-    let mut queries_by_method: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut read_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut write_tables_by_query: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut publishes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
-    let mut consumes_by_member: HashMap<NodeId, Vec<(&Node, &'static str)>> = HashMap::new();
+    let mut route_nodes_by_handler: FxHashMap<NodeId, Vec<&Node>> = FxHashMap::default();
+    let mut queries_by_method: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+    let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+    let mut write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
+    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
     for e in edges {
         match e.kind {
             EdgeKind::HandlesRoute => {
@@ -784,13 +785,13 @@ pub fn trace_processes(
         return ProcessOutput::default();
     }
 
-    let membership_map: HashMap<NodeId, NodeId> = memberships.iter().cloned().collect();
+    let membership_map: FxHashMap<NodeId, NodeId> = memberships.iter().cloned().collect();
     let scored = cih_core::score_entry_points(nodes, edges, &digraph, &node_index, registry);
     let legacy_pairs = cih_core::to_legacy_pairs(&scored);
-    let ep_by_id: HashMap<NodeId, &cih_core::ScoredEntrypoint> =
+    let ep_by_id: FxHashMap<NodeId, &cih_core::ScoredEntrypoint> =
         scored.iter().map(|s| (s.id.clone(), s)).collect();
     let traces = bfs::trace_process_paths(&digraph, &legacy_pairs, &membership_map, cfg);
-    let node_by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let node_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
     // Track which semantic entrypoints produced at least one accepted trace
     let mut covered_entries: HashSet<String> = HashSet::new();
@@ -1088,7 +1089,7 @@ fn smallest_id(members: &[NodeIndex], graph: &petgraph::graph::UnGraph<NodeId, f
         .to_string()
 }
 
-fn display_name(id: &NodeId, node_by_id: &HashMap<&NodeId, &Node>) -> String {
+fn display_name(id: &NodeId, node_by_id: &FxHashMap<&NodeId, &Node>) -> String {
     node_by_id
         .get(id)
         .map(|n| {
