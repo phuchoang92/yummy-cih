@@ -11,6 +11,8 @@
 //! generated `UNWIND` list literal (our own data, fully escaped).
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
@@ -26,9 +28,22 @@ use redis::Value;
 /// (~2M edges at 600k nodes) at the cost of bigger per-statement strings — 4000 is a good balance.
 const BATCH: usize = 4000;
 
+/// Default max wait for a query permit before shedding (used when no explicit
+/// limit is configured, e.g. the engine bulk-load path).
+const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct FalkorStore {
     client: redis::Client,
     graph_key: String,
+    /// Lazily-built, auto-reconnecting, cloneable multiplexed connection. Built
+    /// once on first query and shared across all calls — replaces opening a
+    /// fresh connection per query.
+    conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
+    /// Bounds concurrent `GRAPH.QUERY` execution (backpressure). Defaults to
+    /// effectively unlimited; the server tightens it via [`Self::with_query_limit`].
+    query_limit: Arc<tokio::sync::Semaphore>,
+    /// Max time to wait for a permit before shedding with an "overloaded" error.
+    acquire_timeout: Duration,
 }
 
 impl FalkorStore {
@@ -38,15 +53,49 @@ impl FalkorStore {
         Ok(Self {
             client,
             graph_key: graph_key.into(),
+            conn: tokio::sync::OnceCell::new(),
+            // Effectively unlimited by default — the engine's sequential bulk-load
+            // path must never be throttled. The server opts into a real bound.
+            query_limit: Arc::new(tokio::sync::Semaphore::new(tokio::sync::Semaphore::MAX_PERMITS)),
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         })
     }
 
-    async fn run(&self, cypher: &str) -> Result<Value> {
-        let mut con = self
-            .client
-            .get_multiplexed_async_connection()
+    /// Bound concurrent Cypher queries to `max_concurrent`, shedding requests
+    /// that can't acquire a permit within `acquire_timeout`. Used by the MCP
+    /// server to apply backpressure under multi-client load.
+    pub fn with_query_limit(mut self, max_concurrent: usize, acquire_timeout: Duration) -> Self {
+        self.query_limit = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        self.acquire_timeout = acquire_timeout;
+        self
+    }
+
+    /// A clone of the shared, reconnecting connection, building it on first use.
+    async fn conn(&self) -> Result<redis::aio::ConnectionManager> {
+        self.conn
+            .get_or_try_init(|| redis::aio::ConnectionManager::new(self.client.clone()))
             .await
-            .map_err(|e| GraphStoreError::Backend(e.to_string()))?;
+            .cloned()
+            .map_err(|e| GraphStoreError::Backend(e.to_string()))
+    }
+
+    /// Acquire a query permit, shedding with an "overloaded" error if the
+    /// concurrency limit is saturated for longer than `acquire_timeout`.
+    async fn acquire_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        match tokio::time::timeout(self.acquire_timeout, self.query_limit.clone().acquire_owned())
+            .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            // Elapsed timeout or a closed semaphore both mean we can't proceed.
+            _ => Err(GraphStoreError::Backend(
+                "graph store overloaded: concurrent query limit reached".into(),
+            )),
+        }
+    }
+
+    async fn run(&self, cypher: &str) -> Result<Value> {
+        let _permit = self.acquire_permit().await?;
+        let mut con = self.conn().await?;
         redis::cmd("GRAPH.QUERY")
             .arg(&self.graph_key)
             .arg(cypher)
@@ -56,11 +105,8 @@ impl FalkorStore {
     }
 
     async fn graph_command(&self, command: &str, args: &[&str]) -> Result<Value> {
-        let mut con = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| GraphStoreError::Backend(e.to_string()))?;
+        let _permit = self.acquire_permit().await?;
+        let mut con = self.conn().await?;
         let mut cmd = redis::cmd(command);
         for arg in args {
             cmd.arg(arg);

@@ -61,6 +61,10 @@ contractually-approved endpoint — never the public default.
   `CIH_READ_FILE_MAX_LINES`) so a large file cannot be pulled wholesale.
 - **Cypher queries** are built with escaping (`cstr`); there is no raw-query
   passthrough tool.
+- **Query backpressure**: concurrent Cypher execution is capped
+  (`CIH_MAX_CONCURRENT_QUERIES`, default 64); excess requests shed with a
+  retryable overloaded error after `CIH_QUERY_QUEUE_TIMEOUT_MS` rather than
+  letting a client burst exhaust FalkorDB.
 - **Secrets**: `.env` is git-ignored; API tokens are redacted in the server's
   config debug log. Do not commit `.env` or bake tokens into images.
 

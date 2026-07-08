@@ -12,6 +12,4 @@ redis.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true   # examples/load_sample.rs runtime
+tokio.workspace = true   # sync::{OnceCell, Semaphore} + time::timeout for pooling/backpressure

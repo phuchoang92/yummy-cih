@@ -32,12 +32,21 @@ pub struct Config {
     pub read_file_max_bytes: u64,
     /// Max lines `read_file` returns when no explicit line range is given.
     pub read_file_max_lines: usize,
+    /// Max concurrent Cypher queries against the graph store (backpressure). Set
+    /// near the FalkorDB `THREAD_COUNT` (default = cores) for best throughput.
+    pub max_concurrent_queries: usize,
+    /// Max wait (ms) for a query slot before shedding with an "overloaded" error.
+    pub query_queue_timeout_ms: u64,
 }
 
 /// Default `read_file` byte cap (10 MiB).
 pub const DEFAULT_READ_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Default `read_file` line cap when no range is requested.
 pub const DEFAULT_READ_FILE_MAX_LINES: usize = 5000;
+/// Default cap on concurrent Cypher queries against the graph store.
+pub const DEFAULT_MAX_CONCURRENT_QUERIES: usize = 64;
+/// Default max wait (ms) for a query slot before shedding.
+pub const DEFAULT_QUERY_QUEUE_TIMEOUT_MS: u64 = 5000;
 
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,6 +68,8 @@ impl std::fmt::Debug for Config {
                 &self.api_token.as_deref().map(|_| "[REDACTED]"),
             )
             .field("allow_insecure", &self.allow_insecure)
+            .field("max_concurrent_queries", &self.max_concurrent_queries)
+            .field("query_queue_timeout_ms", &self.query_queue_timeout_ms)
             .finish()
     }
 }
@@ -88,6 +99,14 @@ impl Config {
                 .unwrap_or(false),
             read_file_max_bytes: env_parse("CIH_READ_FILE_MAX_BYTES", DEFAULT_READ_FILE_MAX_BYTES),
             read_file_max_lines: env_parse("CIH_READ_FILE_MAX_LINES", DEFAULT_READ_FILE_MAX_LINES),
+            max_concurrent_queries: env_parse(
+                "CIH_MAX_CONCURRENT_QUERIES",
+                DEFAULT_MAX_CONCURRENT_QUERIES,
+            ),
+            query_queue_timeout_ms: env_parse(
+                "CIH_QUERY_QUEUE_TIMEOUT_MS",
+                DEFAULT_QUERY_QUEUE_TIMEOUT_MS,
+            ),
         }
     }
 
@@ -164,7 +183,11 @@ mod tests {
 pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
     match cfg.backend.as_str() {
         "falkor" => {
-            let store = cih_falkor::FalkorStore::connect(&cfg.falkor_url, &cfg.graph_key)?;
+            let store = cih_falkor::FalkorStore::connect(&cfg.falkor_url, &cfg.graph_key)?
+                .with_query_limit(
+                    cfg.max_concurrent_queries,
+                    std::time::Duration::from_millis(cfg.query_queue_timeout_ms),
+                );
             let mut last_err = None;
             for attempt in 1u32..=5 {
                 match store.ensure_schema().await {
