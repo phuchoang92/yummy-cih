@@ -5,6 +5,13 @@
 //! heritage adjacency, and a precedence-ordered scope-binding lookup that turns a
 //! receiver name into a resolved FQCN. The public [`resolve_edges`] entrypoint runs
 //! the Phase 4.2 pass order and emits graph edges.
+//!
+//! # Error philosophy
+//!
+//! The core resolve entrypoints are **infallible by design**: an unresolvable
+//! reference is data, not an error — it becomes an `UnresolvedRef` diagnostic in
+//! [`ResolveOutput`], and malformed XML/config inputs simply yield fewer facts.
+//! Only artifact/report I/O can fail, and it returns `io::Result` directly.
 
 use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};

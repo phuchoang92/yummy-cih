@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cih_core::{GraphArtifacts, Node, NodeId, VersionId};
+use cih_core::{GraphArtifacts, Node, NodeId};
 use cih_taint::{find_taint_paths, TaintPath};
 
 use crate::db::{load_to_falkor, LoadOutcome};

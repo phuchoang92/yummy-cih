@@ -1,3 +1,11 @@
+//! Wiki page generation from graph artifacts.
+//!
+//! # Error philosophy
+//!
+//! This is leaf orchestration code consumed only by the `cih-engine` binary,
+//! which reports errors rather than branching on them — so functions return
+//! `anyhow::Result` by design (context strings over structured variants).
+
 pub mod bodies;
 pub mod features;
 pub mod graph;
