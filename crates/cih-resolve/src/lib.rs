@@ -17,7 +17,7 @@ use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};
 
 use crate::emit::EdgeEmitter;
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 
 pub(crate) mod complexity;
 pub(crate) mod confidence;
@@ -117,7 +117,7 @@ pub fn resolve_with_registry(
     registry: &ResolverRegistry,
     options: ResolveOptions<'_>,
 ) -> ResolveOutput {
-    let index = CommonIndex::build(parsed, registry);
+    let index = ResolveIndex::build(parsed, registry);
     let emitter = EdgeEmitter::new(parsed, index, registry);
     let emitter = if let Some(cr) = options.constant_resolver {
         emitter.with_constant_resolver_boxed(cr)

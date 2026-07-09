@@ -7,7 +7,7 @@ use cih_core::{
 };
 use cih_lang::constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use crate::inheritance::build_mro_map;
 use crate::contracts::resolve_contract_edges;
 use crate::lang::{InheritanceModel, ResolverRegistry};
@@ -18,7 +18,7 @@ use crate::{ResolveOutput, UnresolvedRef};
 
 pub struct EdgeEmitter<'a> {
     parsed: &'a [ParsedFile],
-    index: CommonIndex,
+    index: ResolveIndex,
     registry: &'a ResolverRegistry,
     /// Optional constant resolver for enriching CALLS edge call-site args (Gap 4/3).
     constant_resolver: Box<dyn ConstantResolver>,
@@ -35,7 +35,7 @@ pub struct EdgeEmitter<'a> {
 }
 
 impl<'a> EdgeEmitter<'a> {
-    pub fn new(parsed: &'a [ParsedFile], index: CommonIndex, registry: &'a ResolverRegistry) -> Self {
+    pub fn new(parsed: &'a [ParsedFile], index: ResolveIndex, registry: &'a ResolverRegistry) -> Self {
         Self {
             parsed,
             index,

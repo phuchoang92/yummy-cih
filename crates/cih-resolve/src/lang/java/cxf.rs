@@ -53,9 +53,9 @@ pub(crate) fn stitch_route_prefixes(
         return;
     }
 
-    // The CommonIndex isn't in scope in `post_process`, so derive the equivalent lookups from the
+    // The ResolveIndex isn't in scope in `post_process`, so derive the equivalent lookups from the
     // assembled graph: FQCN → Class node (existence + edge target) and simple name → FQCNs (for
-    // the workspace-unique-name fallback, mirroring CommonIndex).
+    // the workspace-unique-name fallback, mirroring ResolveIndex).
     let mut class_node_by_fqcn: HashMap<&str, &NodeId> = HashMap::new();
     let mut simple_to_fqcns: HashMap<&str, Vec<&str>> = HashMap::new();
     for n in nodes.iter() {

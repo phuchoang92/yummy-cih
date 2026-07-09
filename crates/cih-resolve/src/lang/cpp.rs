@@ -1,5 +1,5 @@
 use super::{InheritanceModel, LanguageResolver};
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use cih_core::SymbolDef;
 
 pub struct CppResolver;
@@ -21,13 +21,13 @@ impl LanguageResolver for CppResolver {
         &self,
         _keyword: &str,
         in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         // C++ FQCN: "ClassName::method_name"
         in_fqcn.rsplit_once("::").map(|(owner, _)| owner.to_string())
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
         None
     }
 

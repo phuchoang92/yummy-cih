@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 
 /// Compute a C3 linearization for every type in the index.
 /// Result: type FQCN → ordered MRO list (self first, then ancestors breadth-first in C3 order).
-pub(crate) fn build_mro_map(index: &CommonIndex) -> HashMap<String, Vec<String>> {
+pub(crate) fn build_mro_map(index: &ResolveIndex) -> HashMap<String, Vec<String>> {
     let mut cache: HashMap<String, Vec<String>> = HashMap::new();
     let all: Vec<String> = index.type_fqcns().map(str::to_string).collect();
     for fqcn in &all {
@@ -15,10 +15,10 @@ pub(crate) fn build_mro_map(index: &CommonIndex) -> HashMap<String, Vec<String>>
 
 /// C3 linearization of `fqcn`. Results are memoized in `cache`.
 /// Supertypes must be ordered: superclass first (if any), then interfaces — this is guaranteed
-/// by [`CommonIndex::dedup`] which uses [`stable_dedup`] and the parse order from java.rs.
+/// by [`ResolveIndex::dedup`] which uses [`stable_dedup`] and the parse order from java.rs.
 pub(crate) fn c3_linearize(
     fqcn: &str,
-    index: &CommonIndex,
+    index: &ResolveIndex,
     cache: &mut HashMap<String, Vec<String>>,
 ) -> Vec<String> {
     if let Some(cached) = cache.get(fqcn) {

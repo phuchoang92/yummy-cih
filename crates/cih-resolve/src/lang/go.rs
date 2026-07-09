@@ -1,5 +1,5 @@
 use cih_core::SymbolDef;
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use super::{InheritanceModel, LanguageResolver};
 
 pub struct GoResolver;
@@ -24,12 +24,12 @@ impl LanguageResolver for GoResolver {
         &self,
         _keyword: &str,
         _in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         None
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
         None
     }
 

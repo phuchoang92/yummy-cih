@@ -1,5 +1,5 @@
 use super::{InheritanceModel, LanguageResolver};
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use cih_core::SymbolDef;
 
 pub struct RustResolver;
@@ -21,7 +21,7 @@ impl LanguageResolver for RustResolver {
         &self,
         _keyword: &str,
         in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         // in_fqcn for Rust methods is "ModulePath::TypeName::method_name"
         // The owner type is the second-to-last segment
@@ -29,7 +29,7 @@ impl LanguageResolver for RustResolver {
         parts.get(1).map(|s| s.to_string())
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
         None
     }
 

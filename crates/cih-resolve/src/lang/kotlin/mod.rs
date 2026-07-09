@@ -1,6 +1,6 @@
 use cih_core::ImportBinding;
 
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use crate::lang::{InheritanceModel, LanguageResolver};
 use crate::types::class_of;
 
@@ -23,7 +23,7 @@ impl LanguageResolver for KotlinResolver {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         match keyword {
             "this" => Some(class_of(in_fqcn).to_string()),
@@ -40,7 +40,7 @@ impl LanguageResolver for KotlinResolver {
         &self,
         binding: &ImportBinding,
         from_file: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         use cih_core::ImportBindingKind;
         // Kotlin imports are fully qualified — try direct lookup then simple-name fallback

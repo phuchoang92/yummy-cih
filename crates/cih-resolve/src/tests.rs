@@ -1,4 +1,4 @@
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use crate::default_registry;
 use crate::types::simple_of;
 use cih_core::{
@@ -203,7 +203,7 @@ fn workspace() -> Vec<ParsedFile> {
 
 #[test]
 fn resolve_type_uses_import_same_package_and_generics() {
-    let idx = CommonIndex::build(&workspace(), &default_registry());
+    let idx = ResolveIndex::build(&workspace(), &default_registry());
     let f = "com/acme/OwnerController.java";
     assert_eq!(
         idx.resolve_type("List", f).as_deref(),
@@ -226,7 +226,7 @@ fn resolve_type_uses_import_same_package_and_generics() {
 
 #[test]
 fn find_member_matches_overload_by_arity() {
-    let idx = CommonIndex::build(&workspace(), &default_registry());
+    let idx = ResolveIndex::build(&workspace(), &default_registry());
     assert_eq!(
         idx.find_member("com.acme.OwnerService", "save", Some(1)),
         Some(method_id("com.acme.OwnerService", "save", 1))
@@ -243,7 +243,7 @@ fn find_member_matches_overload_by_arity() {
 
 #[test]
 fn receiver_type_param_field_and_this() {
-    let idx = CommonIndex::build(&workspace(), &default_registry());
+    let idx = ResolveIndex::build(&workspace(), &default_registry());
     let scope = "com.acme.OwnerController#handle/1";
     assert_eq!(
         idx.receiver_type(scope, "svc").as_deref(),
@@ -270,7 +270,7 @@ fn local_param_shadows_field() {
         "com.acme.OwnerController#handle/1",
         6,
     ));
-    let idx = CommonIndex::build(&files, &default_registry());
+    let idx = ResolveIndex::build(&files, &default_registry());
     assert_eq!(
         idx.receiver_type("com.acme.OwnerController#handle/1", "service")
             .as_deref(),
@@ -281,7 +281,7 @@ fn local_param_shadows_field() {
 
 #[test]
 fn heritage_and_inherited_member_lookup() {
-    let idx = CommonIndex::build(&workspace(), &default_registry());
+    let idx = ResolveIndex::build(&workspace(), &default_registry());
     assert_eq!(idx.supertypes("com.acme.OwnerService"), ["com.acme.Repo"]);
     assert_eq!(idx.implementors("com.acme.Repo"), ["com.acme.OwnerService"]);
     assert_eq!(

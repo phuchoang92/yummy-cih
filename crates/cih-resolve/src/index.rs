@@ -12,7 +12,7 @@ use crate::types::{base_type_name, class_of, is_type_kind, pick_binding, simple_
 
 /// Cross-file resolution index over a parsed scope.
 #[derive(Debug, Default)]
-pub struct CommonIndex {
+pub struct ResolveIndex {
     /// type FQCN → its def.
     types_by_fqcn: HashMap<String, SymbolDef>,
     /// simple type name → all FQCNs that share it (for unique-name fallback).
@@ -60,10 +60,10 @@ fn build_import_map(imports: &[RawImport]) -> HashMap<String, String> {
         .collect()
 }
 
-impl CommonIndex {
+impl ResolveIndex {
     /// Build the index from all `ParsedFile`s in the scope.
     pub fn build(parsed: &[ParsedFile], registry: &ResolverRegistry) -> Self {
-        let mut idx = CommonIndex::default();
+        let mut idx = ResolveIndex::default();
 
         // Pass 1: defs, members, files, bindings.
         for pf in parsed {

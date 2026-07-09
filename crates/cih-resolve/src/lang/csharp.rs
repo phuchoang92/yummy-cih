@@ -1,5 +1,5 @@
 use cih_core::SymbolDef;
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use super::{InheritanceModel, LanguageResolver};
 
 pub struct CSharpResolver;
@@ -21,7 +21,7 @@ impl LanguageResolver for CSharpResolver {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         if keyword == "this" {
             // in_fqcn is "Namespace.ClassName.MethodName" — strip last segment
@@ -37,7 +37,7 @@ impl LanguageResolver for CSharpResolver {
         None
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
         None
     }
 

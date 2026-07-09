@@ -2,7 +2,7 @@ use std::path::Path;
 
 use cih_core::{Edge, Node, ParsedFile, SymbolDef};
 
-use crate::index::CommonIndex;
+use crate::index::ResolveIndex;
 use crate::lang::{InheritanceModel, LanguageResolver, PostProcessOptions};
 use crate::types::class_of;
 
@@ -28,7 +28,7 @@ impl LanguageResolver for JavaResolver {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         match keyword {
             "this" => Some(class_of(in_fqcn).to_string()),
@@ -37,7 +37,7 @@ impl LanguageResolver for JavaResolver {
         }
     }
 
-    fn di_redirect(&self, type_qname: &str, index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, type_qname: &str, index: &ResolveIndex) -> Option<String> {
         // Prefer Spring-annotated bean (requires stereotype metadata from DI XML or annotations).
         if let Some(bean) = di::single_bean_impl(type_qname, index) {
             return Some(bean);
