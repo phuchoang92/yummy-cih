@@ -14,6 +14,9 @@ pub struct DbTableAccess {
     pub writes: bool,
 }
 
+/// `(name, type)` pairs, e.g. `("OrderCreatedEvent", "kafka")`.
+pub type MessagingPairs = Vec<(String, String)>;
+
 pub struct WikiGraph {
     pub nodes_by_id: BTreeMap<String, Node>,
     pub community_nodes: Vec<Node>,
@@ -359,6 +362,7 @@ struct CommunityStats {
 /// `extra_db_nodes` handles nodes (e.g. JPA @Entity classes in package mode) that are
 /// not in `members_by_community` but still carry `ExecutesQuery` edges. Pass `&[]` when
 /// not needed. `node_comm_id` maps such a node to its community id string.
+#[allow(clippy::too_many_arguments)] // page-renderer context bundle; refactor tracked with wiki rework
 fn derive_community_stats(
     members_by_community: &BTreeMap<String, Vec<Node>>,
     community_by_member: &BTreeMap<String, String>,
@@ -809,10 +813,7 @@ impl WikiGraph {
 
     /// Returns (publishes, consumes) topic lists for a community.
     /// Each entry is (topic_name, topic_type) e.g. ("OrderCreatedEvent", "kafka").
-    pub fn community_messaging(
-        &self,
-        community_id: &str,
-    ) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    pub fn community_messaging(&self, community_id: &str) -> (MessagingPairs, MessagingPairs) {
         let node = match self.nodes_by_id.get(community_id) {
             Some(n) => n,
             None => return (vec![], vec![]),
@@ -980,11 +981,10 @@ impl WikiGraph {
         for (proc_id, steps) in &self.process_steps {
             if let Some(first) = steps.first() {
                 let sym_id = first.symbol.id.as_str().to_string();
-                if self.community_by_member.get(&sym_id).map(|c| c.as_str()) == Some(community_id) {
-                    if !business_only || self.is_business_process(proc_id) {
+                if self.community_by_member.get(&sym_id).map(|c| c.as_str()) == Some(community_id)
+                    && (!business_only || self.is_business_process(proc_id)) {
                         result.push(proc_id.clone());
                     }
-                }
             }
         }
         result.sort();
@@ -1005,7 +1005,7 @@ pub fn route_path(route: &Node) -> String {
         .as_ref()
         .and_then(|p| p.get("path"))
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| route.name.splitn(2, ' ').nth(1).unwrap_or(&route.name))
+        .unwrap_or_else(|| route.name.split_once(' ').map(|x| x.1).unwrap_or(&route.name))
         .to_string()
 }
 

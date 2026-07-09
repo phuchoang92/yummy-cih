@@ -78,9 +78,6 @@ pub fn class_id_from_method_id(method_id: &str, graph: &WikiGraph) -> String {
     format!("Class:{}", fqcn)
 }
 
-/// BFS from handler through calls_out, returning method node IDs in traversal order.
-/// Only includes methods whose class exists in the project graph.
-
 /// DB table access for a single method node ID.
 fn db_access(method_id: &str, graph: &WikiGraph) -> Vec<(String, bool, bool)> {
     let mut tables: HashMap<String, (bool, bool)> = HashMap::new();
@@ -220,7 +217,7 @@ pub fn render_api_flow_page(
             };
             let cleaned_desc;
             let desc = if has_desc && raw_desc != "—" {
-                cleaned_desc = crate::clean_method_desc(raw_desc, &cls, &meth);
+                cleaned_desc = crate::clean_method_desc(raw_desc, cls, meth);
                 cleaned_desc.as_str()
             } else {
                 raw_desc
@@ -391,7 +388,7 @@ fn render_entrypoint_body(
         };
         let cleaned_desc2;
         let desc = if has_desc && raw_desc2 != "—" {
-            cleaned_desc2 = crate::clean_method_desc(raw_desc2, &cls, &meth);
+            cleaned_desc2 = crate::clean_method_desc(raw_desc2, cls, meth);
             cleaned_desc2.as_str()
         } else {
             raw_desc2

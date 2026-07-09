@@ -373,7 +373,7 @@ pub fn community_call_diagram(graph: &WikiGraph, comm_id: &str) -> Option<String
         .filter(|(src, dst, _)| src == comm_id || dst == comm_id)
         .collect();
 
-    if relevant.len() < 1 {
+    if relevant.is_empty() {
         return None;
     }
 
@@ -579,7 +579,7 @@ pub fn call_sequence_diagram(
             "    {}->>{}:{}\n",
             from,
             to,
-            sanitize_seq(&label)
+            sanitize_seq(label)
         ));
     }
     if truncated {

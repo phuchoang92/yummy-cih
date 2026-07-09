@@ -208,7 +208,7 @@ pub fn detect_communities(
                     .as_ref()
                     .and_then(|p| p.get("path"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or_else(|| rn.name.splitn(2, ' ').nth(1).unwrap_or(&rn.name));
+                    .unwrap_or_else(|| rn.name.split_once(' ').map(|x| x.1).unwrap_or(&rn.name));
                 if let Some(seg) = first_non_generic_path_segment(path) {
                     *route_prefix_counts.entry(seg.clone()).or_insert(0) += 1;
                     all_route_prefixes.insert(seg);
@@ -614,7 +614,7 @@ pub fn detect_communities_from_packages(
                     .as_ref()
                     .and_then(|p| p.get("path"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or_else(|| rn.name.splitn(2, ' ').nth(1).unwrap_or(&rn.name));
+                    .unwrap_or_else(|| rn.name.split_once(' ').map(|x| x.1).unwrap_or(&rn.name));
                 if let Some(seg) = first_non_generic_path_segment(path) {
                     *route_prefix_counts.entry(seg.clone()).or_insert(0) += 1;
                     all_route_prefixes.insert(seg);

@@ -113,9 +113,9 @@ pub fn merge_env_values(
                 continue;
             } else if LLM_KEYS.contains(&key) {
                 // If we have a new llm_key_line, replace it; otherwise preserve the existing value
-                if llm_key_line.is_some() {
+                if let Some(llm_key) = llm_key_line {
                     found_llm_key = true;
-                    result.push(llm_key_line.unwrap().trim_end().to_string());
+                    result.push(llm_key.trim_end().to_string());
                 } else {
                     result.push(line.clone());
                 }
@@ -142,8 +142,10 @@ pub fn merge_env_values(
     }
 
     // Append optional LLM key line if it wasn't found in existing
-    if llm_key_line.is_some() && !found_llm_key {
-        result.push(llm_key_line.unwrap().trim_end().to_string());
+    if !found_llm_key {
+        if let Some(llm_key) = llm_key_line {
+            result.push(llm_key.trim_end().to_string());
+        }
     }
 
     result.join("\n") + "\n"

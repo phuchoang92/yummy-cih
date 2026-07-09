@@ -122,8 +122,7 @@ pub fn validate_base_url(url: &str) -> Result<()> {
     if url.starts_with("https://") {
         return Ok(());
     }
-    if url.starts_with("http://") {
-        let rest = &url["http://".len()..];
+    if let Some(rest) = url.strip_prefix("http://") {
         let authority = rest.split('/').next().unwrap_or("");
         // IPv6 literal: http://[::1]:5000 → strip brackets to get ::1
         let host = if authority.starts_with('[') {

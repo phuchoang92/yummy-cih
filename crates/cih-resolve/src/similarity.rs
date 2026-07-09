@@ -69,7 +69,7 @@ pub fn emit_similar_to_edges(nodes: &[Node]) -> Vec<Edge> {
     // Per-source edge list: candidate_idx → Vec<(dst_idx, jaccard)>.
     let mut edge_map: HashMap<usize, Vec<(usize, f32)>> = HashMap::new();
 
-    for (_provider, indices) in &by_provider {
+    for indices in by_provider.values() {
         if indices.len() < 2 {
             continue;
         }

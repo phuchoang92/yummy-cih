@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn resolve_bool_enable_semantics() {
         assert_eq!(resolve_bool(true, Some(false), None).source, Source::Flag);
-        assert_eq!(resolve_bool(false, Some(true), None).value, true);
+        assert!(resolve_bool(false, Some(true), None).value);
         assert_eq!(
             resolve_bool(false, Some(true), None).source,
             Source::RepoConfig
@@ -666,7 +666,7 @@ mod tests {
             resolve_bool(false, None, Some(true)).source,
             Source::HomeConfig
         );
-        assert_eq!(resolve_bool(false, None, None).value, false);
+        assert!(!resolve_bool(false, None, None).value);
     }
 
     #[test]

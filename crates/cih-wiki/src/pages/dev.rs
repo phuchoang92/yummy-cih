@@ -219,7 +219,7 @@ fn lead_method_hint(graph: &WikiGraph, community: &Node) -> Option<String> {
 
 /// Build the sidebar/manifest title for a community dev page.
 pub fn community_display_title(graph: &WikiGraph, community: &Node, page_path: &str) -> String {
-    let slug = page_path.split('/').last().unwrap_or(&community.name);
+    let slug = page_path.split('/').next_back().unwrap_or(&community.name);
     let (base_slug, suffix) = strip_numeric_suffix(slug);
 
     let primary_stereotype = community

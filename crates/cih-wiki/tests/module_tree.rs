@@ -45,7 +45,7 @@ fn graph_module_tree_uses_feature_groups() {
     );
     let comm = comm_node("Community:0", "Order");
     let graph = WikiGraph::build(
-        &[m.clone()],
+        std::slice::from_ref(&m),
         &[],
         &[comm],
         &[member_edge(m.id.as_str(), "Community:0")],

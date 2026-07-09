@@ -323,7 +323,14 @@ impl crate::strategies::llm::FeatureLlmCaller for CountingLlm {
     }
 }
 
-fn single_product_cluster() -> (Vec<cih_core::Node>, Vec<(String, usize)>, HashMap<String, f32>, HashMap<String, NodeMeta>) {
+type ClusterFixture = (
+    Vec<cih_core::Node>,
+    Vec<(String, usize)>,
+    HashMap<String, f32>,
+    HashMap<String, NodeMeta>,
+);
+
+fn single_product_cluster() -> ClusterFixture {
     let id = "Class:com.shop.modules.product.dto.ProductDto";
     let file = "src/main/java/com/shop/modules/product/dto/ProductDto.java";
     let nodes = vec![make_node(id, "ProductDto", file)];

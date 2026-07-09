@@ -17,7 +17,7 @@ fn validate_group_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_group_create(name: &str) -> Result<()> {
+pub fn run_group_create(name: &str) -> Result<()> {
     validate_group_name(name)?;
     let mut registry = GroupRegistry::load();
     if registry.find(name).is_some() {
@@ -34,7 +34,7 @@ pub(crate) fn run_group_create(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_group_add(name: &str, repo: &str) -> Result<()> {
+pub fn run_group_add(name: &str, repo: &str) -> Result<()> {
     let repo_registry = Registry::load();
     let repo_name = repo_registry
         .find(repo)
@@ -54,7 +54,7 @@ pub(crate) fn run_group_add(name: &str, repo: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_group_remove(name: &str, repo: &str) -> Result<()> {
+pub fn run_group_remove(name: &str, repo: &str) -> Result<()> {
     let repo_registry = Registry::load();
     let repo_name = repo_registry
         .find(repo)
@@ -71,7 +71,7 @@ pub(crate) fn run_group_remove(name: &str, repo: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_group_list(json: bool) -> Result<()> {
+pub fn run_group_list(json: bool) -> Result<()> {
     let registry = GroupRegistry::load();
     if json {
         println!("{}", serde_json::to_string_pretty(&registry)?);
@@ -96,7 +96,7 @@ pub(crate) fn run_group_list(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_group_sync(name: &str, json: bool) -> Result<()> {
+pub fn run_group_sync(name: &str, json: bool) -> Result<()> {
     validate_group_name(name)?;
     let summary = crate::group_sync::sync_group(name)?;
     if json {

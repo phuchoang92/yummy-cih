@@ -23,7 +23,7 @@ fn simple_graph() -> WikiGraph {
         props: None,
     };
     WikiGraph::build(
-        &[m.clone()],
+        std::slice::from_ref(&m),
         &[],
         &[c],
         &[Edge {

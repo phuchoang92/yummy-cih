@@ -405,27 +405,26 @@ fn extract_structured_xml(
                                 });
                             }
                         }
-                        b"entry" => {
+                        b"entry"
                             if attr_val(e, b"key").as_deref()
-                                == Some("osgi.http.whiteboard.servlet.pattern")
-                            {
-                                if let Some(pattern) = attr_val(e, b"value") {
-                                    nodes.push(Node {
-                                        id: cih_core::integration_route_id(
-                                            rel_path,
-                                            &format!("osgi-servlet-{pattern}"),
-                                        ),
-                                        kind: NodeKind::IntegrationRoute,
-                                        name: pattern.clone(),
-                                        qualified_name: None,
-                                        file: rel_path.to_string(),
-                                        range: Range::default(),
-                                        props: Some(serde_json::json!({
-                                            "source": "osgi_servlet",
-                                            "servlet_pattern": pattern,
-                                        })),
-                                    });
-                                }
+                                == Some("osgi.http.whiteboard.servlet.pattern") =>
+                        {
+                            if let Some(pattern) = attr_val(e, b"value") {
+                                nodes.push(Node {
+                                    id: cih_core::integration_route_id(
+                                        rel_path,
+                                        &format!("osgi-servlet-{pattern}"),
+                                    ),
+                                    kind: NodeKind::IntegrationRoute,
+                                    name: pattern.clone(),
+                                    qualified_name: None,
+                                    file: rel_path.to_string(),
+                                    range: Range::default(),
+                                    props: Some(serde_json::json!({
+                                        "source": "osgi_servlet",
+                                        "servlet_pattern": pattern,
+                                    })),
+                                });
                             }
                         }
                         _ => {}

@@ -380,6 +380,8 @@ impl ResolveIndex {
         self.supertypes.get(fqcn).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Inverse of `supertypes` — currently exercised only by unit tests.
+    #[cfg(test)]
     pub(crate) fn implementors(&self, fqcn: &str) -> &[String] {
         self.implementors
             .get(fqcn)

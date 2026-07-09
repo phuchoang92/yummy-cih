@@ -104,20 +104,17 @@ impl LlmChoice {
 
 /// Indexing strategy for the interactive start workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum IndexMode {
     /// Only scan — no analyze step.
     ScanOnly,
     /// Analyze all modules.
+    #[default]
     AnalyzeAll,
     /// Analyze specific modules by name.
     Modules(Vec<String>),
 }
 
-impl Default for IndexMode {
-    fn default() -> Self {
-        IndexMode::AnalyzeAll
-    }
-}
 
 /// Configuration assembled from user prompts / arguments before
 /// building the command plan.
@@ -705,7 +702,7 @@ pub fn run_start(mut cfg: StartConfig) -> Result<()> {
         step_line(&format!("  Workspace:      {}", cfg.workspace.display()));
         step_line(&format!("  Repo path:      {}", repo_canonical.display()));
         step_line(&format!("  Repo name:      {}", repo_name));
-        step_line(&format!("  Postgres pwd:   ********"));
+        step_line("  Postgres pwd:   ********");
         step_line(&format!(
             "  Index mode:     {}",
             match &cfg.index_mode {

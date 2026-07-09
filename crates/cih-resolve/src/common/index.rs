@@ -572,9 +572,6 @@ impl CommonIndex {
     }
 }
 
-// Keep the old name for backward compat in tests
-pub(crate) type ResolveIndex = CommonIndex;
-
 /// Infer language from file extension for ParsedFiles with empty `language` field
 /// (parse-cache artifacts produced before language tracking was added).
 fn infer_language_from_path(path: &str) -> &'static str {

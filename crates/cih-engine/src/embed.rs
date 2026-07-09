@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::versioning::latest_graph_artifacts;
 
-pub(crate) fn run_embed(
+pub fn run_embed(
     repo: PathBuf,
     pg_url: Option<String>,
     model: String,

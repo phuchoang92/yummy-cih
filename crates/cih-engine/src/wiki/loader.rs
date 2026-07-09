@@ -164,6 +164,7 @@ pub(super) fn load_wiki_artifacts(
     let community_nodes: Vec<Node>;
     let community_edges: Vec<Edge>;
     let community_version: String;
+#[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
     let feature_of: Box<dyn Fn(&str, &str) -> String + Send>;
 
     if grouping == super::config::WikiGrouping::Package {

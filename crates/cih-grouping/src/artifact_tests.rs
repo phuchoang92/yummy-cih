@@ -29,5 +29,5 @@ fn round_trip_jsonl() {
     let parsed = parse_jsonl(&jsonl).unwrap();
     assert_eq!(parsed.len(), 2);
     assert_eq!(parsed[0].name, "payment");
-    assert_eq!(parsed[1].pinned, true);
+    assert!(parsed[1].pinned);
 }

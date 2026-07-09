@@ -153,6 +153,7 @@ fn chain_steps_text(chain: &[String], graph: &WikiGraph) -> String {
         .join("\n")
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub(super) fn enrich_route_flows(
     graph: &WikiGraph,
     scope: Option<&std::collections::HashSet<String>>,
@@ -175,7 +176,7 @@ pub(super) fn enrich_route_flows(
                 .iter()
                 .map(|(handler, _route)| (handler.id.as_str().to_string(), handler.name.clone()))
         })
-        .filter(|(id, _)| scope.map_or(true, |s| s.contains(id.as_str())))
+        .filter(|(id, _)| scope.is_none_or(|s| s.contains(id.as_str())))
         .collect();
 
     if handlers.is_empty() {
@@ -293,6 +294,7 @@ pub(super) fn enrich_route_flows(
     (result, cache_updates)
 }
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub(super) fn enrich_one_flow(
     process_node: &Node,
     graph: &WikiGraph,

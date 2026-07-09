@@ -161,6 +161,7 @@ fn parse_llm_full(text: &str) -> Result<CommunityLlmFull> {
     )
 }
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 fn enrich_one_community_full(
     community: &cih_core::Node,
     graph: &WikiGraph,

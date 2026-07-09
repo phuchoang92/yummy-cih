@@ -173,7 +173,7 @@ fn servers(out: &cih_resolve::integration_xml::IntegrationXmlOutput) -> Vec<&Nod
         .collect()
 }
 
-fn beans_of<'a>(n: &'a Node) -> Vec<&'a str> {
+fn beans_of(n: &Node) -> Vec<&str> {
     n.props
         .as_ref()
         .and_then(|p| p.get("beans"))
@@ -363,7 +363,7 @@ fn aliased_jaxrs_namespace_prefix_is_matched() {
     assert_eq!(beans_of(server), vec!["svc"]);
 }
 
-fn bean_classes_of<'a>(n: &'a Node) -> Vec<&'a str> {
+fn bean_classes_of(n: &Node) -> Vec<&str> {
     n.props
         .as_ref()
         .and_then(|p| p.get("bean_classes"))

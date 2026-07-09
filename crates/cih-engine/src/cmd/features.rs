@@ -7,7 +7,7 @@ use serde::Serialize;
 
 // ── features show ─────────────────────────────────────────────────────────────
 
-pub(crate) fn run_features_show(repo: PathBuf, json: bool) -> Result<()> {
+pub fn run_features_show(repo: PathBuf, json: bool) -> Result<()> {
     let (dir, entries) = load_feature_artifact(&repo)?;
     let version = dir
         .file_name()
@@ -141,20 +141,17 @@ fn print_summary(repo: &Path, summary: &FeatureSummary) {
     let strategy_w = 10usize;
 
     eprintln!(
-        "     {:<name_w$}  {:>6}  {:<strategy_w$}  {}",
+        "     {:<name_w$}  {:>6}  {:<strategy_w$}  Pinned",
         "Feature",
         "Nodes",
         "Strategy",
-        "Pinned",
         name_w = name_w,
         strategy_w = strategy_w
     );
     eprintln!(
-        "     {}  {}  {}  {}",
+        "     {}  ──────  {}  ──────",
         "─".repeat(name_w),
-        "──────",
-        "─".repeat(strategy_w),
-        "──────"
+        "─".repeat(strategy_w)
     );
 
     for row in &summary.features {
@@ -184,7 +181,7 @@ fn print_summary(repo: &Path, summary: &FeatureSummary) {
 
 // ── features override ─────────────────────────────────────────────────────────
 
-pub(crate) fn run_features_override(
+pub fn run_features_override(
     repo: PathBuf,
     node_id: String,
     feature: String,
@@ -213,7 +210,7 @@ pub(crate) fn run_features_override(
 
 // ── features review (LLM auto-pin) ─────────────────────────────────────────────
 
-pub(crate) struct ReviewFlags {
+pub struct ReviewFlags {
     pub repo: PathBuf,
     pub provider: String,
     pub model: String,
@@ -282,7 +279,7 @@ impl ReviewCache {
     }
 }
 
-pub(crate) fn run_features_review(flags: ReviewFlags) -> Result<()> {
+pub fn run_features_review(flags: ReviewFlags) -> Result<()> {
     let (feat_dir, entries) = load_feature_artifact(&flags.repo)?;
     let version = feat_dir
         .file_name()
@@ -656,6 +653,38 @@ fn short_node(id: &str) -> String {
     id.split_once(':').map(|(_, r)| r).unwrap_or(id).to_string()
 }
 
+// ── feature info for status command ───────────────────────────────────────────
+
+pub struct FeatureStatus {
+    pub graph_version: String,
+    pub feature_count: usize,
+    pub node_count: usize,
+    pub pinned_count: usize,
+    pub strategy: String,
+}
+
+pub fn load_feature_status(repo: &Path) -> Option<FeatureStatus> {
+    let parent = repo.join(".cih").join("artifacts-features");
+    let dir = latest_version_dir(&parent).ok()?;
+    let version = dir.file_name()?.to_str()?.to_string();
+    let entries = cih_grouping::read_feature_artifact(&dir).ok()?;
+
+    let mut features = std::collections::HashSet::new();
+    for e in &entries {
+        features.insert(e.name.as_str());
+    }
+    let pinned = entries.iter().filter(|e| e.pinned).count();
+    let strategy = dominant_strategy(&entries.iter().collect::<Vec<_>>());
+
+    Some(FeatureStatus {
+        graph_version: version,
+        feature_count: features.len(),
+        node_count: entries.len(),
+        pinned_count: pinned,
+        strategy,
+    })
+}
+
 #[cfg(test)]
 mod review_tests {
     use super::*;
@@ -749,36 +778,4 @@ mod review_tests {
         assert_eq!(num_or_str_f32(&serde_json::json!("0.7")), Some(0.7));
         assert_eq!(num_or_str_f32(&serde_json::json!("nope")), None);
     }
-}
-
-// ── feature info for status command ───────────────────────────────────────────
-
-pub(crate) struct FeatureStatus {
-    pub graph_version: String,
-    pub feature_count: usize,
-    pub node_count: usize,
-    pub pinned_count: usize,
-    pub strategy: String,
-}
-
-pub(crate) fn load_feature_status(repo: &Path) -> Option<FeatureStatus> {
-    let parent = repo.join(".cih").join("artifacts-features");
-    let dir = latest_version_dir(&parent).ok()?;
-    let version = dir.file_name()?.to_str()?.to_string();
-    let entries = cih_grouping::read_feature_artifact(&dir).ok()?;
-
-    let mut features = std::collections::HashSet::new();
-    for e in &entries {
-        features.insert(e.name.as_str());
-    }
-    let pinned = entries.iter().filter(|e| e.pinned).count();
-    let strategy = dominant_strategy(&entries.iter().collect::<Vec<_>>());
-
-    Some(FeatureStatus {
-        graph_version: version,
-        feature_count: features.len(),
-        node_count: entries.len(),
-        pinned_count: pinned,
-        strategy,
-    })
 }

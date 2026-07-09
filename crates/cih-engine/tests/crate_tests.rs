@@ -258,7 +258,7 @@ fn extract_jar_api_demand_driven_with_sample_jar() {
 
     // Request only com.acme.Sample — demand-driven.
     let fqcns = vec!["com.acme.Sample".to_string()];
-    let (nodes, _edges, failed) = extract_jar_api(&[jar.clone()], &fqcns);
+    let (nodes, _edges, failed) = extract_jar_api(std::slice::from_ref(&jar), &fqcns);
     assert_eq!(failed, 0);
     assert!(
         !nodes.is_empty(),
