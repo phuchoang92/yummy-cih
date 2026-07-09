@@ -245,3 +245,104 @@ fn owner_fqcn_of_extracts_fqcn_from_method_id() {
     let id = method_id("com.bank.Adapter", "doWork", 2);
     assert_eq!(owner_fqcn_of(&id), "com.bank.Adapter");
 }
+
+#[test]
+fn emit_db_access_resolves_cross_file_unique_const() {
+    // The SQL constant lives in a dedicated constants class, not in the caller's file.
+    let const_fqcn = "com.bank.SqlConstants";
+    let caller_fqcn = "com.bank.AdapterImpl";
+    let callable = method_id(caller_fqcn, "fetchAccounts", 1);
+
+    let constants_file = make_parsed_file(
+        "src/main/java/SqlConstants.java",
+        const_fqcn,
+        vec![make_constant(
+            "QUERY_CROSS",
+            const_fqcn,
+            "SELECT * FROM ACCOUNTS WHERE id = ?",
+        )],
+        vec![],
+    );
+    let adapter_file = make_parsed_file(
+        "src/main/java/AdapterImpl.java",
+        caller_fqcn,
+        vec![],
+        vec![make_site("executeQuery", Some("QUERY_CROSS"), callable.clone())],
+    );
+
+    let (nodes, edges) = emit_db_access(&[constants_file, adapter_file]);
+
+    let query_id = db_query_const_id(const_fqcn, "QUERY_CROSS");
+    let table_id = db_table_id("ACCOUNTS");
+
+    assert!(
+        nodes.iter().any(|n| n.id == query_id && n.kind == NodeKind::DbQuery),
+        "DbQuery node missing for cross-file constant"
+    );
+    assert!(
+        nodes.iter().any(|n| n.id == table_id && n.kind == NodeKind::DbTable),
+        "DbTable node missing — cross-file resolution failed"
+    );
+    assert!(
+        edges.iter().any(|e| e.src == callable && e.dst == query_id && e.kind == EdgeKind::ExecutesQuery),
+        "EXECUTES_QUERY edge missing"
+    );
+    assert!(
+        edges.iter().any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable),
+        "READS_TABLE edge missing"
+    );
+    // Must not be flagged dynamic — the constant was fully resolved.
+    let qnode = nodes.iter().find(|n| n.id == query_id).unwrap();
+    let dynamic = qnode
+        .props
+        .as_ref()
+        .and_then(|p| p.get("dynamic"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(!dynamic, "cross-file resolved constant must not be dynamic");
+}
+
+#[test]
+fn emit_db_access_marks_dynamic_when_const_name_ambiguous() {
+    // Two different files both define a constant with the same bare name.
+    // The caller cannot be resolved to either without import analysis → dynamic=true.
+    let fqcn_a = "com.bank.SqlConstantsA";
+    let fqcn_b = "com.bank.SqlConstantsB";
+    let caller_fqcn = "com.bank.AdapterImpl";
+    let callable = method_id(caller_fqcn, "doQuery", 0);
+
+    let file_a = make_parsed_file(
+        "src/main/java/SqlConstantsA.java",
+        fqcn_a,
+        vec![make_constant("QUERY_SHARED", fqcn_a, "SELECT * FROM TABLE_A")],
+        vec![],
+    );
+    let file_b = make_parsed_file(
+        "src/main/java/SqlConstantsB.java",
+        fqcn_b,
+        vec![make_constant("QUERY_SHARED", fqcn_b, "SELECT * FROM TABLE_B")],
+        vec![],
+    );
+    let caller = make_parsed_file(
+        "src/main/java/AdapterImpl.java",
+        caller_fqcn,
+        vec![],
+        vec![make_site("executeQuery", Some("QUERY_SHARED"), callable)],
+    );
+
+    let (nodes, edges) = emit_db_access(&[file_a, file_b, caller]);
+
+    let table_nodes: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::DbTable).collect();
+    assert!(
+        table_nodes.is_empty(),
+        "ambiguous const must not resolve to a DbTable: {table_nodes:?}"
+    );
+    let table_edges: Vec<_> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::ReadsTable || e.kind == EdgeKind::WritesTable)
+        .collect();
+    assert!(
+        table_edges.is_empty(),
+        "ambiguous const must not emit table edges: {table_edges:?}"
+    );
+}

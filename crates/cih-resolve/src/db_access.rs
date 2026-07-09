@@ -1,9 +1,12 @@
 //! DB-access emit pass: `SqlConstant` + `SqlExecutionSite` IR → `DbQuery`/`DbTable`
 //! nodes and `EXECUTES_QUERY`/`READS_TABLE`/`WRITES_TABLE` edges.
 //!
-//! Same-class constant resolution only (v1): if `const_ref` names a constant
-//! defined in a different class the site is emitted with `dynamic=true` props and
-//! no table edges.
+//! Constant resolution uses a two-tier lookup:
+//!   1. Same-file: `(file, const_name)` — highest confidence.
+//!   2. Workspace-unique: `const_name` only, across all parsed files. If exactly one
+//!      constant carries that name the site is resolved cross-file; if multiple exist
+//!      the name is ambiguous and the site is emitted with `dynamic=true` and no table
+//!      edges (same as the old v1 "truly unknown" behaviour).
 
 use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
@@ -16,12 +19,16 @@ use cih_parse::sql::{scan_tables, TableOp};
 
 /// Emit `DbQuery` / `DbTable` nodes and DB edges from the SQL IR in `parsed`.
 pub fn emit_db_access(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
-    // Build a per-(file, owner_fqcn, const_name) → SqlConstant index.
-    // We key by (file, const_name) since owner_fqcn can be derived from in_callable.
+    // Tier-1 index: (file, const_name) → SqlConstant — same-file lookup.
     let mut const_index: HashMap<(&str, &str), &cih_core::SqlConstant> = HashMap::new();
+    // Tier-2 index: const_name → all constants with that name across all files.
+    // Used when tier-1 misses: if exactly one entry exists the constant is workspace-unique
+    // and can be resolved cross-file; if multiple exist the name is ambiguous → dynamic=true.
+    let mut const_by_name: HashMap<&str, Vec<&cih_core::SqlConstant>> = HashMap::new();
     for pf in parsed {
         for c in &pf.sql_constants {
             const_index.insert((&pf.file, &c.const_name), c);
+            const_by_name.entry(c.const_name.as_str()).or_default().push(c);
         }
     }
 
@@ -35,6 +42,7 @@ pub fn emit_db_access(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
                 pf,
                 site,
                 &const_index,
+                &const_by_name,
                 &mut nodes,
                 &mut edges,
                 &mut seen_nodes,
@@ -49,6 +57,7 @@ fn process_site(
     pf: &ParsedFile,
     site: &cih_core::SqlExecutionSite,
     const_index: &HashMap<(&str, &str), &cih_core::SqlConstant>,
+    const_by_name: &HashMap<&str, Vec<&cih_core::SqlConstant>>,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
     seen_nodes: &mut FxHashSet<NodeId>,
@@ -59,20 +68,27 @@ fn process_site(
 
     let (query_id, sql_text, dynamic, const_name_opt) = match (&site.const_ref, &site.inline_sql) {
         (Some(cref), _) => {
-            // Try same-file constant lookup first, then same-class via owner_fqcn.
+            // Tier 1: same-file lookup (highest confidence).
             let lookup_key = (&pf.file as &str, cref.as_str());
             if let Some(c) = const_index.get(&lookup_key) {
                 let qid = db_query_const_id(&c.owner_fqcn, &c.const_name);
-                (
-                    qid,
-                    c.sql_text.clone(),
-                    c.dynamic,
-                    Some(c.const_name.clone()),
-                )
+                (qid, c.sql_text.clone(), c.dynamic, Some(c.const_name.clone()))
             } else {
-                // Cross-file or unknown constant: emit with dynamic=true, no tables.
-                let qid = db_query_const_id(owner_fqcn, cref);
-                (qid, String::new(), true, Some(cref.clone()))
+                // Tier 2: workspace-unique cross-file fallback.
+                // If exactly one constant with this name exists across all parsed files,
+                // resolve it regardless of which file defines it (covers the common pattern
+                // of a shared SqlConstants utility class with statically-imported names).
+                // If zero or multiple match, fall back to dynamic=true with no table edges.
+                match const_by_name.get(cref.as_str()).map(Vec::as_slice) {
+                    Some([c]) => {
+                        let qid = db_query_const_id(&c.owner_fqcn, &c.const_name);
+                        (qid, c.sql_text.clone(), c.dynamic, Some(c.const_name.clone()))
+                    }
+                    _ => {
+                        let qid = db_query_const_id(owner_fqcn, cref);
+                        (qid, String::new(), true, Some(cref.clone()))
+                    }
+                }
             }
         }
         (None, Some(inline)) => {
