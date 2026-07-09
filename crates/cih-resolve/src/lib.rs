@@ -96,12 +96,19 @@ pub fn default_registry() -> ResolverRegistry {
     r
 }
 
-/// Backward-compatible entrypoint (uses old ResolveIndex for tests).
-/// Run Phase 4.2 over all parsed files: receiver-bound calls, free calls,
-/// remaining references, import edges, then heritage edges.
+/// Convenience entrypoint: resolve with the default language registry and
+/// default options. Runs Phase 4.2 over all parsed files: receiver-bound
+/// calls, free calls, remaining references, import edges, then heritage edges.
 pub fn resolve_edges(parsed: &[ParsedFile]) -> ResolveOutput {
-    let index = index::ResolveIndex::build(parsed);
-    emit::EdgeEmitter::new(parsed, index).run()
+    resolve_with_registry(
+        parsed,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+        },
+    )
 }
 
 /// Configurable entrypoint used by the engine.

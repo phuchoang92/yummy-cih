@@ -746,8 +746,12 @@ fn di_resolves_interface_call_to_service_impl() {
     assert_eq!(di_edge.reason, "di-resolved");
 }
 
+/// A single concrete implementor gets the DI redirect even without a
+/// `@Service` stereotype (annotation-driven wiring may leave metadata empty);
+/// the interface fallback is reserved for the ambiguous multi-impl case,
+/// covered by `di_falls_back_when_multiple_service_impls`.
 #[test]
-fn di_falls_back_when_no_service_impl() {
+fn di_redirects_to_single_impl_even_without_stereotype() {
     let files = make_di_scenario(None);
     let out = resolve_edges(&files);
     let calls: Vec<_> = out
@@ -755,12 +759,11 @@ fn di_falls_back_when_no_service_impl() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Calls)
         .collect();
-    assert!(
-        calls
-            .iter()
-            .any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
-        "should fall back to interface method when no @Service impl"
-    );
+    let di_edge = calls
+        .iter()
+        .find(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1))
+        .expect("single un-stereotyped impl should still receive the DI redirect");
+    assert_eq!(di_edge.reason, "di-resolved");
 }
 
 #[test]
