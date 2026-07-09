@@ -143,11 +143,6 @@ impl PhaseProgress {
         self.inc_ok();
     }
 
-    pub fn tick_failed(&self, label: impl Into<String>) {
-        self.tick(label);
-        self.inc_failed();
-    }
-
     pub fn tick_skipped(&self, label: impl Into<String>) {
         // cached/skipped counts as ok for summary purposes
         self.tick(label);

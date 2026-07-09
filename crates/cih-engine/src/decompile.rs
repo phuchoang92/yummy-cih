@@ -43,7 +43,6 @@ fn tool_release(tool: &str) -> Option<ToolRelease> {
 /// Statistics returned by `run_decompile_precheck`.
 #[derive(Debug, Default)]
 pub struct DecompileStats {
-    pub jars_found: usize,
     pub jars_cached: usize,
     pub jars_decompiled: usize,
     pub jars_failed: usize,
@@ -68,7 +67,6 @@ pub fn run_decompile_precheck(
     let cih_dir = repo.join(".cih");
 
     let mut stats = DecompileStats {
-        jars_found: jars.len(),
         ..Default::default()
     };
 
