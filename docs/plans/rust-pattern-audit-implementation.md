@@ -85,7 +85,13 @@ Each workstream is independently verifiable (`cargo test --workspace` is hermeti
 
 ### WS6 — Symbol-ID interning in the taint hot path (measured)
 
-The largest, riskiest item — done last, and only landed if it measures.
+**Outcome (2026-07-09): rejected by the measurement gate.** Baseline on Fineract
+(~46k nodes, artifacts pre-built): full 4-phase `taint --no-load` = **0.75–0.77s
+wall (3 runs)**. There is no hot path to optimize; the FxHashMap swap (WS3) already
+covers the cheap win. No interner was added (an unused utility would contradict the
+audit's build-for-need principle); negative result recorded in docs/ARCHITECTURE.md.
+
+Original plan (kept for reference) — the largest, riskiest item, only landed if it measures.
 
 1. **Baseline first:** time `cargo run --release -p cih-engine -- analyze <fixture>` on a real repo (e.g. one of `~/BigMoves/AI/cih-eval-repos`, or the Fineract checkout) 3× with hyperfine or `time`; record parse/resolve/taint phase timings (the engine logs phases via tracing).
 2. Add a small hand-rolled interner to cih-core (`src/intern.rs`, ~60 lines, no new dep): `Interner { map: FxHashMap<Box<str>, Sym>, strings: Vec<Box<str>> }`, `Sym(u32)`, `intern(&str) -> Sym`, `resolve(Sym) -> &str`; unit tests.
