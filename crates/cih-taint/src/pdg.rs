@@ -15,7 +15,7 @@
 //!
 //! All data structures are purely in-memory; nothing is persisted to the main graph.
 
-use rustc_hash::{FxHashMap};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 use cih_core::NodeId;
@@ -29,9 +29,7 @@ use crate::ir::StatementKind;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PdgEdgeKind {
     /// True (read-after-write) data dependence: `from` defines `var`, `to` reads it.
-    DataDep {
-        var: String,
-    },
+    DataDep { var: String },
     /// Control dependence: `to` executes only on some successors of `from` (a branch/loop).
     ControlDep,
 }
@@ -65,7 +63,12 @@ impl Pdg {
             by_target.entry(e.to.clone()).or_default().push(i);
             by_source.entry(e.from.clone()).or_default().push(i);
         }
-        Self { callable_id, edges, by_target, by_source }
+        Self {
+            callable_id,
+            edges,
+            by_target,
+            by_source,
+        }
     }
 
     /// Edges that terminate at `target` (what does this statement depend on?).
@@ -86,12 +89,16 @@ impl Pdg {
 
     /// All data-dependence edges.
     pub fn data_edges(&self) -> impl Iterator<Item = &PdgEdge> {
-        self.edges.iter().filter(|e| matches!(e.kind, PdgEdgeKind::DataDep { .. }))
+        self.edges
+            .iter()
+            .filter(|e| matches!(e.kind, PdgEdgeKind::DataDep { .. }))
     }
 
     /// All control-dependence edges.
     pub fn control_edges(&self) -> impl Iterator<Item = &PdgEdge> {
-        self.edges.iter().filter(|e| e.kind == PdgEdgeKind::ControlDep)
+        self.edges
+            .iter()
+            .filter(|e| e.kind == PdgEdgeKind::ControlDep)
     }
 }
 
@@ -139,12 +146,7 @@ pub fn compute_reaching_defs(cfg: &Cfg, param_names: &[String]) -> ReachingDefs 
             };
 
             // IN[B] = param_defs (if entry) ∪ ⋃ OUT[P] for predecessors P.
-            let mut current = merge_in(
-                block_id == &cfg.entry,
-                &param_defs,
-                &block.preds,
-                &out,
-            );
+            let mut current = merge_in(block_id == &cfg.entry, &param_defs, &block.preds, &out);
 
             // Transfer function: for each statement, kill old defs of written vars, gen new def.
             for stmt in &block.stmts {
@@ -182,12 +184,7 @@ pub fn compute_reaching_defs(cfg: &Cfg, param_names: &[String]) -> ReachingDefs 
             None => continue,
         };
 
-        let mut current = merge_in(
-            block_id == &cfg.entry,
-            &param_defs,
-            &block.preds,
-            &out,
-        );
+        let mut current = merge_in(block_id == &cfg.entry, &param_defs, &block.preds, &out);
 
         for stmt in &block.stmts {
             result.insert(stmt.id.clone(), current.clone());
@@ -243,7 +240,9 @@ fn data_dep_edges(cfg: &Cfg, reaching: &ReachingDefs) -> Vec<PdgEdge> {
 
     for block in &cfg.blocks {
         for stmt in &block.stmts {
-            let Some(rd) = reaching.get(&stmt.id) else { continue };
+            let Some(rd) = reaching.get(&stmt.id) else {
+                continue;
+            };
 
             // Collect all variables read by this statement (reads + call_args).
             let mut vars_read: Vec<&String> = stmt.reads.iter().collect();
@@ -288,9 +287,11 @@ fn control_dep_edges(cfg: &Cfg, dom: &DomTree) -> Vec<PdgEdge> {
 
     for block in &cfg.blocks {
         // Find the branch/loop statement in this block (if any).
-        let Some(branch_stmt) = block.stmts.iter().find(|s| {
-            matches!(s.kind, StatementKind::Branch | StatementKind::Loop)
-        }) else {
+        let Some(branch_stmt) = block
+            .stmts
+            .iter()
+            .find(|s| matches!(s.kind, StatementKind::Branch | StatementKind::Loop))
+        else {
             continue;
         };
 
@@ -302,8 +303,8 @@ fn control_dep_edges(cfg: &Cfg, dom: &DomTree) -> Vec<PdgEdge> {
             }
             // Add control-dep edges to all stmts in blocks dominated by succ_id.
             for other_block in &cfg.blocks {
-                let in_region = other_block.id == *succ_id
-                    || dom.strictly_dominates(succ_id, &other_block.id);
+                let in_region =
+                    other_block.id == *succ_id || dom.strictly_dominates(succ_id, &other_block.id);
                 if !in_region {
                     continue;
                 }
@@ -342,11 +343,7 @@ fn dedup_edges(edges: &mut Vec<PdgEdge>) {
 ///
 /// Pass `None` for `reaching` to skip data-dependence edges (useful when only
 /// control-dependence is needed). Pass `None` for `dom` to skip control-dependence.
-pub fn build_pdg(
-    cfg: &Cfg,
-    dom: Option<&DomTree>,
-    reaching: Option<&ReachingDefs>,
-) -> Pdg {
+pub fn build_pdg(cfg: &Cfg, dom: Option<&DomTree>, reaching: Option<&ReachingDefs>) -> Pdg {
     let mut all_edges = Vec::new();
 
     if let Some(rd) = reaching {
@@ -359,4 +356,3 @@ pub fn build_pdg(
     dedup_edges(&mut all_edges);
     Pdg::new(cfg.callable_id.clone(), all_edges)
 }
-

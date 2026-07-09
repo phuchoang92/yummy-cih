@@ -32,13 +32,23 @@ fn confirms_direct_tainted_sink_call() {
     let body = MethodBody {
         callable_id: id.clone(),
         param_names: vec!["input".to_string()],
-        statements: vec![stmt(&id, StatementKind::Call, &[], &[], Some("execute"), &["input"], 10)],
+        statements: vec![stmt(
+            &id,
+            StatementKind::Call,
+            &[],
+            &[],
+            Some("execute"),
+            &["input"],
+            10,
+        )],
     };
 
     let result = analyze_method(&body, &["input".to_string()], &["execute"]);
     assert_eq!(result.confirmed_sinks.len(), 1);
     assert_eq!(result.confirmed_sinks[0].call_name, "execute");
-    assert!(result.confirmed_sinks[0].tainted_args.contains(&"input".to_string()));
+    assert!(result.confirmed_sinks[0]
+        .tainted_args
+        .contains(&"input".to_string()));
 }
 
 #[test]
@@ -48,14 +58,32 @@ fn propagates_taint_through_assign_then_sink() {
         callable_id: id.clone(),
         param_names: vec!["input".to_string()],
         statements: vec![
-            stmt(&id, StatementKind::Assign, &["input"], &["q"], Some("build"), &["input"], 10),
-            stmt(&id, StatementKind::Call, &[], &[], Some("execute"), &["q"], 20),
+            stmt(
+                &id,
+                StatementKind::Assign,
+                &["input"],
+                &["q"],
+                Some("build"),
+                &["input"],
+                10,
+            ),
+            stmt(
+                &id,
+                StatementKind::Call,
+                &[],
+                &[],
+                Some("execute"),
+                &["q"],
+                20,
+            ),
         ],
     };
 
     let result = analyze_method(&body, &["input".to_string()], &["execute"]);
     assert_eq!(result.confirmed_sinks.len(), 1);
-    assert!(result.confirmed_sinks[0].tainted_args.contains(&"q".to_string()));
+    assert!(result.confirmed_sinks[0]
+        .tainted_args
+        .contains(&"q".to_string()));
 }
 
 #[test]
@@ -76,7 +104,10 @@ fn no_taint_no_sink_confirmation() {
     };
 
     let result = analyze_method(&body, &["input".to_string()], &["execute"]);
-    assert!(result.confirmed_sinks.is_empty(), "hardcoded arg should not confirm sink");
+    assert!(
+        result.confirmed_sinks.is_empty(),
+        "hardcoded arg should not confirm sink"
+    );
 }
 
 #[test]
@@ -85,7 +116,15 @@ fn taint_return_detected() {
     let body = MethodBody {
         callable_id: id.clone(),
         param_names: vec!["input".to_string()],
-        statements: vec![stmt(&id, StatementKind::Return, &["input"], &[], None, &[], 10)],
+        statements: vec![stmt(
+            &id,
+            StatementKind::Return,
+            &["input"],
+            &[],
+            None,
+            &[],
+            10,
+        )],
     };
 
     let result = analyze_method(&body, &["input".to_string()], &["execute"]);

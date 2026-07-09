@@ -61,10 +61,7 @@ impl GraphData {
     #[inline]
     pub fn neighbors(&self, node: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
         let (targets, weights) = self.neighbor_slices(node);
-        targets
-            .iter()
-            .zip(weights.iter())
-            .map(|(&t, &w)| (t, w))
+        targets.iter().zip(weights.iter()).map(|(&t, &w)| (t, w))
     }
 
     /// Get raw slices of neighbor targets and weights for a node.
@@ -112,10 +109,7 @@ impl GraphData {
     #[inline]
     pub fn out_neighbors(&self, node: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
         let (targets, weights) = self.out_neighbor_slices(node);
-        targets
-            .iter()
-            .zip(weights.iter())
-            .map(|(&t, &w)| (t, w))
+        targets.iter().zip(weights.iter()).map(|(&t, &w)| (t, w))
     }
 
     /// Get raw slices of out-edge targets and weights for a node.

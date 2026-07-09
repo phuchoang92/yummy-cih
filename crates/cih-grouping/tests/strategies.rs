@@ -81,7 +81,10 @@ fn catch_all_does_not_override_domain_assignment() {
     };
     let entries = hybrid.assign(&input);
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "payment", "package domain should not be overridden");
+    assert_eq!(
+        entries[0].name, "payment",
+        "package domain should not be overridden"
+    );
 }
 
 #[test]

@@ -24,14 +24,17 @@ async fn main() -> anyhow::Result<()> {
     // ---- Phase 1: connection reuse under sustained concurrent load --------
     // Generous limit so the semaphore never sheds; the point is that all this
     // concurrency runs over ONE reused connection, not one-per-request.
-    let store = Arc::new(FalkorStore::connect(&url, KEY)?.with_query_limit(64, Duration::from_secs(5)));
+    let store =
+        Arc::new(FalkorStore::connect(&url, KEY)?.with_query_limit(64, Duration::from_secs(5)));
     store.graph_summary().await?; // warm up / create the graph
 
     let workers = 40usize;
     let per_worker = 500usize;
     println!(
         "Phase 1 (reuse): {} workers x {} queries = {} total, limit=64",
-        workers, per_worker, workers * per_worker
+        workers,
+        per_worker,
+        workers * per_worker
     );
     let t0 = Instant::now();
     let mut handles = Vec::new();
@@ -59,7 +62,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // ---- Phase 2: backpressure sheds under a tight limit -----------------
-    let tight = Arc::new(FalkorStore::connect(&url, KEY)?.with_query_limit(2, Duration::from_millis(20)));
+    let tight =
+        Arc::new(FalkorStore::connect(&url, KEY)?.with_query_limit(2, Duration::from_millis(20)));
     let burst = 200usize;
     println!("Phase 2 (backpressure): {burst} concurrent queries, limit=2, acquire_timeout=20ms");
     let (ok, shed) = run_burst(&tight, burst).await;
@@ -67,7 +71,8 @@ async fn main() -> anyhow::Result<()> {
     assert!(shed > 0, "expected some requests to shed under limit=2");
 
     // ---- Phase 3: no false shedding when capacity is ample ---------------
-    let ample = Arc::new(FalkorStore::connect(&url, KEY)?.with_query_limit(64, Duration::from_millis(20)));
+    let ample =
+        Arc::new(FalkorStore::connect(&url, KEY)?.with_query_limit(64, Duration::from_millis(20)));
     println!("Phase 3 (headroom): {burst} concurrent queries, limit=64, acquire_timeout=20ms");
     let (ok, shed) = run_burst(&ample, burst).await;
     println!("  ok={ok}  shed(overloaded)={shed}");

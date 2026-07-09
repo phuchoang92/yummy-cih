@@ -7,9 +7,9 @@ use cih_core::{
 };
 use cih_lang::constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 
+use crate::contracts::resolve_contract_edges;
 use crate::index::ResolveIndex;
 use crate::inheritance::build_mro_map;
-use crate::contracts::resolve_contract_edges;
 use crate::lang::{InheritanceModel, ResolverRegistry};
 use crate::types::{
     call_name, class_of, is_simple_ident, split_last_dot_outside_parens, starts_uppercase,
@@ -35,7 +35,11 @@ pub struct EdgeEmitter<'a> {
 }
 
 impl<'a> EdgeEmitter<'a> {
-    pub fn new(parsed: &'a [ParsedFile], index: ResolveIndex, registry: &'a ResolverRegistry) -> Self {
+    pub fn new(
+        parsed: &'a [ParsedFile],
+        index: ResolveIndex,
+        registry: &'a ResolverRegistry,
+    ) -> Self {
         Self {
             parsed,
             index,
@@ -65,7 +69,8 @@ impl<'a> EdgeEmitter<'a> {
 
     /// Convenience wrapper when only the FQCN is needed.
     fn resolve_type_cached(&mut self, raw: &str, file: &str) -> Option<String> {
-        self.resolve_with_confidence_cached(raw, file).map(|(fqcn, _)| fqcn)
+        self.resolve_with_confidence_cached(raw, file)
+            .map(|(fqcn, _)| fqcn)
     }
 
     /// Replace the default no-op constant resolver with an already-boxed one (Gap 4).
@@ -246,15 +251,17 @@ impl<'a> EdgeEmitter<'a> {
                             )
                         })
                     }
-                    RefKind::TypeRef => self.resolve_type_node(pf, &site.name).map(|(dst, conf)| {
-                        (
-                            site.in_callable.clone(),
-                            dst,
-                            EdgeKind::Uses,
-                            conf,
-                            "type-ref".to_string(),
-                        )
-                    }),
+                    RefKind::TypeRef => {
+                        self.resolve_type_node(pf, &site.name).map(|(dst, conf)| {
+                            (
+                                site.in_callable.clone(),
+                                dst,
+                                EdgeKind::Uses,
+                                conf,
+                                "type-ref".to_string(),
+                            )
+                        })
+                    }
                     RefKind::Extends | RefKind::Implements => None,
                 };
 
@@ -395,8 +402,9 @@ impl<'a> EdgeEmitter<'a> {
         };
         if let Some(owner_opt) = self_recv {
             if let Some(owner) = owner_opt {
-                if let Some(dst) =
-                    self.index.find_member_in_hierarchy(&owner, &site.name, site.arity)
+                if let Some(dst) = self
+                    .index
+                    .find_member_in_hierarchy(&owner, &site.name, site.arity)
                 {
                     return Some((dst, 0.8, "self-receiver".to_string()));
                 }
@@ -407,7 +415,8 @@ impl<'a> EdgeEmitter<'a> {
         if let Some(owner) = self.resolve_receiver_expr_type(pf, site, receiver) {
             // DI redirect: interface receiver with exactly one @Service impl → use the impl.
             let effective_owner = if self.index.is_interface_type(&owner) {
-                self.registry.for_language(lang)
+                self.registry
+                    .for_language(lang)
                     .di_redirect(&owner, &self.index)
                     .unwrap_or_else(|| owner.clone())
             } else {
@@ -435,9 +444,16 @@ impl<'a> EdgeEmitter<'a> {
         None
     }
 
-    fn resolve_constructor(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<(NodeId, f32)> {
+    fn resolve_constructor(
+        &mut self,
+        pf: &ParsedFile,
+        site: &ReferenceSite,
+    ) -> Option<(NodeId, f32)> {
         let (fqcn, conf) = self.resolve_with_confidence_cached(&site.name, &pf.file)?;
-        let ctor_name = self.registry.for_language(effective_lang(pf)).constructor_name();
+        let ctor_name = self
+            .registry
+            .for_language(effective_lang(pf))
+            .constructor_name();
         let result = if let Some(ctor_name) = ctor_name {
             self.index.find_member(&fqcn, ctor_name, site.arity)
         } else {
@@ -519,7 +535,11 @@ impl<'a> EdgeEmitter<'a> {
 
         if is_simple_ident(receiver) {
             // Language-aware self-receiver (this/super/self/cls)
-            if self.registry.for_language(effective_lang(pf)).is_self_receiver(receiver) {
+            if self
+                .registry
+                .for_language(effective_lang(pf))
+                .is_self_receiver(receiver)
+            {
                 return self.index.receiver_type(&site.in_fqcn, receiver);
             }
             if starts_uppercase(receiver) {
@@ -592,13 +612,13 @@ impl<'a> EdgeEmitter<'a> {
             return;
         }
         let strategy: Option<&str> = match (&kind, reason.as_str()) {
-            (EdgeKind::Calls, "di-resolved")            => Some("di_xml"),
-            (EdgeKind::Calls, "interface_single_impl")  => Some("iface_single"),
-            (EdgeKind::Calls, "receiver-bound")         => Some("type_inferred"),
-            (EdgeKind::Calls, "self-receiver")          => Some("self_recv"),
-            (EdgeKind::Calls, "free-call-fallback")     => Some("free_call"),
-            (EdgeKind::Implements, _)                   => Some("heritage"),
-            (EdgeKind::Extends, _)                      => Some("heritage"),
+            (EdgeKind::Calls, "di-resolved") => Some("di_xml"),
+            (EdgeKind::Calls, "interface_single_impl") => Some("iface_single"),
+            (EdgeKind::Calls, "receiver-bound") => Some("type_inferred"),
+            (EdgeKind::Calls, "self-receiver") => Some("self_recv"),
+            (EdgeKind::Calls, "free-call-fallback") => Some("free_call"),
+            (EdgeKind::Implements, _) => Some("heritage"),
+            (EdgeKind::Extends, _) => Some("heritage"),
             _ => None,
         };
         let props = strategy.map(|s| serde_json::json!({ "rs": s }));

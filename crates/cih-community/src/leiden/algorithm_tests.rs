@@ -1,5 +1,5 @@
 use super::*;
-use crate::leiden_impl::builder::GraphDataBuilder;
+use crate::leiden::builder::GraphDataBuilder;
 
 /// RED TEST: Verify that init_community_stats_into populates PER-LAYER arrays,
 /// NOT accumulated across layers.
@@ -107,16 +107,11 @@ fn test_find_best_community_stays_when_no_improvement() {
     let comm_size: Vec<f64> = vec![1.0, 1.0, 1.0];
     let candidates = [0usize, 2].into_iter();
     let delta_fn = |_target: usize| -> f64 { 1e-20 };
-    let (best, _) = find_best_community(
-        candidates,
-        1,
-        1e-10,
-        0,
-        &comm_size,
-        1.0,
-        delta_fn,
+    let (best, _) = find_best_community(candidates, 1, 1e-10, 0, &comm_size, 1.0, delta_fn);
+    assert_eq!(
+        best, 1,
+        "should stay at current community when all deltas < epsilon"
     );
-    assert_eq!(best, 1, "should stay at current community when all deltas < epsilon");
 }
 
 /// Verify that max_comm_size rejects candidates that would exceed the size limit.
@@ -127,15 +122,15 @@ fn test_find_best_community_respects_max_comm_size() {
     let candidates = [0usize, 2].into_iter();
     let delta_fn = |target: usize| -> f64 {
         // community 0 would be great but is too big
-        if target == 0 { 100.0 } else { 0.5 }
+        if target == 0 {
+            100.0
+        } else {
+            0.5
+        }
     };
     let (best, delta) = find_best_community(
-        candidates,
-        1,
-        1e-10,
-        5, // max_comm_size as usize (5 nodes)
-        &comm_size,
-        1.0, // node_weight
+        candidates, 1, 1e-10, 5, // max_comm_size as usize (5 nodes)
+        &comm_size, 1.0, // node_weight
         delta_fn,
     );
     // community 0 is skipped (5+1 > 5), community 2 is chosen
@@ -162,9 +157,9 @@ fn test_apply_move_updates_partition_and_stats() {
 
     apply_move(
         MoveTarget::Partition(&mut partition),
-        1,   // node
-        1,   // old community
-        0,   // new community
+        1, // node
+        1, // old community
+        0, // new community
         NodeContribution {
             k_v_out: &[2.0],
             k_v_in: &[2.0],
@@ -180,10 +175,22 @@ fn test_apply_move_updates_partition_and_stats() {
     // Partition should now have node 1 in community 0
     assert_eq!(partition.community_of(1), 0);
     // old community 1 lost degree/size; new community 0 gained them
-    assert!((total_degree[0][0] - 4.0).abs() < 1e-10, "comm 0 total_degree should be 4.0");
-    assert!((total_degree[0][1] - 0.0).abs() < 1e-10, "comm 1 total_degree should be 0.0");
-    assert!((in_degree[0][0] - 4.0).abs() < 1e-10, "comm 0 in_degree should be 4.0");
-    assert!((in_degree[0][1] - 0.0).abs() < 1e-10, "comm 1 in_degree should be 0.0");
+    assert!(
+        (total_degree[0][0] - 4.0).abs() < 1e-10,
+        "comm 0 total_degree should be 4.0"
+    );
+    assert!(
+        (total_degree[0][1] - 0.0).abs() < 1e-10,
+        "comm 1 total_degree should be 0.0"
+    );
+    assert!(
+        (in_degree[0][0] - 4.0).abs() < 1e-10,
+        "comm 0 in_degree should be 4.0"
+    );
+    assert!(
+        (in_degree[0][1] - 0.0).abs() < 1e-10,
+        "comm 1 in_degree should be 0.0"
+    );
     assert!((size[0] - 2.0).abs() < 1e-10, "comm 0 size should be 2.0");
     assert!((size[1] - 0.0).abs() < 1e-10, "comm 1 size should be 0.0");
 }
@@ -199,9 +206,9 @@ fn test_apply_move_refined_map() {
 
     apply_move(
         MoveTarget::RefinedMap(&mut refined_map),
-        2,   // node
-        2,   // old community
-        0,   // new community
+        2, // node
+        2, // old community
+        0, // new community
         NodeContribution {
             k_v_out: &[2.0],
             k_v_in: &[0.0],
@@ -214,7 +221,10 @@ fn test_apply_move_refined_map() {
         },
     );
 
-    assert_eq!(refined_map[2], 0, "refined map should update node 2 to community 0");
+    assert_eq!(
+        refined_map[2], 0,
+        "refined map should update node 2 to community 0"
+    );
     assert!((size[0] - 2.0).abs() < 1e-10);
     assert!((size[2] - 0.0).abs() < 1e-10);
 }
@@ -230,7 +240,9 @@ fn test_apply_move_multilayer() {
 
     apply_move(
         MoveTarget::Partition(&mut partition),
-        1, 1, 0,
+        1,
+        1,
+        0,
         NodeContribution {
             k_v_out: &[5.0, 2.0],
             k_v_in: &[5.0, 2.0],
@@ -295,10 +307,15 @@ fn test_build_aggregated_graph_two_communities() {
         agg_edges_map,
         &coarse_partition,
         |node| graph.node_weight(node),
-    ).unwrap();
+    )
+    .unwrap();
 
     // 2 aggregate nodes
-    assert_eq!(agg_data.node_count(), 2, "aggregated graph should have 2 nodes");
+    assert_eq!(
+        agg_data.node_count(),
+        2,
+        "aggregated graph should have 2 nodes"
+    );
 
     // Node weights: each super-node has weight 2.0 (two original nodes of weight 1.0 each)
     assert!((agg_data.node_weight(0) - 2.0).abs() < 1e-10);
@@ -310,15 +327,28 @@ fn test_build_aggregated_graph_two_communities() {
     let neighbors_1: Vec<(usize, f64)> = agg_data.neighbors(1).collect();
 
     // Super-node 0 has: self-loop (internal 0-1) weight 1.0 + edge to 1 (bridge 1-2) weight 1.0
-    assert_eq!(neighbors_0.len(), 2, "super-node 0 should have 2 neighbors (self + bridge)");
-    let has_self_0 = neighbors_0.iter().any(|(n, w)| *n == 0 && (*w - 1.0).abs() < 1e-10);
-    let has_bridge_from_0 = neighbors_0.iter().any(|(n, w)| *n == 1 && (*w - 1.0).abs() < 1e-10);
+    assert_eq!(
+        neighbors_0.len(),
+        2,
+        "super-node 0 should have 2 neighbors (self + bridge)"
+    );
+    let has_self_0 = neighbors_0
+        .iter()
+        .any(|(n, w)| *n == 0 && (*w - 1.0).abs() < 1e-10);
+    let has_bridge_from_0 = neighbors_0
+        .iter()
+        .any(|(n, w)| *n == 1 && (*w - 1.0).abs() < 1e-10);
     assert!(has_self_0, "super-node 0 should have self-loop weight 1.0");
-    assert!(has_bridge_from_0, "super-node 0 should have edge to super-node 1 weight 1.0");
+    assert!(
+        has_bridge_from_0,
+        "super-node 0 should have edge to super-node 1 weight 1.0"
+    );
 
     // Super-node 1 has: self-loop (internal 2-3) weight 1.0 + edge to 0 (bridge) weight 1.0
     assert_eq!(neighbors_1.len(), 2, "super-node 1 should have 2 neighbors");
-    let has_self_1 = neighbors_1.iter().any(|(n, w)| *n == 1 && (*w - 1.0).abs() < 1e-10);
+    let has_self_1 = neighbors_1
+        .iter()
+        .any(|(n, w)| *n == 1 && (*w - 1.0).abs() < 1e-10);
     assert!(has_self_1, "super-node 1 should have self-loop weight 1.0");
 
     // Returned orig_to_agg should be preserved
@@ -357,15 +387,30 @@ fn test_build_aggregated_graph_single_community() {
         agg_edges_map,
         &coarse_partition,
         |node| graph.node_weight(node),
-    ).unwrap();
+    )
+    .unwrap();
 
-    assert_eq!(agg_data.node_count(), 1, "single community should produce 1 super-node");
-    assert!((agg_data.node_weight(0) - 3.0).abs() < 1e-10, "weight should be 3.0");
+    assert_eq!(
+        agg_data.node_count(),
+        1,
+        "single community should produce 1 super-node"
+    );
+    assert!(
+        (agg_data.node_weight(0) - 3.0).abs() < 1e-10,
+        "weight should be 3.0"
+    );
 
     // All edges become self-loops on the single super-node: 2 edges * 2.0 (undirected double-count) = 4.0
     // But aggregate_node_edges_into canonicalizes, so self-loop weight = sum of edge weights
     let neighbors: Vec<(usize, f64)> = agg_data.neighbors(0).collect();
-    assert_eq!(neighbors.len(), 1, "single super-node should only have self-loop");
+    assert_eq!(
+        neighbors.len(),
+        1,
+        "single super-node should only have self-loop"
+    );
     assert_eq!(neighbors[0].0, 0, "neighbor should be self");
-    assert!((neighbors[0].1 - 2.0).abs() < 1e-10, "self-loop weight should be 2.0 (sum of edges)");
+    assert!(
+        (neighbors[0].1 - 2.0).abs() < 1e-10,
+        "self-loop weight should be 2.0 (sum of edges)"
+    );
 }

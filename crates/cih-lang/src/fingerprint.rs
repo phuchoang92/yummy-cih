@@ -11,39 +11,94 @@ pub(crate) const MINHASH_K: usize = 64;
 pub(crate) const MINHASH_MIN_TOKENS: u32 = 30;
 
 pub(crate) const MINHASH_SEEDS: [u64; 64] = [
-    0x9e3779b97f4a7c15, 0x6c62272e07bb0142, 0x94d049bb133111eb, 0xbf58476d1ce4e5b9,
-    0x517cc1b727220a95, 0x4be98134a5976fd3, 0xa8c2fda8d01bcc3d, 0x0bc150392e34b12b,
-    0x3917bfda55c5b0a3, 0x7465fca80eceed01, 0xf17b2e68e95b4b63, 0x2e52d1d0c50a8471,
-    0xd97390e8e9cbb87b, 0x2abe1a8a8c8a1e2b, 0x6d2ee4a3c3cfb9c5, 0x84f8e5a9c8c7f5a1,
-    0x3c7f5d1b8e6a2f4c, 0xa1b2c3d4e5f60718, 0x192a3b4c5d6e7f80, 0x8f7e6d5c4b3a2918,
-    0xdeadbeefcafebabe, 0x0102030405060708, 0xf0e0d0c0b0a09080, 0x123456789abcdef0,
-    0xfedcba9876543210, 0xa5a5a5a5a5a5a5a5, 0x5a5a5a5a5a5a5a5a, 0xc3c3c3c3c3c3c3c3,
-    0x3c3c3c3c3c3c3c3c, 0xe7e7e7e7e7e7e7e7, 0x1818181818181818, 0xaaaa0000bbbb1111,
-    0xcccc2222dddd3333, 0xeeee4444ffff5555, 0x0000666677778888, 0x9999aaaabbbbcccc,
-    0xddddeeeeffff0000, 0x1111222233334444, 0x5555666677778888, 0x9999aaaabbbbdddd,
-    0xeeeeffff11112222, 0x3333444455556666, 0x7777888899990000, 0xaaaabbbbccccdddd,
-    0xeeeeffffaaaabbbb, 0xccccddddeeee0000, 0xffff000011112222, 0x4444333322221111,
-    0xbbbb0000aaaa9999, 0x8888777766665555, 0x4444333399998888, 0x7777666655554444,
-    0x3333222211110000, 0xffffeeeeddddcccc, 0xbbbbaaaa99998888, 0x7777666655554444,
-    0x3333222211110000, 0xffffeeeeddddcccc, 0xbbbbaaaa99998888, 0x7777666655554444,
-    0x3333222211110000, 0x0000111122223333, 0x4444555566667777, 0x8888999900001111,
+    0x9e3779b97f4a7c15,
+    0x6c62272e07bb0142,
+    0x94d049bb133111eb,
+    0xbf58476d1ce4e5b9,
+    0x517cc1b727220a95,
+    0x4be98134a5976fd3,
+    0xa8c2fda8d01bcc3d,
+    0x0bc150392e34b12b,
+    0x3917bfda55c5b0a3,
+    0x7465fca80eceed01,
+    0xf17b2e68e95b4b63,
+    0x2e52d1d0c50a8471,
+    0xd97390e8e9cbb87b,
+    0x2abe1a8a8c8a1e2b,
+    0x6d2ee4a3c3cfb9c5,
+    0x84f8e5a9c8c7f5a1,
+    0x3c7f5d1b8e6a2f4c,
+    0xa1b2c3d4e5f60718,
+    0x192a3b4c5d6e7f80,
+    0x8f7e6d5c4b3a2918,
+    0xdeadbeefcafebabe,
+    0x0102030405060708,
+    0xf0e0d0c0b0a09080,
+    0x123456789abcdef0,
+    0xfedcba9876543210,
+    0xa5a5a5a5a5a5a5a5,
+    0x5a5a5a5a5a5a5a5a,
+    0xc3c3c3c3c3c3c3c3,
+    0x3c3c3c3c3c3c3c3c,
+    0xe7e7e7e7e7e7e7e7,
+    0x1818181818181818,
+    0xaaaa0000bbbb1111,
+    0xcccc2222dddd3333,
+    0xeeee4444ffff5555,
+    0x0000666677778888,
+    0x9999aaaabbbbcccc,
+    0xddddeeeeffff0000,
+    0x1111222233334444,
+    0x5555666677778888,
+    0x9999aaaabbbbdddd,
+    0xeeeeffff11112222,
+    0x3333444455556666,
+    0x7777888899990000,
+    0xaaaabbbbccccdddd,
+    0xeeeeffffaaaabbbb,
+    0xccccddddeeee0000,
+    0xffff000011112222,
+    0x4444333322221111,
+    0xbbbb0000aaaa9999,
+    0x8888777766665555,
+    0x4444333399998888,
+    0x7777666655554444,
+    0x3333222211110000,
+    0xffffeeeeddddcccc,
+    0xbbbbaaaa99998888,
+    0x7777666655554444,
+    0x3333222211110000,
+    0xffffeeeeddddcccc,
+    0xbbbbaaaa99998888,
+    0x7777666655554444,
+    0x3333222211110000,
+    0x0000111122223333,
+    0x4444555566667777,
+    0x8888999900001111,
 ];
 
 pub fn normalize_leaf_token_java(kind: &str) -> &'static str {
     match kind {
         "identifier" => "I",
         "string_literal" | "text_block" => "S",
-        "decimal_integer_literal" | "hex_integer_literal" | "octal_integer_literal"
-        | "binary_integer_literal" | "decimal_floating_point_literal"
+        "decimal_integer_literal"
+        | "hex_integer_literal"
+        | "octal_integer_literal"
+        | "binary_integer_literal"
+        | "decimal_floating_point_literal"
         | "hex_floating_point_literal" => "N",
-        "type_identifier" | "void_type" | "integral_type" | "floating_point_type"
-        | "boolean_type" | "array_type" | "generic_type" => "T",
-        "true" | "false" | "null_literal" | "if" | "else" | "for" | "while" | "do"
-        | "return" | "break" | "continue" | "throw" | "try" | "catch" | "finally"
-        | "switch" | "case" | "default" | "new" | "this" | "super" | "instanceof"
-        | "class" | "interface" | "enum" | "extends" | "implements" | "static"
-        | "final" | "public" | "private" | "protected" | "abstract" | "synchronized"
-        | "volatile" | "transient" | "native" => "K",
+        "type_identifier"
+        | "void_type"
+        | "integral_type"
+        | "floating_point_type"
+        | "boolean_type"
+        | "array_type"
+        | "generic_type" => "T",
+        "true" | "false" | "null_literal" | "if" | "else" | "for" | "while" | "do" | "return"
+        | "break" | "continue" | "throw" | "try" | "catch" | "finally" | "switch" | "case"
+        | "default" | "new" | "this" | "super" | "instanceof" | "class" | "interface" | "enum"
+        | "extends" | "implements" | "static" | "final" | "public" | "private" | "protected"
+        | "abstract" | "synchronized" | "volatile" | "transient" | "native" => "K",
         _ => "O",
     }
 }
@@ -55,10 +110,10 @@ pub fn normalize_leaf_token_python(kind: &str) -> &'static str {
         "integer" | "float" => "N",
         "type" => "T",
         "def" | "class" | "return" | "if" | "elif" | "else" | "for" | "while" | "with"
-        | "import" | "from" | "as" | "pass" | "break" | "continue" | "raise" | "try"
-        | "except" | "finally" | "yield" | "lambda" | "and" | "or" | "not" | "in"
-        | "is" | "None" | "True" | "False" | "async" | "await" | "global" | "nonlocal"
-        | "del" | "assert" | "match" | "case" => "K",
+        | "import" | "from" | "as" | "pass" | "break" | "continue" | "raise" | "try" | "except"
+        | "finally" | "yield" | "lambda" | "and" | "or" | "not" | "in" | "is" | "None" | "True"
+        | "False" | "async" | "await" | "global" | "nonlocal" | "del" | "assert" | "match"
+        | "case" => "K",
         _ => "O",
     }
 }
@@ -70,12 +125,12 @@ pub fn normalize_leaf_token_typescript(kind: &str) -> &'static str {
         "number" => "N",
         "type_identifier" | "predefined_type" => "T",
         "function" | "class" | "return" | "if" | "else" | "for" | "while" | "do" | "switch"
-        | "case" | "default" | "break" | "continue" | "throw" | "try" | "catch"
-        | "finally" | "new" | "this" | "super" | "import" | "export" | "from" | "as"
-        | "typeof" | "instanceof" | "in" | "of" | "delete" | "void" | "null" | "undefined"
-        | "true" | "false" | "async" | "await" | "yield" | "let" | "const" | "var"
-        | "type" | "interface" | "enum" | "extends" | "implements" | "static" | "abstract"
-        | "public" | "private" | "protected" | "readonly" | "override" | "declare" => "K",
+        | "case" | "default" | "break" | "continue" | "throw" | "try" | "catch" | "finally"
+        | "new" | "this" | "super" | "import" | "export" | "from" | "as" | "typeof"
+        | "instanceof" | "in" | "of" | "delete" | "void" | "null" | "undefined" | "true"
+        | "false" | "async" | "await" | "yield" | "let" | "const" | "var" | "type"
+        | "interface" | "enum" | "extends" | "implements" | "static" | "abstract" | "public"
+        | "private" | "protected" | "readonly" | "override" | "declare" => "K",
         _ => "O",
     }
 }
@@ -84,17 +139,15 @@ pub fn normalize_leaf_token_kotlin(kind: &str) -> &'static str {
     match kind {
         "simple_identifier" | "type_identifier" => "I",
         "string_literal" | "multiline_string_literal" => "S",
-        "integer_literal" | "real_literal" | "long_literal" | "hex_literal"
-        | "bin_literal" | "unsigned_literal" => "N",
+        "integer_literal" | "real_literal" | "long_literal" | "hex_literal" | "bin_literal"
+        | "unsigned_literal" => "N",
         "user_type" | "nullable_type" | "not_nullable_type" => "T",
-        "fun" | "class" | "object" | "interface" | "val" | "var" | "return"
-        | "if" | "else" | "for" | "while" | "do" | "when" | "in" | "is" | "as"
-        | "break" | "continue" | "throw" | "try" | "catch" | "finally"
-        | "this" | "super" | "true" | "false" | "null" | "new"
-        | "override" | "open" | "abstract" | "sealed" | "data" | "inner"
-        | "companion" | "by" | "out" | "dynamic" | "typealias"
-        | "init" | "constructor" | "import" | "package" | "suspend"
-        | "crossinline" | "noinline" | "reified" | "external" | "expect" | "actual"
+        "fun" | "class" | "object" | "interface" | "val" | "var" | "return" | "if" | "else"
+        | "for" | "while" | "do" | "when" | "in" | "is" | "as" | "break" | "continue" | "throw"
+        | "try" | "catch" | "finally" | "this" | "super" | "true" | "false" | "null" | "new"
+        | "override" | "open" | "abstract" | "sealed" | "data" | "inner" | "companion" | "by"
+        | "out" | "dynamic" | "typealias" | "init" | "constructor" | "import" | "package"
+        | "suspend" | "crossinline" | "noinline" | "reified" | "external" | "expect" | "actual"
         | "lateinit" | "const" | "enum" | "annotation" => "K",
         _ => "O",
     }

@@ -645,4 +645,3 @@ fn simple_class_from_callable(id: &str) -> Option<String> {
         .trim_start_matches("Function:");
     fqcn.rsplit('.').next().map(|s| s.to_string())
 }
-

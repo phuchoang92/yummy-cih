@@ -39,7 +39,11 @@ pub fn handler_slug(handler_id: &str) -> String {
         }
         out.push(ch.to_ascii_lowercase());
     }
-    if out.is_empty() { "flow".to_string() } else { out }
+    if out.is_empty() {
+        "flow".to_string()
+    } else {
+        out
+    }
 }
 
 fn method_name_from_id(method_id: &str) -> &str {
@@ -83,14 +87,28 @@ fn db_access(method_id: &str, graph: &WikiGraph) -> Vec<(String, bool, bool)> {
     let mut tables: HashMap<String, (bool, bool)> = HashMap::new();
     if let Some(query_ids) = graph.executes_query.get(method_id) {
         for qid in query_ids {
-            for tid in graph.query_reads_table.get(qid.as_str()).into_iter().flatten() {
-                let name = graph.nodes_by_id.get(tid.as_str())
+            for tid in graph
+                .query_reads_table
+                .get(qid.as_str())
+                .into_iter()
+                .flatten()
+            {
+                let name = graph
+                    .nodes_by_id
+                    .get(tid.as_str())
                     .map(|n| n.name.clone())
                     .unwrap_or_else(|| tid.clone());
                 tables.entry(name).or_default().0 = true;
             }
-            for tid in graph.query_writes_table.get(qid.as_str()).into_iter().flatten() {
-                let name = graph.nodes_by_id.get(tid.as_str())
+            for tid in graph
+                .query_writes_table
+                .get(qid.as_str())
+                .into_iter()
+                .flatten()
+            {
+                let name = graph
+                    .nodes_by_id
+                    .get(tid.as_str())
                     .map(|n| n.name.clone())
                     .unwrap_or_else(|| tid.clone());
                 tables.entry(name).or_default().1 = true;
@@ -145,7 +163,9 @@ pub fn render_api_flow_page(
 
     if !chain.is_empty() {
         // Sequence diagram — shown when multiple classes are involved.
-        if let Some(diagram) = mermaid::call_sequence_diagram(&chain, &graph.calls_out, &http_method, &path) {
+        if let Some(diagram) =
+            mermaid::call_sequence_diagram(&chain, &graph.calls_out, &http_method, &path)
+        {
             md.push_str("## Sequence\n\n");
             md.push_str("```mermaid\n");
             md.push_str(&diagram);
@@ -163,8 +183,10 @@ pub fn render_api_flow_page(
         }
 
         // Collect per-step DB access.
-        let step_dbs: Vec<Vec<(String, bool, bool)>> =
-            chain.iter().map(|id| db_access(id.as_str(), graph)).collect();
+        let step_dbs: Vec<Vec<(String, bool, bool)>> = chain
+            .iter()
+            .map(|id| db_access(id.as_str(), graph))
+            .collect();
         let has_db = step_dbs.iter().any(|v| !v.is_empty());
 
         // Only show "What it does" when real LLM descriptions exist — stereotype labels
@@ -172,9 +194,12 @@ pub fn render_api_flow_page(
         let has_desc = flow_summary
             .map(|fs| fs.step_descriptions.iter().any(|s| !s.is_empty()))
             .unwrap_or(false)
-            || chain
-                .iter()
-                .any(|mid| method_desc.get(mid.as_str()).map(|s| !s.is_empty()).unwrap_or(false));
+            || chain.iter().any(|mid| {
+                method_desc
+                    .get(mid.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            });
 
         match (has_desc, has_db) {
             (true, true) => {
@@ -240,12 +265,19 @@ pub fn render_api_flow_page(
                 };
                 md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} | {} |\n",
-                    i + 1, cls, meth, desc, db_str
+                    i + 1,
+                    cls,
+                    meth,
+                    desc,
+                    db_str
                 ));
             } else if has_desc {
                 md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} |\n",
-                    i + 1, cls, meth, desc
+                    i + 1,
+                    cls,
+                    meth,
+                    desc
                 ));
             } else if has_db {
                 let db_str = if step_dbs[i].is_empty() {
@@ -264,7 +296,10 @@ pub fn render_api_flow_page(
                 };
                 md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} |\n",
-                    i + 1, cls, meth, db_str
+                    i + 1,
+                    cls,
+                    meth,
+                    db_str
                 ));
             } else {
                 md.push_str(&format!("| {} | `{}` | `{}` |\n", i + 1, cls, meth));
@@ -276,7 +311,9 @@ pub fn render_api_flow_page(
         let mut published: BTreeMap<String, ()> = BTreeMap::new();
         for mid in &chain {
             for eid in graph.publishes.get(mid.as_str()).into_iter().flatten() {
-                let name = graph.nodes_by_id.get(eid.as_str())
+                let name = graph
+                    .nodes_by_id
+                    .get(eid.as_str())
                     .map(|n| n.name.clone())
                     .unwrap_or_else(|| eid.clone());
                 published.insert(name, ());
@@ -347,11 +384,16 @@ fn render_entrypoint_body(
 
     md.push_str("## Flow\n\n");
 
-    let step_dbs: Vec<Vec<(String, bool, bool)>> =
-        chain.iter().map(|id| db_access(id.as_str(), graph)).collect();
+    let step_dbs: Vec<Vec<(String, bool, bool)>> = chain
+        .iter()
+        .map(|id| db_access(id.as_str(), graph))
+        .collect();
     let has_db = step_dbs.iter().any(|v| !v.is_empty());
     let has_desc = chain.iter().any(|mid| {
-        method_desc.get(mid.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+        method_desc
+            .get(mid.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
     });
 
     match (has_desc, has_db) {
@@ -382,7 +424,11 @@ fn render_entrypoint_body(
             seen_class_ids.push(cls_id);
         }
         let raw_desc2 = if has_desc {
-            method_desc.get(mid.as_str()).map(|s| s.as_str()).filter(|s| !s.is_empty()).unwrap_or("—")
+            method_desc
+                .get(mid.as_str())
+                .map(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("—")
         } else {
             ""
         };
@@ -411,23 +457,30 @@ fn render_entrypoint_body(
             match (has_desc, true) {
                 (true, _) => md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} | {} |\n",
-                    i + 1, cls, meth, desc, db_str
+                    i + 1,
+                    cls,
+                    meth,
+                    desc,
+                    db_str
                 )),
                 (false, _) => md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} |\n",
-                    i + 1, cls, meth, db_str
+                    i + 1,
+                    cls,
+                    meth,
+                    db_str
                 )),
             }
         } else {
             match has_desc {
                 true => md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} |\n",
-                    i + 1, cls, meth, desc
+                    i + 1,
+                    cls,
+                    meth,
+                    desc
                 )),
-                false => md.push_str(&format!(
-                    "| {} | `{}` | `{}` |\n",
-                    i + 1, cls, meth
-                )),
+                false => md.push_str(&format!("| {} | `{}` | `{}` |\n", i + 1, cls, meth)),
             }
         }
     }
@@ -437,7 +490,9 @@ fn render_entrypoint_body(
     let mut published: BTreeMap<String, ()> = BTreeMap::new();
     for mid in &chain {
         for eid in graph.publishes.get(mid.as_str()).into_iter().flatten() {
-            let name = graph.nodes_by_id.get(eid.as_str())
+            let name = graph
+                .nodes_by_id
+                .get(eid.as_str())
                 .map(|n| n.name.clone())
                 .unwrap_or_else(|| eid.clone());
             published.insert(name, ());
@@ -499,7 +554,12 @@ pub fn render_scheduled_flow_page(
     md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
     md.push_str(&format!("# {}\n\n", title));
     md.push_str("> Scheduled job\n\n");
-    md.push_str(&render_entrypoint_body(method_id, graph, class_dev_slugs, method_desc));
+    md.push_str(&render_entrypoint_body(
+        method_id,
+        graph,
+        class_dev_slugs,
+        method_desc,
+    ));
     md
 }
 
@@ -522,9 +582,18 @@ pub fn render_listener_flow_page(
     if topics.is_empty() {
         md.push_str("> Event listener\n\n");
     } else {
-        let topic_list = topics.iter().map(|t| format!("`{}`", t)).collect::<Vec<_>>().join(", ");
+        let topic_list = topics
+            .iter()
+            .map(|t| format!("`{}`", t))
+            .collect::<Vec<_>>()
+            .join(", ");
         md.push_str(&format!("> Listens to: {}\n\n", topic_list));
     }
-    md.push_str(&render_entrypoint_body(method_id, graph, class_dev_slugs, method_desc));
+    md.push_str(&render_entrypoint_body(
+        method_id,
+        graph,
+        class_dev_slugs,
+        method_desc,
+    ));
     md
 }

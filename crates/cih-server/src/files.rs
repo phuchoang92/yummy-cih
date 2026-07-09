@@ -18,11 +18,21 @@ pub async fn read_file(
     limits: ReadFileLimits,
     args: ReadFileArgs,
 ) -> Result<CallToolResult, McpError> {
-    let repo_root = find_repo_path(if args.repo.is_empty() { None } else { Some(args.repo.as_str()) }, graph_key)
-        .map_err(|e| McpError::invalid_params(e, None))?;
+    let repo_root = find_repo_path(
+        if args.repo.is_empty() {
+            None
+        } else {
+            Some(args.repo.as_str())
+        },
+        graph_key,
+    )
+    .map_err(|e| McpError::invalid_params(e, None))?;
 
     let clean = std::path::Path::new(&args.path);
-    if clean.components().any(|c| c == std::path::Component::ParentDir) {
+    if clean
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
         return Err(McpError::invalid_params(
             "path must not contain '..' components",
             None,
@@ -30,7 +40,13 @@ pub async fn read_file(
     }
 
     let full_path = std::path::Path::new(&repo_root).join(clean);
-    let value = read_sliced(&full_path, &args.path, limits, args.start_line, args.end_line)?;
+    let value = read_sliced(
+        &full_path,
+        &args.path,
+        limits,
+        args.start_line,
+        args.end_line,
+    )?;
     json_result(&value)
 }
 
@@ -117,16 +133,26 @@ mod tests {
     #[test]
     fn oversized_file_is_rejected() {
         let p = tmp_write("big", &"x".repeat(1000));
-        let limits = ReadFileLimits { max_bytes: 100, max_lines: 5000 };
+        let limits = ReadFileLimits {
+            max_bytes: 100,
+            max_lines: 5000,
+        };
         let err = read_sliced(&p, "big.txt", limits, 0, 0).unwrap_err();
-        assert!(err.message.contains("over the"), "unexpected: {}", err.message);
+        assert!(
+            err.message.contains("over the"),
+            "unexpected: {}",
+            err.message
+        );
     }
 
     #[test]
     fn unranged_read_truncates_at_line_cap() {
         let body: String = (1..=20).map(|i| format!("line{i}\n")).collect();
         let p = tmp_write("lines", &body);
-        let limits = ReadFileLimits { max_bytes: 10 * 1024 * 1024, max_lines: 5 };
+        let limits = ReadFileLimits {
+            max_bytes: 10 * 1024 * 1024,
+            max_lines: 5,
+        };
         let v = read_sliced(&p, "lines.txt", limits, 0, 0).unwrap();
         assert_eq!(v["truncated"], serde_json::json!(true));
         assert_eq!(v["total_lines"], serde_json::json!(20));
@@ -139,7 +165,10 @@ mod tests {
     fn explicit_range_is_not_capped() {
         let body: String = (1..=20).map(|i| format!("line{i}\n")).collect();
         let p = tmp_write("range", &body);
-        let limits = ReadFileLimits { max_bytes: 10 * 1024 * 1024, max_lines: 5 };
+        let limits = ReadFileLimits {
+            max_bytes: 10 * 1024 * 1024,
+            max_lines: 5,
+        };
         let v = read_sliced(&p, "range.txt", limits, 1, 20).unwrap();
         assert_eq!(v["truncated"], serde_json::json!(false));
         assert_eq!(v["end_line"], serde_json::json!(20));
@@ -148,7 +177,10 @@ mod tests {
     #[test]
     fn small_file_reads_whole() {
         let p = tmp_write("small", "a\nb\nc\n");
-        let limits = ReadFileLimits { max_bytes: 10 * 1024 * 1024, max_lines: 5000 };
+        let limits = ReadFileLimits {
+            max_bytes: 10 * 1024 * 1024,
+            max_lines: 5000,
+        };
         let v = read_sliced(&p, "small.txt", limits, 0, 0).unwrap();
         assert_eq!(v["truncated"], serde_json::json!(false));
         assert_eq!(v["total_lines"], serde_json::json!(3));

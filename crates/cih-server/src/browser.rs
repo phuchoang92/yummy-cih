@@ -138,18 +138,13 @@ async fn graph_overview(
     State(state): State<BrowserState>,
     Query(params): Query<OverviewParams>,
 ) -> Result<Json<layout::LayoutOverview>, BrowserError> {
-    let max_nodes = overview_limit(
-        params.max_nodes,
-        OVERVIEW_DEFAULT_NODES,
-        OVERVIEW_MAX_NODES,
-    );
-    let max_edges = overview_limit(
-        params.max_edges,
-        OVERVIEW_DEFAULT_EDGES,
-        OVERVIEW_MAX_EDGES,
-    );
+    let max_nodes = overview_limit(params.max_nodes, OVERVIEW_DEFAULT_NODES, OVERVIEW_MAX_NODES);
+    let max_edges = overview_limit(params.max_edges, OVERVIEW_DEFAULT_EDGES, OVERVIEW_MAX_EDGES);
     let kinds: Option<Vec<String>> = params.kinds.as_deref().map(|raw| {
-        raw.split(',').map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()).collect()
+        raw.split(',')
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty())
+            .collect()
     });
     let overview = state
         .store
@@ -307,16 +302,17 @@ struct ClusterInfo {
 
 fn load_feature_clusters(artifacts_dir: Option<&Path>) -> anyhow::Result<Vec<ClusterInfo>> {
     let Some(dir) = artifacts_dir else {
-        anyhow::bail!(
-            "CIH_ARTIFACTS_DIR is not set — cannot locate embedding-cluster artifacts"
-        );
+        anyhow::bail!("CIH_ARTIFACTS_DIR is not set — cannot locate embedding-cluster artifacts");
     };
     // `dir` is the artifacts root (`<repo>/.cih/artifacts`); the source graph version names the
     // sibling `<repo>/.cih/artifacts-features/<version>` that discover writes clusters into.
     let artifacts = cih_core::GraphArtifacts::latest_in_dir(dir)?;
     let version = artifacts.version.to_string();
     let repo = dir.parent().and_then(Path::parent).ok_or_else(|| {
-        anyhow::anyhow!("cannot derive repo root from artifacts dir {}", dir.display())
+        anyhow::anyhow!(
+            "cannot derive repo root from artifacts dir {}",
+            dir.display()
+        )
     })?;
     let feat_dir = cih_grouping::find_feature_artifact_dir(repo, &version).ok_or_else(|| {
         anyhow::anyhow!(
@@ -614,4 +610,3 @@ mod tests {
         assert!((clusters[0].avg_confidence - 0.6).abs() < 1e-6);
     }
 }
-

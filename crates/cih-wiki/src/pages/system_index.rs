@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
+use crate::capitalize;
 use crate::features::FeatureGroup;
 use crate::graph::WikiGraph;
-use crate::capitalize;
 
 /// Render the top-level system index page (pages/index.md).
 /// Lists all features with their module, route, and table counts.
@@ -12,7 +12,10 @@ pub fn render_system_index(
     repo_name: &str,
 ) -> String {
     let mut md = String::new();
-    md.push_str(&format!("---\nslug: /\ntitle: {}\nsidebar_position: 1\n---\n\n", repo_name));
+    md.push_str(&format!(
+        "---\nslug: /\ntitle: {}\nsidebar_position: 1\n---\n\n",
+        repo_name
+    ));
     md.push_str(&format!("# {}\n\n", repo_name));
     md.push_str(&format!(
         "**Features:** {} · **Modules:** {} · **Routes:** {}\n\n",
@@ -82,6 +85,3 @@ pub fn render_system_index(
 
     md
 }
-
-
-

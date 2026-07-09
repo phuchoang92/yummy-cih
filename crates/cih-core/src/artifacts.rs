@@ -90,14 +90,45 @@ impl GraphArtifacts {
     }
 }
 
-fn write_jsonl<T: Serialize>(path: &Path, items: &[T]) -> std::io::Result<()> {
+fn write_jsonl<T: Serialize + Sync>(path: &Path, items: &[T]) -> std::io::Result<()> {
+    let body = serialize_jsonl(items)?;
     let mut w = BufWriter::new(File::create(path)?);
-    for it in items {
-        let line = serde_json::to_string(it).map_err(io_err)?;
-        w.write_all(line.as_bytes())?;
-        w.write_all(b"\n")?;
-    }
+    w.write_all(&body)?;
     w.flush()
+}
+
+/// Serialize `items` to newline-delimited JSON, one line per item.
+///
+/// Serialization is the CPU cost (not the write), so it runs in parallel over
+/// rayon chunks; each chunk builds its own buffer and the chunks are then
+/// concatenated in order — keeping output byte-identical to a sequential
+/// `to_string` loop. Worth it for flat records like `Node`/`Edge`; not used
+/// for the parse IR (large nested structs where materialization outweighs the
+/// parallel win — measured on the fineract fixture).
+fn serialize_jsonl<T: Serialize + Sync>(items: &[T]) -> std::io::Result<Vec<u8>> {
+    use rayon::prelude::*;
+
+    // Chunk so each rayon task amortizes buffer allocation over many items;
+    // 2048 keeps chunk buffers cache-friendly while cutting task overhead.
+    const CHUNK: usize = 2048;
+    let chunks: Vec<Vec<u8>> = items
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(chunk.len() * 256);
+            for it in chunk {
+                serde_json::to_writer(&mut buf, it).map_err(io_err)?;
+                buf.push(b'\n');
+            }
+            Ok::<Vec<u8>, std::io::Error>(buf)
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+
+    let total = chunks.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(total);
+    for c in chunks {
+        out.extend_from_slice(&c);
+    }
+    Ok(out)
 }
 
 fn read_jsonl<T: DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {

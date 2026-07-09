@@ -1,4 +1,4 @@
-use rustc_hash::{FxHashMap};
+use rustc_hash::FxHashMap;
 
 use cih_core::{NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};

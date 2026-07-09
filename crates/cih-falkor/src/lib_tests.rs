@@ -17,7 +17,10 @@ async fn query_limit_sheds_when_saturated() {
         .with_query_limit(1, Duration::from_millis(50));
 
     // Hold the only permit for the duration of the test.
-    let _held = store.acquire_permit().await.expect("first acquire succeeds");
+    let _held = store
+        .acquire_permit()
+        .await
+        .expect("first acquire succeeds");
 
     // The next acquire can't get a slot and sheds after the timeout.
     let err = store

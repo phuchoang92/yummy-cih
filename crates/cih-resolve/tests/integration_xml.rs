@@ -32,7 +32,10 @@ fn camel_xml_emits_route_node_from_from_uri() {
     </camelContext>"#;
     let out = extract_integration_xml("src/main/resources/camel-routes.xml", xml);
     assert!(!out.nodes.is_empty(), "should emit at least one route node");
-    let route_node = out.nodes.iter().find(|n| n.kind == NodeKind::IntegrationRoute);
+    let route_node = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::IntegrationRoute);
     assert!(route_node.is_some(), "IntegrationRoute node expected");
     let route = route_node.unwrap();
     assert!(
@@ -51,9 +54,18 @@ fn camel_xml_emits_message_destination_for_broker_to() {
         </route>
     </camelContext>"#;
     let out = extract_integration_xml("camel.xml", xml);
-    let dest = out.nodes.iter().find(|n| n.kind == NodeKind::MessageDestination);
-    assert!(dest.is_some(), "MessageDestination node expected for kafka: to");
-    let edge = out.edges.iter().find(|e| e.kind == EdgeKind::PublishesEvent);
+    let dest = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::MessageDestination);
+    assert!(
+        dest.is_some(),
+        "MessageDestination node expected for kafka: to"
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|e| e.kind == EdgeKind::PublishesEvent);
     assert!(edge.is_some(), "PublishesEvent edge expected");
 }
 
@@ -72,8 +84,14 @@ fn blueprint_xml_emits_integration_route_for_service() {
         <service ref="orderSvc" interface="com.acme.OrderService"/>
     </blueprint>"#;
     let out = extract_integration_xml("OSGI-INF/blueprint/wiring.xml", xml);
-    let route = out.nodes.iter().find(|n| n.kind == NodeKind::IntegrationRoute);
-    assert!(route.is_some(), "IntegrationRoute node expected for blueprint service");
+    let route = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::IntegrationRoute);
+    assert!(
+        route.is_some(),
+        "IntegrationRoute node expected for blueprint service"
+    );
 }
 
 // ── CXF JAX-RS base-path extraction + stitching ─────────────────────────────
@@ -198,7 +216,10 @@ fn multiple_jaxrs_servers_in_one_file() {
     let out = extract_integration_xml("beans.xml", xml);
     let addrs: std::collections::BTreeSet<_> =
         servers(&out).iter().map(|n| n.name.clone()).collect();
-    assert!(addrs.contains("/crm") && addrs.contains("/billing"), "addrs={addrs:?}");
+    assert!(
+        addrs.contains("/crm") && addrs.contains("/billing"),
+        "addrs={addrs:?}"
+    );
     assert_eq!(servers(&out).len(), 2);
 }
 
@@ -216,7 +237,10 @@ fn jaxrs_server_with_multiple_service_beans() {
     let out = extract_integration_xml("beans.xml", xml);
     let server = servers(&out).into_iter().next().expect("server");
     let beans = beans_of(server);
-    assert!(beans.contains(&"one") && beans.contains(&"two"), "beans={beans:?}");
+    assert!(
+        beans.contains(&"one") && beans.contains(&"two"),
+        "beans={beans:?}"
+    );
 }
 
 #[test]
@@ -247,7 +271,10 @@ fn jaxrs_ref_paired_and_self_closing_forms() {
     </beans>"#;
     let out = extract_integration_xml("beans.xml", xml);
     let beans = beans_of(servers(&out).into_iter().next().unwrap());
-    assert!(beans.contains(&"selfClosed") && beans.contains(&"paired"), "beans={beans:?}");
+    assert!(
+        beans.contains(&"selfClosed") && beans.contains(&"paired"),
+        "beans={beans:?}"
+    );
 }
 
 #[test]
@@ -261,7 +288,10 @@ fn cxf_only_file_without_beans_still_parses_server() {
         </jaxrs:server>
     </beans>"#;
     let out = extract_integration_xml("beans.xml", xml);
-    let server = servers(&out).into_iter().next().expect("server via cxf dispatch");
+    let server = servers(&out)
+        .into_iter()
+        .next()
+        .expect("server via cxf dispatch");
     assert_eq!(prop(server, "address"), Some("/api"));
 }
 
@@ -271,8 +301,14 @@ fn osgi_whiteboard_root_pattern() {
         <entry key="osgi.http.whiteboard.servlet.pattern" value="/*"/>
     </beans>"#;
     let out = extract_integration_xml("beans_web.xml", xml);
-    let servlet = out.nodes.iter().find(|n| prop(n, "source") == Some("osgi_servlet"));
-    assert_eq!(prop(servlet.expect("servlet node"), "servlet_pattern"), Some("/*"));
+    let servlet = out
+        .nodes
+        .iter()
+        .find(|n| prop(n, "source") == Some("osgi_servlet"));
+    assert_eq!(
+        prop(servlet.expect("servlet node"), "servlet_pattern"),
+        Some("/*")
+    );
 }
 
 // ── Edge cases: fixed behaviors + documented limitations ─────────────────────
@@ -305,9 +341,19 @@ fn blueprint_service_and_bean_same_id_both_survive() {
     </blueprint>"#;
     let out = extract_integration_xml("OSGI-INF/blueprint/wiring.xml", xml);
     let ids: std::collections::BTreeSet<_> = out.nodes.iter().map(|n| n.id.as_str()).collect();
-    assert_eq!(ids.len(), out.nodes.len(), "node ids must be unique: {ids:?}");
-    assert!(out.nodes.iter().any(|n| prop(n, "class") == Some("com.acme.ApiImpl")));
-    assert!(out.nodes.iter().any(|n| prop(n, "interface") == Some("com.acme.Api")));
+    assert_eq!(
+        ids.len(),
+        out.nodes.len(),
+        "node ids must be unique: {ids:?}"
+    );
+    assert!(out
+        .nodes
+        .iter()
+        .any(|n| prop(n, "class") == Some("com.acme.ApiImpl")));
+    assert!(out
+        .nodes
+        .iter()
+        .any(|n| prop(n, "interface") == Some("com.acme.Api")));
 }
 
 #[test]
@@ -323,11 +369,15 @@ fn commented_out_server_is_not_parsed() {
     </beans>"#;
     let out = extract_integration_xml("beans.xml", xml);
     assert!(
-        !out.nodes.iter().any(|n| prop(n, "address") == Some("/commented-out")),
+        !out.nodes
+            .iter()
+            .any(|n| prop(n, "address") == Some("/commented-out")),
         "commented-out server must not be parsed"
     );
     assert!(
-        out.nodes.iter().any(|n| prop(n, "address") == Some("/live")),
+        out.nodes
+            .iter()
+            .any(|n| prop(n, "address") == Some("/live")),
         "the live server must still be parsed"
     );
 }
@@ -339,8 +389,14 @@ fn commented_out_bean_is_not_parsed() {
         <bean id="live" class="com.acme.Live"/>
     </beans>"#;
     let out = extract_integration_xml("beans.xml", xml);
-    assert!(!out.nodes.iter().any(|n| prop(n, "class") == Some("com.acme.Dead")));
-    assert!(out.nodes.iter().any(|n| prop(n, "class") == Some("com.acme.Live")));
+    assert!(!out
+        .nodes
+        .iter()
+        .any(|n| prop(n, "class") == Some("com.acme.Dead")));
+    assert!(out
+        .nodes
+        .iter()
+        .any(|n| prop(n, "class") == Some("com.acme.Live")));
 }
 
 #[test]
@@ -384,7 +440,11 @@ fn inline_service_bean_is_captured() {
         </jaxrs:server>
     </beans>"#;
     let out = extract_integration_xml("beans.xml", xml);
-    let server = out.nodes.iter().find(|n| prop(n, "source") == Some("cxf_jaxrs_server")).unwrap();
+    let server = out
+        .nodes
+        .iter()
+        .find(|n| prop(n, "source") == Some("cxf_jaxrs_server"))
+        .unwrap();
     assert_eq!(bean_classes_of(server), vec!["com.acme.InlineSvc"]);
 }
 

@@ -236,7 +236,9 @@ fn config_unchanged(repo_root: &Path, cih_dir: &Path, cache: &AnalyzeCacheOption
     match AnalyzeConfigState::load(cih_dir) {
         Some(prev) if prev.fingerprint == current => true,
         _ => {
-            tracing::info!("analyze config changed since last run — re-resolving (no source changes)");
+            tracing::info!(
+                "analyze config changed since last run — re-resolving (no source changes)"
+            );
             false
         }
     }
@@ -271,7 +273,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("cih-cfgfp-{tag}-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cih-cfgfp-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

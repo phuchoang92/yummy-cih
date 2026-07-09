@@ -169,5 +169,8 @@ fn pascal_to_kebab_converts_correctly() {
         "progressive-emi-calculator"
     );
     assert_eq!(pascal_to_kebab("URLParser"), "url-parser");
-    assert_eq!(pascal_to_kebab("LoanReadPlatformServiceImpl"), "loan-read-platform-service-impl");
+    assert_eq!(
+        pascal_to_kebab("LoanReadPlatformServiceImpl"),
+        "loan-read-platform-service-impl"
+    );
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::graph::WikiGraph;
 use crate::capitalize;
+use crate::graph::WikiGraph;
 
 /// Render the feature landing page that links to po/ba pages and lists dev modules.
 pub fn render_feature_index(
@@ -12,7 +12,10 @@ pub fn render_feature_index(
 ) -> String {
     let title = format!("{} — Feature Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\nsidebar_position: 0\n---\n\n", title));
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: 0\n---\n\n",
+        title
+    ));
     md.push_str(&format!("# {}\n\n", title));
 
     let total_routes: usize = community_ids
@@ -62,6 +65,3 @@ pub fn render_feature_index(
 
     md
 }
-
-
-

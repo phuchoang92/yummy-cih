@@ -102,9 +102,21 @@ fn duplicate_edges_are_deduplicated() {
             node("Method:B#save/0", NodeKind::Method, "src/b.rs", 2),
         ],
         edges: vec![
-            GraphOverviewEdge { source: a.clone(), target: b.clone(), kind: EdgeKind::Calls },
-            GraphOverviewEdge { source: a.clone(), target: b.clone(), kind: EdgeKind::Calls },
-            GraphOverviewEdge { source: a, target: b, kind: EdgeKind::Imports },
+            GraphOverviewEdge {
+                source: a.clone(),
+                target: b.clone(),
+                kind: EdgeKind::Calls,
+            },
+            GraphOverviewEdge {
+                source: a.clone(),
+                target: b.clone(),
+                kind: EdgeKind::Calls,
+            },
+            GraphOverviewEdge {
+                source: a,
+                target: b,
+                kind: EdgeKind::Imports,
+            },
         ],
         total_nodes: 2,
         total_edges: 3,
@@ -128,7 +140,11 @@ fn unknown_kind_gets_default_size_and_color() {
     assert_eq!(layout.nodes.len(), 1);
     let n = &layout.nodes[0];
     assert_eq!(n.kind, "Other");
-    assert!(n.size > 3.0 && n.size < 20.0, "size {} out of expected range", n.size);
+    assert!(
+        n.size > 3.0 && n.size < 20.0,
+        "size {} out of expected range",
+        n.size
+    );
     assert_eq!(n.color, "#ffc070");
 }
 

@@ -1,7 +1,7 @@
 //! Quality functions for community detection.
 
-pub use crate::leiden_impl::graph_data::GraphData;
-pub use crate::leiden_impl::move_components::MoveComponents;
+pub use crate::leiden::graph_data::GraphData;
+pub use crate::leiden::move_components::MoveComponents;
 
 /// Trait for quality functions used by the Leiden algorithm.
 pub trait QualityFunction {
@@ -9,7 +9,11 @@ pub trait QualityFunction {
     fn delta_move_from_components(&self, c: &MoveComponents) -> f64;
 
     /// Compute the total quality of a partition.
-    fn total_quality(&self, data: &GraphData, partition: &crate::leiden_impl::partition::Partition) -> f64;
+    fn total_quality(
+        &self,
+        data: &GraphData,
+        partition: &crate::leiden::partition::Partition,
+    ) -> f64;
 }
 
 /// Modularity: Q = Σ_c [e_c/m - γ*(Σ_c/(2m))²]
@@ -64,7 +68,7 @@ fn modularity_delta(resolution: f64, c: &MoveComponents) -> f64 {
 fn modularity_total_quality(
     resolution: f64,
     data: &GraphData,
-    partition: &crate::leiden_impl::partition::Partition,
+    partition: &crate::leiden::partition::Partition,
 ) -> f64 {
     let n = data.node_count();
     let m = data.total_weight();
@@ -130,7 +134,11 @@ impl QualityFunction for Modularity {
         modularity_delta(self.resolution, c)
     }
 
-    fn total_quality(&self, data: &GraphData, partition: &crate::leiden_impl::partition::Partition) -> f64 {
+    fn total_quality(
+        &self,
+        data: &GraphData,
+        partition: &crate::leiden::partition::Partition,
+    ) -> f64 {
         modularity_total_quality(self.resolution, data, partition)
     }
 }
@@ -157,7 +165,11 @@ impl QualityFunction for CPM {
             - self.resolution * c.node_weight * (c.n_target - c.n_current + c.node_weight)
     }
 
-    fn total_quality(&self, data: &GraphData, partition: &crate::leiden_impl::partition::Partition) -> f64 {
+    fn total_quality(
+        &self,
+        data: &GraphData,
+        partition: &crate::leiden::partition::Partition,
+    ) -> f64 {
         let n = data.node_count();
         let num_comms = partition.num_communities();
         let mut e_c: Vec<f64> = vec![0.0; num_comms];
@@ -230,7 +242,11 @@ impl QualityFunction for RBConfiguration {
         modularity_delta(self.resolution, c)
     }
 
-    fn total_quality(&self, data: &GraphData, partition: &crate::leiden_impl::partition::Partition) -> f64 {
+    fn total_quality(
+        &self,
+        data: &GraphData,
+        partition: &crate::leiden::partition::Partition,
+    ) -> f64 {
         modularity_total_quality(self.resolution, data, partition)
     }
 }
@@ -266,7 +282,11 @@ impl QualityFunction for RBER {
             - self.resolution * p * c.node_weight * (c.n_target - c.n_current + c.node_weight)
     }
 
-    fn total_quality(&self, data: &GraphData, partition: &crate::leiden_impl::partition::Partition) -> f64 {
+    fn total_quality(
+        &self,
+        data: &GraphData,
+        partition: &crate::leiden::partition::Partition,
+    ) -> f64 {
         let n = data.node_count();
         let m = data.total_weight();
         if n <= 1 || m == 0.0 {

@@ -6,7 +6,10 @@ fn missing_file_returns_defaults() {
     std::fs::create_dir_all(&tmp).unwrap();
     let rules = load_taint_rules(&tmp);
     assert!(!rules.sinks.is_empty(), "defaults must have sinks");
-    assert!(!rules.extra_sink_name_patterns.is_empty(), "defaults must have name patterns");
+    assert!(
+        !rules.extra_sink_name_patterns.is_empty(),
+        "defaults must have name patterns"
+    );
 }
 
 #[test]
@@ -29,19 +32,31 @@ pattern = "MyValidator#sanitize"
     let rules = load_taint_rules(&tmp);
 
     assert!(
-        rules.sinks.iter().any(|s| s.node_id_pattern == "MyDao#customExecute"),
+        rules
+            .sinks
+            .iter()
+            .any(|s| s.node_id_pattern == "MyDao#customExecute"),
         "custom sink not found in merged rules"
     );
     assert!(
-        rules.sinks.iter().any(|s| s.node_id_pattern == "Runtime#exec"),
+        rules
+            .sinks
+            .iter()
+            .any(|s| s.node_id_pattern == "Runtime#exec"),
         "default sink missing after merge"
     );
     assert!(
-        rules.sanitizers.iter().any(|s| s.node_id_pattern == "MyValidator#sanitize"),
+        rules
+            .sanitizers
+            .iter()
+            .any(|s| s.node_id_pattern == "MyValidator#sanitize"),
         "custom sanitizer not found"
     );
     assert!(
-        rules.extra_sink_name_patterns.iter().any(|p| p == "customExecute"),
+        rules
+            .extra_sink_name_patterns
+            .iter()
+            .any(|p| p == "customExecute"),
         "method name not extracted into extra_sink_name_patterns"
     );
 }
@@ -63,6 +78,10 @@ pattern = "OnlySink#run"
     .unwrap();
 
     let rules = load_taint_rules(&tmp);
-    assert_eq!(rules.sinks.len(), 1, "only the custom sink should be present");
+    assert_eq!(
+        rules.sinks.len(),
+        1,
+        "only the custom sink should be present"
+    );
     assert_eq!(rules.sinks[0].node_id_pattern, "OnlySink#run");
 }

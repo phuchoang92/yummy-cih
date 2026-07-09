@@ -1,6 +1,6 @@
 use super::*;
-use crate::leiden_impl::graph_data::GraphData;
-use crate::leiden_impl::builder::GraphDataBuilder;
+use crate::leiden::builder::GraphDataBuilder;
+use crate::leiden::graph_data::GraphData;
 use rand::prelude::IndexedRandom;
 
 fn make_two_cliques() -> GraphData {
@@ -330,7 +330,10 @@ fn test_validate_rejects_zero_iterations() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -340,7 +343,10 @@ fn test_validate_rejects_negative_resolution() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -350,7 +356,10 @@ fn test_validate_rejects_nan_resolution() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -360,7 +369,10 @@ fn test_validate_rejects_infinite_resolution() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -370,7 +382,10 @@ fn test_validate_rejects_zero_epsilon() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -380,7 +395,10 @@ fn test_validate_rejects_negative_epsilon() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -390,7 +408,10 @@ fn test_validate_rejects_nan_epsilon() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -400,7 +421,10 @@ fn test_validate_rejects_infinite_epsilon() {
         ..Default::default()
     };
     let err = config.validate().unwrap_err();
-    assert!(matches!(err, crate::leiden_impl::error::LeidenError::InvalidParameter { .. }));
+    assert!(matches!(
+        err,
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
+    ));
 }
 
 #[test]
@@ -537,7 +561,10 @@ fn test_louvain_builder_method() {
 #[test]
 fn test_default_skip_refinement_false() {
     let config = LeidenConfig::default();
-    assert!(!config.skip_refinement, "default should be false (Leiden mode)");
+    assert!(
+        !config.skip_refinement,
+        "default should be false (Leiden mode)"
+    );
 
     let explicit = LeidenConfig {
         skip_refinement: false,
@@ -605,7 +632,10 @@ fn test_min_iterations_with_quality_tracking() {
     })
     .run(&graph)
     .unwrap();
-    assert_eq!(result.partition.as_slice(), default_result.partition.as_slice());
+    assert_eq!(
+        result.partition.as_slice(),
+        default_result.partition.as_slice()
+    );
 }
 
 #[test]

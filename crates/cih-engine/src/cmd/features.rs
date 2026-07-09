@@ -294,8 +294,16 @@ pub fn run_features_review(flags: ReviewFlags) -> Result<()> {
     let mut cache = ReviewCache::load(&flags.repo);
     let candidates = select_candidates(&entries, &nodes, &flags, &cache);
 
-    let repo_name = flags.repo.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
-    crate::ui::print_header("Features · review", repo_name, Some(&version[..version.len().min(8)]));
+    let repo_name = flags
+        .repo
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo");
+    crate::ui::print_header(
+        "Features · review",
+        repo_name,
+        Some(&version[..version.len().min(8)]),
+    );
 
     if candidates.is_empty() {
         eprintln!("     No candidates to review (all clear, or already cached from a prior run).");
@@ -327,8 +335,12 @@ pub fn run_features_review(flags: ReviewFlags) -> Result<()> {
             }
         };
         for d in parse_review(&raw) {
-            let Some(cand) = by_id.get(d.node_id.as_str()) else { continue };
-            cache.reviewed.insert(cand.hash.to_string(), d.feature.clone());
+            let Some(cand) = by_id.get(d.node_id.as_str()) else {
+                continue;
+            };
+            cache
+                .reviewed
+                .insert(cand.hash.to_string(), d.feature.clone());
             if d.feature == cand.current {
                 continue;
             }
@@ -390,7 +402,10 @@ pub fn run_features_review(flags: ReviewFlags) -> Result<()> {
     if flags.dry_run {
         eprintln!("     \x1b[2m(dry run — nothing written; drop --dry-run to apply)\x1b[0m");
     } else if added > 0 {
-        eprintln!("     Written to {}", FeatureOverrides::path(&flags.repo).display());
+        eprintln!(
+            "     Written to {}",
+            FeatureOverrides::path(&flags.repo).display()
+        );
         eprintln!("     Re-run `discover` to apply.");
     }
     Ok(())
@@ -401,8 +416,13 @@ fn load_node_meta(repo: &Path) -> Result<HashMap<String, cih_core::Node>> {
     let dir = repo.join(".cih").join("artifacts");
     let artifacts = cih_core::GraphArtifacts::latest_in_dir(&dir)
         .with_context(|| format!("no graph artifacts under {}", dir.display()))?;
-    let nodes = artifacts.read_nodes().with_context(|| "failed to read nodes.jsonl")?;
-    Ok(nodes.into_iter().map(|n| (n.id.as_str().to_string(), n)).collect())
+    let nodes = artifacts
+        .read_nodes()
+        .with_context(|| "failed to read nodes.jsonl")?;
+    Ok(nodes
+        .into_iter()
+        .map(|n| (n.id.as_str().to_string(), n))
+        .collect())
 }
 
 /// Per-cluster catalog: dominant package + a few representative type names, for the LLM prompt.
@@ -428,7 +448,9 @@ fn build_catalog(
         let mut pkg_counts: HashMap<String, usize> = HashMap::new();
         let mut classes: Vec<String> = Vec::new();
         for e in &grp {
-            let Some(n) = nodes.get(&e.node_id) else { continue };
+            let Some(n) = nodes.get(&e.node_id) else {
+                continue;
+            };
             if let Some(p) = package_of(n) {
                 *pkg_counts.entry(p).or_default() += 1;
             }
@@ -464,13 +486,16 @@ fn select_candidates(
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
     for e in entries {
-        let Some(n) = nodes.get(&e.node_id) else { continue };
+        let Some(n) = nodes.get(&e.node_id) else {
+            continue;
+        };
         if !is_project_node(n) || !cih_grouping::is_clusterable_kind(n.kind) {
             continue;
         }
         let is_boundary = e.name == "shared" && e.evidence.contains("below-confidence-threshold");
-        let is_weak =
-            flags.include_weak_members && e.name != "shared" && e.confidence < WEAK_MEMBER_THRESHOLD;
+        let is_weak = flags.include_weak_members
+            && e.name != "shared"
+            && e.confidence < WEAK_MEMBER_THRESHOLD;
         if !(is_boundary || is_weak) {
             continue;
         }
@@ -578,7 +603,11 @@ fn review_system_prompt() -> String {
 fn review_user_prompt(catalog: &BTreeMap<String, CatalogEntry>, batch: &[Candidate]) -> String {
     let mut s = String::from("CATALOG:\n");
     for (name, c) in catalog {
-        s.push_str(&format!("- {name}: pkg={}; classes: {}\n", c.package, c.classes.join(", ")));
+        s.push_str(&format!(
+            "- {name}: pkg={}; classes: {}\n",
+            c.package,
+            c.classes.join(", ")
+        ));
     }
     s.push_str("\nSYMBOLS:\n");
     for cand in batch {
@@ -612,7 +641,11 @@ fn parse_review(raw: &str) -> Vec<ReviewDecision> {
                 node_id: v.get("node_id")?.as_str()?.to_string(),
                 feature: v.get("feature")?.as_str()?.to_string(),
                 confidence: v.get("confidence").and_then(num_or_str_f32).unwrap_or(0.6),
-                reason: v.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+                reason: v
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             })
         })
         .collect()

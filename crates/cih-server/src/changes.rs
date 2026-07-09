@@ -13,11 +13,26 @@ pub async fn detect_changes(
     graph_key: &str,
     args: DetectChangesArgs,
 ) -> Result<CallToolResult, McpError> {
-    let repo_path = find_repo_path(if args.repo.is_empty() { None } else { Some(args.repo.as_str()) }, graph_key)
-        .map_err(|e| McpError::invalid_params(e, None))?;
+    let repo_path = find_repo_path(
+        if args.repo.is_empty() {
+            None
+        } else {
+            Some(args.repo.as_str())
+        },
+        graph_key,
+    )
+    .map_err(|e| McpError::invalid_params(e, None))?;
 
-    let changed_files = git_changed_files(&repo_path, &args.scope, if args.base_ref.is_empty() { None } else { Some(args.base_ref.as_str()) })
-        .map_err(|e| McpError::internal_error(e, None))?;
+    let changed_files = git_changed_files(
+        &repo_path,
+        &args.scope,
+        if args.base_ref.is_empty() {
+            None
+        } else {
+            Some(args.base_ref.as_str())
+        },
+    )
+    .map_err(|e| McpError::internal_error(e, None))?;
 
     if changed_files.is_empty() {
         #[derive(Serialize)]

@@ -545,7 +545,10 @@ pub fn call_sequence_diagram(
             if !participants.contains(&caller_cls) || !participants.contains(&callee_cls) {
                 continue;
             }
-            if !arrows.iter().any(|(f, t, _)| f == &caller_cls && t == &callee_cls) {
+            if !arrows
+                .iter()
+                .any(|(f, t, _)| f == &caller_cls && t == &callee_cls)
+            {
                 let label = meth_name(callee_id).to_string();
                 arrows.push((caller_cls.clone(), callee_cls, label));
             }
@@ -575,12 +578,7 @@ pub fn call_sequence_diagram(
         ));
     }
     for (from, to, label) in &arrows {
-        out.push_str(&format!(
-            "    {}->>{}:{}\n",
-            from,
-            to,
-            sanitize_seq(label)
-        ));
+        out.push_str(&format!("    {}->>{}:{}\n", from, to, sanitize_seq(label)));
     }
     if truncated {
         if let Some(first_p) = participants.first() {
@@ -589,6 +587,3 @@ pub fn call_sequence_diagram(
     }
     Some(out)
 }
-
-
-

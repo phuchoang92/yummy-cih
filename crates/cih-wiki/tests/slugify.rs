@@ -1,5 +1,5 @@
-use cih_core::{NodeId, NodeKind, Range};
 use cih_core::Node;
+use cih_core::{NodeId, NodeKind, Range};
 use cih_wiki::slugify::{build_slug_map, slugify};
 use std::collections::BTreeSet;
 

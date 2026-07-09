@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use cih_core::{Edge, Node, NodeKind};
-use cih_wiki::{assign_class_slugs, WikiGraph};
 use cih_wiki::graph::route_path;
+use cih_wiki::{assign_class_slugs, WikiGraph};
 
 use super::config::WikiArtifacts;
 
@@ -164,7 +164,7 @@ pub(super) fn load_wiki_artifacts(
     let community_nodes: Vec<Node>;
     let community_edges: Vec<Edge>;
     let community_version: String;
-#[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
+    #[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
     let feature_of: Box<dyn Fn(&str, &str) -> String + Send>;
 
     if grouping == super::config::WikiGrouping::Package {
@@ -198,16 +198,31 @@ pub(super) fn load_wiki_artifacts(
                 .unwrap_or("shared")
                 .to_lowercase();
             let mut s = raw.as_str();
-            for suf in &["-api", "-service", "-impl", "-core", "-module", "-web", "-rest"] {
+            for suf in &[
+                "-api", "-service", "-impl", "-core", "-module", "-web", "-rest",
+            ] {
                 s = s.strip_suffix(suf).unwrap_or(s);
             }
             for pfx in &[
-                "banking-", "payment-", "finance-", "base-", "common-", "core-",
-                "shared-", "platform-", "infra-", "app-", "service-",
+                "banking-",
+                "payment-",
+                "finance-",
+                "base-",
+                "common-",
+                "core-",
+                "shared-",
+                "platform-",
+                "infra-",
+                "app-",
+                "service-",
             ] {
                 s = s.strip_prefix(pfx).unwrap_or(s);
             }
-            if s.is_empty() || s == "shared" { raw } else { s.to_string() }
+            if s.is_empty() || s == "shared" {
+                raw
+            } else {
+                s.to_string()
+            }
         });
 
         let feature_lookup: Arc<std::collections::HashMap<String, String>> = Arc::new(
@@ -217,7 +232,10 @@ pub(super) fn load_wiki_artifacts(
                 .unwrap_or_default(),
         );
         if !feature_lookup.is_empty() {
-            tracing::info!(entries = feature_lookup.len(), "loaded pre-computed feature artifact");
+            tracing::info!(
+                entries = feature_lookup.len(),
+                "loaded pre-computed feature artifact"
+            );
         }
 
         {
@@ -226,7 +244,11 @@ pub(super) fn load_wiki_artifacts(
             let df = repo_default_feature.clone();
             wiki_graph = WikiGraph::build_package_grouped(&nodes, &edges, &|node_id, f| {
                 let feat = lk.get(node_id).cloned().unwrap_or_else(|| s.feature_of(f));
-                if feat == "shared" { df.as_ref().clone() } else { feat }
+                if feat == "shared" {
+                    df.as_ref().clone()
+                } else {
+                    feat
+                }
             });
         }
         let all_pkg_nodes: Vec<Node> = wiki_graph.community_nodes.clone();
@@ -242,10 +264,16 @@ pub(super) fn load_wiki_artifacts(
                 .get(node_id)
                 .cloned()
                 .unwrap_or_else(|| pkg_strategy.feature_of(f));
-            if feat == "shared" { repo_default_feature.as_ref().clone() } else { feat }
+            if feat == "shared" {
+                repo_default_feature.as_ref().clone()
+            } else {
+                feat
+            }
         });
     } else {
-        let community_artifact = cih_core::GraphArtifacts::latest_in_dir(&repo.join(".cih").join("artifacts-community")).ok();
+        let community_artifact =
+            cih_core::GraphArtifacts::latest_in_dir(&repo.join(".cih").join("artifacts-community"))
+                .ok();
         let (pre_community_nodes, community_version_raw) = match community_artifact.as_ref() {
             Some(a) => {
                 let ns = a.read_nodes().with_context(|| {
@@ -283,7 +311,9 @@ pub(super) fn load_wiki_artifacts(
                     filter_community.iter().map(|f| f.to_lowercase()).collect();
                 filtered.retain(|n| {
                     let name_lower = n.name.to_lowercase();
-                    filters_lower.iter().any(|f| name_lower.contains(f.as_str()))
+                    filters_lower
+                        .iter()
+                        .any(|f| name_lower.contains(f.as_str()))
                 });
             }
             if let Some(max) = max_communities {
@@ -402,8 +432,13 @@ pub(super) fn load_wiki_artifacts(
         .nodes_path
         .parent()
         .map(|p| p.join("unresolved-refs.md"));
-    let unresolved_report: Option<String> = unresolved_path
-        .and_then(|p| if p.is_file() { std::fs::read_to_string(&p).ok() } else { None });
+    let unresolved_report: Option<String> = unresolved_path.and_then(|p| {
+        if p.is_file() {
+            std::fs::read_to_string(&p).ok()
+        } else {
+            None
+        }
+    });
 
     let out_dir = out.unwrap_or_else(|| repo.join(".cih").join("wiki"));
     let repo_name = std::fs::canonicalize(repo)

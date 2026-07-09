@@ -4,7 +4,6 @@ use crate::graph::WikiGraph;
 use crate::mermaid;
 use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
-
 /// Render the feature-level BA (business analysis) page.
 /// Aggregates workflows, cross-module calls, and LLM summaries.
 pub fn render_feature_ba(
@@ -18,7 +17,10 @@ pub fn render_feature_ba(
 ) -> String {
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\nsidebar_position: 2\n---\n\n", title));
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: 2\n---\n\n",
+        title
+    ));
     md.push_str(&format!("# {}\n\n", title));
 
     // Mermaid process flow diagram (business flows only)
@@ -129,8 +131,17 @@ pub fn render_feature_ba(
                         md.push_str("| Step | Method | What it does |\n");
                         md.push_str("|---|---|---|\n");
                         for (i, step) in steps.iter().enumerate() {
-                            let desc = fs.step_descriptions.get(i).map(|s| s.as_str()).unwrap_or("");
-                            md.push_str(&format!("| {} | `{}` | {} |\n", i + 1, step.symbol.name, desc));
+                            let desc = fs
+                                .step_descriptions
+                                .get(i)
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
+                            md.push_str(&format!(
+                                "| {} | `{}` | {} |\n",
+                                i + 1,
+                                step.symbol.name,
+                                desc
+                            ));
                         }
                         md.push('\n');
                     } else {
@@ -138,7 +149,10 @@ pub fn render_feature_ba(
                             let loc = if !step.symbol.file.is_empty()
                                 && step.symbol.range.start_line > 0
                             {
-                                format!(" — `{}:{}`", step.symbol.file, step.symbol.range.start_line)
+                                format!(
+                                    " — `{}:{}`",
+                                    step.symbol.file, step.symbol.range.start_line
+                                )
                             } else if !step.symbol.file.is_empty() {
                                 format!(" — `{}`", step.symbol.file)
                             } else {
@@ -242,6 +256,3 @@ pub fn render_feature_ba(
 
     md
 }
-
-
-

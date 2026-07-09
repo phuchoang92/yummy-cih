@@ -142,8 +142,7 @@ fn test_duplicate_edges_sum_weights() {
 
 #[test]
 fn test_builder_matches_from_edgelist() {
-    let edges: Vec<(usize, usize, f64)> =
-        vec![(0, 1, 1.0), (1, 2, 2.0), (0, 2, 3.0), (2, 2, 0.5)];
+    let edges: Vec<(usize, usize, f64)> = vec![(0, 1, 1.0), (1, 2, 2.0), (0, 2, 3.0), (2, 2, 0.5)];
 
     let mut b = GraphDataBuilder::new(3);
     for &(u, v, w) in &edges {

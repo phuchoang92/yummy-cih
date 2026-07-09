@@ -70,8 +70,7 @@ impl FeatureStrategy for HybridStrategy {
                         // Override when: new is non-catch-all, OR existing is catch-all and new
                         // has higher confidence.
                         if !new_is_catch_all
-                            || (existing_is_catch_all
-                                && entry.confidence > existing.confidence)
+                            || (existing_is_catch_all && entry.confidence > existing.confidence)
                         {
                             assignments.insert(entry.node_id.clone(), entry);
                         }

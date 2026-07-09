@@ -18,8 +18,7 @@ pub fn write_feature_artifacts(
     raw_entries: &[FeatureGroupEntry],
     merged_entries: &[FeatureGroupEntry],
 ) -> Result<()> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
 
     let raw_path = dir.join(format!("groups-{}.jsonl", strategy_name));
     std::fs::write(&raw_path, entries_to_jsonl(raw_entries)?)

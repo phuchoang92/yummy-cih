@@ -11,8 +11,8 @@ use cih_core::NodeId;
 
 use crate::ir::{MethodBody, StatementKind, StatementNode};
 use crate::java_ast::{
-    collect_reads, extract_call_args, extract_call_site, extract_param_names,
-    find_method_node, parse_method_id, range_of, stmt_id, ts_text,
+    collect_reads, extract_call_args, extract_call_site, extract_param_names, find_method_node,
+    parse_method_id, range_of, stmt_id, ts_text,
 };
 
 // ── Statement walker ──────────────────────────────────────────────────────────
@@ -46,7 +46,10 @@ fn classify_statement(
                         writes.push(ts_text(name_node, src).to_string());
                     }
                     if let Some(value) = child.child_by_field_name("value") {
-                        if matches!(value.kind(), "method_invocation" | "object_creation_expression") {
+                        if matches!(
+                            value.kind(),
+                            "method_invocation" | "object_creation_expression"
+                        ) {
                             call_site = extract_call_site(value, src);
                             call_args = extract_call_args(value, src);
                         }
@@ -220,7 +223,10 @@ fn classify_statement(
             let mut cursor = node.walk();
             let children: Vec<TsNode<'_>> = node.named_children(&mut cursor).collect();
             for child in children {
-                if matches!(child.kind(), "method_invocation" | "object_creation_expression") {
+                if matches!(
+                    child.kind(),
+                    "method_invocation" | "object_creation_expression"
+                ) {
                     call_site = extract_call_site(child, src);
                     call_args = extract_call_args(child, src);
                 }
@@ -335,7 +341,10 @@ fn emit_expression_statement(
                 }
             }
             if let Some(right) = inner.child_by_field_name("right") {
-                if matches!(right.kind(), "method_invocation" | "object_creation_expression") {
+                if matches!(
+                    right.kind(),
+                    "method_invocation" | "object_creation_expression"
+                ) {
                     call_site = extract_call_site(right, src);
                     call_args = extract_call_args(right, src);
                 }
@@ -407,8 +416,7 @@ pub fn extract_method_body(method_id: &NodeId, src: &str) -> Option<MethodBody> 
     let tree = parser.parse(src.as_bytes(), None)?;
     let root = tree.root_node();
 
-    let method_node =
-        find_method_node(root, src.as_bytes(), &target_name, target_arity)?;
+    let method_node = find_method_node(root, src.as_bytes(), &target_name, target_arity)?;
 
     let param_names = method_node
         .child_by_field_name("parameters")

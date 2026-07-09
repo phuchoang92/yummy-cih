@@ -1,6 +1,7 @@
 # CIH — Code Intelligence Hub (Rust engine + MCP service)
 #
-# Crate layers (each layer may only depend on layers above it):
+# Crate layers (each layer may only depend on layers above it — enforced in
+# CI by scripts/check_layering.py; update both together):
 #
 #  Foundation   cih-core          IR, artifacts, group/registry types
 #

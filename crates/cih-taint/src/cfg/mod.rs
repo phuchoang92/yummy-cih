@@ -21,8 +21,8 @@ use cih_core::NodeId;
 
 use crate::ir::{StatementKind, StatementNode};
 use crate::java_ast::{
-    collect_reads, extract_call_args, extract_call_site, extract_param_names,
-    find_method_node, parse_method_id, range_of, stmt_id, ts_text,
+    collect_reads, extract_call_args, extract_call_site, extract_param_names, find_method_node,
+    parse_method_id, range_of, stmt_id, ts_text,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -203,10 +203,16 @@ impl<'src> CfgBuilder<'src> {
     }
 
     fn add_edge(&mut self, from: &BlockId, to: &BlockId, kind: CfgEdgeKind) {
-        let Some(fi) = self.block_idx(from) else { return };
+        let Some(fi) = self.block_idx(from) else {
+            return;
+        };
         let Some(ti) = self.block_idx(to) else { return };
         // Avoid duplicate edges (can happen with dead-code blocks).
-        if self.blocks[fi].succs.iter().any(|(t, k)| t == to && *k == kind) {
+        if self.blocks[fi]
+            .succs
+            .iter()
+            .any(|(t, k)| t == to && *k == kind)
+        {
             return;
         }
         self.blocks[fi].succs.push((to.clone(), kind));
@@ -214,17 +220,22 @@ impl<'src> CfgBuilder<'src> {
     }
 
     fn add_stmt(&mut self, block: &BlockId, stmt: StatementNode) {
-        let Some(idx) = self.block_idx(block) else { return };
+        let Some(idx) = self.block_idx(block) else {
+            return;
+        };
         self.blocks[idx].stmts.push(stmt);
     }
 
     fn set_terminated(&mut self, block: &BlockId) {
-        let Some(idx) = self.block_idx(block) else { return };
+        let Some(idx) = self.block_idx(block) else {
+            return;
+        };
         self.blocks[idx].is_terminated = true;
     }
 
     fn is_terminated(&self, block: &BlockId) -> bool {
-        self.block_idx(block).is_some_and(|idx| self.blocks[idx].is_terminated)
+        self.block_idx(block)
+            .is_some_and(|idx| self.blocks[idx].is_terminated)
     }
 
     // ── Statement node factories ────────────────────────────────────────────
@@ -314,7 +325,10 @@ impl<'src> CfgBuilder<'src> {
                             writes.push(ts_text(name_node, self.src).to_string());
                         }
                         if let Some(value) = child.child_by_field_name("value") {
-                            if matches!(value.kind(), "method_invocation" | "object_creation_expression") {
+                            if matches!(
+                                value.kind(),
+                                "method_invocation" | "object_creation_expression"
+                            ) {
                                 call_site = extract_call_site(value, self.src);
                                 call_args = extract_call_args(value, self.src);
                             }
@@ -339,7 +353,10 @@ impl<'src> CfgBuilder<'src> {
                                 }
                             }
                             if let Some(right) = inner.child_by_field_name("right") {
-                                if matches!(right.kind(), "method_invocation" | "object_creation_expression") {
+                                if matches!(
+                                    right.kind(),
+                                    "method_invocation" | "object_creation_expression"
+                                ) {
                                     call_site = extract_call_site(right, self.src);
                                     call_args = extract_call_args(right, self.src);
                                 }
@@ -629,10 +646,11 @@ impl<'src> CfgBuilder<'src> {
             let mut cur = try_entry.clone();
             for child in &children {
                 if (child.kind() == "block" || child.kind() == "resource_specification")
-                    && child.kind() == "block" {
-                        cur = self.build_block_node(*child, cur);
-                        break;
-                    }
+                    && child.kind() == "block"
+                {
+                    cur = self.build_block_node(*child, cur);
+                    break;
+                }
             }
             cur
         };
@@ -770,4 +788,3 @@ pub fn build_cfg(method_id: &NodeId, src: &str) -> Option<Cfg> {
         param_names,
     })
 }
-

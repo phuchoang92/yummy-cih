@@ -302,6 +302,3 @@ fn processes_for_community(graph: &WikiGraph, community_id: &str) -> Vec<String>
     result.sort();
     result
 }
-
-
-

@@ -2,10 +2,10 @@
 
 use std::collections::VecDeque;
 
-use crate::leiden_impl::graph_data::GraphData;
-use crate::leiden_impl::builder::GraphDataBuilder;
-use crate::leiden_impl::partition::Partition;
-use crate::leiden_impl::quality::{MoveComponents, QualityFunction};
+use crate::leiden::builder::GraphDataBuilder;
+use crate::leiden::graph_data::GraphData;
+use crate::leiden::partition::Partition;
+use crate::leiden::quality::{MoveComponents, QualityFunction};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rustc_hash::FxHashMap;
@@ -58,8 +58,7 @@ impl LocalMovingBuffers {
         if num_layers > self.comm_total_degree.len() {
             self.comm_total_degree
                 .resize_with(num_layers, || vec![0.0; n]);
-            self.comm_in_degree
-                .resize_with(num_layers, || vec![0.0; n]);
+            self.comm_in_degree.resize_with(num_layers, || vec![0.0; n]);
         }
         for arr in &mut self.comm_total_degree[..num_layers] {
             if n > arr.len() {
@@ -398,7 +397,7 @@ pub(crate) fn build_aggregated_graph(
     agg_edges_map: FxHashMap<(usize, usize), f64>,
     coarse_partition: &Partition,
     node_weight_fn: impl Fn(usize) -> f64,
-) -> crate::leiden_impl::error::Result<(crate::leiden_impl::graph_data::GraphData, Vec<usize>, Partition)> {
+) -> crate::leiden::error::Result<(crate::leiden::graph_data::GraphData, Vec<usize>, Partition)> {
     let mut agg_edges: Vec<((usize, usize), f64)> = agg_edges_map.into_iter().collect();
     agg_edges.sort_by_key(|&((u, v), _)| (u, v));
 
@@ -467,7 +466,9 @@ pub(crate) fn refinement_generic(
                     .enumerate()
                     .map_init(
                         || RefinementBuffers::new(n, num_layers),
-                        |thread_buffers, (community, nodes)| refine_fn(community, nodes, thread_buffers),
+                        |thread_buffers, (community, nodes)| {
+                            refine_fn(community, nodes, thread_buffers)
+                        },
                     )
                     .collect()
             } else {
@@ -895,7 +896,8 @@ pub(crate) fn refine_community_generic(
         }
     }
 
-    subset.nodes
+    subset
+        .nodes
         .iter()
         .filter_map(|&node| {
             let rc = refined_map[node];

@@ -287,10 +287,16 @@ fn contract_sites_emit_nodes_and_edges() {
     let publish = out
         .edges
         .iter()
-        .find(|edge| edge.kind == EdgeKind::PublishesEvent && edge.src == caller && edge.dst == topic)
+        .find(|edge| {
+            edge.kind == EdgeKind::PublishesEvent && edge.src == caller && edge.dst == topic
+        })
         .expect("PublishesEvent edge expected");
     assert_eq!(
-        publish.props.as_ref().and_then(|p| p.get("messaging_framework")).and_then(|v| v.as_str()),
+        publish
+            .props
+            .as_ref()
+            .and_then(|p| p.get("messaging_framework"))
+            .and_then(|v| v.as_str()),
         Some("kafka"),
         "Kafka publish should carry messaging_framework=kafka"
     );
@@ -300,7 +306,11 @@ fn contract_sites_emit_nodes_and_edges() {
         .find(|edge| edge.kind == EdgeKind::ListensTo && edge.src == listener && edge.dst == topic)
         .expect("ListensTo edge expected");
     assert_eq!(
-        listen.props.as_ref().and_then(|p| p.get("messaging_framework")).and_then(|v| v.as_str()),
+        listen
+            .props
+            .as_ref()
+            .and_then(|p| p.get("messaging_framework"))
+            .and_then(|v| v.as_str()),
         Some("spring"),
         "Spring listener should carry messaging_framework=spring"
     );
@@ -1302,7 +1312,10 @@ fn python_free_function_call_resolves() {
         file: "app.py".into(),
         language: String::new(),
         package: None,
-        defs: vec![py_function_def("app", "helper", 1), py_function_def("app", "main", 0)],
+        defs: vec![
+            py_function_def("app", "helper", 1),
+            py_function_def("app", "main", 0),
+        ],
         imports: vec![],
         reference_sites: vec![ReferenceSite {
             name: "helper".into(),

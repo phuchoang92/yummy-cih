@@ -40,7 +40,11 @@ pub struct TaintPhaseConfig {
 
 impl Default for TaintPhaseConfig {
     fn default() -> Self {
-        Self { run_intra_proc: true, run_cfg: true, run_pdg: true }
+        Self {
+            run_intra_proc: true,
+            run_cfg: true,
+            run_pdg: true,
+        }
     }
 }
 
@@ -111,13 +115,23 @@ pub struct TaintAnalysisInput<'a> {
 ///    its confidence multiplier against the **Phase-0 baseline** — independently of Phase 1
 ///    — so neither refinement silently erases the other.
 pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAnalysisResult> {
-    let TaintAnalysisInput { nodes, edges, rules, resolve_source, node_file, phases } = input;
+    let TaintAnalysisInput {
+        nodes,
+        edges,
+        rules,
+        resolve_source,
+        node_file,
+        phases,
+    } = input;
 
     // ── Phase 0 ───────────────────────────────────────────────────────────────
     let mut paths = crate::interproc::find_taint_paths(nodes, edges, rules);
 
     let sink_name_patterns_owned: Vec<String> = rules.extra_sink_name_patterns.clone();
-    let sink_patterns: Vec<&str> = sink_name_patterns_owned.iter().map(|s| s.as_str()).collect();
+    let sink_patterns: Vec<&str> = sink_name_patterns_owned
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
 
     // Snapshot Phase-0 baseline before Phase 1 modifies scores in place.
     let baseline_confidence: Vec<f32> = paths.iter().map(|p| p.confidence).collect();
@@ -150,8 +164,12 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
         let unique_sources: FxHashSet<&NodeId> = paths.iter().map(|p| &p.source).collect();
 
         for source_id in &unique_sources {
-            let Some(file) = node_file(source_id) else { continue };
-            let Some(src) = resolve_source(&file) else { continue };
+            let Some(file) = node_file(source_id) else {
+                continue;
+            };
+            let Some(src) = resolve_source(&file) else {
+                continue;
+            };
             let Some(cfg) = crate::cfg::build_cfg(source_id, &src) else {
                 cfg_stats.ir_unavailable += 1;
                 continue;
@@ -186,8 +204,11 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
     let mut pdg_stats = TaintPdgStats::default();
 
     if phases.run_cfg && phases.run_pdg && !paths.is_empty() {
-        let sanitizer_patterns: Vec<&str> =
-            rules.sanitizers.iter().map(|s| s.node_id_pattern.as_str()).collect();
+        let sanitizer_patterns: Vec<&str> = rules
+            .sanitizers
+            .iter()
+            .map(|s| s.node_id_pattern.as_str())
+            .collect();
 
         for (i, path) in paths.iter_mut().enumerate() {
             let Some(cfg) = cfg_cache.get(&path.source) else {
@@ -234,5 +255,9 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
         );
     }
 
-    Ok(TaintAnalysisResult { paths, cfg_stats, pdg_stats })
+    Ok(TaintAnalysisResult {
+        paths,
+        cfg_stats,
+        pdg_stats,
+    })
 }

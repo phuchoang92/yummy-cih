@@ -1,4 +1,6 @@
-use cih_core::{type_id, BindingKind, EdgeKind, NodeKind, ParsedFile, Range, SymbolDef, TypeBinding};
+use cih_core::{
+    type_id, BindingKind, EdgeKind, NodeKind, ParsedFile, Range, SymbolDef, TypeBinding,
+};
 use cih_resolve::di_xml::{
     extract_di_xml, extract_xml_attr, is_di_xml_path, parse_di_document, simple_name,
 };
@@ -98,12 +100,9 @@ fn field_injection_emits_calls_edge() {
     let out = extract_di_xml(&dir, &parsed);
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(out
-        .edges
-        .iter()
-        .any(|e| e.kind == EdgeKind::Calls
-            && e.src == type_id(NodeKind::Class, consumer_fqcn)
-            && e.dst == type_id(NodeKind::Class, "com.acme.OrderService")));
+    assert!(out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+        && e.src == type_id(NodeKind::Class, consumer_fqcn)
+        && e.dst == type_id(NodeKind::Class, "com.acme.OrderService")));
     assert!(out
         .nodes
         .iter()

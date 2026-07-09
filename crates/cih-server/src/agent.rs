@@ -49,7 +49,14 @@ impl AgentRunner {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .unwrap_or_default();
-        Self { search, store, llm_base_url, llm_api_key, llm_model, client }
+        Self {
+            search,
+            store,
+            llm_base_url,
+            llm_api_key,
+            llm_model,
+            client,
+        }
     }
 
     pub async fn ask(&self, question: &str, codebase_description: &str) -> Result<AgentAnswer> {
@@ -67,7 +74,10 @@ impl AgentRunner {
         loop {
             turns += 1;
             if turns > MAX_TURNS {
-                return Err(anyhow!("agent exceeded {} turns without finishing", MAX_TURNS));
+                return Err(anyhow!(
+                    "agent exceeded {} turns without finishing",
+                    MAX_TURNS
+                ));
             }
 
             let mut full_messages: Vec<Value> = vec![json!({"role": "system", "content": &system})];
@@ -79,8 +89,12 @@ impl AgentRunner {
                 "max_tokens": 2048,
             });
 
-            let url = format!("{}/chat/completions", self.llm_base_url.trim_end_matches('/'));
-            let resp = self.client
+            let url = format!(
+                "{}/chat/completions",
+                self.llm_base_url.trim_end_matches('/')
+            );
+            let resp = self
+                .client
                 .post(&url)
                 .bearer_auth(&self.llm_api_key)
                 .json(&body)
@@ -133,10 +147,7 @@ impl AgentRunner {
             }
 
             // finish_reason == "stop" or similar — extract the answer.
-            let answer_text = assistant_msg["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let answer_text = assistant_msg["content"].as_str().unwrap_or("").to_string();
             let tool_calls_made: Vec<String> = messages
                 .iter()
                 .filter(|m| m["role"] == "assistant" && !m["tool_calls"].is_null())
@@ -146,9 +157,7 @@ impl AgentRunner {
                         .cloned()
                         .unwrap_or_default()
                         .into_iter()
-                        .filter_map(|tc| {
-                            tc["function"]["name"].as_str().map(str::to_string)
-                        })
+                        .filter_map(|tc| tc["function"]["name"].as_str().map(str::to_string))
                 })
                 .collect();
 

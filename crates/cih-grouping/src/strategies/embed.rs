@@ -44,10 +44,7 @@ impl EmbedStrategy {
     }
 
     fn is_catch_all(&self, feature: &str) -> bool {
-        self.config
-            .catch_all_features
-            .iter()
-            .any(|c| c == feature)
+        self.config.catch_all_features.iter().any(|c| c == feature)
     }
 }
 
@@ -75,11 +72,8 @@ impl FeatureStrategy for EmbedStrategy {
         }
 
         // Build a quick node lookup
-        let nodes_by_id: HashMap<&str, &cih_core::Node> = input
-            .nodes
-            .iter()
-            .map(|n| (n.id.as_str(), n))
-            .collect();
+        let nodes_by_id: HashMap<&str, &cih_core::Node> =
+            input.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
         // Build per-node method name list from HasMethod edges (for embedding text quality)
         let mut method_names: HashMap<&str, Vec<String>> = HashMap::new();
@@ -201,7 +195,9 @@ impl FeatureStrategy for EmbedStrategy {
             let best = feature_names
                 .iter()
                 .filter_map(|f| {
-                    centroids.get(f).map(|c| (f.as_str(), cosine_similarity(emb, c)))
+                    centroids
+                        .get(f)
+                        .map(|c| (f.as_str(), cosine_similarity(emb, c)))
                 })
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -221,7 +217,10 @@ impl FeatureStrategy for EmbedStrategy {
             }
         }
 
-        tracing::debug!(assigned = results.len(), "EmbedStrategy: assigned residuals");
+        tracing::debug!(
+            assigned = results.len(),
+            "EmbedStrategy: assigned residuals"
+        );
         results
     }
 }

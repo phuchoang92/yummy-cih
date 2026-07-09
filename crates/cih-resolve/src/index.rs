@@ -95,7 +95,8 @@ impl ResolveIndex {
                     if let Some(meta) = resolver.type_metadata(def) {
                         idx.type_metadata.insert(def.fqcn.clone(), meta);
                     }
-                    idx.language_of_type.insert(def.fqcn.clone(), lang.to_string());
+                    idx.language_of_type
+                        .insert(def.fqcn.clone(), lang.to_string());
                     idx.types_by_fqcn.insert(def.fqcn.clone(), def.clone());
                     idx.simple_to_fqcns
                         .entry(simple_of(&def.fqcn))
@@ -267,8 +268,14 @@ impl ResolveIndex {
 
     /// Resolve a simple name to a qualified name, scoped to a specific language.
     /// Only returns a match if there is exactly one type with that simple name in the language.
-    pub fn resolve_type_in_language(&self, simple: &str, _file: &str, language: &str) -> Option<String> {
-        let candidates: Vec<&String> = self.simple_to_fqcns
+    pub fn resolve_type_in_language(
+        &self,
+        simple: &str,
+        _file: &str,
+        language: &str,
+    ) -> Option<String> {
+        let candidates: Vec<&String> = self
+            .simple_to_fqcns
             .get(simple)?
             .iter()
             .filter(|fqcn| self.language_of_type.get(*fqcn).map(String::as_str) == Some(language))
@@ -284,12 +291,7 @@ impl ResolveIndex {
 
     /// Find a member's node id on `owner_fqcn` directly (no hierarchy walk):
     /// exact-arity overload → any overload → field.
-    pub fn find_member(
-        &self,
-        owner_fqcn: &str,
-        name: &str,
-        arity: Option<u16>,
-    ) -> Option<NodeId> {
+    pub fn find_member(&self, owner_fqcn: &str, name: &str, arity: Option<u16>) -> Option<NodeId> {
         let key = (owner_fqcn.to_string(), name.to_string());
         if let Some(overloads) = self.methods.get(&key) {
             if let Some(a) = arity {

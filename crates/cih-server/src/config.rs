@@ -134,7 +134,10 @@ fn env(key: &str, default: &str) -> String {
 
 /// Parse an env var into `T`, falling back to `default` when unset or invalid.
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// True when `bind` (a `host:port` string) targets a loopback interface.
@@ -168,7 +171,10 @@ pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
             let mut last_err = None;
             for attempt in 1u32..=5 {
                 match store.ensure_schema().await {
-                    Ok(_) => { last_err = None; break; }
+                    Ok(_) => {
+                        last_err = None;
+                        break;
+                    }
                     Err(e) => {
                         tracing::warn!(attempt, error = %e, "FalkorDB not ready, retrying in 2s");
                         last_err = Some(e);

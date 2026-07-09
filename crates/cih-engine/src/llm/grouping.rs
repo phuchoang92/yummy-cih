@@ -432,7 +432,6 @@ fn estimate_module_count(graph: &WikiGraph) -> usize {
     hints.len().clamp(8, 40)
 }
 
-
 pub fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal> {
     let mut map: HashMap<String, ModuleProposal> = HashMap::new();
     for p in proposals.drain(..) {

@@ -1,6 +1,4 @@
-use cih_core::{
-    ContractMatch, ContractMatchKind, EdgeKind, NodeKind, Registry,
-};
+use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind, Registry};
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs};
@@ -9,9 +7,7 @@ use crate::utils::{
     parse_contract_kind_filter, short_class_name, strip_response_wrapper,
 };
 
-pub async fn group_contracts(
-    args: GroupContractsArgs,
-) -> Result<CallToolResult, McpError> {
+pub async fn group_contracts(args: GroupContractsArgs) -> Result<CallToolResult, McpError> {
     let path = cih_core::contracts_path(&args.group).ok_or_else(|| {
         McpError::internal_error("cannot determine HOME for group contracts path", None)
     })?;
@@ -26,8 +22,12 @@ pub async fn group_contracts(
             None,
         )
     })?;
-    let filter = parse_contract_kind_filter(if args.kind.is_empty() { None } else { Some(args.kind.as_str()) })
-        .map_err(|e| McpError::invalid_params(e, None))?;
+    let filter = parse_contract_kind_filter(if args.kind.is_empty() {
+        None
+    } else {
+        Some(args.kind.as_str())
+    })
+    .map_err(|e| McpError::invalid_params(e, None))?;
     let mut matches = Vec::new();
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {
         let item: ContractMatch = serde_json::from_str(line).map_err(|e| {
@@ -119,13 +119,19 @@ pub async fn shape_check(args: ShapeCheckArgs) -> Result<CallToolResult, McpErro
     let reg = Registry::load();
     let provider_entry = reg.find(&args.provider).ok_or_else(|| {
         McpError::invalid_params(
-            format!("provider '{}' not in registry; run analyze first", args.provider),
+            format!(
+                "provider '{}' not in registry; run analyze first",
+                args.provider
+            ),
             None,
         )
     })?;
     let consumer_entry = reg.find(&args.consumer).ok_or_else(|| {
         McpError::invalid_params(
-            format!("consumer '{}' not in registry; run analyze first", args.consumer),
+            format!(
+                "consumer '{}' not in registry; run analyze first",
+                args.consumer
+            ),
             None,
         )
     })?;

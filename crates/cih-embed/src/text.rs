@@ -30,7 +30,10 @@ pub fn is_embeddable_kind(kind: NodeKind) -> bool {
 
 /// Kinds for which we extract and strip source body text.
 fn is_body_kind(kind: NodeKind) -> bool {
-    matches!(kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function)
+    matches!(
+        kind,
+        NodeKind::Method | NodeKind::Constructor | NodeKind::Function
+    )
 }
 
 fn file_ext(file: &str) -> &str {

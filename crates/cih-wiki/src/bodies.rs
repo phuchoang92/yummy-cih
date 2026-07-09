@@ -10,7 +10,10 @@ pub struct BodyEntry {
 }
 
 fn is_body_kind(kind: NodeKind) -> bool {
-    matches!(kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function)
+    matches!(
+        kind,
+        NodeKind::Method | NodeKind::Constructor | NodeKind::Function
+    )
 }
 
 fn file_ext(file: &str) -> &str {
@@ -58,7 +61,13 @@ pub fn source_bodies(nodes: &[Node], repo: &Path) -> HashMap<String, BodyEntry> 
         };
 
         if !stripped.trim().is_empty() {
-            bodies.insert(node.id.as_str().to_string(), BodyEntry { stripped, original_lines });
+            bodies.insert(
+                node.id.as_str().to_string(),
+                BodyEntry {
+                    stripped,
+                    original_lines,
+                },
+            );
         }
     }
 
@@ -95,17 +104,20 @@ fn is_noise_line(line: &str) -> bool {
 fn is_log_call(t: &str) -> bool {
     let prefixes = ["log.", "logger.", "LOG.", "LOGGER."];
     prefixes.iter().any(|p| t.starts_with(p))
-        || ((t.contains(".debug(") || t.contains(".info(") || t.contains(".warn(") || t.contains(".error("))
-            && (t.contains("log.") || t.contains("logger.") || t.contains("LOG.") || t.contains("LOGGER.")))
+        || ((t.contains(".debug(")
+            || t.contains(".info(")
+            || t.contains(".warn(")
+            || t.contains(".error("))
+            && (t.contains("log.")
+                || t.contains("logger.")
+                || t.contains("LOG.")
+                || t.contains("LOGGER.")))
 }
 
 fn is_null_guard(t: &str) -> bool {
-    (t.starts_with("if (") || t.starts_with("if("))
-        && t.contains("== null")
-        && t.contains("throw")
+    (t.starts_with("if (") || t.starts_with("if(")) && t.contains("== null") && t.contains("throw")
 }
 
 fn is_trivial_getter_body(t: &str) -> bool {
-    (t.starts_with("return this.") && t.ends_with(';') && !t.contains('('))
-        || t == "return this;"
+    (t.starts_with("return this.") && t.ends_with(';') && !t.contains('(')) || t == "return this;"
 }

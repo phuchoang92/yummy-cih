@@ -15,4 +15,3 @@ pub use model::{EmbedModel, EmbedModelKind};
 pub use store::{EmbedStore, EmbedSummary, NodeVector, SemanticHit};
 pub use strip::strip_java_body;
 pub use text::{content_hash, embeddable_nodes, embedding_text, is_embeddable_kind, source_bodies};
-

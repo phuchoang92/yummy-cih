@@ -214,7 +214,9 @@ pub fn write_parsed_files(dir: &Path, parsed_files: &[ParsedFile]) -> Result<Par
         serde_json::to_writer(&mut writer, parsed)
             .map_err(std::io::Error::other)
             .map_err(artifact_io(&parsed_files_path))?;
-        writer.write_all(b"\n").map_err(artifact_io(&parsed_files_path))?;
+        writer
+            .write_all(b"\n")
+            .map_err(artifact_io(&parsed_files_path))?;
     }
     writer.flush().map_err(artifact_io(&parsed_files_path))?;
 
@@ -340,5 +342,3 @@ fn insert_edge(edges: &mut BTreeMap<(String, String, &'static str), Edge>, edge:
         ))
         .or_insert(edge);
 }
-
-

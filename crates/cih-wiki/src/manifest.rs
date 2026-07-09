@@ -88,6 +88,3 @@ pub struct PageEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub community_id: Option<String>,
 }
-
-
-

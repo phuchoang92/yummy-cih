@@ -19,7 +19,12 @@ fn make_adapter_requires_http_json_config() {
 fn make_adapter_accepts_builtin_providers() {
     assert!(make_adapter(&LlmProvider::OpenAiCompatible, "http://localhost", None).is_ok());
     assert!(make_adapter(&LlmProvider::Anthropic, "http://localhost", None).is_ok());
-    assert!(make_adapter(&LlmProvider::Bedrock, "https://bedrock-runtime.us-east-1.amazonaws.com", None).is_ok());
+    assert!(make_adapter(
+        &LlmProvider::Bedrock,
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        None
+    )
+    .is_ok());
     assert!(make_adapter(&LlmProvider::DeepSeek, "http://localhost", None).is_ok());
     assert!(make_adapter(&LlmProvider::Gemini, "http://localhost", None).is_ok());
 }
@@ -80,8 +85,8 @@ fn integration_bedrock_community_full_prompt() {
     let base_url = std::env::var("AWS_BEDROCK_BASE_URL")
         .unwrap_or_else(|_| "https://bedrock-runtime.us-east-1.amazonaws.com".to_string());
 
-    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
     use cih_engine::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
+    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
 
     let adapter = make_adapter(&LlmProvider::Bedrock, &base_url, None).expect("Bedrock adapter");
 
@@ -106,10 +111,19 @@ fn integration_bedrock_community_full_prompt() {
         (Some(s), Some(e)) if s < e => &text[s..=e],
         _ => text.as_str(),
     };
-    let val: serde_json::Value = serde_json::from_str(json_str)
-        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nRaw: {}", &text[..text.len().min(300)]));
+    let val: serde_json::Value = serde_json::from_str(json_str).unwrap_or_else(|e| {
+        panic!(
+            "JSON parse failed: {e}\nRaw: {}",
+            &text[..text.len().min(300)]
+        )
+    });
 
-    for field in &["po_summary", "po_capabilities", "ba_process_overview", "dev_entry_points"] {
+    for field in &[
+        "po_summary",
+        "po_capabilities",
+        "ba_process_overview",
+        "dev_entry_points",
+    ] {
         assert!(
             val[field].as_str().map(|s| !s.is_empty()).unwrap_or(false),
             "field '{}' missing or empty in response",
@@ -127,8 +141,8 @@ fn integration_deepseek_community_full_prompt() {
         _ => return, // skip when key not set
     };
 
-    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
     use cih_engine::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
+    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
 
     let adapter = make_adapter(&LlmProvider::DeepSeek, "https://api.deepseek.com", None)
         .expect("DeepSeek adapter");
@@ -138,7 +152,13 @@ fn integration_deepseek_community_full_prompt() {
         "Module: \"PaymentService\"\n\nEvidence:\n[R1] POST /api/payments\n[S1] processPayment(){{validateCard(); gateway.charge();}}\n\n{}",
         COMMUNITY_FULL_JSON_TEMPLATE
     );
-    let req = LlmRequest { system, user, model: "deepseek-chat".into(), max_tokens: 2000, timeout_secs: 30 };
+    let req = LlmRequest {
+        system,
+        user,
+        model: "deepseek-chat".into(),
+        max_tokens: 2000,
+        timeout_secs: 30,
+    };
 
     let resp = adapter.call(Some(&api_key), &req).expect("DeepSeek call");
     let text = &resp.text;
@@ -149,13 +169,23 @@ fn integration_deepseek_community_full_prompt() {
         (Some(s), Some(e)) if s < e => &text[s..=e],
         _ => text.as_str(),
     };
-    let val: serde_json::Value = serde_json::from_str(json_str)
-        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nRaw: {}", &text[..text.len().min(300)]));
+    let val: serde_json::Value = serde_json::from_str(json_str).unwrap_or_else(|e| {
+        panic!(
+            "JSON parse failed: {e}\nRaw: {}",
+            &text[..text.len().min(300)]
+        )
+    });
 
-    for field in &["po_summary", "po_capabilities", "ba_process_overview", "dev_entry_points"] {
+    for field in &[
+        "po_summary",
+        "po_capabilities",
+        "ba_process_overview",
+        "dev_entry_points",
+    ] {
         assert!(
             val[field].as_str().map(|s| !s.is_empty()).unwrap_or(false),
-            "field '{}' missing or empty in response", field
+            "field '{}' missing or empty in response",
+            field
         );
     }
 }
@@ -167,8 +197,8 @@ fn integration_deepseek_http_flow_prompt() {
         _ => return,
     };
 
-    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
     use cih_engine::llm::prompts::{http_flow_system, HTTP_FLOW_JSON_TEMPLATE};
+    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
 
     let adapter = make_adapter(&LlmProvider::DeepSeek, "https://api.deepseek.com", None)
         .expect("DeepSeek adapter");
@@ -180,7 +210,13 @@ fn integration_deepseek_http_flow_prompt() {
         "HTTP handler: \"processPayment\"\n\nCall chain (3 steps):\n[1] PaymentController.processPayment() (Controller)\n[2] PaymentService.validate() (Service)\n[3] GatewayClient.charge() (Client)\n\n{}",
         json_template
     );
-    let req = LlmRequest { system, user, model: "deepseek-chat".into(), max_tokens: 600, timeout_secs: 30 };
+    let req = LlmRequest {
+        system,
+        user,
+        model: "deepseek-chat".into(),
+        max_tokens: 600,
+        timeout_secs: 30,
+    };
 
     let resp = adapter.call(Some(&api_key), &req).expect("DeepSeek call");
     let text = &resp.text;
@@ -190,11 +226,29 @@ fn integration_deepseek_http_flow_prompt() {
         (Some(s), Some(e)) if s < e => &text[s..=e],
         _ => text.as_str(),
     };
-    let val: serde_json::Value = serde_json::from_str(json_str)
-        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nRaw: {}", &text[..text.len().min(300)]));
+    let val: serde_json::Value = serde_json::from_str(json_str).unwrap_or_else(|e| {
+        panic!(
+            "JSON parse failed: {e}\nRaw: {}",
+            &text[..text.len().min(300)]
+        )
+    });
 
-    assert!(val["narrative"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "narrative missing");
-    assert!(val["business_impact"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "business_impact missing");
-    let descs = val["step_descriptions"].as_array().expect("step_descriptions should be array");
+    assert!(
+        val["narrative"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "narrative missing"
+    );
+    assert!(
+        val["business_impact"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "business_impact missing"
+    );
+    let descs = val["step_descriptions"]
+        .as_array()
+        .expect("step_descriptions should be array");
     assert!(!descs.is_empty(), "step_descriptions should not be empty");
 }

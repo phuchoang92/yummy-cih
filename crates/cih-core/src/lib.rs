@@ -61,7 +61,15 @@ impl std::fmt::Display for NodeId {
 /// Graph labels are the variant names verbatim (strum's default); they are
 /// stored in FalkorDB, so renaming a variant is a breaking schema change.
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr, strum::EnumString,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
 )]
 pub enum NodeKind {
     File,

@@ -5,12 +5,7 @@ use serde::Serialize;
 
 use crate::versioning::latest_graph_artifacts;
 
-pub fn run_embed(
-    repo: PathBuf,
-    pg_url: Option<String>,
-    model: String,
-    json: bool,
-) -> Result<()> {
+pub fn run_embed(repo: PathBuf, pg_url: Option<String>, model: String, json: bool) -> Result<()> {
     let source = latest_graph_artifacts(&repo)?;
     let nodes = source
         .read_nodes()

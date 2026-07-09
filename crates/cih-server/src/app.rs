@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 use anyhow::Result;
 use axum::{middleware, routing::get};
 use cih_embed::{EmbedModelKind, EmbedStore};
@@ -33,13 +34,15 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
 };
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
-use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
 use crate::args::*;
 use crate::jobs::Jobs;
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, parse_direction, text_result, to_mcp};
-use crate::{agent, browser, changes, contracts, coverage, feature, files, indexing, patterns, resources, search, server, symbol, taint};
+use crate::{
+    agent, browser, changes, contracts, coverage, feature, files, indexing, patterns, resources,
+    search, server, symbol, taint,
+};
 
 use crate::config::{build_store, Config};
 use crate::search::{QueryArgs, QueryResult, SearchState};
@@ -129,10 +132,22 @@ impl CihServer {
                 ));
             }
         };
-        let dir = parse_direction(if args.direction.is_empty() { None } else { Some(args.direction.as_str()) });
+        let dir = parse_direction(if args.direction.is_empty() {
+            None
+        } else {
+            Some(args.direction.as_str())
+        });
         let res = self
             .store
-            .impact(&id, dir, if args.max_depth == 0 { 4 } else { args.max_depth })
+            .impact(
+                &id,
+                dir,
+                if args.max_depth == 0 {
+                    4
+                } else {
+                    args.max_depth
+                },
+            )
             .await
             .map_err(to_mcp)?;
         if args.format == "diagram" {
@@ -228,7 +243,11 @@ impl CihServer {
                 None,
             )
         })?;
-        let description = if args.codebase_description.is_empty() { "a backend codebase" } else { args.codebase_description.as_str() };
+        let description = if args.codebase_description.is_empty() {
+            "a backend codebase"
+        } else {
+            args.codebase_description.as_str()
+        };
         let answer = runner
             .ask(&args.question, description)
             .await
@@ -249,7 +268,11 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<RouteMapArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let prefix = if args.prefix.is_empty() { None } else { Some(args.prefix.as_str()) };
+        let prefix = if args.prefix.is_empty() {
+            None
+        } else {
+            Some(args.prefix.as_str())
+        };
         let limit = (if args.limit == 0 { 200 } else { args.limit }).clamp(1, 1000);
         let routes: Vec<cih_graph_store::RouteInfo> =
             self.store.route_map(prefix, limit).await.map_err(to_mcp)?;
@@ -359,8 +382,17 @@ impl CihServer {
                 ));
             }
         };
-        let depth = (if args.max_depth == 0 { 6 } else { args.max_depth }).clamp(1, 10);
-        let steps = self.store.flow_downstream(&id, depth).await.map_err(to_mcp)?;
+        let depth = (if args.max_depth == 0 {
+            6
+        } else {
+            args.max_depth
+        })
+        .clamp(1, 10);
+        let steps = self
+            .store
+            .flow_downstream(&id, depth)
+            .await
+            .map_err(to_mcp)?;
         if args.format == "mermaid" {
             return text_result(render_mermaid_flow(&id, &steps));
         }
@@ -386,9 +418,21 @@ impl CihServer {
         let hotspots = self
             .store
             .complexity_hotspots(
-                if args.min_cyclomatic == 0 { None } else { Some(args.min_cyclomatic) },
-                if args.min_cognitive == 0 { None } else { Some(args.min_cognitive) },
-                if args.min_transitive_loop == 0 { None } else { Some(args.min_transitive_loop) },
+                if args.min_cyclomatic == 0 {
+                    None
+                } else {
+                    Some(args.min_cyclomatic)
+                },
+                if args.min_cognitive == 0 {
+                    None
+                } else {
+                    Some(args.min_cognitive)
+                },
+                if args.min_transitive_loop == 0 {
+                    None
+                } else {
+                    Some(args.min_transitive_loop)
+                },
                 limit,
             )
             .await
@@ -420,7 +464,11 @@ impl CihServer {
                 ));
             }
         };
-        let min_jaccard = if args.min_jaccard == 0.0 { 0.95 } else { args.min_jaccard };
+        let min_jaccard = if args.min_jaccard == 0.0 {
+            0.95
+        } else {
+            args.min_jaccard
+        };
         let limit = if args.limit == 0 { 10 } else { args.limit };
         let similar = self
             .store
@@ -522,7 +570,10 @@ impl CihServer {
         match jobs.get(&args.job_id) {
             Some(state) => json_result(state),
             None => Err(McpError::invalid_params(
-                format!("unknown job_id '{}' — use index_repo to start a job", args.job_id),
+                format!(
+                    "unknown job_id '{}' — use index_repo to start a job",
+                    args.job_id
+                ),
                 None,
             )),
         }

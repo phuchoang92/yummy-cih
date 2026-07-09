@@ -22,13 +22,18 @@ fn repo_root(repo: &str, graph_key: &str) -> Result<String, McpError> {
         ));
     }
     let entry = if repo.is_empty() {
-        reg.entries.iter().find(|e| e.graph_key == graph_key).cloned()
+        reg.entries
+            .iter()
+            .find(|e| e.graph_key == graph_key)
+            .cloned()
     } else {
         reg.find(repo).cloned()
     };
     entry.map(|e| e.path).ok_or_else(|| {
         McpError::invalid_params(
-            format!("repo '{repo}' not found in registry — index it first, or pass an explicit repo"),
+            format!(
+                "repo '{repo}' not found in registry — index it first, or pass an explicit repo"
+            ),
             None,
         )
     })
@@ -43,7 +48,10 @@ pub async fn add_resolve_pattern(
 ) -> Result<CallToolResult, McpError> {
     if args.kind != "route" {
         return Err(McpError::invalid_params(
-            format!("unsupported pattern kind '{}': only \"route\" is supported", args.kind),
+            format!(
+                "unsupported pattern kind '{}': only \"route\" is supported",
+                args.kind
+            ),
             None,
         ));
     }
@@ -78,8 +86,7 @@ pub async fn add_resolve_pattern(
     // Trigger a background re-index so the live graph reflects the new pattern.
     let mut job_id = None;
     if args.reindex {
-        if let Ok((id, _)) =
-            indexing::start_index_job(falkor_url, graph_key, jobs, &root, "").await
+        if let Ok((id, _)) = indexing::start_index_job(falkor_url, graph_key, jobs, &root, "").await
         {
             job_id = Some(id);
         }
@@ -113,5 +120,9 @@ pub async fn list_resolve_patterns(
 
 fn nonempty(s: &str) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() { None } else { Some(t.to_string()) }
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }

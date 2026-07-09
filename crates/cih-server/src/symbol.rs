@@ -63,10 +63,7 @@ pub async fn resolve_symbol(
 
 /// Find repo path: explicit `repo` arg → registry by name/path; or fallback to
 /// first registry entry whose `graph_key` matches the server's active key.
-pub fn find_repo_path(
-    repo: Option<&str>,
-    graph_key: &str,
-) -> std::result::Result<String, String> {
+pub fn find_repo_path(repo: Option<&str>, graph_key: &str) -> std::result::Result<String, String> {
     let reg = cih_core::Registry::load();
     if reg.entries.is_empty() {
         return Err("no repos in registry — run `cih-engine analyze <repo>` first".to_string());

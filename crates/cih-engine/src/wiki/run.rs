@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{bail, Context, Result};
-use cih_wiki::{
-    generate_wiki, ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary,
-    ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo,
-    WikiInput, WikiLlmInfo, WikiModuleTree,
-};
 use cih_wiki::features::group_communities_by_feature;
 use cih_wiki::graph::route_path;
+use cih_wiki::{
+    generate_wiki, ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary,
+    ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo, WikiInput,
+    WikiLlmInfo, WikiModuleTree,
+};
 
 use crate::llm::evidence::EvidenceCorpus;
 use crate::llm::{make_adapter, resolve_api_key, LlmProvider};
@@ -31,15 +31,16 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         repo,
         out,
         run_llm,
-        llm: crate::llm::LlmCallConfig {
-            provider: llm_provider,
-            base_url: llm_base_url,
-            model: llm_model,
-            api_key_env: llm_api_key_env,
-            max_tokens: llm_max_tokens,
-            timeout_secs: llm_timeout_secs,
-            retries: llm_retries,
-        },
+        llm:
+            crate::llm::LlmCallConfig {
+                provider: llm_provider,
+                base_url: llm_base_url,
+                model: llm_model,
+                api_key_env: llm_api_key_env,
+                max_tokens: llm_max_tokens,
+                timeout_secs: llm_timeout_secs,
+                retries: llm_retries,
+            },
         llm_provider_config,
         evidence_paths,
         llm_concurrency,
@@ -76,7 +77,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     if wiki_language.is_empty() {
         bail!("--wiki-language must not be empty (e.g. en, vi, ja, fr)");
     }
-    let effective_run_llm = run_llm || matches!(wiki_mode, WikiMode::LlmSummary | WikiMode::LlmFull);
+    let effective_run_llm =
+        run_llm || matches!(wiki_mode, WikiMode::LlmSummary | WikiMode::LlmFull);
     let llm_max_tokens = if wiki_mode == WikiMode::LlmFull {
         llm_max_tokens.max(2048)
     } else {
@@ -95,14 +97,32 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "starting wiki"
     );
 
-    let art = match load_wiki_artifacts(repo, out, grouping, &filter_community, max_communities, &filter_route)? {
+    let art = match load_wiki_artifacts(
+        repo,
+        out,
+        grouping,
+        &filter_community,
+        max_communities,
+        &filter_route,
+    )? {
         Some(a) => a,
         None => return Ok(()),
     };
     let super::config::WikiArtifacts {
-        nodes, edges, wiki_graph, community_nodes, community_edges,
-        community_version, graph_version, repo_map, unresolved_report,
-        out_dir, repo_name, bodies, file_dev_map, feature_of,
+        nodes,
+        edges,
+        wiki_graph,
+        community_nodes,
+        community_edges,
+        community_version,
+        graph_version,
+        repo_map,
+        unresolved_report,
+        out_dir,
+        repo_name,
+        bodies,
+        file_dev_map,
+        feature_of,
     } = art;
     let repo_name_display = repo_name.clone();
 
@@ -146,7 +166,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     let mut llm_info: Option<WikiLlmInfo> = None;
     let mut class_enrichment_store: Option<ClassEnrichmentStore> = None;
-#[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
+    #[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
     let (llm_summaries, controller_summaries): (
         Option<HashMap<String, CommunityLlmSummary>>,
         Option<HashMap<String, ControllerLlmSummary>>,
@@ -170,7 +190,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             &nodes,
             repo,
             prev_store,
-            adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
+            adapter
+                .as_ref()
+                .expect("LLM adapter set when run_llm is active")
+                .as_ref(),
             api_key.as_deref(),
             llm_model,
             llm_max_tokens,
@@ -180,7 +203,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             llm_dry_run || llm_debug_evidence,
             json,
             &filter_route[..],
-            pool.as_ref().expect("thread pool set when run_llm is active"),
+            pool.as_ref()
+                .expect("thread pool set when run_llm is active"),
         )?;
 
         tracing::info!(
@@ -216,8 +240,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 &wiki_graph,
                 repo,
                 &evidence_corpus,
-                pool.as_ref().expect("thread pool set when run_llm is active"),
-                llm_params.as_ref().expect("LLM params set when run_llm is active"),
+                pool.as_ref()
+                    .expect("thread pool set when run_llm is active"),
+                llm_params
+                    .as_ref()
+                    .expect("LLM params set when run_llm is active"),
                 json,
             )
         } else {
@@ -230,7 +257,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     } else if grouping == WikiGrouping::Llm {
         match crate::llm::grouping::propose_module_tree(
             &wiki_graph,
-            adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
+            adapter
+                .as_ref()
+                .expect("LLM adapter set when run_llm is active")
+                .as_ref(),
             api_key.as_deref(),
             llm_model,
             llm_max_tokens,
@@ -349,7 +379,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                     .collect()
             });
 
-        ui_feat.lock().expect("UI progress mutex poisoned").finish_phase();
+        ui_feat
+            .lock()
+            .expect("UI progress mutex poisoned")
+            .finish_phase();
 
         let mut map: HashMap<String, FeatureLlmSummary> = HashMap::new();
         for (feature, summary, ev_hash) in raw_features {
@@ -394,14 +427,29 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             })
             .map(|(handler, _)| handler.id.as_str().to_string())
             .collect();
-        if ids.is_empty() { None } else { Some(ids) }
+        if ids.is_empty() {
+            None
+        } else {
+            Some(ids)
+        }
     } else {
         None
     };
 
-    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if effective_run_llm && !llm_no_call {
-        let map = run_process_flow_enrichment(&wiki_graph, llm_params.as_ref().expect("LLM params set when run_llm is active"), json);
-        if map.is_empty() { None } else { Some(map) }
+    let flow_llm_map: Option<HashMap<String, FlowLlmSummary>> = if effective_run_llm && !llm_no_call
+    {
+        let map = run_process_flow_enrichment(
+            &wiki_graph,
+            llm_params
+                .as_ref()
+                .expect("LLM params set when run_llm is active"),
+            json,
+        );
+        if map.is_empty() {
+            None
+        } else {
+            Some(map)
+        }
     } else {
         None
     };
@@ -413,7 +461,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             let (route_flows, updates) = enrich_route_flows(
                 &wiki_graph,
                 route_flow_scope.as_ref(),
-                adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
+                adapter
+                    .as_ref()
+                    .expect("LLM adapter set when run_llm is active")
+                    .as_ref(),
                 api_key.as_deref(),
                 llm_model,
                 llm_max_tokens,
@@ -422,7 +473,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 wiki_language,
                 llm_dry_run,
                 &prev_flow_cache,
-                pool.as_ref().expect("thread pool set when run_llm is active"),
+                pool.as_ref()
+                    .expect("thread pool set when run_llm is active"),
             );
             flow_cache_updates = updates;
             map.extend(route_flows);
@@ -432,7 +484,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let (route_flows, updates) = enrich_route_flows(
             &wiki_graph,
             route_flow_scope.as_ref(),
-            adapter.as_ref().expect("LLM adapter set when run_llm is active").as_ref(),
+            adapter
+                .as_ref()
+                .expect("LLM adapter set when run_llm is active")
+                .as_ref(),
             api_key.as_deref(),
             llm_model,
             llm_max_tokens,
@@ -441,7 +496,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             wiki_language,
             llm_dry_run,
             &prev_flow_cache,
-            pool.as_ref().expect("thread pool set when run_llm is active"),
+            pool.as_ref()
+                .expect("thread pool set when run_llm is active"),
         );
         flow_cache_updates = updates;
         if route_flows.is_empty() {
@@ -457,7 +513,12 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let map: HashMap<String, String> = community_nodes
             .iter()
             .map(|comm| {
-                let pack = crate::llm::evidence::build_evidence_pack(Some(repo), &wiki_graph, comm, &evidence_corpus);
+                let pack = crate::llm::evidence::build_evidence_pack(
+                    Some(repo),
+                    &wiki_graph,
+                    comm,
+                    &evidence_corpus,
+                );
                 (comm.id.as_str().to_string(), pack.render())
             })
             .collect();

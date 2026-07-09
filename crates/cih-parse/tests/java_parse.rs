@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cih_core::{constructor_id, field_id, file_id, method_id, type_id, BindingKind, EdgeKind, RefKind};
+use cih_core::{
+    constructor_id, field_id, file_id, method_id, type_id, BindingKind, EdgeKind, RefKind,
+};
 use cih_parse::{parse_files, LanguageRegistry, ParseOutput};
 
 fn java_registry() -> LanguageRegistry {
@@ -161,9 +163,7 @@ class Inner {
     let controller = output
         .nodes
         .iter()
-        .find(|node| {
-            node.id == type_id(cih_core::NodeKind::Class, "com.example.OwnerController")
-        })
+        .find(|node| node.id == type_id(cih_core::NodeKind::Class, "com.example.OwnerController"))
         .unwrap();
     assert_eq!(
         controller
@@ -743,7 +743,9 @@ fn bare_get_mapping_emits_route_at_class_prefix() {
     let rel = "src/main/java/com/example/CartController.java";
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, r#"
+    fs::write(
+        &path,
+        r#"
 package com.example;
 @RestController
 @RequestMapping("/api/v1/cart")
@@ -757,7 +759,9 @@ public Object clearMyCart(@AuthenticationPrincipal UserDetails userDetails) { re
 @PostMapping("/items")
 public Object addItem(@AuthenticationPrincipal UserDetails userDetails, Object req) { return null; }
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
     fs::remove_dir_all(&root).unwrap();

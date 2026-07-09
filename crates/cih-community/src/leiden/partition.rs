@@ -30,7 +30,11 @@ impl Partition {
         let num_communities = if membership.is_empty() {
             0
         } else {
-            *membership.iter().max().expect("membership is non-empty (checked above)") + 1
+            *membership
+                .iter()
+                .max()
+                .expect("membership is non-empty (checked above)")
+                + 1
         };
         Self {
             community: membership,
@@ -41,7 +45,10 @@ impl Partition {
     /// Get the community ID of a node.
     #[inline]
     pub fn community_of(&self, node: usize) -> usize {
-        debug_assert!(node < self.community.len(), "node {node} out of partition bounds");
+        debug_assert!(
+            node < self.community.len(),
+            "node {node} out of partition bounds"
+        );
         self.community[node]
     }
 
@@ -73,7 +80,11 @@ impl Partition {
         if self.community.is_empty() {
             return vec![];
         }
-        let max_comm = *self.community.iter().max().expect("partition is non-empty (checked above)");
+        let max_comm = *self
+            .community
+            .iter()
+            .max()
+            .expect("partition is non-empty (checked above)");
         let mut sizes = vec![0usize; max_comm + 1];
         for &comm in &self.community {
             sizes[comm] += 1;

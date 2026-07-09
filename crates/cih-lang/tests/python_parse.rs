@@ -94,7 +94,10 @@ app = FastAPI()
 def livez():
     return {}
 "#;
-    assert_eq!(route_sources_for(src), vec![("/livez".to_string(), "fast_api".to_string())]);
+    assert_eq!(
+        route_sources_for(src),
+        vec![("/livez".to_string(), "fast_api".to_string())]
+    );
 }
 
 #[test]
@@ -108,7 +111,10 @@ app = Flask(__name__)
 def livez():
     return {}
 "#;
-    assert_eq!(route_sources_for(src), vec![("/livez".to_string(), "flask".to_string())]);
+    assert_eq!(
+        route_sources_for(src),
+        vec![("/livez".to_string(), "flask".to_string())]
+    );
 }
 
 #[test]
