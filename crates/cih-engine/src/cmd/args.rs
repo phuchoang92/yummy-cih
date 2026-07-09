@@ -607,4 +607,118 @@ mod tests {
             other => panic!("expected Analyze command, got {other:?}"),
         }
     }
+
+    #[test]
+    fn analyze_flags_and_shared_db_args_parse() {
+        let cli = Cli::try_parse_from([
+            "cih-engine",
+            "analyze",
+            "/r",
+            "--language",
+            "java,python",
+            "--skip-xml-integration",
+            "--no-load",
+            "--graph-key",
+            "k",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Analyze(a) => {
+                assert_eq!(a.languages, vec!["java", "python"], "comma-delimited");
+                assert!(a.skip_xml_integration);
+                assert!(a.db.no_load);
+                assert_eq!(a.db.graph_key.as_deref(), Some("k"));
+            }
+            other => panic!("expected Analyze, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discover_strategy_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "cih-engine",
+            "discover",
+            "/r",
+            "--community-strategy",
+            "graph",
+            "--feature-strategy",
+            "hybrid",
+            "--resolution",
+            "1.5",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Discover(a) => {
+                assert_eq!(a.community_strategy.as_deref(), Some("graph"));
+                assert_eq!(a.feature_strategy.as_deref(), Some("hybrid"));
+                assert_eq!(a.resolution, Some(1.5));
+            }
+            other => panic!("expected Discover, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wiki_llm_and_alias_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "cih-engine",
+            "wiki",
+            "/r",
+            "--llm-enrich", // deprecated alias for --llm
+            "--wiki-mode",
+            "llm-full",
+            "--filter-community",
+            "payment",
+            "--filter-community",
+            "order",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Wiki(a) => {
+                assert!(a.llm_enrich);
+                assert_eq!(a.wiki_mode.as_deref(), Some("llm-full"));
+                assert_eq!(a.filter_community, vec!["payment", "order"], "repeatable");
+            }
+            other => panic!("expected Wiki, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn taint_negation_flags_default_true_and_flip_false() {
+        // Default (no flags): all phases on.
+        let on = Cli::try_parse_from(["cih-engine", "taint", "/r"]).unwrap();
+        match on.command {
+            Command::Taint(a) => {
+                assert!(a.intra_proc && a.cfg && a.pdg, "phases default on");
+            }
+            other => panic!("expected Taint, got {other:?}"),
+        }
+        // --no-pdg flips just that phase off.
+        let off = Cli::try_parse_from(["cih-engine", "taint", "/r", "--no-pdg"]).unwrap();
+        match off.command {
+            Command::Taint(a) => {
+                assert!(a.intra_proc && a.cfg && !a.pdg);
+            }
+            other => panic!("expected Taint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_args_parse() {
+        let cli = Cli::try_parse_from([
+            "cih-engine",
+            "start",
+            "--repo",
+            "/svc",
+            "--non-interactive",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Start(a) => {
+                assert_eq!(a.repo.as_deref(), Some(std::path::Path::new("/svc")));
+                assert!(a.non_interactive && a.dry_run);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
 }

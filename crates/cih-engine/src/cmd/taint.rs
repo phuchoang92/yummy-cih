@@ -47,6 +47,40 @@ struct PdgStats {
     ir_unavailable: usize,
 }
 
+/// Fold Phase-3 PDG refinements into the path scores and stats.
+///
+/// "IR unavailable" means the source file could not be read or parsed —
+/// detected via the pdg_clean/confirmed/conditional fields rather than a
+/// float equality check on confidence_multiplier (which would misfire if a
+/// future neutral multiplier of 1.0 is ever added).
+///
+/// Confidence is applied against the Phase-0 `baseline`, not the
+/// Phase-1-modified score, so the two phases score independently rather
+/// than compounding.
+fn apply_pdg_refinements(
+    paths: &mut [TaintPath],
+    baseline: &[f32],
+    refinements: &[cih_taint::flow_sensitive::PdgRefinement],
+    stats: &mut PdgStats,
+) {
+    for r in refinements {
+        if !r.pdg_confirmed && !r.pdg_conditional && !r.pdg_clean {
+            stats.ir_unavailable += 1;
+            continue;
+        }
+        stats.methods_analyzed += 1;
+        if r.pdg_confirmed {
+            stats.confirmed_sinks += 1;
+        }
+        if r.pdg_conditional {
+            stats.conditional_sinks += 1;
+        }
+        if let Some(p) = paths.get_mut(r.path_index) {
+            p.confidence = (baseline[r.path_index] * r.confidence_multiplier).clamp(0.0, 1.0);
+        }
+    }
+}
+
 pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let span = tracing::info_span!("taint", repo = %repo.display());
     let _enter = span.enter();
@@ -181,29 +215,12 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
             &sanitizer_patterns,
         );
 
-        for r in &refinements {
-            // "IR unavailable" means the source file could not be read or parsed.
-            // Detect it via the pdg_clean/confirmed/conditional fields rather than a
-            // float equality check on confidence_multiplier (which would misfire if a
-            // future neutral multiplier of 1.0 is ever added).
-            if !r.pdg_confirmed && !r.pdg_conditional && !r.pdg_clean {
-                pdg_stats.ir_unavailable += 1;
-                continue;
-            }
-            pdg_stats.methods_analyzed += 1;
-            if r.pdg_confirmed {
-                pdg_stats.confirmed_sinks += 1;
-            }
-            if r.pdg_conditional {
-                pdg_stats.conditional_sinks += 1;
-            }
-            // Apply Phase 3 against the Phase-0 baseline, not the Phase-1-modified score,
-            // so the two phases score independently rather than compounding.
-            if let Some(p) = paths.get_mut(r.path_index) {
-                p.confidence =
-                    (original_confidence[r.path_index] * r.confidence_multiplier).clamp(0.0, 1.0);
-            }
-        }
+        apply_pdg_refinements(
+            &mut paths,
+            &original_confidence,
+            &refinements,
+            &mut pdg_stats,
+        );
 
         ui.finish_with(format!(
             "{} PDG confirmed, {} conditional",
@@ -430,5 +447,91 @@ fn short_name(node_id: &str) -> String {
         format!("{class}#{method}")
     } else {
         without_prefix.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_taint::flow_sensitive::PdgRefinement;
+    use cih_taint::SinkCategory;
+
+    fn path(confidence: f32) -> TaintPath {
+        TaintPath {
+            source: NodeId::new("Method:com.acme.A#a/0"),
+            sink_method: NodeId::new("Method:com.acme.B#b/1"),
+            hops: vec![
+                NodeId::new("Method:com.acme.A#a/0"),
+                NodeId::new("Method:com.acme.B#b/1"),
+            ],
+            category: SinkCategory::Sql,
+            confidence,
+        }
+    }
+
+    fn refinement(idx: usize) -> PdgRefinement {
+        PdgRefinement {
+            path_index: idx,
+            pdg_confirmed: false,
+            pdg_conditional: false,
+            pdg_clean: false,
+            confidence_multiplier: 1.0,
+        }
+    }
+
+    #[test]
+    fn pdg_applies_multiplier_against_phase0_baseline_not_phase1() {
+        // Phase 1 already penalised the path 0.8 -> 0.48; Phase 3 must scale
+        // the 0.8 baseline, not compound onto 0.48.
+        let mut paths = vec![path(0.48)];
+        let baseline = vec![0.8];
+        let mut stats = PdgStats::default();
+        let r = PdgRefinement {
+            pdg_confirmed: true,
+            confidence_multiplier: 1.2,
+            ..refinement(0)
+        };
+        apply_pdg_refinements(&mut paths, &baseline, &[r], &mut stats);
+        assert!((paths[0].confidence - 0.96).abs() < 1e-6);
+        assert_eq!(stats.confirmed_sinks, 1);
+        assert_eq!(stats.methods_analyzed, 1);
+    }
+
+    #[test]
+    fn pdg_confidence_clamps_to_unit_interval() {
+        let mut paths = vec![path(0.9)];
+        let mut stats = PdgStats::default();
+        let r = PdgRefinement {
+            pdg_confirmed: true,
+            confidence_multiplier: 2.0,
+            ..refinement(0)
+        };
+        apply_pdg_refinements(&mut paths, &[0.9], &[r], &mut stats);
+        assert_eq!(paths[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn pdg_ir_unavailable_counts_without_touching_confidence() {
+        // All three outcome flags false = IR unavailable.
+        let mut paths = vec![path(0.7)];
+        let mut stats = PdgStats::default();
+        apply_pdg_refinements(&mut paths, &[0.7], &[refinement(0)], &mut stats);
+        assert_eq!(stats.ir_unavailable, 1);
+        assert_eq!(stats.methods_analyzed, 0);
+        assert_eq!(paths[0].confidence, 0.7);
+    }
+
+    #[test]
+    fn pdg_conditional_counts_and_penalises() {
+        let mut paths = vec![path(0.7)];
+        let mut stats = PdgStats::default();
+        let r = PdgRefinement {
+            pdg_conditional: true,
+            confidence_multiplier: 0.6,
+            ..refinement(0)
+        };
+        apply_pdg_refinements(&mut paths, &[0.7], &[r], &mut stats);
+        assert_eq!(stats.conditional_sinks, 1);
+        assert!((paths[0].confidence - 0.42).abs() < 1e-6);
     }
 }

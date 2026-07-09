@@ -80,3 +80,45 @@ fn is_trivial_getter_body(t: &str) -> bool {
     // (bare variable returns can carry domain meaning like "return order").
     (t.starts_with("return this.") && t.ends_with(';') && !t.contains('(')) || t == "return this;"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::strip_java_body;
+
+    #[test]
+    fn strips_logging_calls() {
+        let src = "log.debug(\"x\");\nint y = compute();\nlogger.info(\"done\");";
+        assert_eq!(strip_java_body(src), "int y = compute();");
+    }
+
+    #[test]
+    fn strips_null_guard_throws() {
+        let src = "if (order == null) throw new NullPointerException();\nprocess(order);";
+        assert_eq!(strip_java_body(src), "process(order);");
+    }
+
+    #[test]
+    fn strips_trivial_this_getter_and_super_delegation() {
+        assert_eq!(strip_java_body("super();"), "");
+        assert_eq!(strip_java_body("return this.name;"), "");
+        assert_eq!(strip_java_body("return this;"), "");
+    }
+
+    #[test]
+    fn preserves_domain_bearing_lines() {
+        // A bare-variable return can carry meaning; a method call is not a getter.
+        assert_eq!(strip_java_body("return order;"), "return order;");
+        assert_eq!(
+            strip_java_body("return this.calculate();"),
+            "return this.calculate();"
+        );
+        // Blank lines are structure, not noise.
+        assert_eq!(strip_java_body("a();\n\nb();"), "a();\n\nb();");
+    }
+
+    #[test]
+    fn strips_nothing_from_pure_domain_body() {
+        let src = "BigDecimal total = price.multiply(qty);\nreturn total;";
+        assert_eq!(strip_java_body(src), src);
+    }
+}
