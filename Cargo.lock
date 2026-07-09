@@ -574,6 +574,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "petgraph",
+ "rayon",
  "rustc-hash",
  "serde",
  "serde_json",
