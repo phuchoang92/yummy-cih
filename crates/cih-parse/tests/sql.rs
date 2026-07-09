@@ -127,7 +127,10 @@ fn insert_select_writes_target_reads_source() {
     let r = reads(sql);
     assert!(w.contains(&"DEST_TABLE".to_string()), "got writes: {w:?}");
     assert!(r.contains(&"SRC_TABLE".to_string()), "got reads: {r:?}");
-    assert!(!r.contains(&"DEST_TABLE".to_string()), "target must not be a read");
+    assert!(
+        !r.contains(&"DEST_TABLE".to_string()),
+        "target must not be a read"
+    );
 }
 
 #[test]

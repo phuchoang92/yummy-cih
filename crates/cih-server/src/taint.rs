@@ -64,11 +64,15 @@ fn resolve_repo(repo: &str, graph_key: &str) -> Result<(String, String), String>
         return Err("no repos in registry — run `cih-engine analyze <repo>` first".to_string());
     }
     let entry = if repo.is_empty() {
-        reg.entries.iter().find(|e| e.graph_key == graph_key).ok_or_else(|| {
-            format!("no repo registered for graph_key '{graph_key}'; pass `repo` explicitly")
-        })?
+        reg.entries
+            .iter()
+            .find(|e| e.graph_key == graph_key)
+            .ok_or_else(|| {
+                format!("no repo registered for graph_key '{graph_key}'; pass `repo` explicitly")
+            })?
     } else {
-        reg.find(repo).ok_or_else(|| format!("repo '{repo}' not in registry"))?
+        reg.find(repo)
+            .ok_or_else(|| format!("repo '{repo}' not in registry"))?
     };
     Ok((entry.path.clone(), entry.artifacts_dir.clone()))
 }
@@ -77,10 +81,13 @@ pub async fn taint_paths(
     graph_key: &str,
     args: TaintPathsArgs,
 ) -> Result<CallToolResult, McpError> {
-    let category =
-        parse_category(&args.category).map_err(|e| McpError::invalid_params(e, None))?;
+    let category = parse_category(&args.category).map_err(|e| McpError::invalid_params(e, None))?;
     let min_confidence = args.min_confidence.clamp(0.0, 1.0);
-    let limit = if args.limit == 0 { DEFAULT_LIMIT } else { args.limit.min(MAX_LIMIT) };
+    let limit = if args.limit == 0 {
+        DEFAULT_LIMIT
+    } else {
+        args.limit.min(MAX_LIMIT)
+    };
     let refine = args.refine;
 
     let (repo_path, artifacts_dir) =
@@ -89,7 +96,14 @@ pub async fn taint_paths(
     // The analysis is synchronous and CPU-bound (and reads source files when
     // refining) — keep it off the async runtime threads.
     let out = tokio::task::spawn_blocking(move || {
-        run_and_shape(&repo_path, &artifacts_dir, category, min_confidence, refine, limit)
+        run_and_shape(
+            &repo_path,
+            &artifacts_dir,
+            category,
+            min_confidence,
+            refine,
+            limit,
+        )
     })
     .await
     .map_err(|e| McpError::internal_error(format!("taint task panicked: {e}"), None))??;
@@ -131,9 +145,15 @@ fn run_and_shape(
         rules: &rules,
         resolve_source: Box::new(move |file| std::fs::read_to_string(repo.join(file)).ok()),
         node_file: Box::new(|id| {
-            node_meta.get(id.as_str()).map(|(file, _)| (*file).to_string())
+            node_meta
+                .get(id.as_str())
+                .map(|(file, _)| (*file).to_string())
         }),
-        phases: TaintPhaseConfig { run_intra_proc: refine, run_cfg: refine, run_pdg: refine },
+        phases: TaintPhaseConfig {
+            run_intra_proc: refine,
+            run_cfg: refine,
+            run_pdg: refine,
+        },
     })
     .map_err(|e| McpError::internal_error(format!("taint analysis failed: {e}"), None))?;
 
@@ -217,7 +237,12 @@ mod tests {
             name: id.rsplit('#').next().unwrap_or(id).to_string(),
             qualified_name: None,
             file: file.to_string(),
-            range: Range { start_line: line, start_col: 0, end_line: line + 10, end_col: 0 },
+            range: Range {
+                start_line: line,
+                start_col: 0,
+                end_line: line + 10,
+                end_col: 0,
+            },
             props: None,
         }
     }
@@ -239,7 +264,11 @@ mod tests {
     fn write_fixture(dir: &std::path::Path) {
         std::fs::create_dir_all(dir).unwrap();
         let nodes = [
-            method(CONTROLLER, "src/main/java/com/acme/OrderController.java", 42),
+            method(
+                CONTROLLER,
+                "src/main/java/com/acme/OrderController.java",
+                42,
+            ),
             method(SERVICE, "src/main/java/com/acme/OrderService.java", 10),
             method(DAO, "src/main/java/com/acme/OrderDao.java", 21),
             method(EXEC_HELPER, "src/main/java/com/acme/ShellRunner.java", 7),
@@ -248,14 +277,26 @@ mod tests {
             edge(CONTROLLER, "Route:POST /api/orders", EdgeKind::HandlesRoute),
             edge(CONTROLLER, SERVICE, EdgeKind::Calls),
             edge(SERVICE, DAO, EdgeKind::Calls),
-            edge(DAO, "Method:java.sql.Statement#executeQuery/1", EdgeKind::Calls),
+            edge(
+                DAO,
+                "Method:java.sql.Statement#executeQuery/1",
+                EdgeKind::Calls,
+            ),
             edge(CONTROLLER, EXEC_HELPER, EdgeKind::Calls),
-            edge(EXEC_HELPER, "Method:java.lang.Runtime#exec/1", EdgeKind::Calls),
+            edge(
+                EXEC_HELPER,
+                "Method:java.lang.Runtime#exec/1",
+                EdgeKind::Calls,
+            ),
         ];
-        let nodes_jsonl: String =
-            nodes.iter().map(|n| serde_json::to_string(n).unwrap() + "\n").collect();
-        let edges_jsonl: String =
-            edges.iter().map(|e| serde_json::to_string(e).unwrap() + "\n").collect();
+        let nodes_jsonl: String = nodes
+            .iter()
+            .map(|n| serde_json::to_string(n).unwrap() + "\n")
+            .collect();
+        let edges_jsonl: String = edges
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap() + "\n")
+            .collect();
         std::fs::write(dir.join("nodes.jsonl"), nodes_jsonl).unwrap();
         std::fs::write(dir.join("edges.jsonl"), edges_jsonl).unwrap();
     }
@@ -283,16 +324,27 @@ mod tests {
         assert_eq!(out.total_found, 2);
         assert_eq!(out.returned, 2);
 
-        let sql = out.paths.iter().find(|p| p.category == "sql").expect("sql path");
+        let sql = out
+            .paths
+            .iter()
+            .find(|p| p.category == "sql")
+            .expect("sql path");
         assert_eq!(sql.source, CONTROLLER);
         assert_eq!(sql.sink_method, DAO);
         assert_eq!(sql.hops, vec![CONTROLLER, SERVICE, DAO]);
         assert_eq!(sql.hop_count, 2);
         assert_eq!(sql.severity, "high");
-        assert_eq!(sql.file.as_deref(), Some("src/main/java/com/acme/OrderController.java"));
+        assert_eq!(
+            sql.file.as_deref(),
+            Some("src/main/java/com/acme/OrderController.java")
+        );
         assert_eq!(sql.line, Some(42));
 
-        let exec = out.paths.iter().find(|p| p.category == "exec").expect("exec path");
+        let exec = out
+            .paths
+            .iter()
+            .find(|p| p.category == "exec")
+            .expect("exec path");
         assert_eq!(exec.sink_method, EXEC_HELPER);
         assert_eq!(exec.hop_count, 1);
     }
@@ -321,7 +373,11 @@ mod tests {
     fn min_confidence_above_all_paths_returns_none() {
         let dir = fixture_dir("confidence");
         let all = run(&dir, None, 0.0, 50);
-        let max_conf = all.paths.iter().map(|p| p.confidence).fold(0.0_f32, f32::max);
+        let max_conf = all
+            .paths
+            .iter()
+            .map(|p| p.confidence)
+            .fold(0.0_f32, f32::max);
         assert!(max_conf > 0.0);
         let none = run(&dir, None, (max_conf + 0.01).min(1.0), 50);
         assert_eq!(none.returned, 0);
@@ -333,7 +389,11 @@ mod tests {
         let dir = std::env::temp_dir().join("cih-server-taint-test-missing-nothing-here");
         let dir = dir.to_str().unwrap();
         let err = run_and_shape(dir, dir, None, 0.0, false, 50).unwrap_err();
-        assert!(err.message.contains("cih-engine analyze"), "unexpected error: {}", err.message);
+        assert!(
+            err.message.contains("cih-engine analyze"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[test]

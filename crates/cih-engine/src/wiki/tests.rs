@@ -1,6 +1,6 @@
-use super::flow_enrich::{enrich_route_flows, parse_flow_summary};
-use super::config::fnv64;
+use super::flow_enrich::enrich_route_flows;
 use crate::llm::{LlmRequest, LlmResponse};
+use anyhow::Result;
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 use cih_wiki::{FlowCacheEntry, WikiGraph};
 use std::collections::{BTreeMap, VecDeque};
@@ -8,7 +8,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering as AOrdering},
     Mutex,
 };
-use anyhow::Result;
 
 struct MockLlm {
     responses: Mutex<VecDeque<Result<String>>>,
@@ -16,7 +15,10 @@ struct MockLlm {
 }
 impl MockLlm {
     fn new(responses: Vec<Result<String>>) -> Self {
-        Self { responses: Mutex::new(responses.into()), calls: AtomicUsize::new(0) }
+        Self {
+            responses: Mutex::new(responses.into()),
+            calls: AtomicUsize::new(0),
+        }
     }
 }
 impl crate::llm::LlmAdapter for MockLlm {
@@ -87,29 +89,72 @@ fn flow_cache_hit_skips_llm_on_second_call() {
 
     let adapter1 = MockLlm::new(vec![Ok(flow_response.clone())]);
     let empty_cache = BTreeMap::new();
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     let (summaries1, updates1) = enrich_route_flows(
-        &graph, None, &adapter1, None, "model", 1000, 30, 0, "en", false,
-        &empty_cache, &pool,
+        &graph,
+        None,
+        &adapter1,
+        None,
+        "model",
+        1000,
+        30,
+        0,
+        "en",
+        false,
+        &empty_cache,
+        &pool,
     );
-    assert_eq!(adapter1.calls.load(AOrdering::SeqCst), 1, "first run must call LLM");
+    assert_eq!(
+        adapter1.calls.load(AOrdering::SeqCst),
+        1,
+        "first run must call LLM"
+    );
     assert!(summaries1.contains_key(handler_id));
     assert_eq!(updates1.len(), 1);
 
     let mut flow_cache: BTreeMap<String, FlowCacheEntry> = BTreeMap::new();
     for (id, ev_hash, summary) in updates1 {
-        flow_cache.insert(id, FlowCacheEntry { evidence_hash: ev_hash, summary });
+        flow_cache.insert(
+            id,
+            FlowCacheEntry {
+                evidence_hash: ev_hash,
+                summary,
+            },
+        );
     }
 
     let adapter2 = MockLlm::new(vec![]);
     let (summaries2, updates2) = enrich_route_flows(
-        &graph, None, &adapter2, None, "model", 1000, 30, 0, "en", false,
-        &flow_cache, &pool,
+        &graph,
+        None,
+        &adapter2,
+        None,
+        "model",
+        1000,
+        30,
+        0,
+        "en",
+        false,
+        &flow_cache,
+        &pool,
     );
-    assert_eq!(adapter2.calls.load(AOrdering::SeqCst), 0, "second run must hit cache");
+    assert_eq!(
+        adapter2.calls.load(AOrdering::SeqCst),
+        0,
+        "second run must hit cache"
+    );
     assert!(summaries2.contains_key(handler_id));
-    assert_eq!(summaries2[handler_id].narrative, summaries1[handler_id].narrative);
-    assert!(updates2.is_empty(), "cache hit must not produce new updates");
+    assert_eq!(
+        summaries2[handler_id].narrative,
+        summaries1[handler_id].narrative
+    );
+    assert!(
+        updates2.is_empty(),
+        "cache hit must not produce new updates"
+    );
 }
 
 #[test]
@@ -139,14 +184,33 @@ fn flow_cache_miss_on_changed_call_chain() {
 
     let adapter1 = MockLlm::new(vec![Ok(flow_json("Lists orders."))]);
     let empty_cache = BTreeMap::new();
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     let (_, updates1) = enrich_route_flows(
-        &graph_v1, None, &adapter1, None, "model", 1000, 30, 0, "en", false,
-        &empty_cache, &pool,
+        &graph_v1,
+        None,
+        &adapter1,
+        None,
+        "model",
+        1000,
+        30,
+        0,
+        "en",
+        false,
+        &empty_cache,
+        &pool,
     );
     let mut flow_cache: BTreeMap<String, FlowCacheEntry> = BTreeMap::new();
     for (id, ev_hash, summary) in updates1 {
-        flow_cache.insert(id, FlowCacheEntry { evidence_hash: ev_hash, summary });
+        flow_cache.insert(
+            id,
+            FlowCacheEntry {
+                evidence_hash: ev_hash,
+                summary,
+            },
+        );
     }
 
     let nodes_v2 = vec![
@@ -170,9 +234,23 @@ fn flow_cache_miss_on_changed_call_chain() {
 
     let adapter2 = MockLlm::new(vec![Ok(flow_json("Lists orders with count."))]);
     let (summaries2, _) = enrich_route_flows(
-        &graph_v2, None, &adapter2, None, "model", 1000, 30, 0, "en", false,
-        &flow_cache, &pool,
+        &graph_v2,
+        None,
+        &adapter2,
+        None,
+        "model",
+        1000,
+        30,
+        0,
+        "en",
+        false,
+        &flow_cache,
+        &pool,
     );
-    assert_eq!(adapter2.calls.load(AOrdering::SeqCst), 1, "cache miss must call LLM");
+    assert_eq!(
+        adapter2.calls.load(AOrdering::SeqCst),
+        1,
+        "cache miss must call LLM"
+    );
     assert!(summaries2.contains_key(handler_id));
 }

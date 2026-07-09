@@ -7,9 +7,9 @@ mod flow_enrich;
 mod loader;
 mod run;
 
+pub use crate::llm::{LlmCallConfig, LlmProvider};
 pub use class_enrich::enrich_classes_for_chains;
 pub use config::{WikiConfig, WikiGrouping, WikiMode};
-pub use crate::llm::{LlmCallConfig, LlmProvider};
 pub use feature_enrich::{
     build_feature_evidence, build_feature_user_prompt, cached_feature_summary, enrich_one_feature,
     parse_feature_summary, retain_matching_feature_groups,
@@ -20,4 +20,3 @@ pub use run::run_wiki;
 
 #[cfg(test)]
 mod tests;
-

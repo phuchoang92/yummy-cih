@@ -36,6 +36,7 @@ pub fn parse_scala_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
                   nodes, edges, defs, imports, sites))
 }
 
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)] // walker signature; `sites` reserved for reference-site collection
 fn walk(
     parent: TsNode<'_>, src: &str, rel: &str, pkg: &str,
     file_node_id: &cih_core::NodeId, owner_fqcn: Option<&str>,

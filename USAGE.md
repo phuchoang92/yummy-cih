@@ -635,6 +635,16 @@ Server environment variables:
 | `CIH_GRAPH_KEY` | `cih` | Graph name/key |
 | `CIH_ARTIFACTS_DIR` | unset | Artifacts root for BM25 query fallback |
 | `CIH_PG_URL` | unset | PostgreSQL pgvector URL for semantic search |
+| `CIH_MAX_CONCURRENT_QUERIES` | `64` | Max concurrent Cypher queries (backpressure); set ≈ FalkorDB `THREAD_COUNT` |
+| `CIH_QUERY_QUEUE_TIMEOUT_MS` | `5000` | Max wait for a query slot before shedding with an "overloaded" error |
+
+Under concurrent multi-client load the server reuses a single auto-reconnecting
+FalkorDB connection (no per-query connection churn) and caps in-flight Cypher
+queries at `CIH_MAX_CONCURRENT_QUERIES`. Excess requests wait up to
+`CIH_QUERY_QUEUE_TIMEOUT_MS` for a slot, then fail fast with a retryable
+overloaded error rather than piling onto FalkorDB. FalkorDB executes each
+`GRAPH.QUERY` on its own thread pool (`THREAD_COUNT`, default = cores), so
+setting the client cap near that value gives the best throughput.
 
 Available MCP tools:
 

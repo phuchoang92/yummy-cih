@@ -1,10 +1,10 @@
 pub mod anthropic;
 pub mod bedrock;
-pub mod prompts;
 pub mod evidence;
 pub mod grouping;
 pub mod http_json;
 pub mod openai;
+pub mod prompts;
 
 use std::path::Path;
 
@@ -104,7 +104,9 @@ pub fn make_adapter(
         LlmProvider::OpenAiCompatible => Ok(Box::new(openai::OpenAiAdapter::new(base_url))),
         LlmProvider::Anthropic => Ok(Box::new(anthropic::AnthropicAdapter::new(base_url))),
         LlmProvider::Bedrock => Ok(Box::new(bedrock::BedrockAdapter::new(base_url))),
-        LlmProvider::DeepSeek => Ok(Box::new(openai::OpenAiAdapter::new("https://api.deepseek.com"))),
+        LlmProvider::DeepSeek => Ok(Box::new(openai::OpenAiAdapter::new(
+            "https://api.deepseek.com",
+        ))),
         LlmProvider::Gemini => Ok(Box::new(openai::OpenAiAdapter::new(
             "https://generativelanguage.googleapis.com/v1beta/openai",
         ))),
@@ -122,8 +124,7 @@ pub fn validate_base_url(url: &str) -> Result<()> {
     if url.starts_with("https://") {
         return Ok(());
     }
-    if url.starts_with("http://") {
-        let rest = &url["http://".len()..];
+    if let Some(rest) = url.strip_prefix("http://") {
         let authority = rest.split('/').next().unwrap_or("");
         // IPv6 literal: http://[::1]:5000 → strip brackets to get ::1
         let host = if authority.starts_with('[') {

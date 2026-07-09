@@ -80,30 +80,34 @@ limitations are in `docs/ARCHITECTURE.md`.
 
 ## Developing CIH itself
 
-**Layout.** ~16 crates under `crates/`; two binaries: `cih-engine` (CLI — the
-`scan → parse → resolve → load → discover → embed → wiki` pipeline, writes `.cih/`
-artifacts) and `cih-server` (the MCP server, streamable HTTP via rmcp 0.7). MCP tools
-live in `crates/cih-server/src/main.rs`; the graph store trait is `cih-graph-store`
-with the `cih-falkor` adapter.
+**Layout.** ~16 crates under `crates/`; two binaries, both thin shims over their
+library crates: `cih-engine` (CLI — the `scan → parse → resolve → load → discover
+→ embed → wiki` pipeline, writes `.cih/` artifacts; clap surface + all command
+implementations live in `crates/cih-engine/src/cmd/`, per-command settings
+resolution in `settings.rs`) and `cih-server` (the MCP server, streamable HTTP via
+rmcp 0.7; tools in `crates/cih-server/src/app.rs`). The graph store trait is
+`cih-graph-store` with the `cih-falkor` adapter.
 
 **Build/test.** `cargo build`, `cargo test --workspace`. Workspace tests are hermetic
 — no FalkorDB/Postgres needed (integration paths use artifact fixtures). Local services
 when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgres on
 5433 → `FALKOR_URL=redis://127.0.0.1:6380`.
 
-**Lint gate** (`.github/workflows/ci.yml`). Blocking: clippy `-D warnings` on the
-backend crates only (`cih-core`, `cih-graph-store`, `cih-falkor`, `cih-taint`) plus
-`cargo test --workspace`. Non-blocking (documented TODOs): `cargo fmt` (the tree
-predates a fmt pass) and clippy on the rest — notably `cih-server` still carries a
-lib/bin module-duplication backlog and dead UI code (`browser.rs`, `layout.rs`), so
-warnings there are expected. Keep new code in the gated crates warning-clean.
+**Lint gate** (`.github/workflows/ci.yml`). Blocking: `cargo clippy --workspace
+--all-targets -- -D warnings` plus `cargo test --workspace` — keep the whole tree
+warning-clean, and `cargo fmt --all --check` (the tree is fmt-normalized).
+Note: `browser.rs`/`layout.rs` in cih-server are the live graph-browser UI served at
+`/graph` (tested by `tests/browser.rs`) — not dead code. Both binaries are thin
+shims: server logic lives in `cih_server` (`src/app.rs`), engine modules in
+`cih_engine` (used by `main.rs` via `use cih_engine::…`).
 
 **Config files** (per-repo, at the target repo root): `cih.toml` (analyze/discover/wiki
 option defaults — layered flag > env > repo `cih.toml` > `~/.cih/config.toml` > default;
 `cih config init`/`show` manage it), `cih.scope.toml` (analyze scope), `cih.taint.toml`
 (taint rules), `cih.decompile.toml` (decompile). `.env` holds infra + LLM keys. Adding a
-new persisted option means making its clap flag `Option<T>`, adding it to
-`crates/cih-engine/src/settings.rs`, and resolving it at the dispatch arm.
+new persisted option means making its clap flag `Option<T>` (in
+`crates/cih-engine/src/cmd/args.rs`), adding it to the settings schema and the
+matching `resolve_*` function in `crates/cih-engine/src/settings.rs`.
 
 **Conventions.**
 - Write implementation plans as markdown in `docs/plans/`; parser assumptions/known

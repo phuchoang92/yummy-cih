@@ -1,6 +1,6 @@
-use cih_core::SymbolDef;
-use crate::common::index::CommonIndex;
 use super::{InheritanceModel, LanguageResolver};
+use crate::index::ResolveIndex;
+use cih_core::SymbolDef;
 
 pub struct RubyResolver;
 
@@ -21,21 +21,21 @@ impl LanguageResolver for RubyResolver {
         &self,
         _keyword: &str,
         in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         // Ruby FQCN: "ClassName.method_name" — strip method
-        in_fqcn.rsplitn(2, '.').nth(1).map(str::to_string)
+        in_fqcn.rsplit_once('.').map(|(owner, _)| owner.to_string())
     }
 
-    fn inheritance_model(&self) -> InheritanceModel {
-        InheritanceModel::None
+    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
+        None
     }
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
-        None
+    fn inheritance_model(&self) -> InheritanceModel {
+        InheritanceModel::None
     }
 }

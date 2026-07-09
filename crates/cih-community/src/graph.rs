@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
 
@@ -12,8 +12,8 @@ pub fn build_community_graph(
     edges: &[Edge],
     large: bool,
     min_confidence: f32,
-) -> (UnGraph<NodeId, f32>, HashMap<NodeId, NodeIndex>) {
-    let eligible: HashSet<NodeId> = nodes
+) -> (UnGraph<NodeId, f32>, FxHashMap<NodeId, NodeIndex>) {
+    let eligible: FxHashSet<NodeId> = nodes
         .iter()
         .filter(|n| is_community_symbol(n.kind))
         .map(|n| n.id.clone())
@@ -22,7 +22,7 @@ pub fn build_community_graph(
     // Collect once; reuse for both the degree pass (large mode) and graph build.
     let comm_edges: Vec<&Edge> = community_edges(edges, min_confidence, large).collect();
 
-    let mut degree: HashMap<NodeId, usize> = HashMap::new();
+    let mut degree: FxHashMap<NodeId, usize> = FxHashMap::default();
     if large {
         for edge in &comm_edges {
             if edge.src != edge.dst && eligible.contains(&edge.src) && eligible.contains(&edge.dst)
@@ -34,7 +34,7 @@ pub fn build_community_graph(
     }
 
     let mut graph = UnGraph::<NodeId, f32>::new_undirected();
-    let mut index = HashMap::new();
+    let mut index = FxHashMap::default();
     for node in nodes.iter().filter(|n| is_community_symbol(n.kind)) {
         if large && degree.get(&node.id).copied().unwrap_or(0) <= 1 {
             continue;

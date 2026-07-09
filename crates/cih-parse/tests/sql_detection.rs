@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cih_parse::{parse_files, LanguageRegistry};
 
@@ -9,14 +9,21 @@ fn java_registry() -> LanguageRegistry {
 }
 
 fn temp_repo() -> PathBuf {
+    // pid + atomic counter: parallel tests in one binary share a pid and can
+    // race to the same SystemTime nanos, so a timestamp alone collides.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("cih-parse-test-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "cih-parse-test-{}-{seq}-{nanos}",
+        std::process::id()
+    ))
 }
 
-fn write_file(root: &PathBuf, rel: &str, content: &str) {
+fn write_file(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, content).unwrap();

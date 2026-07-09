@@ -1,7 +1,9 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use cih_core::{constructor_id, field_id, file_id, method_id, type_id, BindingKind, EdgeKind, RefKind};
+use cih_core::{
+    constructor_id, field_id, file_id, method_id, type_id, BindingKind, EdgeKind, RefKind,
+};
 use cih_parse::{parse_files, LanguageRegistry, ParseOutput};
 
 fn java_registry() -> LanguageRegistry {
@@ -11,14 +13,21 @@ fn java_registry() -> LanguageRegistry {
 }
 
 fn temp_repo() -> PathBuf {
+    // pid + atomic counter: parallel tests in one binary share a pid and can
+    // race to the same SystemTime nanos, so a timestamp alone collides.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("cih-parse-test-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "cih-parse-test-{}-{seq}-{nanos}",
+        std::process::id()
+    ))
 }
 
-fn write_file(root: &PathBuf, rel: &str, content: &str) {
+fn write_file(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
@@ -154,9 +163,7 @@ class Inner {
     let controller = output
         .nodes
         .iter()
-        .find(|node| {
-            node.id == type_id(cih_core::NodeKind::Class, "com.example.OwnerController")
-        })
+        .find(|node| node.id == type_id(cih_core::NodeKind::Class, "com.example.OwnerController"))
         .unwrap();
     assert_eq!(
         controller
@@ -632,7 +639,7 @@ fn name_suffix_fallback_stereotypes() {
         let root = temp_repo();
         let rel = format!("src/main/java/com/example/{class_name}.java");
         write_file(&root, &rel, src);
-        let output = parse_files(&root, &[rel.clone()], &java_registry()).unwrap();
+        let output = parse_files(&root, std::slice::from_ref(&rel), &java_registry()).unwrap();
         fs::remove_dir_all(&root).unwrap();
         let node = output
             .nodes
@@ -736,7 +743,9 @@ fn bare_get_mapping_emits_route_at_class_prefix() {
     let rel = "src/main/java/com/example/CartController.java";
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, r#"
+    fs::write(
+        &path,
+        r#"
 package com.example;
 @RestController
 @RequestMapping("/api/v1/cart")
@@ -750,7 +759,9 @@ public Object clearMyCart(@AuthenticationPrincipal UserDetails userDetails) { re
 @PostMapping("/items")
 public Object addItem(@AuthenticationPrincipal UserDetails userDetails, Object req) { return null; }
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let output = parse_files(&root, &[rel.to_string()], &java_registry()).unwrap();
     fs::remove_dir_all(&root).unwrap();

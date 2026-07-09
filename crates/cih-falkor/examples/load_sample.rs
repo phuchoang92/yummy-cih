@@ -30,7 +30,7 @@ fn calls(src: &str, dst: &str) -> Edge {
         kind: EdgeKind::Calls,
         confidence: 0.95,
         reason: "sample".to_string(),
-            props: None,
+        props: None,
     }
 }
 
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     let dir = std::env::temp_dir().join("cih_sample_artifacts");
-    let artifacts = GraphArtifacts::write(&dir, VersionId("v1".into()), &nodes, &edges)?;
+    let artifacts = GraphArtifacts::write(&dir, VersionId::new("v1"), &nodes, &edges)?;
     println!("artifacts: {:?}", artifacts.nodes_path);
 
     let stats = store.bulk_load(&artifacts).await?;

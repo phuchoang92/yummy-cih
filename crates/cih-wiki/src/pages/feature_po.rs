@@ -6,9 +6,9 @@ use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::slugify::slugify;
 use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
-
 /// Render the feature-level PO (business overview) page.
 /// Aggregates routes, tables, and LLM summaries from all communities in the feature.
+#[allow(clippy::too_many_arguments)] // page-renderer context bundle; refactor tracked with wiki rework
 pub fn render_feature_po(
     feature: &str,
     community_ids: &[String],
@@ -22,7 +22,10 @@ pub fn render_feature_po(
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\nsidebar_position: 1\n---\n\n", title));
+    md.push_str(&format!(
+        "---\ntitle: {}\nsidebar_position: 1\n---\n\n",
+        title
+    ));
     md.push_str(&format!("# {}\n\n", title));
 
     // Feature-level LLM overview (highest quality — one call across all communities).
@@ -233,7 +236,9 @@ pub fn render_feature_po(
         for cid in community_ids {
             let procs = graph.processes_for_community(cid, true);
             for proc_id in &procs {
-                let Some(fs) = flow_map.get(proc_id.as_str()) else { continue };
+                let Some(fs) = flow_map.get(proc_id.as_str()) else {
+                    continue;
+                };
                 if fs.business_impact.is_empty() && fs.narrative.is_empty() {
                     continue;
                 }
@@ -254,7 +259,11 @@ pub fn render_feature_po(
                         md.push_str("| Step | What it does |\n");
                         md.push_str("|---|---|\n");
                         for (i, step) in steps.iter().enumerate() {
-                            let desc = fs.step_descriptions.get(i).map(|s| s.as_str()).unwrap_or("");
+                            let desc = fs
+                                .step_descriptions
+                                .get(i)
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
                             md.push_str(&format!("| `{}` | {} |\n", step.symbol.name, desc));
                         }
                         md.push_str("\n</details>\n\n");
@@ -337,10 +346,7 @@ pub fn render_controller_page(
     let display_name = controller_display_name(controller_name);
     let route_count = routes.len();
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\nrole: po\n---\n\n",
-        display_name
-    ));
+    md.push_str(&format!("---\ntitle: {}\nrole: po\n---\n\n", display_name));
     md.push_str("<div class=\"role-banner role-po\"><span class=\"role-dot\"></span>Product Owner<span class=\"role-desc\">Business capabilities &amp; stakeholder view</span></div>\n\n");
     md.push_str(&format!("# {}\n\n", display_name));
     if let Some(desc) = description.filter(|s| !s.is_empty()) {
@@ -363,7 +369,10 @@ pub fn render_controller_page(
     for (handler, route) in routes {
         let method_name = handler_method_name(handler.id.as_str());
         if has_method_descs {
-            let desc = method_descriptions.get(method_name).map(|s| s.as_str()).unwrap_or("");
+            let desc = method_descriptions
+                .get(method_name)
+                .map(|s| s.as_str())
+                .unwrap_or("");
             md.push_str(&format!(
                 "| `{}` | `{}` | `{}` | {} |\n",
                 route_http_method(route),
@@ -391,6 +400,3 @@ fn handler_method_name(handler_id: &str) -> &str {
         .and_then(|s| s.split('/').next())
         .unwrap_or(handler_id)
 }
-
-
-

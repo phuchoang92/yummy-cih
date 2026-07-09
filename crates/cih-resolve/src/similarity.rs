@@ -69,7 +69,7 @@ pub fn emit_similar_to_edges(nodes: &[Node]) -> Vec<Edge> {
     // Per-source edge list: candidate_idx → Vec<(dst_idx, jaccard)>.
     let mut edge_map: HashMap<usize, Vec<(usize, f32)>> = HashMap::new();
 
-    for (_provider, indices) in &by_provider {
+    for indices in by_provider.values() {
         if indices.len() < 2 {
             continue;
         }
@@ -113,9 +113,8 @@ pub fn emit_similar_to_edges(nodes: &[Node]) -> Vec<Edge> {
     let mut edges = Vec::new();
     for (src_idx, mut neighbors) in edge_map {
         // Sort descending by Jaccard.
-        neighbors.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        neighbors
+            .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         neighbors.truncate(MAX_EDGES_PER_NODE);
         for (dst_idx, jaccard) in neighbors {
             edges.push(Edge {

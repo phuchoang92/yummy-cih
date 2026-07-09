@@ -3,7 +3,7 @@ use std::path::Path;
 
 use cih_core::{Edge, ImportBinding, Node, ParsedFile, SymbolDef};
 
-use crate::common::index::CommonIndex;
+use crate::index::ResolveIndex;
 
 /// Declares all resolver modules and generates `all_resolvers()`.
 /// To add a new language: add one line here (plus the implementation file).
@@ -23,7 +23,7 @@ resolvers! {
     python: PythonResolver,
     typescript: TypeScriptResolver,
     go: GoResolver,
-    rust_lang: RustResolver,
+    rust: RustResolver,
     csharp: CSharpResolver,
     ruby: RubyResolver,
     php: PhpResolver,
@@ -56,7 +56,7 @@ pub trait LanguageResolver: Send + Sync {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         let _ = (keyword, in_fqcn, index);
         None
@@ -65,12 +65,12 @@ pub trait LanguageResolver: Send + Sync {
     /// IoC/DI redirect: for an interface/abstract type, return the unambiguous
     /// concrete impl if the framework can determine it (Spring @Service).
     /// Return None when not applicable or ambiguous.
-    fn di_redirect(&self, type_qname: &str, index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, type_qname: &str, index: &ResolveIndex) -> Option<String> {
         let _ = (type_qname, index);
         None
     }
 
-    /// Per-language opaque metadata for a type definition, stored in CommonIndex.
+    /// Per-language opaque metadata for a type definition, stored in ResolveIndex.
     /// Java: Spring stereotype string. Only the same LanguageResolver interprets it.
     fn type_metadata(&self, def: &SymbolDef) -> Option<String> {
         let _ = def;
@@ -98,11 +98,33 @@ pub trait LanguageResolver: Send + Sync {
         &self,
         binding: &ImportBinding,
         from_file: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         let _ = (binding, from_file, index);
         None
     }
+
+    /// Post-process the fully-assembled graph, once every phase's nodes/edges are merged.
+    /// Unlike [`extra_edges`], this may *mutate* existing nodes/edges (e.g. rewriting HTTP
+    /// route paths from framework config). Default no-op.
+    fn post_process(
+        &self,
+        repo_root: Option<&Path>,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        options: &PostProcessOptions,
+    ) {
+        let _ = (repo_root, nodes, edges, options);
+    }
+}
+
+/// Language-agnostic knobs handed to [`LanguageResolver::post_process`]. Each resolver
+/// interprets the fields relevant to it (e.g. the Java resolver maps `route_base_path`
+/// to a CXF servlet prefix).
+#[derive(Clone, Debug, Default)]
+pub struct PostProcessOptions {
+    /// Explicit base path prepended to HTTP route paths, overriding auto-detection.
+    pub route_base_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +191,25 @@ impl ResolverRegistry {
             all_edges.extend(edges);
         }
         (all_nodes, all_edges)
+    }
+
+    /// Invoke `post_process` for each present language's resolver, over the whole graph.
+    /// Deterministic order; languages absent from `parsed` are skipped.
+    pub fn post_process(
+        &self,
+        repo_root: Option<&Path>,
+        parsed: &[ParsedFile],
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        options: &PostProcessOptions,
+    ) {
+        let mut lang_ids: Vec<&str> = parsed.iter().map(|pf| pf.language.as_str()).collect();
+        lang_ids.sort();
+        lang_ids.dedup();
+        for lang in lang_ids {
+            self.for_language(lang)
+                .post_process(repo_root, nodes, edges, options);
+        }
     }
 }
 

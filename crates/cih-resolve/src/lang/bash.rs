@@ -1,6 +1,6 @@
-use cih_core::SymbolDef;
-use crate::common::index::CommonIndex;
 use super::{InheritanceModel, LanguageResolver};
+use crate::index::ResolveIndex;
+use cih_core::SymbolDef;
 
 pub struct BashResolver;
 
@@ -21,20 +21,20 @@ impl LanguageResolver for BashResolver {
         &self,
         _keyword: &str,
         _in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         None
     }
 
-    fn inheritance_model(&self) -> InheritanceModel {
-        InheritanceModel::None
+    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
+        None
     }
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {
-        None
+    fn inheritance_model(&self) -> InheritanceModel {
+        InheritanceModel::None
     }
 }

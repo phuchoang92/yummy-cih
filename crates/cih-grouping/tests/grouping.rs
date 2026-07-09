@@ -1,6 +1,4 @@
-use cih_grouping::{
-    apply_overrides, FeatureGroupEntry, FeatureOverrideEntry, FeatureOverrides,
-};
+use cih_grouping::{apply_overrides, FeatureGroupEntry, FeatureOverrideEntry, FeatureOverrides};
 
 fn entry(node_id: &str, feature: &str) -> FeatureGroupEntry {
     FeatureGroupEntry {

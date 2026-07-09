@@ -45,6 +45,15 @@ graph can be incomplete" list.
   implementors found in the indexed scope; implementors outside the indexed
   modules are not linked.
 
+## Performance notes
+
+- **Symbol-ID interning: measured, not needed (2026-07).** NodeId-keyed maps in
+  the taint pipeline use `FxHashMap` (rustc-hash). A full 4-phase `taint` run on
+  Fineract (~46k nodes) completes in ~0.77s wall time, so interning NodeIds to
+  `u32` symbols in the PDG/dataflow hot path was evaluated and rejected — the
+  string-keyed maps are not a bottleneck at real-repo scale. Re-evaluate only if
+  a profile of a much larger repo shows hashing in the hot path.
+
 ## Implications for agents
 
 - A clean `taint_paths` result (or an empty `route_map` prefix) means "nothing

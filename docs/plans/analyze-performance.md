@@ -1,5 +1,35 @@
 # Analyze Pipeline Performance Plan
 
+> **Update 2026-07-09 — native macOS re-measure (fineract, 6,374 files, artifacts on
+> local APFS).** Per-phase breakdown of a `--no-cache --no-load` run:
+> scan 0.38s · parse 1.98s · resolve 1.37s · JAR 0.18s · **integration XML 0.098s** ·
+> DI XML 0.23s · **artifact write ~3.3s** · total ~7.9s.
+>
+> Two plan assumptions were wrong on native hardware (they were Windows-Docker I/O
+> artifacts, not CPU): **integration XML is ~1%, not 10%** (Fix 2 target), and the
+> **artifact-write phase is ~42%, not 8%** — the real local hot path. Instrumenting
+> the write phase: content_version (blake3) 0.62s · write_parsed_files 1.0s ·
+> `GraphArtifacts::write` (nodes+edges) 0.70s · write_unresolved_reports (270k refs)
+> 0.98s.
+>
+> **Shipped:** parallel serialization for `GraphArtifacts::write` — the flat
+> `Node`/`Edge` records serialize on rayon chunks, measured **695ms → ~150ms (~4.5×)**,
+> output byte-identical (fineract + servicemix artifact hashes unchanged). Serialization
+> is CPU; the write is I/O, so only the serialize step parallelizes.
+>
+> **Measured and NOT shipped:** the same treatment on `write_parsed_files` *regressed*
+> it (1.0s → 1.2–1.6s) — `ParsedFile` is a large nested struct where full-buffer
+> materialization outweighs the parallel win — so the parse/resolve writers stay
+> sequential. Wall-time delta is within noise on a contended dev machine; the CPU
+> reduction scales on the banking target (~10× the node count).
+>
+> **Fix statuses:** Fix 1 (WSL2 filesystem) unchanged — user-side. Fix 2
+> (integration XML) not pursued: ~1% on native, and the Windows slowness was the I/O
+> bridge (Fix 1); `di_xml` already carries the parallel pattern if XML parse ever
+> dominates. Fix 3 (Falkor batch) already at `BATCH = 4000`. Fix 4 (resolve
+> parallelization) obsolete — targeted the since-deleted legacy emitter, and resolve
+> is ~1% locally.
+
 ## Baseline (Windows Docker, 12,334 Java files, bind-mount from D:\)
 
 Measured 2026-06-22 via `docker compose run --rm engine analyze /repo --all --no-cache`:

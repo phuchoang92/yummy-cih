@@ -36,20 +36,9 @@ pub struct OutlineModule {
     pub description: String,
 }
 
-// Phase 2: LLM assigns communities to established module slugs
-#[derive(Serialize, Deserialize, Debug)]
-struct AssignmentResponse {
-    assignments: Vec<Assignment>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct Assignment {
-    community_id: String,
-    module_slug: String,
-}
-
 // ── Public entry point ───────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub fn propose_module_tree(
     graph: &WikiGraph,
     adapter: &dyn LlmAdapter,
@@ -280,6 +269,7 @@ fn call_outline_llm(
     parse_outline_response(&resp.text)
 }
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 fn call_assignment_llm(
     adapter: &dyn LlmAdapter,
     api_key: Option<&str>,
@@ -323,6 +313,7 @@ fn call_assignment_llm(
 
 // ── Two-phase batching ───────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 fn two_phase_grouping(
     graph: &WikiGraph,
     adapter: &dyn LlmAdapter,
@@ -438,9 +429,8 @@ fn estimate_module_count(graph: &WikiGraph) -> usize {
         }
     }
     // Aim for the number of meaningful hints, clamped to a sensible range
-    hints.len().max(8).min(40)
+    hints.len().clamp(8, 40)
 }
-
 
 pub fn merge_proposals(mut proposals: Vec<ModuleProposal>) -> Vec<ModuleProposal> {
     let mut map: HashMap<String, ModuleProposal> = HashMap::new();

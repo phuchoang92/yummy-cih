@@ -1,5 +1,5 @@
 use cih_core::{type_id, NodeKind, Range, SymbolDef};
-use cih_engine_lib::file_cache::*;
+use cih_engine::file_cache::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

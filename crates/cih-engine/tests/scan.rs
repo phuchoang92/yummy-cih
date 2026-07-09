@@ -1,5 +1,5 @@
 use cih_core::BuildSystem;
-use cih_engine_lib::scan::*;
+use cih_engine::scan::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEST_REPO_ID: AtomicU64 = AtomicU64::new(0);

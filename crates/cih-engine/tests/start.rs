@@ -1,11 +1,17 @@
 use anyhow::Result;
-use cih_engine_lib::start::*;
+use cih_engine::cmd::start::*;
 use std::path::{Path, PathBuf};
 
 /// Test runner that records commands instead of executing them.
 #[allow(dead_code)]
 pub struct TestCommandRunner {
     pub recorded: std::cell::RefCell<Vec<(String, String)>>,
+}
+
+impl Default for TestCommandRunner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestCommandRunner {

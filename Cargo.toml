@@ -1,6 +1,7 @@
 # CIH — Code Intelligence Hub (Rust engine + MCP service)
 #
-# Crate layers (each layer may only depend on layers above it):
+# Crate layers (each layer may only depend on layers above it — enforced in
+# CI by scripts/check_layering.py; update both together):
 #
 #  Foundation   cih-core          IR, artifacts, group/registry types
 #
@@ -35,6 +36,7 @@ members = [
   "crates/cih-graph-store",
   "crates/cih-falkor",
   "crates/cih-taint",
+  "crates/cih-patterns",
   "crates/cih-engine",
   "crates/cih-wiki",
   "crates/cih-server",
@@ -78,12 +80,13 @@ tree-sitter-elixir  = "0.3.0"
 tree-sitter-bash    = "0.23.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-redis = { version = "0.27", features = ["tokio-comp"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 cafebabe = "0.9"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 petgraph = "0.6"
 rand = "0.9"
 rustc-hash = "2"
+strum = { version = "0.27", features = ["derive"] }
 fastembed = { version = "4", default-features = false, features = ["ort-download-binaries", "hf-hub-native-tls"] }
 tokio-postgres = "0.7"
 pgvector = { version = "0.4", features = ["postgres"] }
@@ -95,6 +98,7 @@ zstd = "0.13"
 # internal crates
 cih-core = { path = "crates/cih-core" }
 cih-taint = { path = "crates/cih-taint" }
+cih-patterns = { path = "crates/cih-patterns" }
 cih-grouping = { path = "crates/cih-grouping" }
 cih-engine = { path = "crates/cih-engine" }
 cih-lang = { path = "crates/cih-lang" }

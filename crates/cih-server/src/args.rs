@@ -185,6 +185,48 @@ pub struct IndexStatusArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddResolvePatternArgs {
+    /// Repo name or absolute path. Empty = the server's active graph.
+    #[serde(default)]
+    pub repo: String,
+    /// Rule kind. Currently only "route" is supported.
+    #[serde(default = "default_route_kind")]
+    pub kind: String,
+    /// Annotation simple name to match on a method (no `@`), e.g. "BankEndpoint".
+    pub annotation: String,
+    /// Annotation attribute holding the URL path. Empty = "value" (the positional arg).
+    #[serde(default)]
+    pub path_attr: String,
+    /// Fixed HTTP method for every match, e.g. "POST". Use this OR method_attr; empty defaults to GET.
+    #[serde(default)]
+    pub method: String,
+    /// Annotation attribute holding the HTTP method, when it varies per usage.
+    #[serde(default)]
+    pub method_attr: String,
+    /// Optional class-level annotation whose value is a path prefix (e.g. "BankResource").
+    #[serde(default)]
+    pub class_prefix_annotation: String,
+    /// Re-index the repo after adding so the live graph reflects the new pattern (default true).
+    #[serde(default = "default_true")]
+    pub reindex: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListResolvePatternsArgs {
+    /// Repo name or absolute path. Empty = the server's active graph.
+    #[serde(default)]
+    pub repo: String,
+}
+
+fn default_route_kind() -> String {
+    "route".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadFileArgs {
     /// Repo-relative file path as returned by search_code or context (e.g.
     /// "src/main/java/com/acme/OrderService.java").

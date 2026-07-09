@@ -19,7 +19,9 @@ pub struct DomTree {
 
 impl DomTree {
     pub(super) fn empty() -> Self {
-        Self { id_to_idom: HashMap::new() }
+        Self {
+            id_to_idom: HashMap::new(),
+        }
     }
 
     /// Immediate dominator of `block`. Returns `None` for unreachable blocks.
@@ -75,11 +77,15 @@ pub(super) fn compute_dom_tree(cfg: &super::Cfg) -> DomTree {
                 continue;
             }
             let block_id = &rpo[rpo_i];
-            let Some(block) = cfg.block(block_id) else { continue };
+            let Some(block) = cfg.block(block_id) else {
+                continue;
+            };
 
             let mut new_idom = UNDEF;
             for pred_id in &block.preds {
-                let Some(&pred_rpo) = rpo_idx.get(pred_id) else { continue };
+                let Some(&pred_rpo) = rpo_idx.get(pred_id) else {
+                    continue;
+                };
                 if idom[pred_rpo] != UNDEF {
                     new_idom = if new_idom == UNDEF {
                         pred_rpo
@@ -101,7 +107,11 @@ pub(super) fn compute_dom_tree(cfg: &super::Cfg) -> DomTree {
         .enumerate()
         .filter_map(|(i, id)| {
             let dom_rpo = idom[i];
-            if dom_rpo == UNDEF { None } else { Some((id.clone(), rpo[dom_rpo].clone())) }
+            if dom_rpo == UNDEF {
+                None
+            } else {
+                Some((id.clone(), rpo[dom_rpo].clone()))
+            }
         })
         .collect();
 

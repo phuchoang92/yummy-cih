@@ -20,6 +20,8 @@ pub enum FeatureStrategyKind {
     Structural,
     Hybrid,
     Llm,
+    /// Primary embedding clusterer (k-NN + Leiden over pgvector). Requires a prior `cih embed`.
+    Embed,
 }
 
 impl std::fmt::Display for FeatureStrategyKind {
@@ -29,6 +31,7 @@ impl std::fmt::Display for FeatureStrategyKind {
             Self::Structural => "structural",
             Self::Hybrid => "hybrid",
             Self::Llm => "llm",
+            Self::Embed => "embed",
         })
     }
 }
@@ -41,8 +44,9 @@ impl std::str::FromStr for FeatureStrategyKind {
             "structural" => Ok(Self::Structural),
             "hybrid" => Ok(Self::Hybrid),
             "llm" => Ok(Self::Llm),
+            "embed" => Ok(Self::Embed),
             other => anyhow::bail!(
-                "unknown --feature-strategy '{}'; expected package | structural | hybrid | llm",
+                "unknown --feature-strategy '{}'; expected package | structural | hybrid | llm | embed",
                 other
             ),
         }
@@ -70,6 +74,12 @@ pub struct DiscoverOverrides {
     pub feature_strategy: FeatureStrategyKind,
     /// LLM config — required when feature_strategy is "llm" or "hybrid".
     pub feature_llm: Option<LlmCallConfig>,
+    /// Postgres URL for `--feature-strategy embed` (falls back to $CIH_PG_URL upstream).
+    pub pg_url: Option<String>,
+    /// Embed clusterer knobs (None → EmbedClusterConfig defaults).
+    pub embed_similarity_threshold: Option<f32>,
+    pub embed_knn: Option<usize>,
+    pub embed_leiden_resolution: Option<f64>,
 }
 
 pub fn run_discover(
@@ -137,7 +147,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         .with_context(|| format!("failed to read {}", source.edges_path.display()))?;
 
     tracing::info!(
-        source_version = %source.version.0,
+        source_version = %source.version,
         nodes = nodes.len(),
         edges = edges.len(),
         "source graph loaded"
@@ -289,7 +299,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     let artifacts_dir = repo.join(".cih").join("artifacts-community").join(&version);
     let artifacts = GraphArtifacts::write(
         &artifacts_dir,
-        VersionId(version.clone()),
+        VersionId::new(version.clone()),
         &output_nodes,
         &output_edges,
     )
@@ -325,7 +335,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
             Ok(adapter) => {
                 // Load prior artifact for incremental cache.
-                let prior_artifact = find_feature_artifact_dir(repo, &source.version.0)
+                let prior_artifact = find_feature_artifact_dir(repo, source.version.as_str())
                     .and_then(|dir| read_feature_artifact(&dir).ok())
                     .unwrap_or_default();
                 let prior_artifact = prior_artifact
@@ -354,23 +364,41 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         None
     };
 
-    let feature_strategy = match build_feature_strategy(feature_strategy_kind, pkg_cfg, llm_opts) {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::warn!(
-                strategy = %feature_strategy_kind,
-                error = %err,
-                "feature strategy failed to load — falling back to package"
-            );
-            Box::new(cih_grouping::PackageStrategy::new(
-                PackageConfig::load_or_default(repo),
-            ))
+    let feature_strategy = if feature_strategy_kind == FeatureStrategyKind::Embed {
+        // Embedding clusterer: owns the Postgres + Leiden work, then hands assignments to the
+        // (Postgres-free) grouping strategy. Any failure degrades cleanly to package.
+        match build_embed_cluster_strategy(&nodes, overrides, repo, source.version.as_str()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    error = %format!("{err:#}"),
+                    "embed feature strategy unavailable — falling back to package \
+                     (did you run `cih embed --pg-url` first?)"
+                );
+                Box::new(cih_grouping::PackageStrategy::new(
+                    PackageConfig::load_or_default(repo),
+                ))
+            }
+        }
+    } else {
+        match build_feature_strategy(feature_strategy_kind, pkg_cfg, llm_opts) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    strategy = %feature_strategy_kind,
+                    error = %err,
+                    "feature strategy failed to load — falling back to package"
+                );
+                Box::new(cih_grouping::PackageStrategy::new(
+                    PackageConfig::load_or_default(repo),
+                ))
+            }
         }
     };
     let strategy_input = StrategyInput {
         nodes: &nodes,
         edges: &edges,
-        graph_version: &source.version.0,
+        graph_version: source.version.as_str(),
         prior_assignments: &[],
     };
     let raw_entries = feature_strategy.assign(&strategy_input);
@@ -388,7 +416,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         }
         names.len()
     };
-    let feat_dir = feature_artifact_dir(repo, &source.version.0);
+    let feat_dir = feature_artifact_dir(repo, source.version.as_str());
     write_feature_artifacts(
         &feat_dir,
         feature_strategy.name(),
@@ -403,7 +431,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     })?;
     prune_feature_artifacts(
         &repo.join(".cih").join("artifacts-features"),
-        &source.version.0,
+        source.version.as_str(),
     )?;
     tracing::info!(
         features = feature_count,
@@ -442,6 +470,220 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     })
 }
 
+/// A node eligible for embed feature clustering: first-party (not from a jar / not `external`) and
+/// not a test source. Third-party and test nodes are excluded so they don't form junk features.
+fn is_project_node(n: &cih_core::Node) -> bool {
+    let is_external = n
+        .props
+        .as_ref()
+        .map(|p| {
+            p.get("external").and_then(|v| v.as_bool()).unwrap_or(false)
+                || p.get("fromJar").and_then(|v| v.as_bool()).unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let f = n.file.as_str();
+    let is_test = f.ends_with(".jar")
+        || f.contains("src/test/")
+        || f.contains("/test/java/")
+        || f.contains("/test/kotlin/");
+    !is_external && !is_test
+}
+
+/// Build the embedding clusterer: connect to pgvector, fetch per-node vectors + k-NN edges, run
+/// weighted Leiden, and hand the precomputed assignments to the Postgres-free
+/// `EmbedClusterStrategy`. All async DB work runs on `crate::runtime::block_on` — the codebase's
+/// single shared Tokio runtime — which sidesteps the nested-runtime panics a fresh
+/// `Runtime::new().block_on()` would cause if discover were ever driven from within a runtime.
+fn build_embed_cluster_strategy(
+    nodes: &[cih_core::Node],
+    overrides: &DiscoverOverrides,
+    repo: &Path,
+    source_version: &str,
+) -> Result<Box<dyn FeatureStrategy>> {
+    use std::collections::{HashMap, HashSet};
+
+    let pg_url = overrides
+        .pg_url
+        .clone()
+        .or_else(|| std::env::var("CIH_PG_URL").ok())
+        .context(
+            "--feature-strategy embed requires Postgres: pass --pg-url or set CIH_PG_URL, \
+             and run `cih embed` first",
+        )?;
+
+    let mut cfg = cih_grouping::EmbedClusterConfig::default();
+    if let Some(v) = overrides.embed_similarity_threshold {
+        cfg.similarity_threshold = v;
+    }
+    if let Some(v) = overrides.embed_knn {
+        cfg.knn = v;
+    }
+    if let Some(v) = overrides.embed_leiden_resolution {
+        cfg.leiden_resolution = v;
+    }
+
+    // Full embeddable set (used for the cih_node_vectors backfill/prune authority — it must match
+    // what `cih embed` maintains, so semantic search keeps working).
+    let node_ids: Vec<String> = cih_embed::embeddable_nodes(nodes)
+        .iter()
+        .map(|n| n.id.as_str().to_string())
+        .collect();
+    if node_ids.is_empty() {
+        anyhow::bail!("no embeddable nodes in the current graph");
+    }
+
+    // Clustering universe: project, non-test nodes only. Third-party types (jsoup/AWS SDK/...) are
+    // flagged `props.external`/`fromJar` and otherwise cluster into junk features; test sources
+    // pollute domain features. We keep the k-NN computed over the full table (recall) but restrict
+    // clustering to this subset by filtering edges below.
+    let project_ids: std::collections::HashSet<String> = cih_embed::embeddable_nodes(nodes)
+        .iter()
+        .filter(|n| is_project_node(n))
+        .map(|n| n.id.as_str().to_string())
+        .collect();
+    if project_ids.is_empty() {
+        anyhow::bail!("no project (non-external, non-test) embeddable nodes to cluster");
+    }
+    let project_vec: Vec<String> = project_ids.iter().cloned().collect();
+
+    let knn = cfg.knn;
+    let thr = cfg.similarity_threshold;
+
+    // Intern project node ids to compact u32 indices: at 600k-node scale the k-NN edge list is
+    // ~9M edges, which as `(NodeId,NodeId,f32)` would be ~1.3 GB of heap strings but as
+    // `(u32,u32,f32)` is ~100 MB. `idx_to_id` is index→id; `id_to_idx` is id→index.
+    let idx_to_id: Vec<String> = project_vec;
+    let id_to_idx: std::collections::HashMap<String, u32> = idx_to_id
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), i as u32))
+        .collect();
+
+    let (clusters, sims, meta) = crate::runtime::block_on(async {
+        let store =
+            cih_embed::EmbedStore::connect(&pg_url, cih_embed::EmbedModelKind::MiniLm).await?;
+        store.ensure_schema().await?;
+        // Self-heal: an older `cih embed` may predate cih_node_vectors — backfill if empty.
+        if store.node_vector_count().await? == 0 {
+            tracing::info!("cih_node_vectors empty — backfilling from cih_embeddings");
+            store.upsert_node_vectors(&node_ids).await?;
+            store.prune_node_vectors(&node_ids).await?;
+        }
+
+        // Stream the k-NN edges, interning + filtering to the project subset inline. Endpoints not
+        // in the interner (external/test types) are dropped here — no post-fetch retain, and the
+        // full 9M-row Postgres result is never materialized.
+        let mut edges: Vec<(u32, u32, f32)> = Vec::new();
+        let mut dropped: u64 = 0;
+        store
+            .knn_edges_streamed(knn, thr, |src, dst, sim| {
+                match (id_to_idx.get(src), id_to_idx.get(dst)) {
+                    (Some(&a), Some(&b)) => edges.push((a, b, sim)),
+                    _ => dropped += 1,
+                }
+            })
+            .await?;
+        tracing::info!(
+            project = idx_to_id.len(),
+            embeddable = node_ids.len(),
+            edges = edges.len(),
+            edges_dropped = dropped,
+            "embed clustering: streamed + interned k-NN edges (project subset)"
+        );
+        if edges.is_empty() {
+            tracing::warn!(
+                threshold = thr,
+                "no k-NN edges above similarity threshold — lower --embed-similarity-threshold; \
+                 all nodes will be unclustered (shared)"
+            );
+        }
+
+        // Weighted Leiden over the interned semantic k-NN graph.
+        let leiden_out = cih_community::cluster_indexed_edges(
+            &edges,
+            cfg.leiden_resolution,
+            cfg.leiden_seed,
+            10,
+        );
+        drop(edges);
+        let cluster_count = leiden_out
+            .iter()
+            .map(|(_, c)| *c)
+            .collect::<HashSet<_>>()
+            .len();
+        tracing::info!(
+            clusters = cluster_count,
+            assigned = leiden_out.len(),
+            "embed clustering: Leiden produced clusters"
+        );
+
+        // Map compact indices back to node ids.
+        let clusters: Vec<(String, usize)> = leiden_out
+            .iter()
+            .map(|&(u, c)| (idx_to_id[u as usize].clone(), c))
+            .collect();
+
+        // Compute per-node centroid confidence + fetch metadata **in Postgres** — the 600k vectors
+        // never enter Rust. Returns (id, kind, name, file, sim) for each clustered node.
+        let asn_ids: Vec<String> = clusters.iter().map(|(id, _)| id.clone()).collect();
+        let asn_clusters: Vec<i32> = clusters.iter().map(|(_, c)| *c as i32).collect();
+        let rows = store.node_confidences(&asn_ids, &asn_clusters).await?;
+        let mut sims: HashMap<String, f32> = HashMap::with_capacity(rows.len());
+        let mut meta: HashMap<String, cih_grouping::NodeMeta> = HashMap::with_capacity(rows.len());
+        for (id, kind, name, file, sim) in rows {
+            sims.insert(id.clone(), sim);
+            meta.insert(id, cih_grouping::NodeMeta { kind, name, file });
+        }
+
+        anyhow::Ok((clusters, sims, meta))
+    })?;
+
+    if clusters.is_empty() {
+        anyhow::bail!(
+            "no clusters produced — no k-NN edges above threshold, or no embeddings for project \
+             nodes; run `cih embed` first"
+        );
+    }
+
+    // Opt-in LLM labeling: build a caller only when a feature-LLM provider is configured. Also load
+    // the prior run's embed entries so unchanged clusters reuse their prior LLM name (stability).
+    let (llm_caller, prior_entries) = match &overrides.feature_llm {
+        Some(llm_cfg) => match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None)
+        {
+            Ok(adapter) => {
+                let api_key = crate::llm::resolve_api_key(llm_cfg.api_key_env.as_deref())
+                    .ok()
+                    .flatten();
+                let caller = crate::feature_strategy::make_feature_llm_caller(
+                    adapter,
+                    api_key,
+                    llm_cfg.model.clone(),
+                    llm_cfg.max_tokens,
+                    llm_cfg.timeout_secs,
+                );
+                let prior = find_feature_artifact_dir(repo, source_version)
+                    .and_then(|dir| read_feature_artifact(&dir).ok())
+                    .unwrap_or_default();
+                (Some(caller), prior)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "embed LLM labeling disabled — adapter failed to build");
+                (None, Vec::new())
+            }
+        },
+        None => (None, Vec::new()),
+    };
+
+    Ok(Box::new(cih_grouping::EmbedClusterStrategy::new(
+        clusters,
+        sims,
+        meta,
+        cfg,
+        llm_caller,
+        prior_entries,
+    )))
+}
+
 /// Everything `run_discover_core` produced (DB-free), used to load + report.
 pub struct DiscoverOutcome {
     pub source_artifacts: GraphArtifacts,
@@ -465,7 +707,7 @@ impl DiscoverOutcome {
 
     fn summary<'a>(&'a self, load: &'a LoadOutcome) -> DiscoverSummary<'a> {
         DiscoverSummary {
-            source_version: self.source_artifacts.version.0.as_str(),
+            source_version: self.source_artifacts.version.as_str(),
             version: &self.version,
             artifacts_path: self.artifacts_dir.display().to_string(),
             community_count: self.community_count,
@@ -511,7 +753,6 @@ impl DiscoverOutcome {
         eprintln!();
     }
 }
-
 
 #[derive(Serialize)]
 struct DiscoverSummary<'a> {

@@ -114,7 +114,15 @@ fn dfs(
         .map(|dsts| {
             dsts.iter()
                 .map(|dst| {
-                    dfs(dst, callees, id_to_idx, nodes, memo, in_flight, recursive_ids)
+                    dfs(
+                        dst,
+                        callees,
+                        id_to_idx,
+                        nodes,
+                        memo,
+                        in_flight,
+                        recursive_ids,
+                    )
                 })
                 .max()
                 .unwrap_or(0)

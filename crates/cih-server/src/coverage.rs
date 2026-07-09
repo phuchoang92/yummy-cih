@@ -4,7 +4,7 @@ use cih_graph_store::GraphStore;
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{RegressionScopeArgs, TestCoverageArgs, UntestedPathsArgs};
-use crate::symbol::{AmbiguousCandidate, AmbiguousResult, SymbolResolution, resolve_symbol};
+use crate::symbol::{resolve_symbol, AmbiguousCandidate, AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, to_mcp};
 
 pub async fn test_coverage(

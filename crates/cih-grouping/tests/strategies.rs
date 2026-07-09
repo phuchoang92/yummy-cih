@@ -36,8 +36,10 @@ fn default_catch_all() -> Vec<String> {
 
 #[test]
 fn package_non_catchall_overrides_structural_shared() {
-    let mut s_cfg = StructuralConfig::default();
-    s_cfg.min_signals = 2;
+    let s_cfg = StructuralConfig {
+        min_signals: 2,
+        ..Default::default()
+    };
     let structural = Box::new(StructuralStrategy::new(s_cfg));
     let package = Box::new(PackageStrategy::new(PackageConfig::default()));
     let hybrid = HybridStrategy::new(vec![structural, package], default_catch_all());
@@ -60,8 +62,10 @@ fn package_non_catchall_overrides_structural_shared() {
 #[test]
 fn catch_all_does_not_override_domain_assignment() {
     let package = Box::new(PackageStrategy::new(PackageConfig::default()));
-    let mut s_cfg = StructuralConfig::default();
-    s_cfg.min_signals = 1;
+    let s_cfg = StructuralConfig {
+        min_signals: 1,
+        ..Default::default()
+    };
     let structural = Box::new(StructuralStrategy::new(s_cfg));
     let hybrid = HybridStrategy::new(vec![package, structural], default_catch_all());
     let node = make_node(
@@ -77,7 +81,10 @@ fn catch_all_does_not_override_domain_assignment() {
     };
     let entries = hybrid.assign(&input);
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "payment", "package domain should not be overridden");
+    assert_eq!(
+        entries[0].name, "payment",
+        "package domain should not be overridden"
+    );
 }
 
 #[test]
@@ -135,8 +142,10 @@ fn single_signal_does_not_trigger() {
 
 #[test]
 fn min_signals_1_flags_single_keyword() {
-    let mut cfg = StructuralConfig::default();
-    cfg.min_signals = 1;
+    let cfg = StructuralConfig {
+        min_signals: 1,
+        ..Default::default()
+    };
     let s = StructuralStrategy::new(cfg);
     let node = make_node_kind(
         "Class:com.example.payment.PaymentFilter",

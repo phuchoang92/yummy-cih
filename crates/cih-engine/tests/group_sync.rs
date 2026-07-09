@@ -1,5 +1,5 @@
 use cih_core::ContractMatchKind;
-use cih_engine_lib::group_sync::*;
+use cih_engine::cmd::group_sync::*;
 
 #[test]
 fn normalizes_route_variables() {

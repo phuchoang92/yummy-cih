@@ -2,10 +2,11 @@ use std::path::Path;
 
 use cih_core::{Edge, Node, ParsedFile, SymbolDef};
 
-use crate::common::index::CommonIndex;
-use crate::lang::{InheritanceModel, LanguageResolver};
+use crate::index::ResolveIndex;
+use crate::lang::{InheritanceModel, LanguageResolver, PostProcessOptions};
 use crate::types::class_of;
 
+mod cxf;
 pub mod di;
 
 pub struct JavaResolver;
@@ -27,7 +28,7 @@ impl LanguageResolver for JavaResolver {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         match keyword {
             "this" => Some(class_of(in_fqcn).to_string()),
@@ -36,13 +37,15 @@ impl LanguageResolver for JavaResolver {
         }
     }
 
-    fn di_redirect(&self, type_qname: &str, index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, type_qname: &str, index: &ResolveIndex) -> Option<String> {
         // Prefer Spring-annotated bean (requires stereotype metadata from DI XML or annotations).
         if let Some(bean) = di::single_bean_impl(type_qname, index) {
             return Some(bean);
         }
         // Fallback: single concrete implementor in the workspace (annotation-driven wiring).
-        index.single_programmatic_impl(type_qname, "java").map(str::to_string)
+        index
+            .single_programmatic_impl(type_qname, "java")
+            .map(str::to_string)
     }
 
     fn type_metadata(&self, def: &SymbolDef) -> Option<String> {
@@ -53,7 +56,11 @@ impl LanguageResolver for JavaResolver {
         InheritanceModel::JavaNominal
     }
 
-    fn extra_edges(&self, repo_root: Option<&Path>, parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
+    fn extra_edges(
+        &self,
+        repo_root: Option<&Path>,
+        parsed: &[ParsedFile],
+    ) -> (Vec<Node>, Vec<Edge>) {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         if let Some(root) = repo_root {
@@ -62,5 +69,18 @@ impl LanguageResolver for JavaResolver {
             edges.extend(result.edges);
         }
         (nodes, edges)
+    }
+
+    fn post_process(
+        &self,
+        repo_root: Option<&Path>,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        options: &PostProcessOptions,
+    ) {
+        // Prepend CXF <jaxrs:server> base paths (+ servlet prefix) onto Java Route nodes.
+        if let Some(root) = repo_root {
+            cxf::stitch_route_prefixes(root, nodes, edges, options.route_base_path.as_deref());
+        }
     }
 }

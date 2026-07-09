@@ -31,5 +31,3 @@ pub fn is_searchable_kind(kind: NodeKind) -> bool {
             | NodeKind::MessageDestination
     )
 }
-
-

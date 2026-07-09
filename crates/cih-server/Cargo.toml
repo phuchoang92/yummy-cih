@@ -9,16 +9,17 @@ name = "cih-server"
 path = "src/main.rs"
 
 [lib]
-name = "cih_server_lib"
 path = "src/lib.rs"
 
 [dependencies]
 cih-core.workspace = true
 cih-embed.workspace = true
+cih-grouping.workspace = true
 cih-graph-store.workspace = true
 cih-falkor.workspace = true
 cih-search.workspace = true
 cih-taint.workspace = true
+cih-patterns.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

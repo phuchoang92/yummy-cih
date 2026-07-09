@@ -5,6 +5,7 @@
 //! defined in a different class the site is emitted with `dynamic=true` props and
 //! no table edges.
 
+use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
 
 use cih_core::{
@@ -26,7 +27,7 @@ pub fn emit_db_access(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
 
     let mut nodes: Vec<Node> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();
-    let mut seen_nodes: HashSet<NodeId> = HashSet::new();
+    let mut seen_nodes: FxHashSet<NodeId> = FxHashSet::default();
 
     for pf in parsed {
         for site in &pf.sql_execution_sites {
@@ -50,7 +51,7 @@ fn process_site(
     const_index: &HashMap<(&str, &str), &cih_core::SqlConstant>,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
-    seen_nodes: &mut HashSet<NodeId>,
+    seen_nodes: &mut FxHashSet<NodeId>,
 ) {
     // Derive the owner FQCN from the callable id.
     // Method id format: `Method:<fqcn>#<name>/<arity>` or `Constructor:<fqcn>#<init>/<arity>`.
@@ -150,7 +151,7 @@ fn process_site(
         kind: EdgeKind::ExecutesQuery,
         confidence: 1.0,
         reason: site.api_name.clone(),
-            props: None,
+        props: None,
     });
 
     // Emit DbTable nodes + READS_TABLE / WRITES_TABLE edges.
@@ -214,7 +215,10 @@ pub fn emit_jpa_tables(nodes: &[Node]) -> (Vec<Node>, Vec<Edge>) {
     let mut seen_tables: HashSet<String> = HashSet::new();
 
     for node in nodes {
-        if !matches!(node.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Record) {
+        if !matches!(
+            node.kind,
+            NodeKind::Class | NodeKind::Interface | NodeKind::Record
+        ) {
             continue;
         }
         let Some(props) = &node.props else { continue };
@@ -317,4 +321,3 @@ fn detect_sql_op(sql: &str) -> &'static str {
         "UNKNOWN"
     }
 }
-

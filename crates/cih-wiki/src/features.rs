@@ -99,7 +99,7 @@ fn route_feature(path: &str) -> Option<String> {
 
 fn table_feature(table: &str) -> Option<String> {
     table
-        .split(|ch: char| ch == '_' || ch == '.' || ch == '-' || ch == '/')
+        .split(['_', '.', '-', '/'])
         .filter_map(clean_feature_token)
         .find(|token| !is_generic_route_token(token))
 }
@@ -107,7 +107,7 @@ fn table_feature(table: &str) -> Option<String> {
 fn topic_feature(topic_id: &str) -> Option<String> {
     let topic = topic_id.strip_prefix("KafkaTopic:").unwrap_or(topic_id);
     topic
-        .split(|ch: char| ch == '_' || ch == '.' || ch == '-' || ch == '/')
+        .split(['_', '.', '-', '/'])
         .filter_map(clean_feature_token)
         .find(|token| !is_generic_route_token(token))
 }
@@ -361,5 +361,3 @@ where
     }
     result
 }
-
-

@@ -1,6 +1,9 @@
 use cih_core::{ContractMatchKind, Edge, GraphArtifacts, Node, VersionId};
 use cih_graph_store::{Direction, GraphStoreError};
-use rmcp::{model::{CallToolResult, Content}, ErrorData as McpError};
+use rmcp::{
+    model::{CallToolResult, Content},
+    ErrorData as McpError,
+};
 
 pub fn to_mcp(e: GraphStoreError) -> McpError {
     McpError::internal_error(e.to_string(), None)
@@ -29,7 +32,7 @@ pub fn load_artifact_nodes(artifacts_dir: &str) -> std::io::Result<Vec<Node>> {
     GraphArtifacts {
         nodes_path: dir.join("nodes.jsonl"),
         edges_path: dir.join("edges.jsonl"),
-        version: VersionId(String::new()),
+        version: VersionId::new(String::new()),
     }
     .read_nodes()
 }
@@ -39,7 +42,7 @@ pub fn load_artifact_edges(artifacts_dir: &str) -> std::io::Result<Vec<Edge>> {
     GraphArtifacts {
         nodes_path: dir.join("nodes.jsonl"),
         edges_path: dir.join("edges.jsonl"),
-        version: VersionId(String::new()),
+        version: VersionId::new(String::new()),
     }
     .read_edges()
 }

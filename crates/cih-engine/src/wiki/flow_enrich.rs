@@ -5,9 +5,9 @@ use cih_core::Node;
 use cih_wiki::{FlowCacheEntry, FlowLlmSummary, WikiGraph};
 use rayon::prelude::*;
 
+use super::config::fnv64;
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
-use super::config::fnv64;
 
 fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
     const MAX_FLOW_EVIDENCE: usize = 2_000;
@@ -78,7 +78,9 @@ fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
                     .flatten()
                     .take(2)
                 {
-                    let name = tid.strip_prefix(crate::node_prefix::DB_TABLE).unwrap_or(tid);
+                    let name = tid
+                        .strip_prefix(crate::node_prefix::DB_TABLE)
+                        .unwrap_or(tid);
                     tables.push(format!("{}(r)", name));
                 }
                 for tid in graph
@@ -88,7 +90,9 @@ fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
                     .flatten()
                     .take(2)
                 {
-                    let name = tid.strip_prefix(crate::node_prefix::DB_TABLE).unwrap_or(tid);
+                    let name = tid
+                        .strip_prefix(crate::node_prefix::DB_TABLE)
+                        .unwrap_or(tid);
                     tables.push(format!("{}(w)", name));
                 }
             }
@@ -99,7 +103,11 @@ fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
             step.step_number,
             step.symbol.name,
             class_name,
-            if stereotype.is_empty() { "?" } else { stereotype }
+            if stereotype.is_empty() {
+                "?"
+            } else {
+                stereotype
+            }
         );
         if !calls.is_empty() {
             line.push_str(&format!(" | calls: {}", calls.join(", ")));
@@ -153,6 +161,7 @@ fn chain_steps_text(chain: &[String], graph: &WikiGraph) -> String {
         .join("\n")
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub(super) fn enrich_route_flows(
     graph: &WikiGraph,
     scope: Option<&std::collections::HashSet<String>>,
@@ -166,7 +175,10 @@ pub(super) fn enrich_route_flows(
     dry_run: bool,
     flow_cache: &BTreeMap<String, FlowCacheEntry>,
     pool: &rayon::ThreadPool,
-) -> (HashMap<String, FlowLlmSummary>, Vec<(String, String, FlowLlmSummary)>) {
+) -> (
+    HashMap<String, FlowLlmSummary>,
+    Vec<(String, String, FlowLlmSummary)>,
+) {
     let handlers: Vec<(String, String)> = graph
         .routes_by_controller
         .values()
@@ -175,7 +187,7 @@ pub(super) fn enrich_route_flows(
                 .iter()
                 .map(|(handler, _route)| (handler.id.as_str().to_string(), handler.name.clone()))
         })
-        .filter(|(id, _)| scope.map_or(true, |s| s.contains(id.as_str())))
+        .filter(|(id, _)| scope.is_none_or(|s| s.contains(id.as_str())))
         .collect();
 
     if handlers.is_empty() {
@@ -207,7 +219,9 @@ pub(super) fn enrich_route_flows(
                     }
                 }
 
-                ui.lock().expect("UI progress mutex poisoned").tick(handler_name.as_str());
+                ui.lock()
+                    .expect("UI progress mutex poisoned")
+                    .tick(handler_name.as_str());
 
                 if dry_run {
                     let summary = FlowLlmSummary {
@@ -247,11 +261,7 @@ pub(super) fn enrich_route_flows(
                     {
                         Ok(summary) => {
                             ui.lock().expect("UI progress mutex poisoned").inc_ok();
-                            return Some((
-                                handler_id.clone(),
-                                summary,
-                                Some(evidence_hash),
-                            ));
+                            return Some((handler_id.clone(), summary, Some(evidence_hash)));
                         }
                         Err(err) => {
                             if attempt < retries as usize {
@@ -280,7 +290,9 @@ pub(super) fn enrich_route_flows(
             .collect()
     });
 
-    ui.lock().expect("UI progress mutex poisoned").finish_phase();
+    ui.lock()
+        .expect("UI progress mutex poisoned")
+        .finish_phase();
 
     let mut result = HashMap::with_capacity(raw.len());
     let mut cache_updates = Vec::new();
@@ -293,6 +305,7 @@ pub(super) fn enrich_route_flows(
     (result, cache_updates)
 }
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub(super) fn enrich_one_flow(
     process_node: &Node,
     graph: &WikiGraph,
@@ -314,7 +327,11 @@ pub(super) fn enrich_one_flow(
         .unwrap_or(0);
 
     let system = crate::llm::prompts::process_flow_system(language);
-    let evidence_str = if evidence.trim().is_empty() { "none" } else { &evidence };
+    let evidence_str = if evidence.trim().is_empty() {
+        "none"
+    } else {
+        &evidence
+    };
     let json_template = crate::llm::prompts::PROCESS_FLOW_JSON_TEMPLATE
         .replace("{step_count}", &step_count.to_string());
     let user = format!(
@@ -404,7 +421,11 @@ fn extract_flow_partial(text: &str, step_count: usize) -> Option<FlowLlmSummary>
                 None => break,
             }
         }
-        if out.trim().is_empty() { None } else { Some(out.trim().to_string()) }
+        if out.trim().is_empty() {
+            None
+        } else {
+            Some(out.trim().to_string())
+        }
     }
 
     let narrative = extract_string_value(text, "narrative").unwrap_or_default();
@@ -430,20 +451,20 @@ fn extract_flow_partial(text: &str, step_count: usize) -> Option<FlowLlmSummary>
                         }
                         break;
                     }
-                    Some('"') if !in_str => { in_str = true; }
+                    Some('"') if !in_str => {
+                        in_str = true;
+                    }
                     Some('"') if in_str => {
                         descs.push(current.trim().to_string());
                         current = String::new();
                         in_str = false;
                     }
-                    Some('\\') if in_str => {
-                        match chars.next() {
-                            Some('n') => current.push('\n'),
-                            Some('t') => current.push('\t'),
-                            Some(c) => current.push(c),
-                            None => break,
-                        }
-                    }
+                    Some('\\') if in_str => match chars.next() {
+                        Some('n') => current.push('\n'),
+                        Some('t') => current.push('\t'),
+                        Some(c) => current.push(c),
+                        None => break,
+                    },
                     Some(c) if in_str => current.push(c),
                     _ => {}
                 }
@@ -452,7 +473,11 @@ fn extract_flow_partial(text: &str, step_count: usize) -> Option<FlowLlmSummary>
     }
     descs.resize(step_count, String::new());
 
-    Some(FlowLlmSummary { narrative, business_impact, step_descriptions: descs })
+    Some(FlowLlmSummary {
+        narrative,
+        business_impact,
+        step_descriptions: descs,
+    })
 }
 
 pub fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummary> {
@@ -466,7 +491,11 @@ pub fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummar
         .trim_end_matches("```")
         .trim();
     let json_str = if let (Some(s), Some(e)) = (stripped.find('{'), stripped.rfind('}')) {
-        if s <= e { &stripped[s..=e] } else { stripped }
+        if s <= e {
+            &stripped[s..=e]
+        } else {
+            stripped
+        }
     } else {
         stripped
     };
@@ -476,14 +505,25 @@ pub fn parse_flow_summary(text: &str, step_count: usize) -> Result<FlowLlmSummar
             let business_impact = val["business_impact"].as_str().unwrap_or("").to_string();
             let mut descs: Vec<String> = val["step_descriptions"]
                 .as_array()
-                .map(|arr| arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
                 .unwrap_or_default();
             descs.resize(step_count, String::new());
 
-            if narrative.is_empty() && business_impact.is_empty() && descs.iter().all(|s| s.is_empty()) {
+            if narrative.is_empty()
+                && business_impact.is_empty()
+                && descs.iter().all(|s| s.is_empty())
+            {
                 bail!("flow LLM response did not contain any expected fields");
             }
-            Ok(FlowLlmSummary { narrative, business_impact, step_descriptions: descs })
+            Ok(FlowLlmSummary {
+                narrative,
+                business_impact,
+                step_descriptions: descs,
+            })
         }
         Err(parse_err) => {
             if let Some(partial) = extract_flow_partial(stripped, step_count) {

@@ -10,7 +10,8 @@ fn strips_log_lines() {
 
 #[test]
 fn strips_null_guard() {
-    let src = "if (user == null) throw new IllegalArgumentException(\"null\");\nreturn user.getName();";
+    let src =
+        "if (user == null) throw new IllegalArgumentException(\"null\");\nreturn user.getName();";
     let stripped = strip_java_body(src);
     assert!(!stripped.contains("null"));
     assert!(stripped.contains("getName"));

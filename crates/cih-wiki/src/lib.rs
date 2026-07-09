@@ -1,3 +1,11 @@
+//! Wiki page generation from graph artifacts.
+//!
+//! # Error philosophy
+//!
+//! This is leaf orchestration code consumed only by the `cih-engine` binary,
+//! which reports errors rather than branching on them — so functions return
+//! `anyhow::Result` by design (context strings over structured variants).
+
 pub mod bodies;
 pub mod features;
 pub mod graph;
@@ -108,6 +116,9 @@ pub struct CommunityLlmFull {
     pub dev_entry_points: String,
 }
 
+/// Maps `(node_id, file_path)` to a feature name.
+pub type FeatureOfFn = Box<dyn Fn(&str, &str) -> String + Send>;
+
 pub struct WikiInput<'a> {
     pub nodes: &'a [Node],
     pub edges: &'a [cih_core::Edge],
@@ -150,7 +161,7 @@ pub struct WikiInput<'a> {
     /// `WikiGraph::build_package_grouped`. When grouping is "graph"/"llm" never called.
     /// When a pre-computed artifact is available, `node_id` gives a direct lookup;
     /// otherwise fall back to file-path heuristics.
-    pub feature_of: Box<dyn Fn(&str, &str) -> String + Send>,
+    pub feature_of: FeatureOfFn,
     /// Scheduled jobs and event listeners from `.cih/entrypoints.json`.
     /// Empty when the sidecar does not exist (no such methods in the repo).
     pub entrypoints: Vec<EntrypointRecord>,
@@ -184,14 +195,18 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
     let sig_pos_len = s[..scan_window]
         .find(sig_needle_bt.as_str())
         .map(|p| (p, sig_needle_bt.len()))
-        .or_else(|| s[..scan_window].find(sig_needle.as_str()).map(|p| (p, sig_needle.len())));
+        .or_else(|| {
+            s[..scan_window]
+                .find(sig_needle.as_str())
+                .map(|p| (p, sig_needle.len()))
+        });
     if let Some((pos, needle_len)) = sig_pos_len {
         // Find the end of the signature: scan past `()` and any trailing space/punctuation
         let after_start = (pos + needle_len).min(s.len());
         let after_sig = &s[after_start..];
         // Find closing ')' — the signature ends there; take everything after it
         if let Some(paren_close) = after_sig.find(')') {
-            let rest = after_sig[paren_close + 1..].trim_start_matches(|c: char| c == ' ' || c == '\n');
+            let rest = after_sig[paren_close + 1..].trim_start_matches([' ', '\n']);
             if !rest.is_empty() {
                 // Drop connective phrases like "is called to", "is invoked to", "resource method"
                 let rest = rest
@@ -204,7 +219,7 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
         } else {
             // No closing paren — just take everything after the class name
             let rest = after_sig
-                .find(|c: char| c == ' ')
+                .find(' ')
                 .map(|i| after_sig[i..].trim_start())
                 .unwrap_or("");
             if !rest.is_empty() {
@@ -235,7 +250,10 @@ struct PageBatch {
 
 impl PageBatch {
     fn new() -> Self {
-        Self { pages: Vec::new(), nav: BTreeMap::new() }
+        Self {
+            pages: Vec::new(),
+            nav: BTreeMap::new(),
+        }
     }
 }
 
@@ -307,12 +325,19 @@ fn emit_feature_section(
 
     // D1 — Feature landing index
     let idx_md = pages::feature_index::render_feature_index(feature, cids, dev_paths, ctx.graph);
-    std::fs::write(ctx.out_dir.join(format!("pages/{}/index.md", feature)), &idx_md)?;
-    batch.nav.entry(feature.clone()).or_default().push(NavEntry {
-        slug: format!("{}/index", feature),
-        title: format!("{} Overview", capitalize(feature)),
-        kind: "index".into(),
-    });
+    std::fs::write(
+        ctx.out_dir.join(format!("pages/{}/index.md", feature)),
+        &idx_md,
+    )?;
+    batch
+        .nav
+        .entry(feature.clone())
+        .or_default()
+        .push(NavEntry {
+            slug: format!("{}/index", feature),
+            title: format!("{} Overview", capitalize(feature)),
+            kind: "index".into(),
+        });
     batch.pages.push(PageEntry {
         slug: format!("{}/index", feature),
         role: feature.clone(),
@@ -324,7 +349,8 @@ fn emit_feature_section(
     });
 
     // D2 — Feature PO
-    let feature_llm = ctx.input
+    let feature_llm = ctx
+        .input
         .feature_llm_summaries
         .as_ref()
         .and_then(|m| m.get(feature.as_str()));
@@ -336,15 +362,25 @@ fn emit_feature_section(
         ctx.input.llm_full.as_ref(),
         feature_llm,
         ctx.input.flow_llm_summaries.as_ref(),
-        ctx.feature_scheduled_counts.get(feature.as_str()).copied().unwrap_or(0),
-        ctx.feature_listener_counts.get(feature.as_str()).copied().unwrap_or(0),
+        ctx.feature_scheduled_counts
+            .get(feature.as_str())
+            .copied()
+            .unwrap_or(0),
+        ctx.feature_listener_counts
+            .get(feature.as_str())
+            .copied()
+            .unwrap_or(0),
     );
     std::fs::write(ctx.out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
-    batch.nav.entry(feature.clone()).or_default().push(NavEntry {
-        slug: format!("{}/po", feature),
-        title: format!("{} — Business Overview", capitalize(feature)),
-        kind: "po".into(),
-    });
+    batch
+        .nav
+        .entry(feature.clone())
+        .or_default()
+        .push(NavEntry {
+            slug: format!("{}/po", feature),
+            title: format!("{} — Business Overview", capitalize(feature)),
+            kind: "po".into(),
+        });
     batch.pages.push(PageEntry {
         slug: format!("{}/po", feature),
         role: feature.clone(),
@@ -366,11 +402,15 @@ fn emit_feature_section(
         ctx.input.flow_llm_summaries.as_ref(),
     );
     std::fs::write(ctx.out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
-    batch.nav.entry(feature.clone()).or_default().push(NavEntry {
-        slug: format!("{}/ba", feature),
-        title: format!("{} — Business Analysis", capitalize(feature)),
-        kind: "ba".into(),
-    });
+    batch
+        .nav
+        .entry(feature.clone())
+        .or_default()
+        .push(NavEntry {
+            slug: format!("{}/ba", feature),
+            title: format!("{} — Business Analysis", capitalize(feature)),
+            kind: "ba".into(),
+        });
     batch.pages.push(PageEntry {
         slug: format!("{}/ba", feature),
         role: feature.clone(),
@@ -393,23 +433,22 @@ fn emit_feature_section(
                 ) {
                     continue;
                 }
-                if let Some(cls_id) =
-                    m.id.as_str().split_once('#').map(|(prefix, _)| {
-                        let fqcn = prefix
-                            .trim_start_matches("Method:")
-                            .trim_start_matches("Constructor:")
-                            .trim_start_matches("Function:");
-                        ["Class:", "Interface:", "Enum:", "Record:"]
-                            .iter()
-                            .map(|pfx| format!("{}{}", pfx, fqcn))
-                            .find(|id| {
-                                ctx.graph.nodes_by_id.contains_key(id.as_str())
-                                    || ctx.graph.methods_by_class.contains_key(id.as_str())
-                            })
-                            .unwrap_or_else(|| format!("Class:{}", fqcn))
-                    })
-                {
-                    if ctx.class_primary_feature
+                if let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
+                    let fqcn = prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:")
+                        .trim_start_matches("Function:");
+                    ["Class:", "Interface:", "Enum:", "Record:"]
+                        .iter()
+                        .map(|pfx| format!("{}{}", pfx, fqcn))
+                        .find(|id| {
+                            ctx.graph.nodes_by_id.contains_key(id.as_str())
+                                || ctx.graph.methods_by_class.contains_key(id.as_str())
+                        })
+                        .unwrap_or_else(|| format!("Class:{}", fqcn))
+                }) {
+                    if ctx
+                        .class_primary_feature
                         .get(&cls_id)
                         .map(|f| f == feature)
                         .unwrap_or(true)
@@ -453,7 +492,8 @@ fn emit_feature_section(
                     .next()
                     .unwrap_or("Unknown")
                     .to_string();
-                let file = ctx.graph
+                let file = ctx
+                    .graph
                     .methods_by_class
                     .get(class_id.as_str())
                     .and_then(|ms| ms.first())
@@ -472,7 +512,10 @@ fn emit_feature_section(
             }
         };
         let md = pages::dev::render_dev_class(
-            ctx.graph, cls_node, &ctx.input.bodies, ctx.method_flow_desc,
+            ctx.graph,
+            cls_node,
+            &ctx.input.bodies,
+            ctx.method_flow_desc,
         );
         let json_val = pages::dev::render_dev_class_json(ctx.graph, cls_node);
         std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
@@ -481,11 +524,15 @@ fn emit_feature_section(
             serde_json::to_string_pretty(&json_val)?,
         )?;
         let dev_title = cls_node.name.clone();
-        batch.nav.entry(feature.clone()).or_default().push(NavEntry {
-            slug: page_path.clone(),
-            title: dev_title.clone(),
-            kind: "dev".into(),
-        });
+        batch
+            .nav
+            .entry(feature.clone())
+            .or_default()
+            .push(NavEntry {
+                slug: page_path.clone(),
+                title: dev_title.clone(),
+                kind: "dev".into(),
+            });
         batch.pages.push(PageEntry {
             slug: page_path.clone(),
             role: feature.clone(),
@@ -498,23 +545,30 @@ fn emit_feature_section(
     }
 
     // D5 — Per-route API-flow pages
-    let mut feature_controllers: Vec<(&str, &Vec<(Node, Node)>)> = ctx.graph
+    let mut feature_controllers: Vec<(&str, &Vec<(Node, Node)>)> = ctx
+        .graph
         .routes_by_controller
         .iter()
         .filter(|(ctrl, _)| {
-            let graph_feature = ctx.graph
+            let graph_feature = ctx
+                .graph
                 .controller_feature
                 .get(*ctrl)
                 .map(|f| f.as_str())
                 .unwrap_or("shared");
             let effective_feature = if graph_feature == "shared" {
-                let llm_feat = ctx.input
+                let llm_feat = ctx
+                    .input
                     .controller_summaries
                     .as_ref()
                     .and_then(|m| m.get(*ctrl))
                     .and_then(|s| s.feature.as_deref())
                     .unwrap_or("shared");
-                if ctx.known_features.contains(llm_feat) { llm_feat } else { graph_feature }
+                if ctx.known_features.contains(llm_feat) {
+                    llm_feat
+                } else {
+                    graph_feature
+                }
             } else {
                 graph_feature
             };
@@ -534,7 +588,8 @@ fn emit_feature_section(
         for (ctrl_pos, (ctrl_name, routes)) in feature_controllers.iter().enumerate() {
             let ctrl_slug = slugify(ctrl_name);
             let display_title = pages::feature_po::controller_display_name(ctrl_name);
-            let ctrl_summary = ctx.input
+            let ctrl_summary = ctx
+                .input
                 .controller_summaries
                 .as_ref()
                 .and_then(|m| m.get(*ctrl_name));
@@ -572,11 +627,12 @@ fn emit_feature_section(
                 let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
                 let process_id = ctx.process_by_handler.get(handler.id.as_str());
                 let flow_summary = process_id
-                    .and_then(|pid| {
-                        ctx.input.flow_llm_summaries.as_ref()?.get(pid.as_str())
-                    })
+                    .and_then(|pid| ctx.input.flow_llm_summaries.as_ref()?.get(pid.as_str()))
                     .or_else(|| {
-                        ctx.input.flow_llm_summaries.as_ref()?.get(handler.id.as_str())
+                        ctx.input
+                            .flow_llm_summaries
+                            .as_ref()?
+                            .get(handler.id.as_str())
                     });
                 let flow_md = pages::api_flow::render_api_flow_page(
                     handler,
@@ -593,11 +649,15 @@ fn emit_feature_section(
                     &flow_md,
                 )?;
                 let flow_title = pages::api_flow::handler_title(handler.id.as_str());
-                batch.nav.entry(feature.clone()).or_default().push(NavEntry {
-                    slug: page_path.clone(),
-                    title: flow_title.clone(),
-                    kind: "api-flow".into(),
-                });
+                batch
+                    .nav
+                    .entry(feature.clone())
+                    .or_default()
+                    .push(NavEntry {
+                        slug: page_path.clone(),
+                        title: flow_title.clone(),
+                        kind: "api-flow".into(),
+                    });
                 batch.pages.push(PageEntry {
                     slug: page_path.clone(),
                     role: feature.clone(),
@@ -624,7 +684,8 @@ fn emit_entrypoint_section(
         return Ok(batch);
     }
 
-    let all_method_desc: HashMap<String, String> = ctx.input
+    let all_method_desc: HashMap<String, String> = ctx
+        .input
         .controller_summaries
         .iter()
         .flat_map(|m| m.values())
@@ -632,13 +693,12 @@ fn emit_entrypoint_section(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let mut by_feature_scheduled: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
-        BTreeMap::new();
-    let mut by_feature_events: BTreeMap<String, Vec<&crate::EntrypointRecord>> =
-        BTreeMap::new();
+    let mut by_feature_scheduled: BTreeMap<String, Vec<&crate::EntrypointRecord>> = BTreeMap::new();
+    let mut by_feature_events: BTreeMap<String, Vec<&crate::EntrypointRecord>> = BTreeMap::new();
 
     for ep in &ctx.input.entrypoints {
-        let file = ctx.graph
+        let file = ctx
+            .graph
             .nodes_by_id
             .get(ep.method_id.as_str())
             .map(|n| n.file.as_str())
@@ -676,11 +736,15 @@ fn emit_entrypoint_section(
             let page_path = format!("{}/api/scheduled/{}", feature, slug);
             std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
             let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
-            batch.nav.entry(feature.clone()).or_default().push(NavEntry {
-                slug: page_path.clone(),
-                title: flow_title.clone(),
-                kind: "scheduled-flow".into(),
-            });
+            batch
+                .nav
+                .entry(feature.clone())
+                .or_default()
+                .push(NavEntry {
+                    slug: page_path.clone(),
+                    title: flow_title.clone(),
+                    kind: "scheduled-flow".into(),
+                });
             batch.pages.push(PageEntry {
                 slug: page_path.clone(),
                 role: feature.clone(),
@@ -719,11 +783,15 @@ fn emit_entrypoint_section(
             let page_path = format!("{}/api/events/{}", feature, slug);
             std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
             let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
-            batch.nav.entry(feature.clone()).or_default().push(NavEntry {
-                slug: page_path.clone(),
-                title: flow_title.clone(),
-                kind: "listener-flow".into(),
-            });
+            batch
+                .nav
+                .entry(feature.clone())
+                .or_default()
+                .push(NavEntry {
+                    slug: page_path.clone(),
+                    title: flow_title.clone(),
+                    kind: "listener-flow".into(),
+                });
             batch.pages.push(PageEntry {
                 slug: page_path.clone(),
                 role: feature.clone(),
@@ -770,7 +838,8 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
         let dir = ctx.out_dir.join(format!("pages/communities/{dir_name}"));
         std::fs::create_dir_all(&dir)?;
 
-        let processes_here: Vec<&Node> = ctx.graph
+        let processes_here: Vec<&Node> = ctx
+            .graph
             .process_nodes
             .iter()
             .filter(|p| {
@@ -783,12 +852,15 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
             })
             .collect();
 
-        let llm = ctx.input.llm_summaries.as_ref().and_then(|m| m.get(&comm_id));
+        let llm = ctx
+            .input
+            .llm_summaries
+            .as_ref()
+            .and_then(|m| m.get(&comm_id));
         let llm_full = ctx.input.llm_full.as_ref().and_then(|m| m.get(&comm_id));
 
-        let detail_md = pages::community::render_community_detail(
-            comm, ctx.graph, &processes_here, llm,
-        );
+        let detail_md =
+            pages::community::render_community_detail(comm, ctx.graph, &processes_here, llm);
         std::fs::write(dir.join("index.md"), &detail_md)?;
         batch.pages.push(PageEntry {
             slug: format!("communities/{dir_name}/index"),
@@ -813,9 +885,8 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
                 community_id: Some(comm_id.clone()),
             });
 
-            let ba_md = pages::community::render_community_ba(
-                comm, ctx.graph, &processes_here, full,
-            );
+            let ba_md =
+                pages::community::render_community_ba(comm, ctx.graph, &processes_here, full);
             std::fs::write(dir.join("ba.md"), &ba_md)?;
             batch.pages.push(PageEntry {
                 slug: format!("communities/{dir_name}/ba"),
@@ -836,7 +907,12 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
     let graph = if input.grouping == "package" {
         WikiGraph::build_package_grouped(input.nodes, input.edges, &*input.feature_of)
     } else {
-        WikiGraph::build(input.nodes, input.edges, input.community_nodes, input.community_edges)
+        WikiGraph::build(
+            input.nodes,
+            input.edges,
+            input.community_nodes,
+            input.community_edges,
+        )
     };
 
     let unresolved_count = count_unresolved_refs(input.unresolved_report.as_deref());
@@ -866,15 +942,22 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
     let mut feature_groups = if input.grouping == "package" {
         // Restrict to packages that survived --filter-route (stored in input.community_nodes).
         // When no route filter was active, input.community_nodes contains all packages.
-        let allowed_ids: std::collections::HashSet<&str> =
-            input.community_nodes.iter().map(|n| n.id.as_str()).collect();
+        let allowed_ids: std::collections::HashSet<&str> = input
+            .community_nodes
+            .iter()
+            .map(|n| n.id.as_str())
+            .collect();
         let all_groups = group_nodes_by_package(&graph);
         if allowed_ids.is_empty() {
             all_groups
         } else {
             all_groups
                 .into_iter()
-                .filter(|g| g.community_ids.iter().any(|id| allowed_ids.contains(id.as_str())))
+                .filter(|g| {
+                    g.community_ids
+                        .iter()
+                        .any(|id| allowed_ids.contains(id.as_str()))
+                })
                 .collect()
         }
     } else {
@@ -925,11 +1008,12 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
             for (proc_id, summary) in flow_map {
                 if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
                     for step in steps {
-                        let idx = (step.step_number as usize).saturating_sub(1);
+                        let idx = step.step_number.saturating_sub(1);
                         if let Some(desc) = summary.step_descriptions.get(idx) {
                             if !desc.is_empty() {
                                 let id = step.symbol.id.as_str();
-                                let cleaned = if let Some((prefix, meth_arity)) = id.split_once('#') {
+                                let cleaned = if let Some((prefix, meth_arity)) = id.split_once('#')
+                                {
                                     let cls = prefix
                                         .trim_start_matches("Method:")
                                         .trim_start_matches("Constructor:")
@@ -958,15 +1042,13 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         for method_nodes in graph.methods_by_class.values() {
             for method in method_nodes {
                 let method_id = method.id.as_str();
-                let class_name = method_id
-                    .split_once('#')
-                    .and_then(|(prefix, _)| {
-                        prefix
-                            .trim_start_matches("Method:")
-                            .trim_start_matches("Constructor:")
-                            .rsplit('.')
-                            .next()
-                    });
+                let class_name = method_id.split_once('#').and_then(|(prefix, _)| {
+                    prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:")
+                        .rsplit('.')
+                        .next()
+                });
                 let simple_method_name = method_id
                     .split('#')
                     .nth(1)
@@ -1101,8 +1183,10 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
     // spread across communities that belong to different features (e.g. CouponController having
     // a cart-calling method landing it in the cart community).
     let class_primary_feature: std::collections::HashMap<String, String> = {
-        let mut votes: std::collections::HashMap<String, std::collections::BTreeMap<String, usize>> =
-            std::collections::HashMap::new();
+        let mut votes: std::collections::HashMap<
+            String,
+            std::collections::BTreeMap<String, usize>,
+        > = std::collections::HashMap::new();
         for group in &feature_groups {
             for comm_id in &group.community_ids {
                 if let Some(members) = graph.members_by_community.get(comm_id) {
@@ -1113,22 +1197,20 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
                         ) {
                             continue;
                         }
-                        if let Some(cls_id) =
-                            m.id.as_str().split_once('#').map(|(prefix, _)| {
-                                let fqcn = prefix
-                                    .trim_start_matches("Method:")
-                                    .trim_start_matches("Constructor:")
-                                    .trim_start_matches("Function:");
-                                ["Class:", "Interface:", "Enum:", "Record:"]
-                                    .iter()
-                                    .map(|pfx| format!("{}{}", pfx, fqcn))
-                                    .find(|id| {
-                                        graph.nodes_by_id.contains_key(id.as_str())
-                                            || graph.methods_by_class.contains_key(id.as_str())
-                                    })
-                                    .unwrap_or_else(|| format!("Class:{}", fqcn))
-                            })
-                        {
+                        if let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
+                            let fqcn = prefix
+                                .trim_start_matches("Method:")
+                                .trim_start_matches("Constructor:")
+                                .trim_start_matches("Function:");
+                            ["Class:", "Interface:", "Enum:", "Record:"]
+                                .iter()
+                                .map(|pfx| format!("{}{}", pfx, fqcn))
+                                .find(|id| {
+                                    graph.nodes_by_id.contains_key(id.as_str())
+                                        || graph.methods_by_class.contains_key(id.as_str())
+                                })
+                                .unwrap_or_else(|| format!("Class:{}", fqcn))
+                        }) {
                             *votes
                                 .entry(cls_id)
                                 .or_default()
@@ -1287,5 +1369,3 @@ fn count_test_classes(graph: &WikiGraph) -> usize {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
-
-

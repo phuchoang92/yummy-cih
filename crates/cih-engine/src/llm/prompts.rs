@@ -75,8 +75,7 @@ pub const CLASS_SYSTEM_PROMPT: &str =
      Start each method description with an action verb. \
      Do not mention the class name, method name, or arity (e.g. /2()) in the description.";
 
-pub const CLASS_ENRICH_JSON_TEMPLATE: &str =
-    "Return exactly this JSON:\n\
+pub const CLASS_ENRICH_JSON_TEMPLATE: &str = "Return exactly this JSON:\n\
      {\n\
        \"summary\": \"one paragraph: what this class does in the system\",\n\
        \"methods\": {\n\

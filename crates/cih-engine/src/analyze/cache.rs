@@ -10,7 +10,7 @@ use crate::file_cache::{
 };
 use crate::versioning::latest_graph_artifacts;
 
-use super::{AnalyzeCacheOptions, CacheStats};
+use super::{analyze_config_fingerprint, AnalyzeCacheOptions, AnalyzeConfigState, CacheStats};
 
 pub(super) enum ParseScopeOutcome {
     Reused {
@@ -108,6 +108,7 @@ pub(super) fn parse_scope(
         && all_files_hashed
         && changed_files.is_empty()
         && previous.same_file_set(&current_hashes)
+        && config_unchanged(repo_root, cih_dir, &cache)
     {
         match reused_artifacts(repo_root, cih_dir) {
             Ok(reused) => {
@@ -116,7 +117,7 @@ pub(super) fn parse_scope(
                     cache_stats: CacheStats {
                         enabled: true,
                         noop: true,
-                        version: Some(reused.artifacts.version.0.clone()),
+                        version: Some(reused.artifacts.version.to_string()),
                         ..CacheStats::default()
                     },
                     artifacts: reused.artifacts,
@@ -227,12 +228,30 @@ pub(super) fn parse_scope(
     })
 }
 
+/// Whether the output-affecting analyze config still matches what produced the cached artifacts.
+/// A missing or differing fingerprint (e.g. a new `--cxf-base-path` or edited `cih.patterns.toml`)
+/// returns `false`, which disqualifies the no-op reuse so resolve/post-process/emit re-run.
+fn config_unchanged(repo_root: &Path, cih_dir: &Path, cache: &AnalyzeCacheOptions) -> bool {
+    let current = analyze_config_fingerprint(repo_root, cache);
+    match AnalyzeConfigState::load(cih_dir) {
+        Some(prev) if prev.fingerprint == current => true,
+        _ => {
+            tracing::info!(
+                "analyze config changed since last run — re-resolving (no source changes)"
+            );
+            false
+        }
+    }
+}
+
 fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts> {
     let artifacts = latest_graph_artifacts(repo_root)?;
     let nodes = artifacts.read_nodes()?;
     let edges = artifacts.read_edges()?;
-    let parsed_dir = cih_dir.join("parsed").join(&artifacts.version.0);
+    let parsed_dir = cih_dir.join("parsed").join(artifacts.version.as_str());
     let parsed_files_path = parsed_dir.join("parsed-files.jsonl");
+    // A missing/corrupt parsed-files.jsonl is deliberately not an error here:
+    // count 0 makes the cache look unusable and forces a full reparse.
     let parsed_file_count = cih_parse::load_parsed_files(&parsed_dir)
         .map(|files| files.len())
         .unwrap_or(0);
@@ -243,4 +262,97 @@ fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts>
         edge_count: edges.len(),
         parsed_file_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_repo(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("cih-cfgfp-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn opts(cxf: Option<&str>, skip_xml: bool) -> AnalyzeCacheOptions {
+        AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: true,
+            skip_xml_integration: skip_xml,
+            cxf_base_path: cxf.map(String::from),
+        }
+    }
+
+    /// Persist the fingerprint for `cache`, exactly as the emit path does.
+    fn record(repo: &Path, cih_dir: &Path, cache: &AnalyzeCacheOptions) {
+        AnalyzeConfigState {
+            fingerprint: analyze_config_fingerprint(repo, cache),
+        }
+        .save(cih_dir)
+        .unwrap();
+    }
+
+    #[test]
+    fn unchanged_config_matches_and_changed_config_does_not() {
+        let repo = temp_repo("cxf");
+        let cih_dir = repo.join(".cih");
+        let a = opts(None, false);
+        record(&repo, &cih_dir, &a);
+
+        // Identical config → reuse allowed.
+        assert!(config_unchanged(&repo, &cih_dir, &a));
+        // A new --cxf-base-path with no source change → reuse disqualified.
+        let b = opts(Some("/cxf"), false);
+        assert!(!config_unchanged(&repo, &cih_dir, &b));
+        // Toggling skip_xml_integration also invalidates.
+        assert!(!config_unchanged(&repo, &cih_dir, &opts(None, true)));
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn missing_fingerprint_disqualifies_reuse() {
+        let repo = temp_repo("missing");
+        let cih_dir = repo.join(".cih"); // never written
+        assert!(!config_unchanged(&repo, &cih_dir, &opts(None, false)));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn editing_patterns_file_invalidates_reuse() {
+        let repo = temp_repo("patterns");
+        let cih_dir = repo.join(".cih");
+        let cache = opts(None, false);
+        // Fingerprint recorded with no cih.patterns.toml present.
+        record(&repo, &cih_dir, &cache);
+        assert!(config_unchanged(&repo, &cih_dir, &cache));
+
+        // Adding a resolve pattern changes the effective config even though no source file did.
+        std::fs::write(
+            repo.join(cih_patterns::PATTERNS_FILE),
+            "[[route]]\nannotation = \"BankEndpoint\"\nmethod = \"POST\"\n",
+        )
+        .unwrap();
+        assert!(!config_unchanged(&repo, &cih_dir, &cache));
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_and_ignores_cache_control() {
+        let repo = temp_repo("det");
+        let mut a = opts(Some("/rest"), false);
+        let fp1 = analyze_config_fingerprint(&repo, &a);
+        assert_eq!(fp1, analyze_config_fingerprint(&repo, &a));
+        // Flipping cache-control fields must not change the fingerprint (they don't affect output).
+        a.use_cache = false;
+        a.allow_noop = false;
+        assert_eq!(fp1, analyze_config_fingerprint(&repo, &a));
+        std::fs::remove_dir_all(&repo).ok();
+    }
 }

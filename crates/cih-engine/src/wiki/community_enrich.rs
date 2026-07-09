@@ -3,14 +3,14 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 use cih_core::Node;
-use cih_wiki::{CommunityLlmFull, CommunityLlmSummary, FlowLlmSummary, WikiGraph};
+use cih_wiki::{CommunityLlmFull, FlowLlmSummary, WikiGraph};
 use rayon::prelude::*;
 
+use super::config::LlmRunParams;
+use super::flow_enrich::enrich_one_flow;
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
-use super::config::LlmRunParams;
-use super::flow_enrich::enrich_one_flow;
 
 pub(super) fn run_community_full_enrichment(
     community_nodes: &[Node],
@@ -48,7 +48,11 @@ pub(super) fn run_community_full_enrichment(
                     llm.retries,
                     llm.language,
                 );
-                if r.is_ok() { ui_full.inc_ok(); } else { ui_full.inc_failed(); }
+                if r.is_ok() {
+                    ui_full.inc_ok();
+                } else {
+                    ui_full.inc_failed();
+                }
                 (comm.id.as_str().to_string(), r)
             })
             .collect()
@@ -58,12 +62,18 @@ pub(super) fn run_community_full_enrichment(
     let mut map = HashMap::new();
     for (id, result) in results {
         match result {
-            Ok(full) => { map.insert(id, full); }
+            Ok(full) => {
+                map.insert(id, full);
+            }
             Err(err) => tracing::warn!(community = %id, error = %err, "LLM full enrichment failed"),
         }
     }
     tracing::info!(enriched = map.len(), "LLM full enrichment complete");
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 pub(super) fn run_process_flow_enrichment(
@@ -113,7 +123,11 @@ pub(super) fn run_process_flow_enrichment(
 }
 
 fn build_full_prompt(name: &str, evidence: &str) -> String {
-    let evidence = if evidence.trim().is_empty() { "none" } else { evidence };
+    let evidence = if evidence.trim().is_empty() {
+        "none"
+    } else {
+        evidence
+    };
     format!(
         "You are writing detailed documentation from a code analysis graph.\nModule: \"{name}\"\n\nEvidence:\n{evidence}\n\n{}",
         crate::llm::prompts::COMMUNITY_FULL_JSON_TEMPLATE
@@ -161,6 +175,7 @@ fn parse_llm_full(text: &str) -> Result<CommunityLlmFull> {
     )
 }
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 fn enrich_one_community_full(
     community: &cih_core::Node,
     graph: &WikiGraph,

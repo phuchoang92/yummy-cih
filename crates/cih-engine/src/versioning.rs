@@ -23,8 +23,12 @@ pub fn content_version(nodes: &[Node], edges: &[Edge], parsed_files: &[ParsedFil
 
 pub fn latest_graph_artifacts(repo: &Path) -> Result<GraphArtifacts> {
     let parent = repo.join(".cih").join("artifacts");
-    GraphArtifacts::latest_in_dir(&parent)
-        .with_context(|| format!("run `analyze` first — no graph artifacts at {}", parent.display()))
+    GraphArtifacts::latest_in_dir(&parent).with_context(|| {
+        format!(
+            "run `analyze` first — no graph artifacts at {}",
+            parent.display()
+        )
+    })
 }
 
 pub fn discover_version(nodes: &[Node], edges: &[Edge]) -> String {

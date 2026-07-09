@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Result};
-use cih_wiki::{FeatureLlmSummary, WikiGraph};
 use cih_wiki::features::FeatureGroup;
+use cih_wiki::{FeatureLlmSummary, WikiGraph};
 
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
@@ -68,6 +68,7 @@ pub fn build_feature_evidence(
     merged
 }
 
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub fn enrich_one_feature(
     feature: &str,
     evidence: &str,
@@ -273,9 +274,7 @@ fn replace_citations(text: &str, map: &HashMap<String, String>) -> String {
             let abs = pos + idx;
             let after = abs + bare.len();
             let next = out.as_bytes().get(after).copied();
-            if next == Some(b'(') {
-                pos = after;
-            } else if next.map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
+            if next == Some(b'(') || next.map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
                 pos = after;
             } else {
                 out.replace_range(abs..after, &linked);

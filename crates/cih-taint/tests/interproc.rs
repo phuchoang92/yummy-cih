@@ -58,8 +58,14 @@ fn direct_source_to_sql_sink_via_executes_query() {
     let paths = find_taint_paths(&nodes, &edges, &rules);
 
     assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0].source.as_str(), "Method:com.example.OrderController#create/1");
-    assert_eq!(paths[0].sink_method.as_str(), "Method:com.example.OrderDao#save/1");
+    assert_eq!(
+        paths[0].source.as_str(),
+        "Method:com.example.OrderController#create/1"
+    );
+    assert_eq!(
+        paths[0].sink_method.as_str(),
+        "Method:com.example.OrderDao#save/1"
+    );
     assert_eq!(paths[0].category, SinkCategory::Sql);
     assert_eq!(paths[0].hops.len(), 2);
 }
@@ -124,7 +130,10 @@ fn multi_hop_exec_sink() {
 
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].category, SinkCategory::Exec);
-    assert_eq!(paths[0].sink_method.as_str(), "Method:com.example.CommandService#execute/1");
+    assert_eq!(
+        paths[0].sink_method.as_str(),
+        "Method:com.example.CommandService#execute/1"
+    );
     assert_eq!(paths[0].edge_count(), 1);
 }
 
@@ -136,7 +145,11 @@ fn sanitizer_stops_propagation() {
         method_node("Method:org.springframework.web.util.HtmlUtils#htmlEscape/1"),
     ];
     let edges = vec![
-        edge("Method:com.example.WebController#render/1", "Route:/render", EdgeKind::HandlesRoute),
+        edge(
+            "Method:com.example.WebController#render/1",
+            "Route:/render",
+            EdgeKind::HandlesRoute,
+        ),
         edge(
             "Method:com.example.WebController#render/1",
             "Method:com.example.WebService#buildHtml/1",
@@ -151,7 +164,10 @@ fn sanitizer_stops_propagation() {
 
     let rules = default_rules();
     let paths = find_taint_paths(&nodes, &edges, &rules);
-    assert!(paths.is_empty(), "path through sanitizer should be suppressed");
+    assert!(
+        paths.is_empty(),
+        "path through sanitizer should be suppressed"
+    );
 }
 
 #[test]

@@ -163,7 +163,10 @@ fn distinctive_class_name(graph: &WikiGraph, community: &Node, base_slug: &str) 
 
     let mut class_info: HashMap<String, (String, usize, bool)> = HashMap::new();
     for m in members {
-        if !matches!(m.kind, NodeKind::Method | NodeKind::Constructor | NodeKind::Function) {
+        if !matches!(
+            m.kind,
+            NodeKind::Method | NodeKind::Constructor | NodeKind::Function
+        ) {
             continue;
         }
         let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
@@ -210,16 +213,22 @@ fn lead_method_hint(graph: &WikiGraph, community: &Node) -> Option<String> {
     members
         .iter()
         .filter(|m| matches!(m.kind, NodeKind::Method))
-        .filter(|m| !m.name.starts_with("get") && !m.name.starts_with("set") && !m.name.starts_with("is"))
+        .filter(|m| {
+            !m.name.starts_with("get") && !m.name.starts_with("set") && !m.name.starts_with("is")
+        })
         .max_by_key(|m| {
-            graph.calls_out.get(m.id.as_str()).map(|v| v.len()).unwrap_or(0)
+            graph
+                .calls_out
+                .get(m.id.as_str())
+                .map(|v| v.len())
+                .unwrap_or(0)
         })
         .map(|m| m.name.clone())
 }
 
 /// Build the sidebar/manifest title for a community dev page.
 pub fn community_display_title(graph: &WikiGraph, community: &Node, page_path: &str) -> String {
-    let slug = page_path.split('/').last().unwrap_or(&community.name);
+    let slug = page_path.split('/').next_back().unwrap_or(&community.name);
     let (base_slug, suffix) = strip_numeric_suffix(slug);
 
     let primary_stereotype = community
@@ -352,7 +361,9 @@ pub fn render_dev_community(
 
     if !class_to_methods.is_empty() {
         let has_non_test = class_to_methods.iter().any(|(cls_id, _)| {
-            graph.nodes_by_id.get(cls_id)
+            graph
+                .nodes_by_id
+                .get(cls_id)
                 .and_then(node_stereotype)
                 .map(|s| s != "test")
                 .unwrap_or(true)
@@ -458,7 +469,10 @@ pub fn render_dev_community(
                 let sig = html_encode_angles(&method_signature(method));
                 let lang = lang_tag(&method.file);
                 let location = if method.range.start_line > 0 && method.range.end_line > 0 {
-                    format!(" — lines {}–{}", method.range.start_line, method.range.end_line)
+                    format!(
+                        " — lines {}–{}",
+                        method.range.start_line, method.range.end_line
+                    )
                 } else {
                     String::new()
                 };
@@ -470,7 +484,10 @@ pub fn render_dev_community(
                         let comment_prefix = cih_lang::comment_prefix_for_lang(lang);
                         format!(
                             "{} stripped · {} of {} lines shown\n{}",
-                            comment_prefix, stripped_lines, body.original_lines, body.stripped.trim()
+                            comment_prefix,
+                            stripped_lines,
+                            body.original_lines,
+                            body.stripped.trim()
                         )
                     } else {
                         body.stripped.trim().to_string()
@@ -664,7 +681,10 @@ pub fn render_dev_class(
                 String::new()
             };
             if cls.range.start_line > 0 {
-                md.push_str(&format!("`{}` :{}{}  \n\n", file, cls.range.start_line, stereo_part));
+                md.push_str(&format!(
+                    "`{}` :{}{}  \n\n",
+                    file, cls.range.start_line, stereo_part
+                ));
             } else {
                 md.push_str(&format!("`{}`{}  \n\n", file, stereo_part));
             }
@@ -720,7 +740,10 @@ pub fn render_dev_class(
             if !is_interface {
                 if let Some(body) = bodies.get(method.id.as_str()) {
                     let location = if method.range.start_line > 0 && method.range.end_line > 0 {
-                        format!("Lines {}–{}", method.range.start_line, method.range.end_line)
+                        format!(
+                            "Lines {}–{}",
+                            method.range.start_line, method.range.end_line
+                        )
                     } else {
                         "Source".to_string()
                     };
@@ -739,10 +762,7 @@ pub fn render_dev_class(
                         } else {
                             body.stripped.trim().to_string()
                         };
-                        md.push_str(&format!(
-                            "<details>\n<summary>{}</summary>\n\n",
-                            location
-                        ));
+                        md.push_str(&format!("<details>\n<summary>{}</summary>\n\n", location));
                         if lang.is_empty() {
                             md.push_str(&format!("```\n{}\n```\n\n", code_content));
                         } else {
@@ -878,9 +898,10 @@ pub fn render_dev_class(
     for method in all_methods {
         if let Some(tester_ids) = graph.tests_in.get(method.id.as_str()) {
             for tid in tester_ids {
-                if let Some(tcls_id) = tid.split_once('#').map(|(prefix, _)| {
-                    format!("Class:{}", prefix.trim_start_matches("Method:"))
-                }) {
+                if let Some(tcls_id) = tid
+                    .split_once('#')
+                    .map(|(prefix, _)| format!("Class:{}", prefix.trim_start_matches("Method:")))
+                {
                     if let Some(tcls_node) = graph.nodes_by_id.get(&tcls_id) {
                         test_class_names.insert(tcls_node.name.clone());
                     }
@@ -1000,7 +1021,9 @@ pub fn render_dev_class_json(graph: &WikiGraph, cls: &Node) -> serde_json::Value
 
     let links: Vec<serde_json::Value> = seen_edges
         .into_iter()
-        .filter(|(src, dst)| neighbor_ids.contains(src.as_str()) && neighbor_ids.contains(dst.as_str()))
+        .filter(|(src, dst)| {
+            neighbor_ids.contains(src.as_str()) && neighbor_ids.contains(dst.as_str())
+        })
         .map(|(src, dst)| {
             serde_json::json!({
                 "source": src,
@@ -1081,6 +1104,3 @@ pub fn render_dev_community_json(graph: &WikiGraph, community: &Node) -> serde_j
         "links": links,
     })
 }
-
-
-

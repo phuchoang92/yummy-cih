@@ -43,7 +43,7 @@ export interface SymbolContext {
   community?: { id: string; name: string; symbol_count: number; cohesion: number };
 }
 
-export type TabId = "overview" | "search" | "impact" | "flow" | "communities" | "routes";
+export type TabId = "overview" | "search" | "impact" | "flow" | "communities" | "clusters" | "routes";
 
 export interface FlatGraphNode {
   id: string;

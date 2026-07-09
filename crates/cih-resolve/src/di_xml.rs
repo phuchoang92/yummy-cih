@@ -254,7 +254,11 @@ pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
             let Some(candidates) = beans_by_simple.get(field_simple) else {
                 continue;
             };
-            let owner_fqcn = binding.in_fqcn.split('#').next().unwrap_or(&binding.in_fqcn);
+            let owner_fqcn = binding
+                .in_fqcn
+                .split('#')
+                .next()
+                .unwrap_or(&binding.in_fqcn);
             let owner_kind = owner_kind_by_fqcn
                 .get(owner_fqcn)
                 .copied()
@@ -347,7 +351,11 @@ fn collect_di_definitions(repo_root: &Path) -> (Vec<BeanDef>, Vec<ReferenceDef>)
                         .unwrap_or(&path)
                         .to_string_lossy()
                         .replace('\\', "/");
-                    if is_di_xml_path(&rel) { Some((path, rel)) } else { None }
+                    if is_di_xml_path(&rel) {
+                        Some((path, rel))
+                    } else {
+                        None
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, "di-xml: walk error — skipping");
@@ -412,4 +420,3 @@ pub fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
         from = pos + needle.len();
     }
 }
-

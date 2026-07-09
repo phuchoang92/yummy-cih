@@ -99,9 +99,23 @@ pub struct ContractSite {
     /// HTTP method for HTTP calls.
     #[serde(default)]
     pub http_method: Option<String>,
+    /// Messaging framework for event contracts (`EventPublish` / `EventListen`), so the
+    /// contract carries its own Kafka-vs-Spring identity instead of consumers guessing.
+    #[serde(default)]
+    pub messaging_framework: Option<MessagingFramework>,
     /// Graph id of the enclosing callable that makes/listens to this contract.
     pub in_callable: NodeId,
     pub range: Range,
+}
+
+/// Messaging framework behind an event contract, determined by the parser
+/// (`@KafkaListener` / `KafkaTemplate` → Kafka; `@EventListener` /
+/// `ApplicationEventPublisher` → Spring).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagingFramework {
+    Kafka,
+    Spring,
 }
 
 /// Type of contract site discovered by the parser.
@@ -229,13 +243,20 @@ pub struct ComplexityRecord {
     pub is_recursive: bool,
     /// Control-flow statement counts used to build the class-level StructuralProfile.
     /// All default to 0 so old serialised records remain valid.
-    #[serde(default)] pub if_count: u16,
-    #[serde(default)] pub for_count: u16,
-    #[serde(default)] pub while_count: u16,
-    #[serde(default)] pub switch_count: u16,
-    #[serde(default)] pub try_count: u16,
-    #[serde(default)] pub return_count: u16,
-    #[serde(default)] pub throw_count: u16,
+    #[serde(default)]
+    pub if_count: u16,
+    #[serde(default)]
+    pub for_count: u16,
+    #[serde(default)]
+    pub while_count: u16,
+    #[serde(default)]
+    pub switch_count: u16,
+    #[serde(default)]
+    pub try_count: u16,
+    #[serde(default)]
+    pub return_count: u16,
+    #[serde(default)]
+    pub throw_count: u16,
 }
 
 /// 25-float structural fingerprint of a class node.
@@ -257,21 +278,40 @@ pub struct StructuralProfile {
 
 impl StructuralProfile {
     pub fn cosine_similarity(&self, other: &Self) -> f32 {
-        let dot: f32 = self.features.iter().zip(other.features.iter()).map(|(a, b)| a * b).sum();
+        let dot: f32 = self
+            .features
+            .iter()
+            .zip(other.features.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let na: f32 = self.features.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = other.features.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na == 0.0 || nb == 0.0 { 0.0 } else { (dot / (na * nb)).clamp(-1.0, 1.0) }
+        if na == 0.0 || nb == 0.0 {
+            0.0
+        } else {
+            (dot / (na * nb)).clamp(-1.0, 1.0)
+        }
     }
 
     pub fn to_json_array(&self) -> serde_json::Value {
-        serde_json::Value::Array(self.features.iter().map(|&f| {
-            serde_json::Value::Number(serde_json::Number::from_f64(f as f64).unwrap_or(serde_json::Number::from(0)))
-        }).collect())
+        serde_json::Value::Array(
+            self.features
+                .iter()
+                .map(|&f| {
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(f as f64)
+                            .unwrap_or(serde_json::Number::from(0)),
+                    )
+                })
+                .collect(),
+        )
     }
 
     pub fn from_json_array(v: &serde_json::Value) -> Option<Self> {
         let arr = v.as_array()?;
-        if arr.len() != 25 { return None; }
+        if arr.len() != 25 {
+            return None;
+        }
         let mut features = [0f32; 25];
         for (i, val) in arr.iter().enumerate() {
             features[i] = val.as_f64()? as f32;

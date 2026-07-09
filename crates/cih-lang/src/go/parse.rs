@@ -246,7 +246,7 @@ fn extract_method(
     src: &str,
     rel: &str,
     pkg: &str,
-    file_id: &NodeId,
+    _file_id: &NodeId,
 ) -> Option<(SymbolDef, Node, Edge)> {
     let receiver_node = node.child_by_field_name("receiver")?;
     let receiver_type = extract_receiver_type(receiver_node, src)?;
@@ -298,6 +298,7 @@ fn extract_method(
     Some((def, graph_node, edge))
 }
 
+#[allow(clippy::too_many_arguments)] // recursive tree-walker signature
 fn collect_type_decls(
     type_decl: TsNode<'_>,
     src: &str,

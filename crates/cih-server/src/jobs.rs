@@ -7,9 +7,19 @@ use serde::Serialize;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum JobState {
-    Running { started_at_secs: u64 },
-    Done { started_at_secs: u64, finished_at_secs: u64, output: String },
-    Failed { started_at_secs: u64, finished_at_secs: u64, error: String },
+    Running {
+        started_at_secs: u64,
+    },
+    Done {
+        started_at_secs: u64,
+        finished_at_secs: u64,
+        output: String,
+    },
+    Failed {
+        started_at_secs: u64,
+        finished_at_secs: u64,
+        error: String,
+    },
 }
 
 pub type Jobs = Arc<tokio::sync::RwLock<HashMap<String, JobState>>>;

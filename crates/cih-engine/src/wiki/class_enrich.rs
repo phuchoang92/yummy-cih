@@ -8,10 +8,11 @@ use cih_wiki::{
 };
 use rayon::prelude::*;
 
+use super::config::fnv64;
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
-use super::config::fnv64;
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub fn enrich_classes_for_chains(
     wiki_graph: &WikiGraph,
     all_nodes: &[Node],
@@ -39,8 +40,7 @@ pub fn enrich_classes_for_chains(
             if !filter_route.is_empty() && {
                 let path = cih_wiki::graph::route_path(route);
                 !filter_route.iter().any(|f| path.contains(f.as_str()))
-            }
-            {
+            } {
                 continue;
             }
             let chain = wiki_graph.build_call_chain(handler.id.as_str(), 4);
@@ -63,10 +63,13 @@ pub fn enrich_classes_for_chains(
     }
 
     let total = class_methods.len();
-    tracing::info!(classes = total, "class-traversal: enriching {} unique classes", total);
+    tracing::info!(
+        classes = total,
+        "class-traversal: enriching {} unique classes",
+        total
+    );
 
-    let node_by_id: HashMap<&str, &Node> =
-        all_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let node_by_id: HashMap<&str, &Node> = all_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
     let prev_entries = prev_store.entries.clone();
 
@@ -114,12 +117,16 @@ pub fn enrich_classes_for_chains(
 
                     if let Some(cached) = prev_entries.get(fqcn.as_str()) {
                         if cached.content_hash == content_hash {
-                            ui.lock().expect("UI progress mutex poisoned").tick_skipped(format!("{} (cached)", simple_name));
+                            ui.lock()
+                                .expect("UI progress mutex poisoned")
+                                .tick_skipped(format!("{} (cached)", simple_name));
                             return None;
                         }
                     }
 
-                    ui.lock().expect("UI progress mutex poisoned").tick(simple_name);
+                    ui.lock()
+                        .expect("UI progress mutex poisoned")
+                        .tick(simple_name);
 
                     let entry = if dry_run {
                         println!("--- [dry-run] class: {} ---", fqcn);
@@ -128,10 +135,8 @@ pub fn enrich_classes_for_chains(
                             method_descriptions: method_ids
                                 .iter()
                                 .filter_map(|id| {
-                                    let m = id
-                                        .split('#')
-                                        .nth(1)
-                                        .and_then(|x| x.split('/').next())?;
+                                    let m =
+                                        id.split('#').nth(1).and_then(|x| x.split('/').next())?;
                                     Some((m.to_string(), format!("[dry-run] {}", m)))
                                 })
                                 .collect(),
@@ -170,9 +175,7 @@ pub fn enrich_classes_for_chains(
                                             attempt,
                                             jitter.wrapping_add(attempt as u64),
                                         );
-                                        std::thread::sleep(std::time::Duration::from_millis(
-                                            delay,
-                                        ));
+                                        std::thread::sleep(std::time::Duration::from_millis(delay));
                                     } else {
                                         tracing::warn!(
                                             class = %fqcn,
@@ -201,10 +204,12 @@ pub fn enrich_classes_for_chains(
         updated_entries.insert(fqcn, entry);
     }
 
-    ui.lock().expect("UI progress mutex poisoned").finish_phase();
+    ui.lock()
+        .expect("UI progress mutex poisoned")
+        .finish_phase();
 
     let mut ctrl_map: HashMap<String, ControllerLlmSummary> = HashMap::new();
-    for (fqcn, _) in &class_methods {
+    for fqcn in class_methods.keys() {
         let simple_name = fqcn.rsplit('.').next().unwrap_or(fqcn.as_str()).to_string();
         if let Some(entry) = updated_entries.get(fqcn.as_str()) {
             ctrl_map.insert(
@@ -305,14 +310,12 @@ fn extract_summary_from_partial(text: &str) -> Option<String> {
     let mut chars = s.chars().peekable();
     loop {
         match chars.next() {
-            Some('\\') => {
-                match chars.next() {
-                    Some('n') => summary.push('\n'),
-                    Some('t') => summary.push('\t'),
-                    Some(c) => summary.push(c),
-                    None => break,
-                }
-            }
+            Some('\\') => match chars.next() {
+                Some('n') => summary.push('\n'),
+                Some('t') => summary.push('\t'),
+                Some(c) => summary.push(c),
+                None => break,
+            },
             Some('"') => break,
             Some(c) => summary.push(c),
             None => break,
@@ -333,23 +336,22 @@ fn parse_class_enrich_response(text: &str) -> Result<(String, HashMap<String, St
         .trim_end_matches("```")
         .trim();
 
-    let extract =
-        |val: &serde_json::Value| -> Option<(String, HashMap<String, String>)> {
-            let summary = val["summary"].as_str().unwrap_or("").to_string();
-            let methods: HashMap<String, String> = val["methods"]
-                .as_object()
-                .map(|m| {
-                    m.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if summary.is_empty() && methods.is_empty() {
-                None
-            } else {
-                Some((summary, methods))
-            }
-        };
+    let extract = |val: &serde_json::Value| -> Option<(String, HashMap<String, String>)> {
+        let summary = val["summary"].as_str().unwrap_or("").to_string();
+        let methods: HashMap<String, String> = val["methods"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if summary.is_empty() && methods.is_empty() {
+            None
+        } else {
+            Some((summary, methods))
+        }
+    };
 
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(cleaned) {
         if let Some(r) = extract(&val) {
@@ -366,9 +368,7 @@ fn parse_class_enrich_response(text: &str) -> Result<(String, HashMap<String, St
         }
     }
     if let Some(summary) = extract_summary_from_partial(cleaned) {
-        tracing::debug!(
-            "class enrichment: partial JSON recovered (summary only), methods lost"
-        );
+        tracing::debug!("class enrichment: partial JSON recovered (summary only), methods lost");
         return Ok((summary, HashMap::new()));
     }
     bail!(

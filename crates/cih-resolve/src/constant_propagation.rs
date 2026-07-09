@@ -20,7 +20,10 @@ pub fn build_java_constant_resolver(parsed: &[ParsedFile]) -> impl ConstantResol
         // Collect (fqcn, super_fqcn) for all type-level defs
         for def in &pf.defs {
             use cih_core::NodeKind;
-            if matches!(def.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum) {
+            if matches!(
+                def.kind,
+                NodeKind::Class | NodeKind::Interface | NodeKind::Enum
+            ) {
                 // The fqcn for a type def is the same as its qualified_name; we use def.fqcn.
                 // super_fqcn is not tracked in SymbolDef, so pass None here —
                 // the resolver will still handle simple / qualified / static-import lookups.

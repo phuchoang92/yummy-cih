@@ -12,4 +12,5 @@ rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 streaming-iterator.workspace = true
+thiserror.workspace = true
 tree-sitter.workspace = true

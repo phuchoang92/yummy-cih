@@ -157,6 +157,10 @@ pub(super) fn build_class_props(
     if let Some(s) = effective_stereotype { obj.insert("stereotype".into(), s.into()); }
     if let Some(e) = entity_opt           { obj.insert("entityType".into(), e.into()); }
     if let Some(t) = table_name           { obj.insert("tableName".into(), t.into()); }
+    let annotations = super::annotation_metadata(node, src);
+    if !annotations.is_empty() {
+        obj.insert("annotations".into(), serde_json::Value::Array(annotations));
+    }
     if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
 }
 
@@ -172,10 +176,10 @@ fn extract_table_annotation_name(text: &str) -> Option<String> {
         if let Some(rel) = search_area[pos..].find("name") {
             let abs = pos + rel;
             let after_name = search_area[abs + 4..].trim_start();
-            if after_name.starts_with('=') {
-                let after_eq = after_name[1..].trim_start();
-                if after_eq.starts_with('"') {
-                    let value_start = after_eq[1..].to_string();
+            if let Some(rest) = after_name.strip_prefix('=') {
+                let after_eq = rest.trim_start();
+                if let Some(stripped) = after_eq.strip_prefix('"') {
+                    let value_start = stripped.to_string();
                     let end = value_start.find('"')?;
                     let name = value_start[..end].to_string();
                     if !name.is_empty() {

@@ -73,14 +73,14 @@ impl GraphArtifacts {
                 GraphArtifacts {
                     nodes_path,
                     edges_path,
-                    version: VersionId(version),
+                    version: VersionId::new(version),
                 },
             ));
         }
         candidates.sort_by(|(a_mtime, a_art), (b_mtime, b_art)| {
             b_mtime
                 .cmp(a_mtime)
-                .then_with(|| b_art.version.0.cmp(&a_art.version.0))
+                .then_with(|| b_art.version.as_str().cmp(a_art.version.as_str()))
         });
         candidates
             .into_iter()
@@ -90,14 +90,45 @@ impl GraphArtifacts {
     }
 }
 
-fn write_jsonl<T: Serialize>(path: &Path, items: &[T]) -> std::io::Result<()> {
+fn write_jsonl<T: Serialize + Sync>(path: &Path, items: &[T]) -> std::io::Result<()> {
+    let body = serialize_jsonl(items)?;
     let mut w = BufWriter::new(File::create(path)?);
-    for it in items {
-        let line = serde_json::to_string(it).map_err(io_err)?;
-        w.write_all(line.as_bytes())?;
-        w.write_all(b"\n")?;
-    }
+    w.write_all(&body)?;
     w.flush()
+}
+
+/// Serialize `items` to newline-delimited JSON, one line per item.
+///
+/// Serialization is the CPU cost (not the write), so it runs in parallel over
+/// rayon chunks; each chunk builds its own buffer and the chunks are then
+/// concatenated in order — keeping output byte-identical to a sequential
+/// `to_string` loop. Worth it for flat records like `Node`/`Edge`; not used
+/// for the parse IR (large nested structs where materialization outweighs the
+/// parallel win — measured on the fineract fixture).
+fn serialize_jsonl<T: Serialize + Sync>(items: &[T]) -> std::io::Result<Vec<u8>> {
+    use rayon::prelude::*;
+
+    // Chunk so each rayon task amortizes buffer allocation over many items;
+    // 2048 keeps chunk buffers cache-friendly while cutting task overhead.
+    const CHUNK: usize = 2048;
+    let chunks: Vec<Vec<u8>> = items
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(chunk.len() * 256);
+            for it in chunk {
+                serde_json::to_writer(&mut buf, it).map_err(io_err)?;
+                buf.push(b'\n');
+            }
+            Ok::<Vec<u8>, std::io::Error>(buf)
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+
+    let total = chunks.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(total);
+    for c in chunks {
+        out.extend_from_slice(&c);
+    }
+    Ok(out)
 }
 
 fn read_jsonl<T: DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
@@ -123,8 +154,7 @@ const BUNDLE_MAGIC: &[u8; 8] = b"CIHPACK1";
 
 /// Write one entry to a bundle: 4-byte LE length + zstd-compressed content.
 fn write_bundle_entry(w: &mut impl Write, content: &[u8]) -> io::Result<()> {
-    let compressed = zstd::encode_all(content, 3)
-        .map_err(io::Error::other)?;
+    let compressed = zstd::encode_all(content, 3).map_err(io::Error::other)?;
     let len = compressed.len() as u32;
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&compressed)?;
@@ -216,7 +246,7 @@ impl GraphArtifacts {
             repo_name,
             root_path,
             indexed_at: crate::registry::now_rfc3339(),
-            artifact_version: self.version.0.clone(),
+            artifact_version: self.version.to_string(),
             has_community,
             file_count,
         };
@@ -282,9 +312,7 @@ impl GraphArtifacts {
         let repo_map_bytes = read_bundle_entry(&mut r)?;
 
         // Restore into cih_dir.
-        let art_dir = cih_dir
-            .join("artifacts")
-            .join(&manifest.artifact_version);
+        let art_dir = cih_dir.join("artifacts").join(&manifest.artifact_version);
         fs::create_dir_all(&art_dir)?;
 
         let nodes_path = art_dir.join("nodes.jsonl");
@@ -295,7 +323,7 @@ impl GraphArtifacts {
         let main_artifacts = GraphArtifacts {
             nodes_path,
             edges_path,
-            version: VersionId(manifest.artifact_version.clone()),
+            version: VersionId::new(manifest.artifact_version.clone()),
         };
 
         let community_artifacts = if manifest.has_community && !comm_nodes_bytes.is_empty() {
@@ -310,7 +338,7 @@ impl GraphArtifacts {
             Some(GraphArtifacts {
                 nodes_path: cn,
                 edges_path: ce,
-                version: VersionId(manifest.artifact_version.clone()),
+                version: VersionId::new(manifest.artifact_version.clone()),
             })
         } else {
             None

@@ -1,7 +1,7 @@
 use cih_core::{
-    constructor_id, external_endpoint_id, field_id, file_id, kafka_topic_id, method_id, type_id,
-    BindingKind, ContractKind, ContractSite, EdgeKind, NodeId, NodeKind, ParsedFile, Range,
-    RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    constructor_id, external_endpoint_id, field_id, file_id, function_id, kafka_topic_id,
+    method_id, type_id, BindingKind, ContractKind, ContractSite, EdgeKind, MessagingFramework,
+    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
 };
 use cih_resolve::resolve_edges;
 
@@ -242,6 +242,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 url_template: Some("/api/orders/{id}".into()),
                 topic: None,
                 http_method: Some("get".into()),
+                messaging_framework: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -250,6 +251,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 url_template: None,
                 topic: Some("orders.created".into()),
                 http_method: None,
+                messaging_framework: Some(MessagingFramework::Kafka),
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -258,6 +260,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 url_template: None,
                 topic: Some("orders.created".into()),
                 http_method: None,
+                messaging_framework: Some(MessagingFramework::Spring),
                 in_callable: listener.clone(),
                 range: Range::default(),
             },
@@ -281,12 +284,36 @@ fn contract_sites_emit_nodes_and_edges() {
     assert!(out.edges.iter().any(|edge| {
         edge.kind == EdgeKind::ExternalCall && edge.src == caller && edge.dst == endpoint
     }));
-    assert!(out.edges.iter().any(|edge| {
-        edge.kind == EdgeKind::PublishesEvent && edge.src == caller && edge.dst == topic
-    }));
-    assert!(out.edges.iter().any(|edge| {
-        edge.kind == EdgeKind::ListensTo && edge.src == listener && edge.dst == topic
-    }));
+    let publish = out
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::PublishesEvent && edge.src == caller && edge.dst == topic
+        })
+        .expect("PublishesEvent edge expected");
+    assert_eq!(
+        publish
+            .props
+            .as_ref()
+            .and_then(|p| p.get("messaging_framework"))
+            .and_then(|v| v.as_str()),
+        Some("kafka"),
+        "Kafka publish should carry messaging_framework=kafka"
+    );
+    let listen = out
+        .edges
+        .iter()
+        .find(|edge| edge.kind == EdgeKind::ListensTo && edge.src == listener && edge.dst == topic)
+        .expect("ListensTo edge expected");
+    assert_eq!(
+        listen
+            .props
+            .as_ref()
+            .and_then(|p| p.get("messaging_framework"))
+            .and_then(|v| v.as_str()),
+        Some("spring"),
+        "Spring listener should carry messaging_framework=spring"
+    );
 }
 
 fn mro_workspace() -> Vec<ParsedFile> {
@@ -729,8 +756,12 @@ fn di_resolves_interface_call_to_service_impl() {
     assert_eq!(di_edge.reason, "di-resolved");
 }
 
+/// A single concrete implementor gets the DI redirect even without a
+/// `@Service` stereotype (annotation-driven wiring may leave metadata empty);
+/// the interface fallback is reserved for the ambiguous multi-impl case,
+/// covered by `di_falls_back_when_multiple_service_impls`.
 #[test]
-fn di_falls_back_when_no_service_impl() {
+fn di_redirects_to_single_impl_even_without_stereotype() {
     let files = make_di_scenario(None);
     let out = resolve_edges(&files);
     let calls: Vec<_> = out
@@ -738,12 +769,11 @@ fn di_falls_back_when_no_service_impl() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Calls)
         .collect();
-    assert!(
-        calls
-            .iter()
-            .any(|e| e.dst == method_id("com.acme.UserService", "save", 1)),
-        "should fall back to interface method when no @Service impl"
-    );
+    let di_edge = calls
+        .iter()
+        .find(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1))
+        .expect("single un-stereotyped impl should still receive the DI redirect");
+    assert_eq!(di_edge.reason, "di-resolved");
 }
 
 #[test]
@@ -1250,4 +1280,69 @@ fn callresult_factory_pattern_unresolved_when_return_type_absent() {
     assert_eq!(out.skipped, 1);
     let r = &out.unresolved_refs[0];
     assert_eq!(r.reason, "receiver_type_unknown");
+}
+
+/// A module-level function def as the Python parser emits it: `NodeKind::Function`, `owner: None`,
+/// `fqcn` = the module, empty `param_types`.
+fn py_function_def(container: &str, name: &str, arity: u16) -> SymbolDef {
+    SymbolDef {
+        id: function_id(container, name, arity),
+        kind: NodeKind::Function,
+        fqcn: container.into(),
+        name: name.into(),
+        owner: None,
+        range: Range::default(),
+        modifiers: Vec::new(),
+        param_types: Vec::new(),
+        return_type: None,
+        declared_type: None,
+        framework_role: None,
+        body_fingerprint: None,
+        complexity: None,
+        lang_meta: None,
+    }
+}
+
+#[test]
+fn python_free_function_call_resolves() {
+    // Mirrors what the Python parser now emits: `NodeKind::Function` defs (empty `param_types`) and
+    // a call ref attributed to the enclosing function `main`. Regression guard for the two Python
+    // call-graph fixes (index registers Function-kind; parser attributes calls to the caller).
+    let file = ParsedFile {
+        file: "app.py".into(),
+        language: String::new(),
+        package: None,
+        defs: vec![
+            py_function_def("app", "helper", 1),
+            py_function_def("app", "main", 0),
+        ],
+        imports: vec![],
+        reference_sites: vec![ReferenceSite {
+            name: "helper".into(),
+            receiver: None,
+            kind: RefKind::Call,
+            arity: Some(1),
+            range: Range::default(),
+            in_fqcn: "app#main/0".into(),
+            in_callable: function_id("app", "main", 0),
+            arg_texts: vec![],
+        }],
+        type_bindings: vec![],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+    };
+    let out = resolve_edges(&[file]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == function_id("app", "main", 0)
+            && e.dst == function_id("app", "helper", 1)),
+        "expected CALLS edge main -> helper; calls = {:?}",
+        out.edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
 }

@@ -4,7 +4,7 @@ use cih_core::{
 };
 use cih_core::{
     ArchitectureHint, BindingKind, BuildSystem, ContractKind, ContractSite, JarInfo, ModuleInfo,
-    NodeKind, ParsedFile, RawImport, Range, ReferenceSite, RefKind, RepoMap, SymbolDef,
+    NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, RepoMap, SymbolDef,
     TypeBinding,
 };
 
@@ -75,6 +75,44 @@ fn node_kind_labels_round_trip() {
         assert_eq!(NodeKind::from_label(kind.label()), kind);
     }
     assert_eq!(NodeKind::from_label("Unknown"), NodeKind::Other);
+}
+
+/// Cypher labels are persisted in FalkorDB graphs — they must never drift.
+/// This pins every label byte-for-byte (guards the strum derive against
+/// accidental renames or serialize_all changes).
+#[test]
+fn edge_kind_cypher_labels_are_stable() {
+    use cih_core::EdgeKind;
+    let expected = [
+        (EdgeKind::Contains, "CONTAINS"),
+        (EdgeKind::Calls, "CALLS"),
+        (EdgeKind::Extends, "EXTENDS"),
+        (EdgeKind::Implements, "IMPLEMENTS"),
+        (EdgeKind::HasMethod, "HAS_METHOD"),
+        (EdgeKind::HasField, "HAS_FIELD"),
+        (EdgeKind::Imports, "IMPORTS"),
+        (EdgeKind::Accesses, "ACCESSES"),
+        (EdgeKind::Uses, "USES"),
+        (EdgeKind::MethodOverrides, "METHOD_OVERRIDES"),
+        (EdgeKind::MethodImplements, "METHOD_IMPLEMENTS"),
+        (EdgeKind::MemberOf, "MEMBER_OF"),
+        (EdgeKind::StepInProcess, "STEP_IN_PROCESS"),
+        (EdgeKind::HandlesRoute, "HANDLES_ROUTE"),
+        (EdgeKind::PublishesEvent, "PUBLISHES_EVENT"),
+        (EdgeKind::ListensTo, "LISTENS_TO"),
+        (EdgeKind::ExternalCall, "EXTERNAL_CALL"),
+        (EdgeKind::Tests, "TESTS"),
+        (EdgeKind::ExecutesQuery, "EXECUTES_QUERY"),
+        (EdgeKind::ReadsTable, "READS_TABLE"),
+        (EdgeKind::WritesTable, "WRITES_TABLE"),
+        (EdgeKind::IntegrationLink, "INTEGRATION_LINK"),
+        (EdgeKind::SimilarTo, "SIMILAR_TO"),
+        (EdgeKind::TaintFlow, "TAINT_FLOW"),
+        (EdgeKind::Other, "REL"),
+    ];
+    for (kind, label) in expected {
+        assert_eq!(kind.cypher_label(), label);
+    }
 }
 
 #[test]
@@ -206,6 +244,7 @@ fn parsed_file_round_trips_json() {
             url_template: None,
             topic: Some("user-saved".into()),
             http_method: None,
+            messaging_framework: Some(cih_core::MessagingFramework::Spring),
             in_callable: method_id("com.acme.UserService", "save", 1),
             range: Range {
                 start_line: 12,
@@ -222,4 +261,52 @@ fn parsed_file_round_trips_json() {
     let encoded = serde_json::to_string(&parsed).unwrap();
     let decoded: ParsedFile = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, parsed);
+}
+
+#[test]
+fn messaging_framework_maps_to_contract_match_kind() {
+    use cih_core::{ContractMatchKind, MessagingFramework};
+    assert_eq!(
+        ContractMatchKind::from(MessagingFramework::Kafka),
+        ContractMatchKind::KafkaTopic
+    );
+    assert_eq!(
+        ContractMatchKind::from(MessagingFramework::Spring),
+        ContractMatchKind::SpringEvent
+    );
+}
+
+#[test]
+fn messaging_framework_serializes_snake_case() {
+    use cih_core::MessagingFramework;
+    assert_eq!(
+        serde_json::to_string(&MessagingFramework::Spring).unwrap(),
+        "\"spring\""
+    );
+    assert_eq!(
+        serde_json::to_string(&MessagingFramework::Kafka).unwrap(),
+        "\"kafka\""
+    );
+}
+
+#[test]
+fn contract_site_messaging_framework_roundtrips_and_defaults() {
+    use cih_core::{ContractKind, ContractSite, MessagingFramework, NodeId, Range};
+    let site = ContractSite {
+        kind: ContractKind::EventPublish,
+        url_template: None,
+        topic: Some("orders".into()),
+        http_method: None,
+        messaging_framework: Some(MessagingFramework::Spring),
+        in_callable: NodeId::new("Method:com.acme.X#m/0"),
+        range: Range::default(),
+    };
+    let back: ContractSite = serde_json::from_str(&serde_json::to_string(&site).unwrap()).unwrap();
+    assert_eq!(back.messaging_framework, Some(MessagingFramework::Spring));
+
+    // An older artifact without the field deserializes to None (serde default).
+    let mut value = serde_json::to_value(&site).unwrap();
+    value.as_object_mut().unwrap().remove("messaging_framework");
+    let legacy: ContractSite = serde_json::from_value(value).unwrap();
+    assert_eq!(legacy.messaging_framework, None);
 }

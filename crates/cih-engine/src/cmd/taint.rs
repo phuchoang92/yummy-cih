@@ -5,11 +5,11 @@
 //! Phase 2: on-demand CFG construction + dominance tree for Phase 1-confirmed source methods.
 //! Phase 3: PDG-based flow-sensitive, kill-aware taint (reaching defs → DataDep/ControlDep).
 
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cih_core::{GraphArtifacts, Node, NodeId, VersionId};
+use cih_core::{GraphArtifacts, Node, NodeId};
 use cih_taint::{find_taint_paths, TaintPath};
 
 use crate::db::{load_to_falkor, LoadOutcome};
@@ -47,6 +47,40 @@ struct PdgStats {
     ir_unavailable: usize,
 }
 
+/// Fold Phase-3 PDG refinements into the path scores and stats.
+///
+/// "IR unavailable" means the source file could not be read or parsed —
+/// detected via the pdg_clean/confirmed/conditional fields rather than a
+/// float equality check on confidence_multiplier (which would misfire if a
+/// future neutral multiplier of 1.0 is ever added).
+///
+/// Confidence is applied against the Phase-0 `baseline`, not the
+/// Phase-1-modified score, so the two phases score independently rather
+/// than compounding.
+fn apply_pdg_refinements(
+    paths: &mut [TaintPath],
+    baseline: &[f32],
+    refinements: &[cih_taint::flow_sensitive::PdgRefinement],
+    stats: &mut PdgStats,
+) {
+    for r in refinements {
+        if !r.pdg_confirmed && !r.pdg_conditional && !r.pdg_clean {
+            stats.ir_unavailable += 1;
+            continue;
+        }
+        stats.methods_analyzed += 1;
+        if r.pdg_confirmed {
+            stats.confirmed_sinks += 1;
+        }
+        if r.pdg_conditional {
+            stats.conditional_sinks += 1;
+        }
+        if let Some(p) = paths.get_mut(r.path_index) {
+            p.confidence = (baseline[r.path_index] * r.confidence_multiplier).clamp(0.0, 1.0);
+        }
+    }
+}
+
 pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let span = tracing::info_span!("taint", repo = %repo.display());
     let _enter = span.enter();
@@ -54,13 +88,17 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let cih_dir = repo.join(".cih");
 
     // ── Load latest graph artifacts ───────────────────────────────────────────
-    let artifacts = latest_graph_artifacts(&repo)
-        .context("no graph artifacts found — run `analyze` first")?;
+    let artifacts =
+        latest_graph_artifacts(&repo).context("no graph artifacts found — run `analyze` first")?;
 
-    tracing::info!(version = %artifacts.version.0, "loaded graph artifacts");
+    tracing::info!(version = %artifacts.version, "loaded graph artifacts");
 
-    let nodes = artifacts.read_nodes().context("failed to read nodes.jsonl")?;
-    let edges = artifacts.read_edges().context("failed to read edges.jsonl")?;
+    let nodes = artifacts
+        .read_nodes()
+        .context("failed to read nodes.jsonl")?;
+    let edges = artifacts
+        .read_edges()
+        .context("failed to read edges.jsonl")?;
 
     tracing::info!(nodes = nodes.len(), edges = edges.len(), "graph loaded");
 
@@ -79,9 +117,11 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     // Derive intra-proc sink name patterns from the loaded rules so Phase 1 and Phase 3
     // always use the same set (which now includes any user additions from cih.taint.toml).
     let sink_name_patterns_owned: Vec<String> = rules.extra_sink_name_patterns.clone();
-    let sink_name_patterns: Vec<&str> =
-        sink_name_patterns_owned.iter().map(|s| s.as_str()).collect();
-    let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let sink_name_patterns: Vec<&str> = sink_name_patterns_owned
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let node_map: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
     let repo_ref = repo.as_path();
     // Snapshot Phase-0 scores before Phase 1 modifies them.
     // Phase 3 applies its multiplier against this baseline so that a Phase-1 penalty
@@ -120,12 +160,15 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         ui.spin("Phase 2: CFG construction + dominance tree");
 
         // Build CFG for each unique source method on a taint path.
-        let unique_sources: std::collections::HashSet<&NodeId> =
-            paths.iter().map(|p| &p.source).collect();
+        let unique_sources: FxHashSet<&NodeId> = paths.iter().map(|p| &p.source).collect();
 
         for source_id in &unique_sources {
-            let Some(node) = node_map.get(source_id) else { continue };
-            let Ok(src) = std::fs::read_to_string(repo_ref.join(&node.file)) else { continue };
+            let Some(node) = node_map.get(source_id) else {
+                continue;
+            };
+            let Ok(src) = std::fs::read_to_string(repo_ref.join(&node.file)) else {
+                continue;
+            };
             let Some(cfg) = cih_taint::build_cfg(source_id, &src) else {
                 cfg_stats.ir_unavailable += 1;
                 continue;
@@ -134,8 +177,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
             cfg_stats.methods_analyzed += 1;
             cfg_stats.total_blocks += cfg.block_count();
             cfg_stats.total_edges += cfg.edge_count();
-            cfg_stats.max_cyclomatic =
-                cfg_stats.max_cyclomatic.max(cfg.cyclomatic_complexity());
+            cfg_stats.max_cyclomatic = cfg_stats.max_cyclomatic.max(cfg.cyclomatic_complexity());
             cfg_stats.dominated_pairs += dom.dominated_ids().count();
             tracing::debug!(
                 method = %source_id.as_str(),
@@ -159,8 +201,11 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         ui.spin("Phase 3: PDG construction + flow-sensitive taint");
 
         // Sanitizer node-id patterns from the same rules used by Phase 0.
-        let sanitizer_patterns: Vec<&str> =
-            rules.sanitizers.iter().map(|s| s.node_id_pattern.as_str()).collect();
+        let sanitizer_patterns: Vec<&str> = rules
+            .sanitizers
+            .iter()
+            .map(|s| s.node_id_pattern.as_str())
+            .collect();
 
         let refinements = cih_taint::flow_sensitive::refine_paths(
             &paths,
@@ -170,29 +215,12 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
             &sanitizer_patterns,
         );
 
-        for r in &refinements {
-            // "IR unavailable" means the source file could not be read or parsed.
-            // Detect it via the pdg_clean/confirmed/conditional fields rather than a
-            // float equality check on confidence_multiplier (which would misfire if a
-            // future neutral multiplier of 1.0 is ever added).
-            if !r.pdg_confirmed && !r.pdg_conditional && !r.pdg_clean {
-                pdg_stats.ir_unavailable += 1;
-                continue;
-            }
-            pdg_stats.methods_analyzed += 1;
-            if r.pdg_confirmed {
-                pdg_stats.confirmed_sinks += 1;
-            }
-            if r.pdg_conditional {
-                pdg_stats.conditional_sinks += 1;
-            }
-            // Apply Phase 3 against the Phase-0 baseline, not the Phase-1-modified score,
-            // so the two phases score independently rather than compounding.
-            if let Some(p) = paths.get_mut(r.path_index) {
-                p.confidence =
-                    (original_confidence[r.path_index] * r.confidence_multiplier).clamp(0.0, 1.0);
-            }
-        }
+        apply_pdg_refinements(
+            &mut paths,
+            &original_confidence,
+            &refinements,
+            &mut pdg_stats,
+        );
 
         ui.finish_with(format!(
             "{} PDG confirmed, {} conditional",
@@ -216,12 +244,12 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
 
     let taint_dir = cih_dir
         .join("artifacts-taint")
-        .join(&artifacts.version.0);
+        .join(artifacts.version.as_str());
 
     ui.spin("Writing taint artifacts");
     let taint_artifacts = GraphArtifacts::write(
         &taint_dir,
-        VersionId(artifacts.version.0.clone()),
+        artifacts.version.clone(),
         &empty_nodes,
         &taint_edges,
     )
@@ -274,20 +302,46 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     Ok(())
 }
 
-fn print_human_report(paths: &[TaintPath], load: &LoadOutcome, taint_dir: &Path, cfg: &CfgStats, pdg: &PdgStats) {
+fn print_human_report(
+    paths: &[TaintPath],
+    load: &LoadOutcome,
+    taint_dir: &Path,
+    cfg: &CfgStats,
+    pdg: &PdgStats,
+) {
     crate::ui::print_header("Taint", "Phase 0 + Phase 1 + Phase 2 + Phase 3", None);
     crate::ui::print_row("Paths", &crate::ui::fmt_count(paths.len()));
 
     // Count by category.
-    let sql = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::Sql).count();
-    let exec = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::Exec).count();
-    let file = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::File).count();
-    let html = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::Html).count();
+    let sql = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::Sql)
+        .count();
+    let exec = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::Exec)
+        .count();
+    let file = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::File)
+        .count();
+    let html = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::Html)
+        .count();
 
-    if sql > 0 { crate::ui::print_row("  SQL", &crate::ui::fmt_count(sql)); }
-    if exec > 0 { crate::ui::print_row("  Exec", &crate::ui::fmt_count(exec)); }
-    if file > 0 { crate::ui::print_row("  File", &crate::ui::fmt_count(file)); }
-    if html > 0 { crate::ui::print_row("  HTML", &crate::ui::fmt_count(html)); }
+    if sql > 0 {
+        crate::ui::print_row("  SQL", &crate::ui::fmt_count(sql));
+    }
+    if exec > 0 {
+        crate::ui::print_row("  Exec", &crate::ui::fmt_count(exec));
+    }
+    if file > 0 {
+        crate::ui::print_row("  File", &crate::ui::fmt_count(file));
+    }
+    if html > 0 {
+        crate::ui::print_row("  HTML", &crate::ui::fmt_count(html));
+    }
 
     if cfg.methods_analyzed > 0 {
         crate::ui::print_row("CFGs built", &crate::ui::fmt_count(cfg.methods_analyzed));
@@ -300,7 +354,10 @@ fn print_human_report(paths: &[TaintPath], load: &LoadOutcome, taint_dir: &Path,
     }
     if pdg.methods_analyzed > 0 {
         crate::ui::print_row("PDG confirmed", &crate::ui::fmt_count(pdg.confirmed_sinks));
-        crate::ui::print_row("PDG conditional", &crate::ui::fmt_count(pdg.conditional_sinks));
+        crate::ui::print_row(
+            "PDG conditional",
+            &crate::ui::fmt_count(pdg.conditional_sinks),
+        );
     }
     if pdg.ir_unavailable > 0 {
         crate::ui::print_row("PDG unavailable", &crate::ui::fmt_count(pdg.ir_unavailable));
@@ -322,7 +379,11 @@ fn print_human_report(paths: &[TaintPath], load: &LoadOutcome, taint_dir: &Path,
     println!();
 
     let mut sorted: Vec<&TaintPath> = paths.iter().collect();
-    sorted.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for (i, path) in sorted.iter().take(show).enumerate() {
         let source_short = short_name(path.source.as_str());
@@ -386,5 +447,91 @@ fn short_name(node_id: &str) -> String {
         format!("{class}#{method}")
     } else {
         without_prefix.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_taint::flow_sensitive::PdgRefinement;
+    use cih_taint::SinkCategory;
+
+    fn path(confidence: f32) -> TaintPath {
+        TaintPath {
+            source: NodeId::new("Method:com.acme.A#a/0"),
+            sink_method: NodeId::new("Method:com.acme.B#b/1"),
+            hops: vec![
+                NodeId::new("Method:com.acme.A#a/0"),
+                NodeId::new("Method:com.acme.B#b/1"),
+            ],
+            category: SinkCategory::Sql,
+            confidence,
+        }
+    }
+
+    fn refinement(idx: usize) -> PdgRefinement {
+        PdgRefinement {
+            path_index: idx,
+            pdg_confirmed: false,
+            pdg_conditional: false,
+            pdg_clean: false,
+            confidence_multiplier: 1.0,
+        }
+    }
+
+    #[test]
+    fn pdg_applies_multiplier_against_phase0_baseline_not_phase1() {
+        // Phase 1 already penalised the path 0.8 -> 0.48; Phase 3 must scale
+        // the 0.8 baseline, not compound onto 0.48.
+        let mut paths = vec![path(0.48)];
+        let baseline = vec![0.8];
+        let mut stats = PdgStats::default();
+        let r = PdgRefinement {
+            pdg_confirmed: true,
+            confidence_multiplier: 1.2,
+            ..refinement(0)
+        };
+        apply_pdg_refinements(&mut paths, &baseline, &[r], &mut stats);
+        assert!((paths[0].confidence - 0.96).abs() < 1e-6);
+        assert_eq!(stats.confirmed_sinks, 1);
+        assert_eq!(stats.methods_analyzed, 1);
+    }
+
+    #[test]
+    fn pdg_confidence_clamps_to_unit_interval() {
+        let mut paths = vec![path(0.9)];
+        let mut stats = PdgStats::default();
+        let r = PdgRefinement {
+            pdg_confirmed: true,
+            confidence_multiplier: 2.0,
+            ..refinement(0)
+        };
+        apply_pdg_refinements(&mut paths, &[0.9], &[r], &mut stats);
+        assert_eq!(paths[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn pdg_ir_unavailable_counts_without_touching_confidence() {
+        // All three outcome flags false = IR unavailable.
+        let mut paths = vec![path(0.7)];
+        let mut stats = PdgStats::default();
+        apply_pdg_refinements(&mut paths, &[0.7], &[refinement(0)], &mut stats);
+        assert_eq!(stats.ir_unavailable, 1);
+        assert_eq!(stats.methods_analyzed, 0);
+        assert_eq!(paths[0].confidence, 0.7);
+    }
+
+    #[test]
+    fn pdg_conditional_counts_and_penalises() {
+        let mut paths = vec![path(0.7)];
+        let mut stats = PdgStats::default();
+        let r = PdgRefinement {
+            pdg_conditional: true,
+            confidence_multiplier: 0.6,
+            ..refinement(0)
+        };
+        apply_pdg_refinements(&mut paths, &[0.7], &[r], &mut stats);
+        assert_eq!(stats.conditional_sinks, 1);
+        assert!((paths[0].confidence - 0.42).abs() < 1e-6);
     }
 }

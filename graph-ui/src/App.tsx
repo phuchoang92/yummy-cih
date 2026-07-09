@@ -8,7 +8,8 @@ import type { SymbolContext, TabId } from "./types";
 const TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "Overview" }, { id: "search", label: "Search" },
   { id: "impact", label: "Impact" }, { id: "flow", label: "Flow" },
-  { id: "communities", label: "Communities" }, { id: "routes", label: "Routes" },
+  { id: "communities", label: "Communities" }, { id: "clusters", label: "Clusters" },
+  { id: "routes", label: "Routes" },
 ];
 
 function CompactInspector({ context, onClose }: { context: SymbolContext; onClose: () => void }) {

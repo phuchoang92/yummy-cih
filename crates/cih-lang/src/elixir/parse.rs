@@ -22,6 +22,7 @@ pub fn parse_elixir_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
     Ok(build_unit(rel, "elixir", None, nodes, edges, defs, imports, sites))
 }
 
+#[allow(clippy::too_many_arguments)] // recursive tree-walker signature
 fn walk(
     parent: TsNode<'_>, src: &str, rel: &str,
     file_node_id: &cih_core::NodeId, module_name: Option<&str>,
@@ -51,7 +52,7 @@ fn walk(
                     if let Some(args) = child.child_by_field_name("arguments") {
                         // Find the first named child index without holding the cursor alive
                         let first_idx = (0..args.child_count())
-                            .find(|&i| args.child(i).map_or(false, |c| c.is_named()));
+                            .find(|&i| args.child(i).is_some_and(|c| c.is_named()));
                         let name: String = first_idx
                             .and_then(|i| args.child(i))
                             .map(|first| {

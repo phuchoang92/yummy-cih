@@ -47,7 +47,12 @@ impl PackageStrategy {
         };
 
         // Strategy 2: Maven multi-module directory before src root marker
-        if let Some(marker_pos) = self.config.src_roots.iter().find_map(|m| file.find(m.as_str())) {
+        if let Some(marker_pos) = self
+            .config
+            .src_roots
+            .iter()
+            .find_map(|m| file.find(m.as_str()))
+        {
             let module_dir = &file[..marker_pos];
             let module_name = module_dir.rsplit('/').next().unwrap_or(module_dir);
             if !module_name.is_empty() {
@@ -132,7 +137,6 @@ impl PackageStrategy {
         }
         None
     }
-
 }
 
 impl FeatureStrategy for PackageStrategy {

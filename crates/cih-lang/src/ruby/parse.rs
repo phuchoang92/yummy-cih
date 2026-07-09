@@ -21,6 +21,7 @@ pub fn parse_ruby_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
     Ok(build_unit(rel, "ruby", None, nodes, edges, defs, imports, sites))
 }
 
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)] // walker signature; `sites` reserved for reference-site collection
 fn walk(
     parent: TsNode<'_>, src: &str, rel: &str,
     file_node_id: &cih_core::NodeId, owner_fqcn: Option<&str>,

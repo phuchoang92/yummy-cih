@@ -1,10 +1,10 @@
 use cih_core::JarInfo;
-use cih_engine_lib::analyze::{analyze_emit, analyze_from_scope, extract_jar_api};
-use cih_engine_lib::db::LoadOutcome;
-use cih_engine_lib::discover::run_discover_core;
-use cih_engine_lib::scan;
-use cih_engine_lib::scope::{ScopeFile, ScopeRequest};
-use cih_engine_lib::wiki as wiki_cmd;
+use cih_engine::analyze::{analyze_emit, analyze_from_scope, extract_jar_api};
+use cih_engine::db::LoadOutcome;
+use cih_engine::discover::run_discover_core;
+use cih_engine::scan;
+use cih_engine::scope::{ScopeFile, ScopeRequest};
+use cih_engine::wiki as wiki_cmd;
 use cih_wiki::{WikiManifest, WikiMeta};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -258,7 +258,7 @@ fn extract_jar_api_demand_driven_with_sample_jar() {
 
     // Request only com.acme.Sample — demand-driven.
     let fqcns = vec!["com.acme.Sample".to_string()];
-    let (nodes, _edges, failed) = extract_jar_api(&[jar.clone()], &fqcns);
+    let (nodes, _edges, failed) = extract_jar_api(std::slice::from_ref(&jar), &fqcns);
     assert_eq!(failed, 0);
     assert!(
         !nodes.is_empty(),
@@ -388,7 +388,7 @@ fn discover_emits_community_and_process_artifacts() {
 
     let discover = run_discover_core(
         &root,
-        &cih_engine_lib::discover::DiscoverOverrides {
+        &cih_engine::discover::DiscoverOverrides {
             min_community_size: Some(1),
             ..Default::default()
         },
@@ -418,7 +418,7 @@ fn repo_with_wiki_artifacts() -> PathBuf {
     analyze_emit(&scan, all_scope()).unwrap();
     run_discover_core(
         &root,
-        &cih_engine_lib::discover::DiscoverOverrides {
+        &cih_engine::discover::DiscoverOverrides {
             min_community_size: Some(1),
             ..Default::default()
         },
@@ -612,13 +612,9 @@ fn discover_preserves_analyze_artifacts_on_disk() {
 
     let analyze_nodes = analyze.artifacts.nodes_path.clone();
     let analyze_edges = analyze.artifacts.edges_path.clone();
-    let analyze_version = analyze.artifacts.version.0.clone();
+    let analyze_version = analyze.artifacts.version.to_string();
 
-    run_discover_core(
-        &root,
-        &cih_engine_lib::discover::DiscoverOverrides::default(),
-    )
-    .unwrap();
+    run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
         analyze_nodes.exists(),
@@ -629,9 +625,10 @@ fn discover_preserves_analyze_artifacts_on_disk() {
         "analyze edges.jsonl must survive discover"
     );
 
-    let latest = cih_engine_lib::versioning::latest_graph_artifacts(&root).unwrap();
+    let latest = cih_engine::versioning::latest_graph_artifacts(&root).unwrap();
     assert_eq!(
-        latest.version.0, analyze_version,
+        latest.version.as_str(),
+        analyze_version,
         "latest_graph_artifacts must still return the analyze version after discover"
     );
     assert!(
@@ -653,11 +650,8 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
     let scan = scan::scan_repo(&root).unwrap();
     analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(
-        &root,
-        &cih_engine_lib::discover::DiscoverOverrides::default(),
-    )
-    .unwrap();
+    let discover =
+        run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
         discover
@@ -684,7 +678,7 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
         "discover.artifacts must be under .cih/artifacts-community/"
     );
     assert_ne!(
-        discover.source_artifacts.version.0, discover.artifacts.version.0,
+        discover.source_artifacts.version, discover.artifacts.version,
         "source and community versions must differ"
     );
 
@@ -702,11 +696,8 @@ fn discover_load_artifacts_are_analyze_then_community() {
     let scan = scan::scan_repo(&root).unwrap();
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(
-        &root,
-        &cih_engine_lib::discover::DiscoverOverrides::default(),
-    )
-    .unwrap();
+    let discover =
+        run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
     let artifact_sets = discover.artifact_sets_for_load();
 
     // Canonicalize both sides: macOS temp_dir() symlinks may differ from canonicalized paths.
@@ -718,11 +709,11 @@ fn discover_load_artifacts_are_analyze_then_community() {
         artifact_sets[0].edges_path.canonicalize().unwrap(),
         analyze.artifacts.edges_path.canonicalize().unwrap()
     );
-    assert_eq!(artifact_sets[0].version.0, analyze.artifacts.version.0);
+    assert_eq!(artifact_sets[0].version, analyze.artifacts.version);
 
     assert_eq!(artifact_sets[1].nodes_path, discover.artifacts.nodes_path);
     assert_eq!(artifact_sets[1].edges_path, discover.artifacts.edges_path);
-    assert_eq!(artifact_sets[1].version.0, discover.artifacts.version.0);
+    assert_eq!(artifact_sets[1].version, discover.artifacts.version);
 
     fs::remove_dir_all(&root).unwrap();
 }

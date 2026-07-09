@@ -37,6 +37,8 @@ pub struct AnalyzeFlags {
     pub skip_xml_integration: bool,
     /// Language filter: only include files for these languages (empty = all).
     pub languages: Vec<String>,
+    /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
+    pub cxf_base_path: Option<String>,
 }
 
 pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -70,6 +72,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
             use_cache: !flags.no_cache,
             allow_noop: !flags.no_cache,
             skip_xml_integration: flags.skip_xml_integration,
+            cxf_base_path: flags.cxf_base_path.clone(),
         },
     )?;
 
@@ -139,6 +142,16 @@ pub fn run_resolve(
     };
 
     let jars = load_jars_from_repo_map(&repo);
+    // No CLI flags on `resolve`; honor the repo/home cih.toml layers for the base path.
+    let cxf_base_path = {
+        let layers = crate::settings::Layers::load(&repo);
+        layers
+            .repo
+            .analyze
+            .cxf_base_path
+            .clone()
+            .or_else(|| layers.home.analyze.cxf_base_path.clone())
+    };
     let emit = analyze_from_scope_with_options(
         scope_file,
         scope_path,
@@ -147,6 +160,7 @@ pub fn run_resolve(
             use_cache: true,
             allow_noop: false,
             skip_xml_integration: false,
+            cxf_base_path,
         },
     )?;
 
@@ -193,6 +207,7 @@ pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<Em
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
+            cxf_base_path: None,
         },
     )
 }
@@ -221,6 +236,7 @@ pub fn analyze_from_scope(
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
+            cxf_base_path: None,
         },
     )
 }
@@ -287,7 +303,7 @@ pub fn analyze_from_scope_with_options(
     );
     ui.spin(format!("Parsing {} files", files_to_parse.len()));
 
-    let incremental = parse_scope(&repo_root, &cih_dir, files_to_parse, cache)?;
+    let incremental = parse_scope(&repo_root, &cih_dir, files_to_parse, cache.clone())?;
     if let ParseScopeOutcome::Reused {
         artifacts,
         parsed_files_path,
@@ -316,7 +332,6 @@ pub fn analyze_from_scope_with_options(
             resolved_edge_count: 0,
             unresolved_reference_count: 0,
             unresolved_external_fqcns: Vec::new(),
-            unresolved_report_path: None,
             parsed_file_count,
             skipped_count: 0,
             jar_node_count: 0,
@@ -461,6 +476,33 @@ pub fn analyze_from_scope_with_options(
     all_nodes.extend(db_nodes);
     all_nodes.extend(xml_nodes);
 
+    // Language-specific post-processing over the assembled graph (e.g. the Java resolver
+    // rewrites HTTP route paths from framework config). The base-path override is resolved
+    // at the dispatch arm (flag > cih.toml > home) and passed through generically.
+    let post_opts = cih_resolve::PostProcessOptions {
+        route_base_path: cache.cxf_base_path.clone(),
+    };
+    resolvers.post_process(
+        Some(&repo_root),
+        &parse_output.parsed_files,
+        &mut all_nodes,
+        &mut edges,
+        &post_opts,
+    );
+
+    // Apply user-defined resolve patterns (cih.patterns.toml) — teach CIH a repo's own framework
+    // conventions (custom route annotations, …) without a hardcoded handler. Fail-soft: no file → no-op.
+    let pattern_rules = cih_patterns::load_patterns(&repo_root);
+    if !pattern_rules.is_empty() {
+        let before = all_nodes.len();
+        cih_resolve::apply_pattern_rules(&mut all_nodes, &mut edges, &pattern_rules);
+        tracing::info!(
+            route_rules = pattern_rules.routes.len(),
+            synthesized_nodes = all_nodes.len() - before,
+            "applied cih.patterns.toml resolve patterns"
+        );
+    }
+
     cih_resolve::propagate_loop_depths(&mut all_nodes, &edges);
 
     let similar_edges = cih_resolve::emit_similar_to_edges(&all_nodes);
@@ -480,7 +522,7 @@ pub fn analyze_from_scope_with_options(
     let artifacts_dir = cih_dir.join("artifacts").join(&version);
     let artifacts = GraphArtifacts::write(
         &artifacts_dir,
-        VersionId(version.clone()),
+        VersionId::new(version.clone()),
         &all_nodes,
         &edges,
     )
@@ -497,6 +539,12 @@ pub fn analyze_from_scope_with_options(
     prune_other_versions(&cih_dir.join("parsed"), &version)?;
     prune_other_versions(&cih_dir.join("artifacts"), &version)?;
     crate::file_cache::FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
+    // Persist the config fingerprint alongside the file hashes so the next run's no-op gate can
+    // detect a config-only change (e.g. a new --cxf-base-path or edited cih.patterns.toml).
+    AnalyzeConfigState {
+        fingerprint: analyze_config_fingerprint(&repo_root, &cache),
+    }
+    .save(&cih_dir)?;
 
     tracing::info!(
         nodes = all_nodes.len(),
@@ -529,7 +577,6 @@ pub fn analyze_from_scope_with_options(
         resolved_edge_count: resolve_output.edges.len(),
         unresolved_reference_count: resolve_output.skipped,
         unresolved_external_fqcns: resolve_output.unresolved_external_fqcns,
-        unresolved_report_path: Some(artifacts_dir.join("unresolved-refs.md")),
         parsed_file_count: parse_output.parsed_files.len(),
         skipped_count: parse_output.skipped.len(),
         jar_node_count,
@@ -539,12 +586,58 @@ pub fn analyze_from_scope_with_options(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
 pub struct AnalyzeCacheOptions {
     pub use_cache: bool,
     pub allow_noop: bool,
     /// Skip the integration + DI XML walk (faster on large repos).
     pub skip_xml_integration: bool,
+    /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
+    /// Resolved at the dispatch arm (flag > `cih.toml` > `~/.cih/config.toml`); `None`
+    /// falls back to auto-detection.
+    pub cxf_base_path: Option<String>,
+}
+
+/// Fingerprint of the analyze inputs that affect graph output but are **not** source-file
+/// hashes: the resolved `cxf_base_path`, `skip_xml_integration`, and the effective
+/// `cih.patterns.toml` rules. The incremental no-op reuse gate compares this against the value
+/// stored from the last run so a config-only change (e.g. a new `--cxf-base-path`) re-runs the
+/// resolve/post-process/emit path instead of silently reusing stale artifacts. Cache-control
+/// fields (`use_cache`/`allow_noop`) are intentionally excluded — they don't change output.
+pub(super) fn analyze_config_fingerprint(repo_root: &Path, cache: &AnalyzeCacheOptions) -> String {
+    let patterns = cih_patterns::load_patterns(repo_root);
+    let material = format!(
+        "cxf_base_path={:?}\nskip_xml_integration={}\npatterns=\n{}",
+        cache.cxf_base_path,
+        cache.skip_xml_integration,
+        cih_patterns::to_toml(&patterns),
+    );
+    blake3::hash(material.as_bytes()).to_hex()[..16].to_string()
+}
+
+/// The analyze config fingerprint persisted beside `file-hashes.json`, so the next run's no-op
+/// gate can detect a config-only change. Modeled on [`crate::file_cache::FileHashIndex`].
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct AnalyzeConfigState {
+    pub fingerprint: String,
+}
+
+impl AnalyzeConfigState {
+    const FILE: &'static str = "analyze-config.json";
+
+    pub(super) fn load(cih_dir: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(cih_dir.join(Self::FILE)).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    pub(super) fn save(&self, cih_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(cih_dir)
+            .with_context(|| format!("failed to create {}", cih_dir.display()))?;
+        let path = cih_dir.join(Self::FILE);
+        std::fs::write(&path, serde_json::to_string_pretty(self)?.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -581,7 +674,6 @@ pub struct EmitOutcome {
     pub jar_failed: usize,
     pub unresolved_reference_count: u64,
     pub unresolved_external_fqcns: Vec<String>,
-    pub unresolved_report_path: Option<PathBuf>,
     pub parsed_file_count: usize,
     pub skipped_count: usize,
     pub reused_artifacts: bool,

@@ -1,4 +1,4 @@
-use cih_engine_lib::start_env::*;
+use cih_engine::cmd::start_env::*;
 use std::path::{Path, PathBuf};
 
 fn temp_dir(suffix: &str) -> PathBuf {
@@ -154,7 +154,13 @@ fn start_merge_llm_key_appends_if_missing() {
     let existing = vec!["REPO_PATH=/old".to_string()];
     let repo = Path::new("/new");
 
-    let output = merge_env_values(&existing, repo, "test", "changeme", Some("GEMINI_API_KEY=sk-test-456"));
+    let output = merge_env_values(
+        &existing,
+        repo,
+        "test",
+        "changeme",
+        Some("GEMINI_API_KEY=sk-test-456"),
+    );
 
     assert!(output.contains("GEMINI_API_KEY=sk-test-456"));
 }

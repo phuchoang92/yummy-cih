@@ -1,6 +1,6 @@
 use cih_core::NodeId;
 use cih_graph_store::{Direction, FlowHop, FlowNode, Impact, ImpactNode};
-use cih_server_lib::viz::{
+use cih_server::viz::{
     mermaid_key, render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi,
 };
 
@@ -138,9 +138,7 @@ fn render_openapi_groups_by_path() {
             path: "/api/users/{id}".to_string(),
             http_method: "DELETE".to_string(),
             decorator: "DeleteMapping".to_string(),
-            handler_id: NodeId::new(
-                "Method:com.example.UserController#deleteUser/1".to_string(),
-            ),
+            handler_id: NodeId::new("Method:com.example.UserController#deleteUser/1".to_string()),
             handler_name: "deleteUser".to_string(),
             handler_qualified: "com.example.UserController#deleteUser/1".to_string(),
         },

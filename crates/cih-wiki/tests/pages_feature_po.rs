@@ -50,7 +50,7 @@ fn simple_graph() -> (WikiGraph, Vec<String>) {
     let m = method_node("Method:A#do/0");
     let c = comm_node("Community:0", "payment");
     let g = WikiGraph::build(
-        &[m.clone()],
+        std::slice::from_ref(&m),
         &[],
         &[c],
         &[member_edge(m.id.as_str(), "Community:0")],

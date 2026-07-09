@@ -69,10 +69,7 @@ impl DecompileConfig {
 
     /// Resolved cache directory (creates it if absent).
     pub fn resolved_cache_dir(&self, repo: &Path) -> PathBuf {
-        let dir = self
-            .cache_dir
-            .as_deref()
-            .unwrap_or(".cih/decompiled");
+        let dir = self.cache_dir.as_deref().unwrap_or(".cih/decompiled");
         let path = if std::path::Path::new(dir).is_absolute() {
             PathBuf::from(dir)
         } else {
@@ -114,7 +111,9 @@ impl DecompileConfig {
 
 /// Recursively collect `.jar` files under `dir` whose filename starts with `prefix`.
 fn walk_jars(dir: &Path, prefix: &str, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -159,7 +158,9 @@ mod tests {
         };
         let jars = cfg.collect_jars(dir);
         assert_eq!(jars.len(), 2);
-        assert!(jars.iter().all(|j| j.file_name().unwrap().to_str().unwrap().starts_with("mfa-")));
+        assert!(jars
+            .iter()
+            .all(|j| j.file_name().unwrap().to_str().unwrap().starts_with("mfa-")));
     }
 
     #[test]
@@ -175,9 +176,10 @@ mod tests {
         let cfg = DecompileConfig {
             tool: "cfr".into(),
             tool_jar: Some("/opt/cfr.jar".into()),
-            sources: vec![
-                DecompileSource { dir: "target/lib".into(), prefix: "mfa-".into() },
-            ],
+            sources: vec![DecompileSource {
+                dir: "target/lib".into(),
+                prefix: "mfa-".into(),
+            }],
             ..Default::default()
         };
         cfg.save(tmp.path()).unwrap();

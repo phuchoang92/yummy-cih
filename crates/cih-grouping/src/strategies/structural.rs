@@ -80,12 +80,18 @@ impl StructuralStrategy {
 
     fn name_signal(&self, name: &str) -> bool {
         let lower = name.to_lowercase();
-        self.config.name_keywords.iter().any(|kw| lower.contains(kw.as_str()))
+        self.config
+            .name_keywords
+            .iter()
+            .any(|kw| lower.contains(kw.as_str()))
     }
 
     fn path_signal(&self, file: &str) -> bool {
         let lower = file.to_lowercase();
-        self.config.path_fragments.iter().any(|frag| lower.contains(frag.as_str()))
+        self.config
+            .path_fragments
+            .iter()
+            .any(|frag| lower.contains(frag.as_str()))
     }
 
     fn stereotype_signal(node: &cih_core::Node) -> bool {

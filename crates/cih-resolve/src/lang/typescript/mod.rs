@@ -1,6 +1,6 @@
 use cih_core::{ImportBinding, ImportBindingKind};
 
-use crate::common::index::CommonIndex;
+use crate::index::ResolveIndex;
 use crate::lang::{InheritanceModel, LanguageResolver};
 use crate::types::class_of;
 
@@ -23,7 +23,7 @@ impl LanguageResolver for TypeScriptResolver {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         if keyword == "this" {
             Some(class_of(in_fqcn).to_string())
@@ -40,7 +40,7 @@ impl LanguageResolver for TypeScriptResolver {
         &self,
         binding: &ImportBinding,
         from_file: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         let module = &binding.module;
         if !module.starts_with('.') && !module.starts_with('/') {
@@ -49,7 +49,11 @@ impl LanguageResolver for TypeScriptResolver {
         // Build directory from the source file path
         let dir = {
             let parts: Vec<&str> = from_file.rsplitn(2, '/').collect();
-            if parts.len() == 2 { parts[1] } else { "" }
+            if parts.len() == 2 {
+                parts[1]
+            } else {
+                ""
+            }
         };
         let resolved_path = resolve_relative(dir, module);
         match binding.kind {
@@ -66,13 +70,11 @@ impl LanguageResolver for TypeScriptResolver {
                     None
                 }
             }
-            ImportBindingKind::Default => {
-                index.resolve_type_in_language(
-                    binding.local.as_deref().unwrap_or(""),
-                    from_file,
-                    "typescript",
-                )
-            }
+            ImportBindingKind::Default => index.resolve_type_in_language(
+                binding.local.as_deref().unwrap_or(""),
+                from_file,
+                "typescript",
+            ),
             ImportBindingKind::Wildcard
             | ImportBindingKind::Namespace
             | ImportBindingKind::Module

@@ -99,20 +99,13 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
         } else {
             ImportBindingKind::Named
         };
-        let (module, imported) = if imp.is_static && !imp.is_wildcard {
-            if let Some((m, i)) = imp.raw.rsplit_once('.') {
-                (m.to_string(), Some(i.to_string()))
-            } else {
-                (imp.raw.clone(), None)
-            }
-        } else if !imp.is_wildcard {
-            if let Some((m, i)) = imp.raw.rsplit_once('.') {
-                (m.to_string(), Some(i.to_string()))
-            } else {
-                (imp.raw.clone(), None)
-            }
-        } else {
+        // Static-member and named imports split identically; only wildcards differ.
+        let (module, imported) = if imp.is_wildcard {
             (imp.raw.trim_end_matches(".*").to_string(), None)
+        } else if let Some((m, i)) = imp.raw.rsplit_once('.') {
+            (m.to_string(), Some(i.to_string()))
+        } else {
+            (imp.raw.clone(), None)
         };
         ImportBinding { module, imported, local: None, kind, range: imp.range }
     }).collect::<Vec<_>>();
@@ -203,6 +196,81 @@ pub(super) fn annotation_string_values(node: TsNode<'_>, src: &str, keys: &[&str
     }
     out.sort();
     out.dedup();
+    out
+}
+
+/// A JSON snapshot of every annotation on a declaration: its simple name plus any string-literal
+/// attributes (positional `value` and `key = "..."` pairs). Retained on Method/Class node props so
+/// a config-driven pattern engine can match arbitrary/custom annotations post-parse — no hardcoded
+/// per-framework handler required.
+pub(super) fn annotation_metadata(node: TsNode<'_>, src: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for ann in annotations(node) {
+        let Some(name) = annotation_name(ann, src) else {
+            continue;
+        };
+        let mut attrs = serde_json::Map::new();
+        if let Some(args) = first_named_child(ann, "annotation_argument_list") {
+            let mut cursor = args.walk();
+            for child in args.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_literal" => {
+                        if let Some(v) = unquote_spring_literal(&text(child, src)) {
+                            attrs
+                                .entry("value".to_string())
+                                .or_insert(serde_json::Value::String(v));
+                        }
+                    }
+                    "element_value_array_initializer" | "array_initializer" => {
+                        let vals: Vec<serde_json::Value> = string_literals(child)
+                            .into_iter()
+                            .filter_map(|s| unquote_spring_literal(&text(s, src)))
+                            .map(serde_json::Value::String)
+                            .collect();
+                        if !vals.is_empty() {
+                            attrs
+                                .entry("value".to_string())
+                                .or_insert(serde_json::Value::Array(vals));
+                        }
+                    }
+                    "element_value_pair" => {
+                        let key = child
+                            .child_by_field_name("key")
+                            .or_else(|| first_named_child(child, "identifier"))
+                            .map(|k| text(k, src))
+                            .filter(|k| !k.is_empty());
+                        if let Some(key) = key {
+                            let mut vals: Vec<String> = string_literals(child)
+                                .into_iter()
+                                .filter_map(|s| unquote_spring_literal(&text(s, src)))
+                                .collect();
+                            match vals.len() {
+                                0 => {}
+                                1 => {
+                                    attrs.insert(key, serde_json::Value::String(vals.remove(0)));
+                                }
+                                _ => {
+                                    attrs.insert(
+                                        key,
+                                        serde_json::Value::Array(
+                                            vals.into_iter().map(serde_json::Value::String).collect(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".to_string(), serde_json::Value::String(name));
+        if !attrs.is_empty() {
+            entry.insert("attrs".to_string(), serde_json::Value::Object(attrs));
+        }
+        out.push(serde_json::Value::Object(entry));
+    }
     out
 }
 

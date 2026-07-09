@@ -30,10 +30,7 @@ fn linearize_rec(
     if bases.is_empty() {
         return vec![fqcn.to_string()];
     }
-    let mut lists: Vec<Vec<String>> = bases
-        .iter()
-        .map(|b| linearize_rec(b, map, cache))
-        .collect();
+    let mut lists: Vec<Vec<String>> = bases.iter().map(|b| linearize_rec(b, map, cache)).collect();
     lists.push(bases.clone());
     let mut result = vec![fqcn.to_string()];
     loop {
@@ -47,7 +44,11 @@ fn linearize_rec(
             .iter()
             .find_map(|list| {
                 let h = &list[0];
-                if !tails.contains(h) { Some(h.clone()) } else { None }
+                if !tails.contains(h) {
+                    Some(h.clone())
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| lists[0][0].clone());
         result.push(head.clone());
@@ -65,29 +66,18 @@ fn linearize_rec(
 /// Correct C3 order: [D, B, C, A].
 #[test]
 fn c3_diamond_inheritance() {
-    let result = mro(
-        "D",
-        &[
-            ("D", &["B", "C"]),
-            ("B", &["A"]),
-            ("C", &["A"]),
-        ],
+    let result = mro("D", &[("D", &["B", "C"]), ("B", &["A"]), ("C", &["A"])]);
+    assert_eq!(
+        result,
+        vec!["D", "B", "C", "A"],
+        "diamond C3 must be [D, B, C, A]; got {result:?}"
     );
-    assert_eq!(result, vec!["D", "B", "C", "A"],
-        "diamond C3 must be [D, B, C, A]; got {result:?}");
 }
 
 /// Simple linear: D extends C extends B extends A.
 #[test]
 fn c3_linear_chain() {
-    let result = mro(
-        "D",
-        &[
-            ("D", &["C"]),
-            ("C", &["B"]),
-            ("B", &["A"]),
-        ],
-    );
+    let result = mro("D", &[("D", &["C"]), ("C", &["B"]), ("B", &["A"])]);
     assert_eq!(result, vec!["D", "C", "B", "A"]);
 }
 

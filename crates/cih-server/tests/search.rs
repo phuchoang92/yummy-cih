@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cih_core::GraphArtifacts;
-use cih_server_lib::search::query_limit;
+use cih_server::search::query_limit;
 
 struct TempDir {
     path: PathBuf,
@@ -53,7 +53,7 @@ fn latest_graph_artifacts_chooses_newest_complete_dir() {
 
     let artifacts = GraphArtifacts::latest_in_dir(&tmp.path).unwrap();
 
-    assert_eq!(artifacts.version.0, "v2");
+    assert_eq!(artifacts.version.as_str(), "v2");
     assert!(artifacts.nodes_path.ends_with("v2/nodes.jsonl"));
     assert!(artifacts.edges_path.ends_with("v2/edges.jsonl"));
 }

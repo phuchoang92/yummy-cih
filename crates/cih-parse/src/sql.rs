@@ -399,4 +399,3 @@ fn push_unique(results: &mut Vec<TableAccess>, table: String, op: TableOp) {
         results.push(TableAccess { table, op });
     }
 }
-

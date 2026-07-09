@@ -55,6 +55,24 @@ impl FeatureLlmCaller for EngineLlmCaller {
     }
 }
 
+/// Wrap an LLM adapter as a `FeatureLlmCaller` — used by the embed clusterer's optional labeling
+/// pass so it builds a caller the same way the `hybrid`/`llm` strategies do.
+pub fn make_feature_llm_caller(
+    adapter: Box<dyn LlmAdapter>,
+    api_key: Option<String>,
+    model: String,
+    max_tokens: u32,
+    timeout_secs: u64,
+) -> Arc<dyn FeatureLlmCaller> {
+    Arc::new(EngineLlmCaller {
+        adapter,
+        api_key,
+        model,
+        max_tokens,
+        timeout_secs,
+    })
+}
+
 /// Build the feature classification strategy selected by the `--feature-strategy` flag.
 ///
 /// - `"package"` (default): fast file-path heuristic, zero cost.
@@ -124,6 +142,15 @@ pub fn build_feature_strategy(
             }
 
             Ok(Box::new(HybridStrategy::new(strategies, catch_all)))
+        }
+        FeatureStrategyKind::Embed => {
+            // The embed clusterer needs Postgres + Leiden orchestration, which happens in
+            // `discover::run_discover_core` before this builder is reached. If we get here the
+            // pg path was unavailable, so fall back to package.
+            tracing::warn!(
+                "--feature-strategy embed reached the generic builder (no pg path) — falling back to package"
+            );
+            Ok(Box::new(PackageStrategy::new(pkg_cfg)))
         }
         FeatureStrategyKind::Package => Ok(Box::new(PackageStrategy::new(pkg_cfg))),
     }

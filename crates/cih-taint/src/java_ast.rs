@@ -60,10 +60,23 @@ pub(crate) fn collect_reads(node: TsNode<'_>, src: &[u8], out: &mut Vec<String>)
 pub(crate) fn is_noise_token(s: &str) -> bool {
     matches!(
         s,
-        "true" | "false" | "null" | "this" | "super"
-            | "int" | "long" | "double" | "float" | "boolean"
-            | "char" | "byte" | "short" | "void" | "String"
-            | "var" | "new"
+        "true"
+            | "false"
+            | "null"
+            | "this"
+            | "super"
+            | "int"
+            | "long"
+            | "double"
+            | "float"
+            | "boolean"
+            | "char"
+            | "byte"
+            | "short"
+            | "void"
+            | "String"
+            | "var"
+            | "new"
     )
 }
 
@@ -156,8 +169,7 @@ pub(crate) fn find_method_node<'tree>(
         match node.kind() {
             "method_declaration" | "constructor_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    if ts_text(name_node, src) == target_name
-                        && count_params(node) == target_arity
+                    if ts_text(name_node, src) == target_name && count_params(node) == target_arity
                     {
                         return Some(node);
                     }

@@ -38,9 +38,7 @@ pub fn render_community_index(
     graph: &WikiGraph,
 ) -> String {
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: Communities\nsidebar_position: 5\n---\n\n"
-    ));
+    md.push_str("---\ntitle: Communities\nsidebar_position: 5\n---\n\n");
     md.push_str("# Communities\n\n");
     md.push_str(&format!(
         "**{}** communities detected by Leiden community detection.\n\n",
@@ -136,8 +134,12 @@ pub fn render_community_detail(
         let mut by_kind: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
         for m in members {
             let kind_label = match m.kind {
-                NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Record => "Class / Interface",
-                NodeKind::Method | NodeKind::Constructor | NodeKind::Function => "Method / Function",
+                NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Record => {
+                    "Class / Interface"
+                }
+                NodeKind::Method | NodeKind::Constructor | NodeKind::Function => {
+                    "Method / Function"
+                }
                 NodeKind::Route => "Route",
                 _ => "Other",
             };
@@ -164,7 +166,11 @@ pub fn render_community_detail(
     }
 
     // Routes served by this community
-    if let Some(routes) = graph.community_routes.get(comm_id).filter(|r| !r.is_empty()) {
+    if let Some(routes) = graph
+        .community_routes
+        .get(comm_id)
+        .filter(|r| !r.is_empty())
+    {
         md.push_str("## Routes\n\n");
         md.push_str("| Method | Path | Handler |\n");
         md.push_str("|---|---|---|\n");
@@ -255,7 +261,9 @@ pub fn render_community_po(
     let title = format!("{name} — Business Overview");
 
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {title}\nsidebar_position: 1\n---\n\n"));
+    md.push_str(&format!(
+        "---\ntitle: {title}\nsidebar_position: 1\n---\n\n"
+    ));
     md.push_str(&format!("# {title}\n\n"));
 
     if !llm_full.po_summary.is_empty() {
@@ -280,7 +288,11 @@ pub fn render_community_po(
     }
 
     // Routes summary for the PO
-    if let Some(routes) = graph.community_routes.get(comm_id).filter(|r| !r.is_empty()) {
+    if let Some(routes) = graph
+        .community_routes
+        .get(comm_id)
+        .filter(|r| !r.is_empty())
+    {
         md.push_str("## Endpoints\n\n");
         md.push_str("| Method | Path |\n");
         md.push_str("|---|---|\n");
@@ -312,7 +324,9 @@ pub fn render_community_ba(
     let title = format!("{name} — Business Analysis");
 
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {title}\nsidebar_position: 2\n---\n\n"));
+    md.push_str(&format!(
+        "---\ntitle: {title}\nsidebar_position: 2\n---\n\n"
+    ));
     md.push_str(&format!("# {title}\n\n"));
 
     if !llm_full.ba_process_overview.is_empty() {

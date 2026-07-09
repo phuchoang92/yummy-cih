@@ -35,7 +35,7 @@ struct CachedIndex {
 }
 
 #[derive(Clone)]
-pub(crate) struct SearchState {
+pub struct SearchState {
     bm25: Arc<RwLock<Option<CachedIndex>>>,
     embed_store: Option<Arc<EmbedStore>>,
     artifacts_dir: Option<PathBuf>,
@@ -85,7 +85,7 @@ impl SearchState {
         };
 
         let artifacts = cih_core::GraphArtifacts::latest_in_dir(artifacts_dir)?;
-        let latest_version = artifacts.version.0.clone();
+        let latest_version = artifacts.version.to_string();
 
         {
             let guard = self.bm25.read().await;
@@ -124,4 +124,3 @@ fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
         "semantic",
     )
 }
-

@@ -1,5 +1,4 @@
 use cih_core::{file_id, ParsedUnit, RawImport};
-use tree_sitter::Node as TsNode;
 use crate::generic_parse::{emit_function, range_of, text, build_unit};
 use cih_core::{Edge, Node, SymbolDef, ReferenceSite};
 

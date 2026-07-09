@@ -14,6 +14,9 @@ pub struct DbTableAccess {
     pub writes: bool,
 }
 
+/// `(name, type)` pairs, e.g. `("OrderCreatedEvent", "kafka")`.
+pub type MessagingPairs = Vec<(String, String)>;
+
 pub struct WikiGraph {
     pub nodes_by_id: BTreeMap<String, Node>,
     pub community_nodes: Vec<Node>,
@@ -94,8 +97,12 @@ fn feature_from_file_path(file: &str) -> String {
     //   banking-overdraft/src/...       → "overdraft"
     //   banking-overdraft-api/src/...   → "overdraft"
     //   custom-impl/src/.../overdraft/  → fallthrough to strategy 3
-    let src_markers = ["/src/main/java/", "/src/main/kotlin/",
-                        "/src/test/java/",  "/src/test/kotlin/"];
+    let src_markers = [
+        "/src/main/java/",
+        "/src/main/kotlin/",
+        "/src/test/java/",
+        "/src/test/kotlin/",
+    ];
     if let Some(marker_pos) = src_markers.iter().find_map(|m| file.find(m)) {
         let module_dir = &file[..marker_pos];
         // Keep only the last path segment (the Maven module name itself)
@@ -106,9 +113,18 @@ fn feature_from_file_path(file: &str) -> String {
             // domain-specific.  Bare catch-all module names like "core", "common",
             // "custom", "impl" carry no feature meaning — fall through to strategy 3.
             const STILL_GENERIC: &[&str] = &[
-                "core", "common", "shared", "base", "impl",
-                "custom", "default", "generic", "abstract",
-                "infra", "infrastructure", "platform",
+                "core",
+                "common",
+                "shared",
+                "base",
+                "impl",
+                "custom",
+                "default",
+                "generic",
+                "abstract",
+                "infra",
+                "infrastructure",
+                "platform",
             ];
             if !normalised.is_empty()
                 && normalised != "shared"
@@ -149,14 +165,22 @@ fn feature_from_file_path(file: &str) -> String {
 ///   "my-app-core"            → (empty — too generic, handled as catch-all)
 fn normalise_module_name(name: &str) -> String {
     const GENERIC_SUFFIXES: &[&str] = &[
-        "-api", "-service", "-impl", "-core", "-common", "-module",
-        "-lib", "-client", "-server", "-domain", "-model", "-dto",
-        "-web", "-rest", "-grpc",
+        "-api", "-service", "-impl", "-core", "-common", "-module", "-lib", "-client", "-server",
+        "-domain", "-model", "-dto", "-web", "-rest", "-grpc",
     ];
     const GENERIC_PREFIXES: &[&str] = &[
-        "banking-", "payment-", "finance-", "base-", "common-",
-        "core-", "shared-", "platform-", "infra-", "infrastructure-",
-        "app-", "service-",
+        "banking-",
+        "payment-",
+        "finance-",
+        "base-",
+        "common-",
+        "core-",
+        "shared-",
+        "platform-",
+        "infra-",
+        "infrastructure-",
+        "app-",
+        "service-",
     ];
 
     let mut s = name.to_lowercase();
@@ -198,25 +222,92 @@ fn normalise_module_name(name: &str) -> String {
 fn meaningful_package_feature(pkg_dir: &str) -> Option<String> {
     const SKIP: &[&str] = &[
         // language / build dirs
-        "java", "kotlin", "scala", "groovy",
-        "main", "test",
+        "java",
+        "kotlin",
+        "scala",
+        "groovy",
+        "main",
+        "test",
         // top-level TLDs and common org segments (skip first 1-2 segments after these)
-        "com", "org", "net", "io", "co", "dev",
+        "com",
+        "org",
+        "net",
+        "io",
+        "co",
+        "dev",
         // cross-cutting technical layers
-        "impl", "internal", "common", "shared", "core", "base", "custom", "default",
-        "util", "utils", "helper", "helpers", "support",
-        "model", "models", "dto", "dtos", "entity", "entities", "domain",
-        "config", "configuration", "properties",
-        "service", "services", "usecase", "usecases",
-        "repository", "repositories", "repo", "repos", "persistence",
-        "controller", "controllers", "handler", "handlers", "resource", "resources",
-        "exception", "exceptions", "error", "errors",
-        "web", "rest", "grpc", "api", "client", "server",
-        "messaging", "event", "events", "listener", "listeners",
-        "gateway", "adapter", "adapters", "infrastructure", "infra",
-        "security", "filter", "filters", "interceptor", "interceptors",
-        "mapper", "mappers", "converter", "converters",
-        "scheduler", "job", "jobs", "task", "tasks",
+        "impl",
+        "internal",
+        "common",
+        "shared",
+        "core",
+        "base",
+        "custom",
+        "default",
+        "util",
+        "utils",
+        "helper",
+        "helpers",
+        "support",
+        "model",
+        "models",
+        "dto",
+        "dtos",
+        "entity",
+        "entities",
+        "domain",
+        "config",
+        "configuration",
+        "properties",
+        "service",
+        "services",
+        "usecase",
+        "usecases",
+        "repository",
+        "repositories",
+        "repo",
+        "repos",
+        "persistence",
+        "controller",
+        "controllers",
+        "handler",
+        "handlers",
+        "resource",
+        "resources",
+        "exception",
+        "exceptions",
+        "error",
+        "errors",
+        "web",
+        "rest",
+        "grpc",
+        "api",
+        "client",
+        "server",
+        "messaging",
+        "event",
+        "events",
+        "listener",
+        "listeners",
+        "gateway",
+        "adapter",
+        "adapters",
+        "infrastructure",
+        "infra",
+        "security",
+        "filter",
+        "filters",
+        "interceptor",
+        "interceptors",
+        "mapper",
+        "mappers",
+        "converter",
+        "converters",
+        "scheduler",
+        "job",
+        "jobs",
+        "task",
+        "tasks",
     ];
 
     for segment in pkg_dir.split('/').rev() {
@@ -295,8 +386,7 @@ fn index_edges(edges: &[Edge], nodes_by_id: &BTreeMap<String, Node>) -> EdgeInde
                 listens.entry(src).or_default().push(dst);
             }
             EdgeKind::HandlesRoute => {
-                if let (Some(handler), Some(route)) =
-                    (nodes_by_id.get(&src), nodes_by_id.get(&dst))
+                if let (Some(handler), Some(route)) = (nodes_by_id.get(&src), nodes_by_id.get(&dst))
                 {
                     routes.push((handler.clone(), route.clone()));
                 }
@@ -337,10 +427,19 @@ fn index_edges(edges: &[Edge], nodes_by_id: &BTreeMap<String, Node>) -> EdgeInde
     });
 
     EdgeIndex {
-        calls_out, calls_in, tests_out, tests_in,
-        external_calls, publishes, listens, routes,
-        methods_by_class, executes_query, query_reads_table,
-        query_writes_table, impl_methods,
+        calls_out,
+        calls_in,
+        tests_out,
+        tests_in,
+        external_calls,
+        publishes,
+        listens,
+        routes,
+        methods_by_class,
+        executes_query,
+        query_reads_table,
+        query_writes_table,
+        impl_methods,
     }
 }
 
@@ -359,6 +458,7 @@ struct CommunityStats {
 /// `extra_db_nodes` handles nodes (e.g. JPA @Entity classes in package mode) that are
 /// not in `members_by_community` but still carry `ExecutesQuery` edges. Pass `&[]` when
 /// not needed. `node_comm_id` maps such a node to its community id string.
+#[allow(clippy::too_many_arguments)] // page-renderer context bundle; refactor tracked with wiki rework
 fn derive_community_stats(
     members_by_community: &BTreeMap<String, Vec<Node>>,
     community_by_member: &BTreeMap<String, String>,
@@ -456,11 +556,21 @@ fn derive_community_stats(
                 for qid in query_ids {
                     for tid in query_reads_table.get(qid.as_str()).into_iter().flatten() {
                         let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
-                        raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().0 = true;
+                        raw_db
+                            .entry(comm_id.clone())
+                            .or_default()
+                            .entry(name)
+                            .or_default()
+                            .0 = true;
                     }
                     for tid in query_writes_table.get(qid.as_str()).into_iter().flatten() {
                         let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
-                        raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().1 = true;
+                        raw_db
+                            .entry(comm_id.clone())
+                            .or_default()
+                            .entry(name)
+                            .or_default()
+                            .1 = true;
                     }
                 }
             }
@@ -469,19 +579,34 @@ fn derive_community_stats(
     // Class/Record/Interface nodes not in members_by_community (e.g. JPA @Entity classes in
     // package mode) can still carry ExecutesQuery edges. Walk them separately.
     for node in extra_db_nodes {
-        if !matches!(node.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Record) {
+        if !matches!(
+            node.kind,
+            NodeKind::Class | NodeKind::Interface | NodeKind::Record
+        ) {
             continue;
         }
-        let Some(query_ids) = executes_query.get(node.id.as_str()) else { continue };
+        let Some(query_ids) = executes_query.get(node.id.as_str()) else {
+            continue;
+        };
         let comm_id = node_comm_id(node);
         for qid in query_ids {
             for tid in query_reads_table.get(qid.as_str()).into_iter().flatten() {
                 let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
-                raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().0 = true;
+                raw_db
+                    .entry(comm_id.clone())
+                    .or_default()
+                    .entry(name)
+                    .or_default()
+                    .0 = true;
             }
             for tid in query_writes_table.get(qid.as_str()).into_iter().flatten() {
                 let name = tid.strip_prefix("DbTable:").unwrap_or(tid).to_string();
-                raw_db.entry(comm_id.clone()).or_default().entry(name).or_default().1 = true;
+                raw_db
+                    .entry(comm_id.clone())
+                    .or_default()
+                    .entry(name)
+                    .or_default()
+                    .1 = true;
             }
         }
     }
@@ -491,7 +616,11 @@ fn derive_community_stats(
         .map(|(comm_id, tables)| {
             let mut v: Vec<DbTableAccess> = tables
                 .into_iter()
-                .map(|(name, (r, w))| DbTableAccess { table_name: name, reads: r, writes: w })
+                .map(|(name, (r, w))| DbTableAccess {
+                    table_name: name,
+                    reads: r,
+                    writes: w,
+                })
                 .collect();
             v.sort_by(|a, b| a.table_name.cmp(&b.table_name));
             (comm_id, v)
@@ -499,9 +628,13 @@ fn derive_community_stats(
         .collect();
 
     CommunityStats {
-        community_routes, community_tests,
-        community_class_counts, community_method_counts, community_stereotypes,
-        inter_community_calls, community_db_tables,
+        community_routes,
+        community_tests,
+        community_class_counts,
+        community_method_counts,
+        community_stereotypes,
+        inter_community_calls,
+        community_db_tables,
     }
 }
 
@@ -562,7 +695,10 @@ impl WikiGraph {
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(usize::MAX);
                     if let Some(sym) = nodes_by_id.get(&symbol_id) {
-                        steps_raw.entry(proc_id).or_default().push((step_num, sym.clone()));
+                        steps_raw
+                            .entry(proc_id)
+                            .or_default()
+                            .push((step_num, sym.clone()));
                     }
                 }
                 _ => {}
@@ -616,10 +752,19 @@ impl WikiGraph {
         );
 
         let EdgeIndex {
-            calls_out, calls_in, tests_out, tests_in,
-            external_calls, publishes, listens, routes,
-            methods_by_class, executes_query, query_reads_table,
-            query_writes_table, impl_methods,
+            calls_out,
+            calls_in,
+            tests_out,
+            tests_in,
+            external_calls,
+            publishes,
+            listens,
+            routes,
+            methods_by_class,
+            executes_query,
+            query_reads_table,
+            query_writes_table,
+            impl_methods,
         } = idx;
 
         WikiGraph {
@@ -692,13 +837,19 @@ impl WikiGraph {
         let mut community_by_member: BTreeMap<String, String> = BTreeMap::new();
 
         for node in nodes {
-            if !matches!(node.kind, NodeKind::Method | NodeKind::Function | NodeKind::Constructor) {
+            if !matches!(
+                node.kind,
+                NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+            ) {
                 continue;
             }
             let feat = feature_of(node.id.as_str(), &node.file);
             let pkg_id = format!("Pkg:{}", feat);
             community_by_member.insert(node.id.as_str().to_string(), pkg_id.clone());
-            members_by_community.entry(pkg_id).or_default().push(node.clone());
+            members_by_community
+                .entry(pkg_id)
+                .or_default()
+                .push(node.clone());
         }
 
         for members in members_by_community.values_mut() {
@@ -744,10 +895,19 @@ impl WikiGraph {
         );
 
         let EdgeIndex {
-            calls_out, calls_in, tests_out, tests_in,
-            external_calls, publishes, listens, routes,
-            methods_by_class, executes_query, query_reads_table,
-            query_writes_table, impl_methods,
+            calls_out,
+            calls_in,
+            tests_out,
+            tests_in,
+            external_calls,
+            publishes,
+            listens,
+            routes,
+            methods_by_class,
+            executes_query,
+            query_reads_table,
+            query_writes_table,
+            impl_methods,
         } = idx;
 
         WikiGraph {
@@ -809,10 +969,7 @@ impl WikiGraph {
 
     /// Returns (publishes, consumes) topic lists for a community.
     /// Each entry is (topic_name, topic_type) e.g. ("OrderCreatedEvent", "kafka").
-    pub fn community_messaging(
-        &self,
-        community_id: &str,
-    ) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    pub fn community_messaging(&self, community_id: &str) -> (MessagingPairs, MessagingPairs) {
         let node = match self.nodes_by_id.get(community_id) {
             Some(n) => n,
             None => return (vec![], vec![]),
@@ -869,10 +1026,7 @@ impl WikiGraph {
                 con_set.insert(name, "Kafka".to_string());
             }
         }
-        (
-            pub_set.into_iter().collect(),
-            con_set.into_iter().collect(),
-        )
+        (pub_set.into_iter().collect(), con_set.into_iter().collect())
     }
 
     pub fn community_display_name<'a>(&'a self, community_id: &'a str) -> &'a str {
@@ -911,9 +1065,14 @@ impl WikiGraph {
             let cls_id = crate::pages::api_flow::class_id_from_method_id(id.as_str(), self);
             let is_exception_ctor = id.starts_with("Constructor:") && {
                 let simple = id
-                    .strip_prefix("Constructor:").unwrap_or("")
-                    .split('#').next().unwrap_or("")
-                    .rsplit('.').next().unwrap_or("");
+                    .strip_prefix("Constructor:")
+                    .unwrap_or("")
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("");
                 simple.ends_with("Exception") || simple.ends_with("Error")
             };
             let is_interface_method = cls_id.starts_with("Interface:");
@@ -980,10 +1139,10 @@ impl WikiGraph {
         for (proc_id, steps) in &self.process_steps {
             if let Some(first) = steps.first() {
                 let sym_id = first.symbol.id.as_str().to_string();
-                if self.community_by_member.get(&sym_id).map(|c| c.as_str()) == Some(community_id) {
-                    if !business_only || self.is_business_process(proc_id) {
-                        result.push(proc_id.clone());
-                    }
+                if self.community_by_member.get(&sym_id).map(|c| c.as_str()) == Some(community_id)
+                    && (!business_only || self.is_business_process(proc_id))
+                {
+                    result.push(proc_id.clone());
                 }
             }
         }
@@ -1005,7 +1164,13 @@ pub fn route_path(route: &Node) -> String {
         .as_ref()
         .and_then(|p| p.get("path"))
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| route.name.splitn(2, ' ').nth(1).unwrap_or(&route.name))
+        .unwrap_or_else(|| {
+            route
+                .name
+                .split_once(' ')
+                .map(|x| x.1)
+                .unwrap_or(&route.name)
+        })
         .to_string()
 }
 
@@ -1035,5 +1200,3 @@ pub fn route_decorator(route: &Node) -> &str {
         })
         .unwrap_or("")
 }
-
-

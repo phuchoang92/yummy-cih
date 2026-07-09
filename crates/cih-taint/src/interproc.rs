@@ -13,7 +13,8 @@
 //!   this pass will miss the sanitization pattern and may flag false positives on
 //!   repos that use parameterized queries consistently.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::VecDeque;
 
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
 
@@ -66,7 +67,7 @@ impl TaintPath {
 /// `rules.max_hops` call-graph edges.
 pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> Vec<TaintPath> {
     // ── Index: CALLS forward adjacency ───────────────────────────────────────
-    let mut calls_fwd: HashMap<&NodeId, Vec<&NodeId>> = HashMap::new();
+    let mut calls_fwd: FxHashMap<&NodeId, Vec<&NodeId>> = FxHashMap::default();
     for edge in edges {
         if edge.kind == EdgeKind::Calls {
             calls_fwd.entry(&edge.src).or_default().push(&edge.dst);
@@ -74,7 +75,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
     }
 
     // ── Source detection: methods with HandlesRoute or ListensTo outgoing edges ──
-    let mut source_ids: HashSet<&NodeId> = HashSet::new();
+    let mut source_ids: FxHashSet<&NodeId> = FxHashSet::default();
     for edge in edges {
         if edge.kind == EdgeKind::HandlesRoute || edge.kind == EdgeKind::ListensTo {
             source_ids.insert(&edge.src);
@@ -84,7 +85,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
     // ── Sink detection ────────────────────────────────────────────────────────
 
     // 1. Dynamic DbQuery nodes already flagged by emit_db_access.
-    let dynamic_db_queries: HashSet<&NodeId> = nodes
+    let dynamic_db_queries: FxHashSet<&NodeId> = nodes
         .iter()
         .filter(|n| n.kind == NodeKind::DbQuery)
         .filter(|n| {
@@ -100,7 +101,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
     // 2. Build sink_map: method node ID → sink category.
     //    A method is a sink if it ExecutesQuery on a dynamic DbQuery node, or if it
     //    Calls a node whose ID matches a known dangerous pattern.
-    let mut sink_map: HashMap<&NodeId, SinkCategory> = HashMap::new();
+    let mut sink_map: FxHashMap<&NodeId, SinkCategory> = FxHashMap::default();
     for edge in edges {
         match edge.kind {
             EdgeKind::ExecutesQuery if dynamic_db_queries.contains(&edge.dst) => {
@@ -108,7 +109,10 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
             }
             EdgeKind::Calls => {
                 let target = edge.dst.as_str();
-                if let Some(rule) = rules.sinks.iter().find(|s| target.contains(s.node_id_pattern.as_str()))
+                if let Some(rule) = rules
+                    .sinks
+                    .iter()
+                    .find(|s| target.contains(s.node_id_pattern.as_str()))
                 {
                     sink_map.entry(&edge.src).or_insert(rule.category);
                 }
@@ -120,7 +124,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
     // ── Sanitizer detection ───────────────────────────────────────────────────
     // A method is considered "sanitizing" if it calls a known sanitizer callee.
     // When BFS visits such a method, we stop expanding that branch.
-    let mut sanitizing_methods: HashSet<&NodeId> = HashSet::new();
+    let mut sanitizing_methods: FxHashSet<&NodeId> = FxHashSet::default();
     for edge in edges {
         if edge.kind != EdgeKind::Calls {
             continue;
@@ -148,7 +152,7 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
     for source in &source_ids {
         // path = full node chain from source (inclusive) to the current node.
         let mut queue: VecDeque<(&NodeId, Vec<&NodeId>)> = VecDeque::new();
-        let mut visited: HashSet<&NodeId> = HashSet::new();
+        let mut visited: FxHashSet<&NodeId> = FxHashSet::default();
 
         queue.push_back((source, vec![source]));
         visited.insert(source);
@@ -197,5 +201,6 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
 }
 
 fn confidence_for_edges(edge_count: usize) -> f32 {
-    (INTERPROC_BASE - (edge_count.saturating_sub(1) as f32 * INTERPROC_HOP_PENALTY)).max(INTERPROC_FLOOR)
+    (INTERPROC_BASE - (edge_count.saturating_sub(1) as f32 * INTERPROC_HOP_PENALTY))
+        .max(INTERPROC_FLOOR)
 }

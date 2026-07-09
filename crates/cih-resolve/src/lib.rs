@@ -5,37 +5,46 @@
 //! heritage adjacency, and a precedence-ordered scope-binding lookup that turns a
 //! receiver name into a resolved FQCN. The public [`resolve_edges`] entrypoint runs
 //! the Phase 4.2 pass order and emits graph edges.
+//!
+//! # Error philosophy
+//!
+//! The core resolve entrypoints are **infallible by design**: an unresolvable
+//! reference is data, not an error — it becomes an `UnresolvedRef` diagnostic in
+//! [`ResolveOutput`], and malformed XML/config inputs simply yield fewer facts.
+//! Only artifact/report I/O can fail, and it returns `io::Result` directly.
 
 use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};
 
-use crate::common::emit::EdgeEmitter;
-use crate::common::index::CommonIndex;
+use crate::emit::EdgeEmitter;
+use crate::index::ResolveIndex;
 
-pub(crate) mod confidence;
-pub(crate) mod common;
 pub(crate) mod complexity;
+pub(crate) mod confidence;
 pub(crate) mod constant_propagation;
+pub(crate) mod emit;
+pub(crate) mod index;
+pub(crate) mod inheritance;
 pub(crate) mod lang;
 pub(crate) mod similarity;
 
 mod contracts;
 pub mod db_access;
 pub mod di_xml;
-mod emit;
-mod index;
 pub mod integration_xml;
+pub mod patterns;
 pub(crate) mod reports;
 mod types;
 pub use complexity::propagate_loop_depths;
 pub use constant_propagation::build_java_constant_resolver;
-pub use similarity::emit_similar_to_edges;
 pub use contracts::resolve_contract_edges;
 pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
 pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
-pub use lang::{all_resolvers, ResolverRegistry};
+pub use lang::{all_resolvers, PostProcessOptions, ResolverRegistry};
+pub use patterns::apply_pattern_rules;
 pub use reports::write_unresolved_reports;
+pub use similarity::emit_similar_to_edges;
 
 /// Per-site diagnostic record for a reference that could not be resolved.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,12 +96,19 @@ pub fn default_registry() -> ResolverRegistry {
     r
 }
 
-/// Backward-compatible entrypoint (uses old ResolveIndex for tests).
-/// Run Phase 4.2 over all parsed files: receiver-bound calls, free calls,
-/// remaining references, import edges, then heritage edges.
+/// Convenience entrypoint: resolve with the default language registry and
+/// default options. Runs Phase 4.2 over all parsed files: receiver-bound
+/// calls, free calls, remaining references, import edges, then heritage edges.
 pub fn resolve_edges(parsed: &[ParsedFile]) -> ResolveOutput {
-    let index = index::ResolveIndex::build(parsed);
-    emit::EdgeEmitter::new(parsed, index).run()
+    resolve_with_registry(
+        parsed,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+        },
+    )
 }
 
 /// Configurable entrypoint used by the engine.
@@ -101,7 +117,7 @@ pub fn resolve_with_registry(
     registry: &ResolverRegistry,
     options: ResolveOptions<'_>,
 ) -> ResolveOutput {
-    let index = CommonIndex::build(parsed, registry);
+    let index = ResolveIndex::build(parsed, registry);
     let emitter = EdgeEmitter::new(parsed, index, registry);
     let emitter = if let Some(cr) = options.constant_resolver {
         emitter.with_constant_resolver_boxed(cr)
