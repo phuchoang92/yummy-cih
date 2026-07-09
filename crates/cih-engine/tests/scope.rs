@@ -1,6 +1,6 @@
 use cih_core::{BuildSystem, ModuleInfo};
-use cih_engine_lib::scan::OwnedSourceFile;
-use cih_engine_lib::scope::*;
+use cih_engine::scan::OwnedSourceFile;
+use cih_engine::scope::*;
 
 fn repo_map() -> cih_core::RepoMap {
     cih_core::RepoMap {

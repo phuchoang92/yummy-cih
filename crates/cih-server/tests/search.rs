@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cih_core::GraphArtifacts;
-use cih_server_lib::search::query_limit;
+use cih_server::search::query_limit;
 
 struct TempDir {
     path: PathBuf,

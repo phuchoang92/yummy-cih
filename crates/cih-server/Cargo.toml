@@ -9,7 +9,6 @@ name = "cih-server"
 path = "src/main.rs"
 
 [lib]
-name = "cih_server_lib"
 path = "src/lib.rs"
 
 [dependencies]

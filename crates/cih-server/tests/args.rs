@@ -1,10 +1,10 @@
 use cih_core::ContractMatchKind;
 use cih_graph_store::Direction;
-use cih_server_lib::args::{
+use cih_server::args::{
     DetectChangesArgs, FeatureMapArgs, ImpactArgs, RegressionScopeArgs, RouteMapArgs,
     TraceFlowArgs, UntestedPathsArgs,
 };
-use cih_server_lib::utils::{parse_contract_kind_filter, parse_direction};
+use cih_server::utils::{parse_contract_kind_filter, parse_direction};
 
 #[test]
 fn direction_parse_unknown_falls_back_to_upstream() {

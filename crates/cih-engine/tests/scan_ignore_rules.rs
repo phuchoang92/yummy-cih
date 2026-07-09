@@ -1,4 +1,4 @@
-use cih_engine_lib::scan::ignore_rules::*;
+use cih_engine::scan::ignore_rules::*;
 
 #[test]
 fn ignore_rules_cover_directories_files_and_extensions() {

@@ -1,6 +1,6 @@
 use cih_core::{Node, NodeId, NodeKind, Range};
 use cih_graph_store::{Direction, FlowHop, FlowNode};
-use cih_server_lib::browser::{
+use cih_server::browser::{
     bounded_depth, limit_or_default, overview_limit, parse_graph_direction, render_flow_graph,
     INDEX_HTML, OVERVIEW_DEFAULT_EDGES, OVERVIEW_DEFAULT_NODES, OVERVIEW_MAX_EDGES,
     OVERVIEW_MAX_NODES,
