@@ -247,11 +247,15 @@ impl Layers {
 // values. The CLI dispatch stays thin, and precedence is unit-testable here.
 
 /// `analyze` flags that participate in config layering.
+///
+/// `skip_xml_integration` and `include_decompiled` are `Option<bool>` so that
+/// an explicit `--no-*` flag can override a `true` set in `cih.toml`. `None`
+/// means "not supplied on the CLI — fall through to the config layer".
 #[derive(Debug, Default)]
 pub struct AnalyzeFlagInputs {
     pub languages: Vec<String>,
-    pub skip_xml_integration: bool,
-    pub include_decompiled: bool,
+    pub skip_xml_integration: Option<bool>,
+    pub include_decompiled: Option<bool>,
     pub cxf_base_path: Option<String>,
 }
 
@@ -277,16 +281,20 @@ pub fn resolve_analyze(flags: AnalyzeFlagInputs, layers: &Layers) -> AnalyzeReso
     };
     AnalyzeResolved {
         languages,
-        skip_xml_integration: resolve_bool(
+        skip_xml_integration: resolve(
             flags.skip_xml_integration,
+            None, // no env binding for this option
             r.skip_xml_integration,
             h.skip_xml_integration,
+            false,
         )
         .value,
-        include_decompiled: resolve_bool(
+        include_decompiled: resolve(
             flags.include_decompiled,
+            None, // no env binding for this option
             r.include_decompiled,
             h.include_decompiled,
+            false,
         )
         .value,
         // flag > repo cih.toml > home config (no env binding for this option).

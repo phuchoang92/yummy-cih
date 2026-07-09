@@ -44,30 +44,18 @@ fn is_noise_line(line: &str) -> bool {
 }
 
 fn is_log_call(t: &str) -> bool {
+    // Prefix-only check: a line is a log call only if it *starts with* a known
+    // logger variable. The old contains(".info(") && contains("log.") approach
+    // was unsound — any line calling .info() on a non-logger object that also
+    // happened to mention the string "log." (e.g. in a string literal) was
+    // incorrectly stripped.
     let prefixes = [
         "log.",
         "logger.",
         "LOG.",
         "LOGGER.",
-        "log.debug",
-        "log.info",
-        "log.warn",
-        "log.error",
-        "log.trace",
-        "logger.debug",
-        "logger.info",
-        "logger.warn",
-        "logger.error",
     ];
     prefixes.iter().any(|p| t.starts_with(p))
-        || (t.contains(".debug(")
-            || t.contains(".info(")
-            || t.contains(".warn(")
-            || t.contains(".error("))
-            && (t.contains("log.")
-                || t.contains("logger.")
-                || t.contains("LOG.")
-                || t.contains("LOGGER."))
 }
 
 fn is_null_guard(t: &str) -> bool {

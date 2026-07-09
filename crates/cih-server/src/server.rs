@@ -20,7 +20,13 @@ pub async fn auth_middleware(
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        if provided != Some(expected.as_str()) {
+        // Use constant-time comparison to prevent timing side-channel attacks
+        // that could allow an attacker to recover the token byte-by-byte.
+        let authed = match provided {
+            Some(tok) => constant_time_eq::constant_time_eq(tok.as_bytes(), expected.as_bytes()),
+            None => false,
+        };
+        if !authed {
             return (StatusCode::UNAUTHORIZED, "Unauthorized\n").into_response();
         }
     }

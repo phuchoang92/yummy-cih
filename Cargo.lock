@@ -780,6 +780,7 @@ dependencies = [
  "cih-patterns",
  "cih-search",
  "cih-taint",
+ "constant_time_eq",
  "reqwest",
  "rmcp",
  "schemars",

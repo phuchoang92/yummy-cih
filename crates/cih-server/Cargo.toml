@@ -37,3 +37,4 @@ rmcp = { version = "0.7", features = ["server", "macros", "transport-streamable-
 # Must match rmcp's schemars major (rmcp 0.7 → schemars 1.x) or JsonSchema derives the wrong trait.
 schemars = "1"
 reqwest.workspace = true
+constant_time_eq = "0.4"

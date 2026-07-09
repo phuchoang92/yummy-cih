@@ -91,8 +91,12 @@ impl FalkorStore {
         .await
         {
             Ok(Ok(permit)) => Ok(permit),
-            // Elapsed timeout or a closed semaphore both mean we can't proceed.
-            _ => Err(GraphStoreError::Backend(
+            // Semaphore was closed — the store has been dropped; retrying is futile.
+            Ok(Err(_)) => Err(GraphStoreError::Backend(
+                "graph store shut down: query semaphore closed".into(),
+            )),
+            // Timeout elapsed — transient overload, caller may retry.
+            Err(_) => Err(GraphStoreError::Backend(
                 "graph store overloaded: concurrent query limit reached".into(),
             )),
         }
@@ -147,7 +151,9 @@ impl FalkorStore {
     async fn load_nodes_edges(&self, nodes: &[Node], edges: &[Edge]) -> Result<LoadStats> {
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await; // idempotent
 
-        for chunk in nodes.chunks(BATCH) {
+        let node_chunks: Vec<_> = nodes.chunks(BATCH).collect();
+        let total_node_batches = node_chunks.len();
+        for (batch_idx, chunk) in node_chunks.into_iter().enumerate() {
             let q = format!(
                 "UNWIND {arr} AS row \
                  MERGE (n:Symbol {{id: row.id}}) \
@@ -162,7 +168,15 @@ impl FalkorStore {
                      n.loopDepth = row.loopDepth, n.transitiveLoopDepth = row.transitiveLoopDepth",
                 arr = nodes_to_list(chunk)
             );
-            self.run(&q).await?;
+            self.run(&q).await.inspect_err(|_| {
+                tracing::error!(
+                    batch = batch_idx,
+                    committed_batches = batch_idx,
+                    total_batches = total_node_batches,
+                    "node batch write failed — graph is partially written; \
+                     re-run bulk_load from scratch to restore consistency"
+                );
+            })?;
         }
 
         // Relationship types can't be parameterized in MERGE → one batch per kind.
@@ -172,7 +186,9 @@ impl FalkorStore {
         }
         for (kind, es) in &by_kind {
             let label = kind.cypher_label();
-            for chunk in es.chunks(BATCH) {
+            let edge_chunks: Vec<_> = es.chunks(BATCH).collect();
+            let total_edge_batches = edge_chunks.len();
+            for (batch_idx, chunk) in edge_chunks.into_iter().enumerate() {
                 let q = format!(
                     "UNWIND {arr} AS row \
                      MATCH (a:Symbol {{id: row.src}}), (b:Symbol {{id: row.dst}}) \
@@ -181,7 +197,16 @@ impl FalkorStore {
                          r.callSites = row.callSites",
                     arr = edges_to_list(chunk)
                 );
-                self.run(&q).await?;
+                self.run(&q).await.inspect_err(|_| {
+                    tracing::error!(
+                        kind = ?kind,
+                        batch = batch_idx,
+                        committed_batches = batch_idx,
+                        total_batches = total_edge_batches,
+                        "edge batch write failed — graph is partially written; \
+                         re-run bulk_load from scratch to restore consistency"
+                    );
+                })?;
             }
         }
 
@@ -229,10 +254,23 @@ impl GraphStore for FalkorStore {
     }
 
     async fn publish_to(&self, dest_key: &str) -> Result<()> {
-        // Delete the destination first; ignore the error if it doesn't exist yet.
-        let _ = self.graph_command("GRAPH.DELETE", &[dest_key]).await;
-        self.graph_command("GRAPH.COPY", &[&self.graph_key, dest_key])
+        // Safer swap: copy staging → a temp key first so dest is only empty for the
+        // brief window between the final DELETE and the COPY completing. A crash
+        // before step 3 leaves dest intact; a crash after step 3 leaves the data in
+        // the tmp key so it can be recovered manually.
+        let tmp_key = format!("{dest_key}__swap_tmp");
+
+        // Step 1: remove any leftover tmp from a previous crashed attempt.
+        let _ = self.graph_command("GRAPH.DELETE", &[tmp_key.as_str()]).await;
+        // Step 2: copy staging → tmp (dest is untouched if this fails).
+        self.graph_command("GRAPH.COPY", &[&self.graph_key, tmp_key.as_str()])
             .await?;
+        // Step 3: replace dest (narrow unavailability window starts here).
+        let _ = self.graph_command("GRAPH.DELETE", &[dest_key]).await;
+        self.graph_command("GRAPH.COPY", &[tmp_key.as_str(), dest_key])
+            .await?;
+        // Step 4: clean up temp.
+        let _ = self.graph_command("GRAPH.DELETE", &[tmp_key.as_str()]).await;
         Ok(())
     }
 

@@ -16,11 +16,25 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
     };
     // Layer flags over <repo>/cih.toml and ~/.cih/config.toml (see settings.rs).
     let layers = settings::Layers::load(&repo);
+    // Map CLI bool flags to Option<bool> so the resolver can distinguish
+    // "explicitly set by user" from "not provided — fall through to config".
+    // --skip-xml-integration → Some(true), --no-skip-xml-integration → Some(false),
+    // neither → None (config layer wins).
+    let skip_xml_integration = match (args.skip_xml_integration, args.no_skip_xml_integration) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    let include_decompiled = match (args.include_decompiled, args.no_include_decompiled) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
     let resolved = settings::resolve_analyze(
         settings::AnalyzeFlagInputs {
-            languages: args.languages,
-            skip_xml_integration: args.skip_xml_integration,
-            include_decompiled: args.include_decompiled,
+            languages: args.languages.into_iter().filter(|s| !s.is_empty()).collect(),
+            skip_xml_integration,
+            include_decompiled,
             cxf_base_path: args.cxf_base_path,
         },
         &layers,
@@ -29,7 +43,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         repo,
         AnalyzeFlags {
             all: args.all,
-            modules: args.modules,
+            modules: args.modules.into_iter().filter(|s| !s.is_empty()).collect(),
             include: args.include,
             exclude: args.exclude,
             include_decompiled: resolved.include_decompiled,

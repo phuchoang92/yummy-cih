@@ -44,19 +44,30 @@ impl AgentRunner {
         llm_base_url: String,
         llm_api_key: String,
         llm_model: String,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        // Require https:// to prevent SSRF to cloud metadata endpoints or plain-HTTP
+        // internal services. The API key would otherwise be forwarded to the target.
+        if !llm_base_url.starts_with("https://") {
+            anyhow::bail!(
+                "CIH_AGENT_LLM_BASE_URL must start with https:// (got {:?})",
+                llm_base_url
+            );
+        }
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            // Disable redirects: a redirect to a different host would forward
+            // the Authorization header (and thus the API key) to that host.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default();
-        Self {
+            .context("failed to build HTTP client for LLM agent")?;
+        Ok(Self {
             search,
             store,
             llm_base_url,
             llm_api_key,
             llm_model,
             client,
-        }
+        })
     }
 
     pub async fn ask(&self, question: &str, codebase_description: &str) -> Result<AgentAnswer> {
@@ -104,8 +115,12 @@ impl AgentRunner {
 
             if !resp.status().is_success() {
                 let status = resp.status();
+                // Log the full body server-side only; the body may contain rate-limit
+                // quota IDs or account identifiers from the LLM provider that must not
+                // be forwarded to MCP clients.
                 let text = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("LLM returned {status}: {text}"));
+                tracing::warn!(%status, body = %text, "LLM request failed");
+                return Err(anyhow!("LLM returned {status}"));
             }
 
             let resp_json: Value = resp.json().await.context("agent LLM response JSON parse")?;

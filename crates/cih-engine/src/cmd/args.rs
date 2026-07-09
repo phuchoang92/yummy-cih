@@ -303,8 +303,11 @@ pub struct AnalyzeArgs {
     #[arg(long)]
     pub exclude: Vec<String>,
     /// Include files under decompiled dirs such as .workspace-dependencies.
-    #[arg(long)]
+    #[arg(long, overrides_with = "no_include_decompiled")]
     pub include_decompiled: bool,
+    /// Exclude decompiled dirs even if cih.toml has include_decompiled = true.
+    #[arg(long = "no-include-decompiled", overrides_with = "include_decompiled")]
+    pub no_include_decompiled: bool,
     /// Scope TOML file. Defaults to `<repo>/cih.scope.toml` when present.
     #[arg(long)]
     pub scope: Option<PathBuf>,
@@ -317,8 +320,11 @@ pub struct AnalyzeArgs {
     #[arg(long)]
     pub no_cache: bool,
     /// Skip integration and DI XML extraction (faster on large repos).
-    #[arg(long)]
+    #[arg(long, overrides_with = "no_skip_xml_integration")]
     pub skip_xml_integration: bool,
+    /// Re-enable integration XML extraction even if cih.toml has skip_xml_integration = true.
+    #[arg(long = "no-skip-xml-integration", overrides_with = "skip_xml_integration")]
+    pub no_skip_xml_integration: bool,
     /// Limit analysis to these languages (comma-delimited or repeated). Default: all.
     /// Example: --language java,typescript
     #[arg(long = "language", value_delimiter = ',')]

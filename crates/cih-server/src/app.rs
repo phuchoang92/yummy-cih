@@ -729,15 +729,19 @@ pub async fn run() -> Result<()> {
         None
     };
     let graph_key = cfg.graph_key.clone();
-    let agent = cfg.agent_api_key.as_deref().map(|key| {
-        agent::AgentRunner::new(
-            SearchState::new(cfg.artifacts_dir.clone(), None),
-            store.clone(),
-            cfg.agent_llm_base_url.clone(),
-            key.to_string(),
-            cfg.agent_llm_model.clone(),
-        )
-    });
+    let agent = cfg
+        .agent_api_key
+        .as_deref()
+        .map(|key| {
+            agent::AgentRunner::new(
+                SearchState::new(cfg.artifacts_dir.clone(), None),
+                store.clone(),
+                cfg.agent_llm_base_url.clone(),
+                key.to_string(),
+                cfg.agent_llm_model.clone(),
+            )
+        })
+        .transpose()?;
     let cih = CihServer::new(
         store.clone(),
         cfg.artifacts_dir.clone(),
