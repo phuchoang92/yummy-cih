@@ -121,6 +121,35 @@ impl EmbedStore {
             ))
             .await
             .with_context(|| "failed to ensure cih_embeddings schema")?;
+
+        // Verify that the embedding column's dimension matches the current model.
+        // CREATE TABLE IF NOT EXISTS is a no-op when the table already exists, so a
+        // model swap would otherwise only surface as a pgvector type error on the first
+        // upsert — potentially after minutes of work. Fail here instead with a clear
+        // message telling the operator what to do.
+        let col_type: String = self
+            .client
+            .query_one(
+                r#"SELECT pg_catalog.format_type(atttypid, atttypmod)
+                   FROM pg_attribute
+                   WHERE attrelid = 'cih_embeddings'::regclass
+                     AND attname = 'embedding'
+                     AND attnum > 0
+                     AND NOT attisdropped"#,
+                &[],
+            )
+            .await
+            .with_context(|| "failed to inspect cih_embeddings.embedding column type")?
+            .get(0);
+        let expected = format!("vector({})", self.model.dimension());
+        if col_type != expected {
+            anyhow::bail!(
+                "cih_embeddings.embedding column has type '{col_type}' but the current \
+                 model produces {}-dimensional vectors; drop the cih_embeddings and \
+                 cih_node_vectors tables then re-run `cih embed` to rebuild",
+                self.model.dimension()
+            );
+        }
         Ok(())
     }
 
