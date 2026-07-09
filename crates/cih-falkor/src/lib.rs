@@ -260,23 +260,13 @@ impl GraphStore for FalkorStore {
     }
 
     async fn publish_to(&self, dest_key: &str) -> Result<()> {
-        // Safer swap: copy staging → a temp key first so dest is only empty for the
-        // brief window between the final DELETE and the COPY completing. A crash
-        // before step 3 leaves dest intact; a crash after step 3 leaves the data in
-        // the tmp key so it can be recovered manually.
-        let tmp_key = format!("{dest_key}__swap_tmp");
-
-        // Step 1: remove any leftover tmp from a previous crashed attempt.
-        let _ = self.graph_command("GRAPH.DELETE", &[tmp_key.as_str()]).await;
-        // Step 2: copy staging → tmp (dest is untouched if this fails).
-        self.graph_command("GRAPH.COPY", &[&self.graph_key, tmp_key.as_str()])
+        // Redis RENAME is O(1), atomic, and fork-free — the kernel does not need to
+        // duplicate FalkorDB's RSS to execute it. GRAPH.COPY forks the process, which
+        // fails on memory-constrained hosts when the graph is large (> ~4 GB RSS).
+        // If dest_key already exists Redis atomically replaces it, so there is no
+        // window where the live graph is absent.
+        self.graph_command("RENAME", &[&self.graph_key, dest_key])
             .await?;
-        // Step 3: replace dest (narrow unavailability window starts here).
-        let _ = self.graph_command("GRAPH.DELETE", &[dest_key]).await;
-        self.graph_command("GRAPH.COPY", &[tmp_key.as_str(), dest_key])
-            .await?;
-        // Step 4: clean up temp.
-        let _ = self.graph_command("GRAPH.DELETE", &[tmp_key.as_str()]).await;
         Ok(())
     }
 
