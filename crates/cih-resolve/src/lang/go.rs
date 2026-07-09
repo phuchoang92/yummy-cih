@@ -1,5 +1,5 @@
 use cih_core::SymbolDef;
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 use super::{InheritanceModel, LanguageResolver};
 
 pub struct GoResolver;

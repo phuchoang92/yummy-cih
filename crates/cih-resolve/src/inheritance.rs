@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 
 /// Compute a C3 linearization for every type in the index.
 /// Result: type FQCN → ordered MRO list (self first, then ancestors breadth-first in C3 order).

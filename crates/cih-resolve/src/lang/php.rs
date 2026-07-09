@@ -1,5 +1,5 @@
 use super::{InheritanceModel, LanguageResolver};
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 use cih_core::SymbolDef;
 
 pub struct PhpResolver;

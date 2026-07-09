@@ -1,6 +1,6 @@
 use cih_core::{ImportBinding, ImportBindingKind};
 
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 use crate::lang::{InheritanceModel, LanguageResolver};
 use crate::types::class_of;
 

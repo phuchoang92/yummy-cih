@@ -7,8 +7,8 @@ use cih_core::{
 };
 use cih_lang::constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 
-use crate::common::index::CommonIndex;
-use crate::common::inheritance::build_mro_map;
+use crate::index::CommonIndex;
+use crate::inheritance::build_mro_map;
 use crate::contracts::resolve_contract_edges;
 use crate::lang::{InheritanceModel, ResolverRegistry};
 use crate::types::{

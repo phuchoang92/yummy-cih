@@ -2,7 +2,7 @@ use std::path::Path;
 
 use cih_core::{Edge, Node, ParsedFile, SymbolDef};
 
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 use crate::lang::{InheritanceModel, LanguageResolver, PostProcessOptions};
 use crate::types::class_of;
 

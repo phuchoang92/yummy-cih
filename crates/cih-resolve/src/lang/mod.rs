@@ -3,7 +3,7 @@ use std::path::Path;
 
 use cih_core::{Edge, ImportBinding, Node, ParsedFile, SymbolDef};
 
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 
 /// Declares all resolver modules and generates `all_resolvers()`.
 /// To add a new language: add one line here (plus the implementation file).

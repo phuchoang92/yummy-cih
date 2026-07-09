@@ -1,4 +1,4 @@
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 use crate::default_registry;
 use crate::types::simple_of;
 use cih_core::{

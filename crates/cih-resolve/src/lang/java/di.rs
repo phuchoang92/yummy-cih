@@ -1,4 +1,4 @@
-use crate::common::index::CommonIndex;
+use crate::index::CommonIndex;
 
 const SPRING_BEANS: &[&str] = &[
     "service",

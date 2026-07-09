@@ -16,13 +16,15 @@
 use cih_core::{Edge, Node, NodeId, ParsedFile, Range};
 use serde::{Deserialize, Serialize};
 
-use crate::common::emit::EdgeEmitter;
-use crate::common::index::CommonIndex;
+use crate::emit::EdgeEmitter;
+use crate::index::CommonIndex;
 
-pub(crate) mod common;
 pub(crate) mod complexity;
 pub(crate) mod confidence;
 pub(crate) mod constant_propagation;
+pub(crate) mod emit;
+pub(crate) mod index;
+pub(crate) mod inheritance;
 pub(crate) mod lang;
 pub(crate) mod similarity;
 
