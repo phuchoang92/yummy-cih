@@ -11,9 +11,13 @@ pub mod config;
 pub mod discover;
 pub mod features;
 pub mod group;
+pub mod group_sync;
 pub mod list;
+pub mod start;
+pub mod start_env;
 pub mod status;
 pub mod taint;
+pub mod tui;
 pub mod wiki;
 
 use anyhow::Result;
@@ -38,7 +42,7 @@ pub fn main() -> Result<()> {
     // TUI command builder — runs before the normal dispatch so the terminal is
     // restored before we print anything or exec the chosen command.
     if matches!(cli.command, Command::Ui) {
-        if let Some(cmd_args) = crate::tui::run_tui()? {
+        if let Some(cmd_args) = tui::run_tui()? {
             let cmd_display = std::iter::once("cih-engine")
                 .chain(cmd_args.iter().map(String::as_str))
                 .collect::<Vec<_>>()
@@ -127,7 +131,7 @@ pub fn main() -> Result<()> {
                 json: a.json,
             },
         ),
-        Command::Start(a) => crate::start::run_start(crate::start::StartConfig {
+        Command::Start(a) => start::run_start(start::StartConfig {
             workspace: a.workspace,
             repo: a.repo,
             repo_name: a.repo_name,

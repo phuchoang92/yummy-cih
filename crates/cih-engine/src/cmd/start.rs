@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use anyhow::{bail, Context, Result};
 use dialoguer::{Confirm, Input, Password, Select};
 
-use crate::start_env;
+use crate::cmd::start_env;
 
 // ── Timeline UI ────────────────────────────────────────────────────────────
 

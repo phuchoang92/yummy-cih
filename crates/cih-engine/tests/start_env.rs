@@ -1,4 +1,4 @@
-use cih_engine::start_env::*;
+use cih_engine::cmd::start_env::*;
 use std::path::{Path, PathBuf};
 
 fn temp_dir(suffix: &str) -> PathBuf {

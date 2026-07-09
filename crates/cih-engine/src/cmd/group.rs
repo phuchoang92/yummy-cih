@@ -98,7 +98,7 @@ pub fn run_group_list(json: bool) -> Result<()> {
 
 pub fn run_group_sync(name: &str, json: bool) -> Result<()> {
     validate_group_name(name)?;
-    let summary = crate::group_sync::sync_group(name)?;
+    let summary = super::group_sync::sync_group(name)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
