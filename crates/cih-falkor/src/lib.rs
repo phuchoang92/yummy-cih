@@ -154,10 +154,16 @@ impl FalkorStore {
         let node_chunks: Vec<_> = nodes.chunks(BATCH).collect();
         let total_node_batches = node_chunks.len();
         for (batch_idx, chunk) in node_chunks.into_iter().enumerate() {
+            // ON CREATE SET only: the staging graph is always drop_graph()'d before
+            // bulk_load runs, and upsert_incremental DETACH-DELETEs changed-file nodes
+            // before calling load_nodes_edges. So every MERGE here creates a new node.
+            // In the retry case (partial batch failure), matched nodes already hold the
+            // correct values from the same artifact — skipping ON MATCH SET is safe and
+            // avoids re-writing ~18 properties per node for zero net change.
             let q = format!(
                 "UNWIND {arr} AS row \
                  MERGE (n:Symbol {{id: row.id}}) \
-                 SET n.name = row.name, n.kind = row.kind, n.file = row.file, \
+                 ON CREATE SET n.name = row.name, n.kind = row.kind, n.file = row.file, \
                      n.qualifiedName = row.qn, n.startLine = row.sl, n.endLine = row.el, \
                      n.props = row.props, n.stereotype = row.stereotype, \
                      n.httpMethod = row.httpMethod, n.path = row.path, \
@@ -193,7 +199,7 @@ impl FalkorStore {
                     "UNWIND {arr} AS row \
                      MATCH (a:Symbol {{id: row.src}}), (b:Symbol {{id: row.dst}}) \
                      MERGE (a)-[r:{label}]->(b) \
-                     SET r.confidence = row.conf, r.reason = row.reason, \
+                     ON CREATE SET r.confidence = row.conf, r.reason = row.reason, \
                          r.callSites = row.callSites",
                     arr = edges_to_list(chunk)
                 );
