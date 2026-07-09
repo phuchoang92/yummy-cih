@@ -1,6 +1,6 @@
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
-use crate::args::ReadFileArgs;
+use crate::args::{GrepFilesArgs, ReadFileArgs};
 use crate::symbol::find_repo_path;
 use crate::utils::json_result;
 
@@ -133,6 +133,171 @@ fn read_sliced(
     }))
 }
 
+/// Skip files larger than this during a grep walk — keeps stray artifacts
+/// (fat jars, dumps) from being pulled into memory.
+const GREP_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Cap on returned match text — one minified single-line file must not flood
+/// the agent's context through a single match.
+const GREP_MAX_TEXT_BYTES: usize = 500;
+/// Default / hard-cap on the number of returned matches.
+const GREP_DEFAULT_LIMIT: usize = 200;
+const GREP_MAX_LIMIT: usize = 1000;
+
+/// Build/vendor directories to skip even when no gitignore applies (sources
+/// copied without `.git` — e.g. into a Docker volume — get no gitignore
+/// filtering from the `ignore` crate).
+const GREP_SKIP_DIRS: &[&str] = &["target", "node_modules", "build", "dist", ".git"];
+
+#[derive(serde::Serialize)]
+pub struct GrepMatch {
+    pub file: String,
+    pub line: u32,
+    pub text: String,
+}
+
+pub async fn grep_files(graph_key: &str, args: GrepFilesArgs) -> Result<CallToolResult, McpError> {
+    // Validate the cheap, registry-free inputs first.
+    let regex = compile_pattern(&args.pattern)?;
+    let glob = compile_glob(&args.glob)?;
+
+    let repo_root = find_repo_path(
+        if args.repo.is_empty() {
+            None
+        } else {
+            Some(args.repo.as_str())
+        },
+        graph_key,
+    )
+    .map_err(|e| McpError::invalid_params(e, None))?;
+
+    let limit = if args.limit == 0 {
+        GREP_DEFAULT_LIMIT
+    } else {
+        args.limit
+    }
+    .min(GREP_MAX_LIMIT);
+
+    // The walk is synchronous filesystem I/O over the whole repo — keep it off
+    // the async workers.
+    let root = std::path::PathBuf::from(&repo_root);
+    let (matches, truncated) =
+        tokio::task::spawn_blocking(move || grep_dir(&root, &regex, glob.as_ref(), limit))
+            .await
+            .map_err(|e| McpError::internal_error(format!("grep task failed: {e}"), None))?;
+
+    json_result(&serde_json::json!({
+        "pattern": args.pattern,
+        "glob": args.glob,
+        "matches_returned": matches.len(),
+        "truncated": truncated,
+        "matches": matches,
+    }))
+}
+
+fn compile_pattern(pattern: &str) -> Result<regex::Regex, McpError> {
+    regex::Regex::new(pattern)
+        .map_err(|e| McpError::invalid_params(format!("invalid regex pattern: {e}"), None))
+}
+
+fn compile_glob(glob: &str) -> Result<Option<globset::GlobSet>, McpError> {
+    if glob.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = globset::GlobSetBuilder::new();
+    builder.add(
+        globset::Glob::new(glob)
+            .map_err(|e| McpError::invalid_params(format!("invalid glob: {e}"), None))?,
+    );
+    builder
+        .build()
+        .map_err(|e| McpError::invalid_params(format!("invalid glob: {e}"), None))
+        .map(Some)
+}
+
+/// Gitignore-aware regex scan under `root`. Separated from repo resolution so
+/// it is unit-testable without the registry. Returns matches in walk order and
+/// whether the `limit` cut the scan short.
+fn grep_dir(
+    root: &std::path::Path,
+    regex: &regex::Regex,
+    glob: Option<&globset::GlobSet>,
+    limit: usize,
+) -> (Vec<GrepMatch>, bool) {
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .add_custom_ignore_filename(".cihignore")
+        .filter_entry(|entry| {
+            if entry.depth() > 0 && entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy();
+                return !GREP_SKIP_DIRS.contains(&name.as_ref());
+            }
+            true
+        });
+
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    'files: for entry in builder.build().flatten() {
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        // The walker does not follow symlinks, so a symlinked file is the only
+        // way a read could escape the repo root — skip them.
+        if entry.path_is_symlink() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(root) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+        if let Some(glob) = glob {
+            if !glob.is_match(rel) {
+                continue;
+            }
+        }
+        match entry.metadata() {
+            Ok(md) if md.len() <= GREP_MAX_FILE_BYTES => {}
+            _ => continue,
+        }
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        if bytes.contains(&0) {
+            continue; // binary heuristic
+        }
+        let content = String::from_utf8_lossy(&bytes);
+        for (i, line) in content.lines().enumerate() {
+            if regex.is_match(line) {
+                matches.push(GrepMatch {
+                    file: rel.to_string_lossy().into_owned(),
+                    line: i as u32 + 1,
+                    text: cap_text(line, GREP_MAX_TEXT_BYTES),
+                });
+                if matches.len() >= limit {
+                    truncated = true;
+                    break 'files;
+                }
+            }
+        }
+    }
+    (matches, truncated)
+}
+
+/// Truncate to at most `max` bytes on a char boundary, marking the cut.
+fn cap_text(line: &str, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_string();
+    }
+    let mut end = max;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +362,100 @@ mod tests {
         let v = read_sliced(&p, "small.txt", limits, 0, 0).unwrap();
         assert_eq!(v["truncated"], serde_json::json!(false));
         assert_eq!(v["total_lines"], serde_json::json!(3));
+    }
+
+    /// Fresh temp dir for a grep test; recreated on every run.
+    fn grep_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("cih-grepfiles-test-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_under(root: &std::path::Path, rel: &str, contents: &[u8]) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, contents).unwrap();
+    }
+
+    fn re(pattern: &str) -> regex::Regex {
+        regex::Regex::new(pattern).unwrap()
+    }
+
+    #[test]
+    fn grep_finds_match_with_file_line_text() {
+        let root = grep_root("basic");
+        write_under(
+            &root,
+            "src/Foo.java",
+            b"class Foo {\n  // TODO fix this\n}\n",
+        );
+        let (matches, truncated) = grep_dir(&root, &re("TODO"), None, 100);
+        assert!(!truncated);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].file, "src/Foo.java");
+        assert_eq!(matches[0].line, 2);
+        assert_eq!(matches[0].text, "  // TODO fix this");
+    }
+
+    #[test]
+    fn grep_glob_filters_files() {
+        let root = grep_root("glob");
+        write_under(&root, "a/Foo.java", b"// TODO java\n");
+        write_under(&root, "b/bar.rs", b"// TODO rust\n");
+        let glob = compile_glob("**/*.java").unwrap().unwrap();
+        let (matches, _) = grep_dir(&root, &re("TODO"), Some(&glob), 100);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].file, "a/Foo.java");
+    }
+
+    #[test]
+    fn grep_limit_truncates() {
+        let root = grep_root("limit");
+        let body: String = (1..=10).map(|i| format!("TODO {i}\n")).collect();
+        write_under(&root, "many.txt", body.as_bytes());
+        let (matches, truncated) = grep_dir(&root, &re("TODO"), None, 3);
+        assert!(truncated);
+        assert_eq!(matches.len(), 3);
+    }
+
+    #[test]
+    fn grep_skips_binary_files() {
+        let root = grep_root("binary");
+        write_under(&root, "blob.bin", b"TODO\0TODO\n");
+        let (matches, _) = grep_dir(&root, &re("TODO"), None, 100);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn grep_caps_long_match_text() {
+        let root = grep_root("longline");
+        let line = format!("TODO {}", "x".repeat(2000));
+        write_under(&root, "minified.js", line.as_bytes());
+        let (matches, _) = grep_dir(&root, &re("TODO"), None, 100);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].text.len() <= GREP_MAX_TEXT_BYTES + '…'.len_utf8());
+        assert!(matches[0].text.ends_with('…'));
+    }
+
+    #[test]
+    fn grep_skips_build_dirs() {
+        let root = grep_root("skipdirs");
+        write_under(&root, "node_modules/dep/x.js", b"// TODO vendored\n");
+        write_under(&root, "target/debug/x.rs", b"// TODO generated\n");
+        write_under(&root, "src/x.rs", b"// TODO real\n");
+        let (matches, _) = grep_dir(&root, &re("TODO"), None, 100);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].file, "src/x.rs");
+    }
+
+    #[test]
+    fn invalid_pattern_is_rejected() {
+        let err = compile_pattern("[unclosed").unwrap_err();
+        assert!(
+            err.message.contains("invalid regex"),
+            "unexpected: {}",
+            err.message
+        );
     }
 }

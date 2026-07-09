@@ -27,6 +27,9 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 async-trait.workspace = true
+globset.workspace = true
+ignore.workspace = true
+regex.workspace = true
 
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "trace", "timeout"] }

@@ -623,6 +623,20 @@ impl CihServer {
     ) -> Result<CallToolResult, McpError> {
         files::read_file(&self.graph_key, self.read_file_limits, args).await
     }
+
+    #[tool(
+        description = "Search for a regex pattern across source files in the repo. \
+            Use this to find comments, TODOs, annotations, string literals, or any \
+            text not captured by the graph index. Prefix the pattern with (?i) for \
+            case-insensitive search. `glob` filters by file path \
+            (e.g. \"**/*.java\", \"src/**/*.rs\"). Returns up to `limit` matches (default 200)."
+    )]
+    async fn grep_files(
+        &self,
+        Parameters(args): Parameters<GrepFilesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        files::grep_files(&self.graph_key, args).await
+    }
 }
 
 #[tool_handler]
@@ -664,7 +678,7 @@ impl ServerHandler for CihServer {
                  \n\
                  ## Other tools\n\
                  `feature_map`, `query`, `ask_codebase`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
-                 `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`.\n\
+                 `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`, `grep_files`.\n\
                  \n\
                  ## Security\n\
                  `taint_paths(category=\"sql\"|\"exec\"|\"file\"|\"html\")` — source→sink flows from HTTP/event entry points; refine=true for flow-sensitive confirmation."

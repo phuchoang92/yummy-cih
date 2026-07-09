@@ -243,6 +243,23 @@ pub struct ReadFileArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GrepFilesArgs {
+    /// Regex pattern to search for (e.g. "TODO|FIXME", "^import ", "@Deprecated").
+    /// Prefix with (?i) for case-insensitive matching.
+    pub pattern: String,
+    /// Glob to filter files (e.g. "**/*.java", "src/**/*.rs").
+    /// Leave empty to search all non-ignored files.
+    #[serde(default)]
+    pub glob: String,
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active repo.
+    #[serde(default)]
+    pub repo: String,
+    /// Max matches to return (default 200, capped at 1000, pass 0 for default).
+    #[serde(default)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListReposArgs {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
