@@ -80,11 +80,13 @@ limitations are in `docs/ARCHITECTURE.md`.
 
 ## Developing CIH itself
 
-**Layout.** ~16 crates under `crates/`; two binaries: `cih-engine` (CLI — the
-`scan → parse → resolve → load → discover → embed → wiki` pipeline, writes `.cih/`
-artifacts) and `cih-server` (the MCP server, streamable HTTP via rmcp 0.7). MCP tools
-live in `crates/cih-server/src/main.rs`; the graph store trait is `cih-graph-store`
-with the `cih-falkor` adapter.
+**Layout.** ~16 crates under `crates/`; two binaries, both thin shims over their
+library crates: `cih-engine` (CLI — the `scan → parse → resolve → load → discover
+→ embed → wiki` pipeline, writes `.cih/` artifacts; clap surface + all command
+implementations live in `crates/cih-engine/src/cmd/`, per-command settings
+resolution in `settings.rs`) and `cih-server` (the MCP server, streamable HTTP via
+rmcp 0.7; tools in `crates/cih-server/src/app.rs`). The graph store trait is
+`cih-graph-store` with the `cih-falkor` adapter.
 
 **Build/test.** `cargo build`, `cargo test --workspace`. Workspace tests are hermetic
 — no FalkorDB/Postgres needed (integration paths use artifact fixtures). Local services
@@ -103,8 +105,9 @@ shims: server logic lives in `cih_server` (`src/app.rs`), engine modules in
 option defaults — layered flag > env > repo `cih.toml` > `~/.cih/config.toml` > default;
 `cih config init`/`show` manage it), `cih.scope.toml` (analyze scope), `cih.taint.toml`
 (taint rules), `cih.decompile.toml` (decompile). `.env` holds infra + LLM keys. Adding a
-new persisted option means making its clap flag `Option<T>`, adding it to
-`crates/cih-engine/src/settings.rs`, and resolving it at the dispatch arm.
+new persisted option means making its clap flag `Option<T>` (in
+`crates/cih-engine/src/cmd/args.rs`), adding it to the settings schema and the
+matching `resolve_*` function in `crates/cih-engine/src/settings.rs`.
 
 **Conventions.**
 - Write implementation plans as markdown in `docs/plans/`; parser assumptions/known
