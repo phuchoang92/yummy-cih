@@ -95,7 +95,7 @@ when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgr
 
 **Lint gate** (`.github/workflows/ci.yml`). Blocking: `cargo clippy --workspace
 --all-targets -- -D warnings` plus `cargo test --workspace` — keep the whole tree
-warning-clean. `cargo fmt` stays non-blocking (the tree predates a fmt pass).
+warning-clean, and `cargo fmt --all --check` (the tree is fmt-normalized).
 Note: `browser.rs`/`layout.rs` in cih-server are the live graph-browser UI served at
 `/graph` (tested by `tests/browser.rs`) — not dead code. Both binaries are thin
 shims: server logic lives in `cih_server` (`src/app.rs`), engine modules in

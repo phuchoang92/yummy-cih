@@ -26,12 +26,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The existing tree predates any rustfmt run (~150 files drift from default
-      # style). Reported for awareness but non-blocking until a one-shot
-      # `cargo fmt --all` normalization commit lands.
-      # TODO: make this blocking after that commit.
-      - name: Format (non-blocking)
-        run: cargo fmt --all --check || true
+      - name: Format
+        run: cargo fmt --all --check
 
       # The whole workspace is warning-clean; keep it that way. (The graph-
       # browser UI in cih-server's browser.rs/layout.rs is a live, tested
