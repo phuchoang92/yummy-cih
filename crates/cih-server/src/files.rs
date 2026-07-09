@@ -40,8 +40,21 @@ pub async fn read_file(
     }
 
     let full_path = std::path::Path::new(&repo_root).join(clean);
+
+    // Canonicalize both paths to resolve symlinks before the containment check.
+    // This prevents a symlink inside the repo from pointing outside the root.
+    let canon_root = std::path::Path::new(&repo_root)
+        .canonicalize()
+        .map_err(|e| McpError::invalid_params(format!("cannot resolve repo root: {e}"), None))?;
+    let canon_path = full_path
+        .canonicalize()
+        .map_err(|e| McpError::invalid_params(format!("cannot resolve '{}': {e}", args.path), None))?;
+    if !canon_path.starts_with(&canon_root) {
+        return Err(McpError::invalid_params("path escapes repo root", None));
+    }
+
     let value = read_sliced(
-        &full_path,
+        &canon_path,
         &args.path,
         limits,
         args.start_line,

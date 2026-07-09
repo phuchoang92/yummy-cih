@@ -436,9 +436,10 @@ impl GraphStore for FalkorStore {
 
         if let Some(kind_list) = kinds {
             // User-selected kinds: single filtered query with degree scan only on the subset.
+            // Use cstr() for every value to prevent Cypher injection from crafted kind strings.
             let kind_literals = kind_list
                 .iter()
-                .map(|k| format!("'{k}'"))
+                .map(|k| cstr(k))
                 .collect::<Vec<_>>()
                 .join(",");
             let node_query = format!(

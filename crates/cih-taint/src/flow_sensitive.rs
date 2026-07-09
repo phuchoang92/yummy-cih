@@ -275,12 +275,16 @@ fn is_control_dep_tainted(
         let Some(branch_rd) = reaching.get(&edge.from) else {
             continue;
         };
-        let branch_reads: HashSet<&String> = cfg
-            .stmt_by_id(&edge.from)
-            .map(|s| s.reads.iter().collect())
-            .unwrap_or_default();
+        // If the branch statement isn't in the CFG (e.g. synthetic node from a
+        // different snapshot), skip rather than defaulting to an empty reads set.
+        // An empty set would make `branch_reads.is_empty()` always true and flag
+        // every tainted-def live at this point as a false-positive control dep.
+        let Some(branch_stmt) = cfg.stmt_by_id(&edge.from) else {
+            continue;
+        };
+        let branch_reads: HashSet<&String> = branch_stmt.reads.iter().collect();
         for (var, defs) in branch_rd {
-            if (branch_reads.is_empty() || branch_reads.contains(var))
+            if branch_reads.contains(var)
                 && defs.iter().any(|d| tainted_defs.contains(d))
             {
                 return true;
