@@ -29,8 +29,6 @@ pub(crate) mod similarity;
 mod contracts;
 pub mod db_access;
 pub mod di_xml;
-mod emit;
-mod index;
 pub mod integration_xml;
 pub mod patterns;
 pub(crate) mod reports;
