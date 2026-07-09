@@ -29,6 +29,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # Layer rules from the root Cargo.toml diagram, enforced mechanically.
+      - name: Crate layering
+        run: python3 scripts/check_layering.py
+
       # The whole workspace is warning-clean; keep it that way. (The graph-
       # browser UI in cih-server's browser.rs/layout.rs is a live, tested
       # feature served at /graph — not dead code.)
