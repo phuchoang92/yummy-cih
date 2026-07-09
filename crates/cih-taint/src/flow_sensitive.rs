@@ -35,6 +35,7 @@
 //! The result feeds back to `taint_cmd.rs`, which applies a confidence multiplier to
 //! the Phase 0 path score.
 
+use rustc_hash::{FxHashSet};
 use std::collections::HashSet;
 
 use cih_core::NodeId;
@@ -98,7 +99,7 @@ pub fn analyze_with_pdg(
     let callable_id = cfg.callable_id.clone();
 
     // Seed: virtual parameter-definition node IDs are initially tainted.
-    let mut tainted_defs: HashSet<NodeId> = tainted_params
+    let mut tainted_defs: FxHashSet<NodeId> = tainted_params
         .iter()
         .map(|p| param_def_id(&callable_id, p))
         .collect();
@@ -175,7 +176,7 @@ fn propagate_pass(
     cfg: &Cfg,
     reaching: &ReachingDefs,
     rpo: &[crate::cfg::BlockId],
-    tainted_defs: &mut HashSet<NodeId>,
+    tainted_defs: &mut FxHashSet<NodeId>,
     sanitizer_patterns: &[&str],
 ) -> bool {
     let mut changed = false;
@@ -208,7 +209,7 @@ fn propagate_pass(
 fn stmt_reads_tainted(
     stmt: &StatementNode,
     reaching: &ReachingDefs,
-    tainted_defs: &HashSet<NodeId>,
+    tainted_defs: &FxHashSet<NodeId>,
 ) -> bool {
     let Some(rd) = reaching.get(&stmt.id) else {
         return false;
@@ -230,7 +231,7 @@ fn stmt_reads_tainted(
 fn tainted_args_of(
     stmt: &StatementNode,
     reaching: &ReachingDefs,
-    tainted_defs: &HashSet<NodeId>,
+    tainted_defs: &FxHashSet<NodeId>,
 ) -> Vec<String> {
     let Some(rd) = reaching.get(&stmt.id) else {
         return vec![];
@@ -257,7 +258,7 @@ fn is_control_dep_tainted(
     sink_stmt: &NodeId,
     pdg: &Pdg,
     cfg: &Cfg,
-    tainted_defs: &HashSet<NodeId>,
+    tainted_defs: &FxHashSet<NodeId>,
     reaching: &ReachingDefs,
 ) -> bool {
     for edge in pdg.incoming(sink_stmt) {

@@ -25,11 +25,11 @@ impl LanguageResolver for CSharpResolver {
     ) -> Option<String> {
         if keyword == "this" {
             // in_fqcn is "Namespace.ClassName.MethodName" — strip last segment
-            let owner = in_fqcn.rsplitn(2, '.').nth(1)?;
+            let (owner, _) = in_fqcn.rsplit_once('.')?;
             return Some(owner.to_string());
         }
         if keyword == "base" {
-            let owner = in_fqcn.rsplitn(2, '.').nth(1)?;
+            let (owner, _) = in_fqcn.rsplit_once('.')?;
             // Return the first supertype if known
             let supers = index.supertypes(owner);
             return supers.first().cloned();

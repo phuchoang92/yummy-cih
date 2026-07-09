@@ -23,6 +23,7 @@ pub fn text<'a>(node: TsNode<'_>, src: &'a str) -> &'a str {
 }
 
 /// Emit a Function node + Contains edge and SymbolDef.
+#[allow(clippy::too_many_arguments)] // flat emitter signature shared by all providers
 pub fn emit_function(
     name: &str, fqcn: &str, arity: u16, range: Range, rel: &str,
     file_node_id: &NodeId,
@@ -47,6 +48,7 @@ pub fn emit_function(
 }
 
 /// Emit a Class/Interface/Enum node + Contains edge and SymbolDef.
+#[allow(clippy::too_many_arguments)] // flat emitter signature shared by all providers
 pub fn emit_type(
     kind: NodeKind, name: &str, fqcn: &str, range: Range, rel: &str,
     file_node_id: &NodeId,
@@ -71,6 +73,7 @@ pub fn emit_type(
 }
 
 /// Emit a Method node + HAS_METHOD edge from an owner type.
+#[allow(clippy::too_many_arguments)] // flat emitter signature shared by all providers
 pub fn emit_method(
     name: &str, owner_fqcn: &str, arity: u16, range: Range, rel: &str,
     nodes: &mut Vec<Node>, edges: &mut Vec<Edge>, defs: &mut Vec<SymbolDef>,
@@ -95,6 +98,7 @@ pub fn emit_method(
 }
 
 /// Simple call-site collector: walks any subtree for call_expression nodes.
+#[allow(clippy::too_many_arguments)] // flat emitter signature shared by all providers
 pub fn collect_calls_generic(
     root: TsNode<'_>, src: &str, call_kind: &str,
     function_field: &str, receiver_field: Option<&str>, name_field: Option<&str>,
@@ -131,6 +135,7 @@ pub fn collect_calls_generic(
 }
 
 /// Build a minimal ParsedUnit for languages that only extract top-level defs.
+#[allow(clippy::too_many_arguments)] // flat emitter signature shared by all providers
 pub fn build_unit(
     rel: &str, language: &str, package: Option<String>,
     nodes: Vec<Node>, edges: Vec<Edge>, defs: Vec<SymbolDef>,

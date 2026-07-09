@@ -51,7 +51,7 @@ fn feature_inferred_from_modules_path() {
     );
     let comm = comm_node("Community:0", "Payment");
     let g = WikiGraph::build(
-        &[m.clone()],
+        std::slice::from_ref(&m),
         &[],
         &[comm],
         &[member_edge(m.id.as_str(), "Community:0")],
@@ -64,7 +64,7 @@ fn feature_falls_back_to_shared() {
     let m = method_node("Method:com.example.Foo#bar/0", "Test.java");
     let comm = comm_node("Community:0", "misc");
     let g = WikiGraph::build(
-        &[m.clone()],
+        std::slice::from_ref(&m),
         &[],
         &[comm],
         &[member_edge(m.id.as_str(), "Community:0")],
@@ -113,7 +113,7 @@ fn dev_slug_uses_primary_class_name() {
     );
     let comm = comm_node("Community:0", "Payment");
     let g = WikiGraph::build(
-        &[m.clone()],
+        std::slice::from_ref(&m),
         &[],
         &[comm],
         &[member_edge(m.id.as_str(), "Community:0")],

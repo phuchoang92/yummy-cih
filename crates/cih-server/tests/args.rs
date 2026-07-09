@@ -99,6 +99,9 @@ fn untested_paths_args_defaults() {
 }
 
 #[test]
+// Mirrors the production `git diff` arg match in changes.rs; base_ref is a
+// literal None here because the test pins scope="staged".
+#[allow(clippy::unnecessary_literal_unwrap)]
 fn git_diff_staged_args_are_correct() {
     let scope = "staged";
     let base_ref: Option<&str> = None;

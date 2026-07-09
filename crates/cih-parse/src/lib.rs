@@ -9,7 +9,6 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use cih_core::{file_id, folder_id, Edge, EdgeKind, Node, NodeId, ParsedFile, Range};
 use cih_lang::LanguageProvider;
 use rayon::prelude::*;
@@ -17,6 +16,57 @@ use rayon::prelude::*;
 pub mod sql;
 
 pub use cih_core::ParsedUnit;
+
+/// Failure modes of the parse phase. Per-file errors are folded into
+/// [`SkippedFile`] records by [`parse_file_units`]; a `ParseError` escaping
+/// this crate means the whole phase could not proceed (artifact I/O, etc.).
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("no language provider for {0}")]
+    NoLanguageProvider(String),
+    #[error("failed to read {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Language-provider failure (tree-sitter grammar errors surface as anyhow today).
+    #[error("parse failed for {rel}")]
+    Parse {
+        rel: String,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("artifact I/O at {path}")]
+    ArtifactIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("bad JSON at {path}:{line}")]
+    ArtifactJson {
+        path: PathBuf,
+        line: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+pub type Result<T> = std::result::Result<T, ParseError>;
+
+/// Render an error and its source chain as `top: cause: root-cause` — the
+/// same shape anyhow's `{:#}` produced, so `SkippedFile.reason` text keeps
+/// its pre-`ParseError` quality.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut src = err.source();
+    while let Some(s) = src {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        src = s.source();
+    }
+    out
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ParseOutput {
@@ -47,6 +97,12 @@ pub struct ParseArtifacts {
 
 pub struct LanguageRegistry {
     providers: Vec<Box<dyn LanguageProvider>>,
+}
+
+impl Default for LanguageRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LanguageRegistry {
@@ -105,7 +161,7 @@ pub fn parse_file_units(
             Ok(unit) => units.push(unit),
             Err(err) => skipped.push(SkippedFile {
                 rel,
-                reason: format!("{err:#}"),
+                reason: error_chain(&err),
             }),
         }
     }
@@ -146,17 +202,21 @@ pub fn parse_output_from_units(
 }
 
 pub fn write_parsed_files(dir: &Path, parsed_files: &[ParsedFile]) -> Result<ParseArtifacts> {
-    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let artifact_io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| ParseError::ArtifactIo { path, source }
+    };
+    fs::create_dir_all(dir).map_err(artifact_io(dir))?;
     let parsed_files_path = dir.join("parsed-files.jsonl");
-    let mut writer = BufWriter::new(
-        File::create(&parsed_files_path)
-            .with_context(|| format!("failed to create {}", parsed_files_path.display()))?,
-    );
+    let mut writer =
+        BufWriter::new(File::create(&parsed_files_path).map_err(artifact_io(&parsed_files_path))?);
     for parsed in parsed_files {
-        serde_json::to_writer(&mut writer, parsed)?;
-        writer.write_all(b"\n")?;
+        serde_json::to_writer(&mut writer, parsed)
+            .map_err(std::io::Error::other)
+            .map_err(artifact_io(&parsed_files_path))?;
+        writer.write_all(b"\n").map_err(artifact_io(&parsed_files_path))?;
     }
-    writer.flush()?;
+    writer.flush().map_err(artifact_io(&parsed_files_path))?;
 
     Ok(ParseArtifacts { parsed_files_path })
 }
@@ -164,18 +224,25 @@ pub fn write_parsed_files(dir: &Path, parsed_files: &[ParsedFile]) -> Result<Par
 /// Read a `parsed-files.jsonl` produced by [`write_parsed_files`] back into memory.
 pub fn load_parsed_files(dir: &Path) -> Result<Vec<ParsedFile>> {
     let path = dir.join("parsed-files.jsonl");
-    let reader = BufReader::new(
-        File::open(&path).with_context(|| format!("failed to open {}", path.display()))?,
-    );
+    let reader = BufReader::new(File::open(&path).map_err(|source| ParseError::ArtifactIo {
+        path: path.clone(),
+        source,
+    })?);
     let mut out = Vec::new();
     for (i, line) in reader.lines().enumerate() {
-        let line =
-            line.with_context(|| format!("read error at line {} of {}", i + 1, path.display()))?;
+        let line = line.map_err(|source| ParseError::ArtifactIo {
+            path: path.clone(),
+            source,
+        })?;
         if line.trim().is_empty() {
             continue;
         }
-        let pf: ParsedFile = serde_json::from_str(&line)
-            .with_context(|| format!("parse error at line {} of {}", i + 1, path.display()))?;
+        let pf: ParsedFile =
+            serde_json::from_str(&line).map_err(|source| ParseError::ArtifactJson {
+                path: path.clone(),
+                line: i + 1,
+                source,
+            })?;
         out.push(pf);
     }
     Ok(out)
@@ -183,14 +250,18 @@ pub fn load_parsed_files(dir: &Path) -> Result<Vec<ParsedFile>> {
 
 fn parse_one(registry: &LanguageRegistry, repo_root: &Path, rel: &str) -> Result<ParsedUnit> {
     let path = repo_root.join(rel);
-    let src =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let src = fs::read_to_string(&path).map_err(|source| ParseError::Read { path, source })?;
     // The File node + its Folder ancestry + CONTAINS edges are emitted centrally by
     // `add_structure_path` during merge, so the parse unit only carries declarations.
     let provider = registry
         .provider_for(rel)
-        .ok_or_else(|| anyhow::anyhow!("no language provider for {rel}"))?;
-    let mut unit = provider.parse_file(rel, &src)?;
+        .ok_or_else(|| ParseError::NoLanguageProvider(rel.to_string()))?;
+    let mut unit = provider
+        .parse_file(rel, &src)
+        .map_err(|source| ParseError::Parse {
+            rel: rel.to_string(),
+            source,
+        })?;
     unit.parsed_file.language = provider.language_id().to_string();
     Ok(unit)
 }

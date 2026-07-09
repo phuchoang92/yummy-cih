@@ -12,6 +12,7 @@ use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
 use super::config::fnv64;
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub fn enrich_classes_for_chains(
     wiki_graph: &WikiGraph,
     all_nodes: &[Node],
@@ -204,7 +205,7 @@ pub fn enrich_classes_for_chains(
     ui.lock().expect("UI progress mutex poisoned").finish_phase();
 
     let mut ctrl_map: HashMap<String, ControllerLlmSummary> = HashMap::new();
-    for (fqcn, _) in &class_methods {
+    for fqcn in class_methods.keys() {
         let simple_name = fqcn.rsplit('.').next().unwrap_or(fqcn.as_str()).to_string();
         if let Some(entry) = updated_entries.get(fqcn.as_str()) {
             ctrl_map.insert(

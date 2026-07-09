@@ -23,7 +23,7 @@ fn simple_setup() -> (WikiGraph, Vec<FeatureGroup>) {
         props: None,
     };
     let g = WikiGraph::build(
-        &[m.clone()],
+        std::slice::from_ref(&m),
         &[],
         &[c],
         &[Edge {

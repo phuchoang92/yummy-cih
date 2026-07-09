@@ -314,7 +314,7 @@ fn load_feature_clusters(artifacts_dir: Option<&Path>) -> anyhow::Result<Vec<Clu
     // `dir` is the artifacts root (`<repo>/.cih/artifacts`); the source graph version names the
     // sibling `<repo>/.cih/artifacts-features/<version>` that discover writes clusters into.
     let artifacts = cih_core::GraphArtifacts::latest_in_dir(dir)?;
-    let version = artifacts.version.0.clone();
+    let version = artifacts.version.to_string();
     let repo = dir.parent().and_then(Path::parent).ok_or_else(|| {
         anyhow::anyhow!("cannot derive repo root from artifacts dir {}", dir.display())
     })?;

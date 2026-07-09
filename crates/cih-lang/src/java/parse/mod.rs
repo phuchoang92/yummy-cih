@@ -99,20 +99,13 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
         } else {
             ImportBindingKind::Named
         };
-        let (module, imported) = if imp.is_static && !imp.is_wildcard {
-            if let Some((m, i)) = imp.raw.rsplit_once('.') {
-                (m.to_string(), Some(i.to_string()))
-            } else {
-                (imp.raw.clone(), None)
-            }
-        } else if !imp.is_wildcard {
-            if let Some((m, i)) = imp.raw.rsplit_once('.') {
-                (m.to_string(), Some(i.to_string()))
-            } else {
-                (imp.raw.clone(), None)
-            }
-        } else {
+        // Static-member and named imports split identically; only wildcards differ.
+        let (module, imported) = if imp.is_wildcard {
             (imp.raw.trim_end_matches(".*").to_string(), None)
+        } else if let Some((m, i)) = imp.raw.rsplit_once('.') {
+            (m.to_string(), Some(i.to_string()))
+        } else {
+            (imp.raw.clone(), None)
         };
         ImportBinding { module, imported, local: None, kind, range: imp.range }
     }).collect::<Vec<_>>();

@@ -1,27 +1,8 @@
-mod analyze;
-mod cmd;
-mod db;
-mod decompile;
-mod decompile_config;
-mod discover;
-mod embed;
-mod feature_strategy;
-mod file_cache;
-mod group_sync;
-mod llm;
-mod node_prefix;
-mod registry;
-mod runtime;
-mod scan;
-mod scope;
-mod settings;
-mod start;
-mod start_env;
-
-mod tui;
-mod ui;
-mod versioning;
-mod wiki;
+use cih_engine_lib::{
+    analyze, cmd, discover, embed, llm, runtime, scan, settings, start, tui,
+    wiki,
+};
+use cih_engine_lib::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
 use std::path::PathBuf;
 
@@ -29,9 +10,6 @@ use analyze::AnalyzeFlags;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-/// Default FalkorDB URL (Homebrew redis squats 6379, FalkorDB on 6380).
-const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
-const DEFAULT_GRAPH_KEY: &str = "cih";
 
 /// Shared FalkorDB connection + load options, used by Analyze, Resolve, and Discover.
 #[derive(Debug, clap::Args)]
@@ -1194,7 +1172,7 @@ fn run_artifact(command: ArtifactCommand) -> Result<()> {
             let artifacts = GraphArtifacts {
                 nodes_path: version_dir.join("nodes.jsonl"),
                 edges_path: version_dir.join("edges.jsonl"),
-                version: cih_core::VersionId(version_id.clone()),
+                version: cih_core::VersionId::new(version_id.clone()),
             };
             let bundle_path = out.unwrap_or_else(|| cih_dir.join("graph.db.zst"));
             let manifest = artifacts.export_bundle(

@@ -9,6 +9,7 @@ use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary
 
 /// Render the feature-level PO (business overview) page.
 /// Aggregates routes, tables, and LLM summaries from all communities in the feature.
+#[allow(clippy::too_many_arguments)] // page-renderer context bundle; refactor tracked with wiki rework
 pub fn render_feature_po(
     feature: &str,
     community_ids: &[String],

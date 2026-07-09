@@ -38,9 +38,7 @@ pub fn render_community_index(
     graph: &WikiGraph,
 ) -> String {
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: Communities\nsidebar_position: 5\n---\n\n"
-    ));
+    md.push_str("---\ntitle: Communities\nsidebar_position: 5\n---\n\n");
     md.push_str("# Communities\n\n");
     md.push_str(&format!(
         "**{}** communities detected by Leiden community detection.\n\n",

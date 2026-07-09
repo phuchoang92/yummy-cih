@@ -122,7 +122,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let evidence_corpus = EvidenceCorpus::load(&evidence_paths)?;
 
     let (pool, concurrency) = if effective_run_llm {
-        let c = llm_concurrency.max(1).min(32);
+        let c = llm_concurrency.clamp(1, 32);
         let p = rayon::ThreadPoolBuilder::new()
             .num_threads(c)
             .build()
@@ -146,6 +146,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     let mut llm_info: Option<WikiLlmInfo> = None;
     let mut class_enrichment_store: Option<ClassEnrichmentStore> = None;
+#[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
     let (llm_summaries, controller_summaries): (
         Option<HashMap<String, CommunityLlmSummary>>,
         Option<HashMap<String, ControllerLlmSummary>>,

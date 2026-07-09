@@ -24,7 +24,7 @@ impl LanguageResolver for CppResolver {
         _index: &CommonIndex,
     ) -> Option<String> {
         // C++ FQCN: "ClassName::method_name"
-        in_fqcn.rsplitn(2, "::").nth(1).map(str::to_string)
+        in_fqcn.rsplit_once("::").map(|(owner, _)| owner.to_string())
     }
 
     fn di_redirect(&self, _type_qname: &str, _index: &CommonIndex) -> Option<String> {

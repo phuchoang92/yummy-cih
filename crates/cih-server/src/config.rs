@@ -155,29 +155,6 @@ fn bind_is_loopback(bind: &str) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::bind_is_loopback;
-
-    #[test]
-    fn loopback_binds_are_recognized() {
-        assert!(bind_is_loopback("127.0.0.1:8080"));
-        assert!(bind_is_loopback("localhost:8080"));
-        assert!(bind_is_loopback("[::1]:8080"));
-        assert!(bind_is_loopback("127.0.0.1"));
-    }
-
-    #[test]
-    fn exposed_binds_are_not_loopback() {
-        assert!(!bind_is_loopback("0.0.0.0:8080"));
-        assert!(!bind_is_loopback("[::]:8080"));
-        assert!(!bind_is_loopback("192.168.1.10:8080"));
-        assert!(!bind_is_loopback("10.0.0.5:8080"));
-        // Unparseable host fails safe (treated as exposed).
-        assert!(!bind_is_loopback("not-an-addr:8080"));
-    }
-}
-
 /// Build the configured `GraphStore`. This is the single place adapters are
 /// named — the rest of the engine/MCP layer depends only on `dyn GraphStore`.
 pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
@@ -213,5 +190,28 @@ pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
         other => Err(anyhow!(
             "unknown CIH_GRAPH_BACKEND='{other}' (use falkor|neptune|postgres)"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_is_loopback;
+
+    #[test]
+    fn loopback_binds_are_recognized() {
+        assert!(bind_is_loopback("127.0.0.1:8080"));
+        assert!(bind_is_loopback("localhost:8080"));
+        assert!(bind_is_loopback("[::1]:8080"));
+        assert!(bind_is_loopback("127.0.0.1"));
+    }
+
+    #[test]
+    fn exposed_binds_are_not_loopback() {
+        assert!(!bind_is_loopback("0.0.0.0:8080"));
+        assert!(!bind_is_loopback("[::]:8080"));
+        assert!(!bind_is_loopback("192.168.1.10:8080"));
+        assert!(!bind_is_loopback("10.0.0.5:8080"));
+        // Unparseable host fails safe (treated as exposed).
+        assert!(!bind_is_loopback("not-an-addr:8080"));
     }
 }

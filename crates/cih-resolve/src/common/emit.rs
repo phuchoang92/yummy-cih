@@ -68,12 +68,6 @@ impl<'a> EdgeEmitter<'a> {
         self.resolve_with_confidence_cached(raw, file).map(|(fqcn, _)| fqcn)
     }
 
-    /// Replace the default no-op constant resolver with a real one (Gap 4).
-    pub fn with_constant_resolver(mut self, resolver: impl ConstantResolver + 'static) -> Self {
-        self.constant_resolver = Box::new(resolver);
-        self
-    }
-
     /// Replace the default no-op constant resolver with an already-boxed one (Gap 4).
     pub fn with_constant_resolver_boxed(mut self, resolver: Box<dyn ConstantResolver>) -> Self {
         self.constant_resolver = resolver;
@@ -449,10 +443,8 @@ impl<'a> EdgeEmitter<'a> {
         } else {
             self.index.find_member(&fqcn, &site.name, site.arity)
         };
-        if result.is_none() {
-            if fqcn.contains('.') && !self.index.is_known_type(&fqcn) {
-                self.unresolved_external_fqcns.insert(fqcn);
-            }
+        if result.is_none() && fqcn.contains('.') && !self.index.is_known_type(&fqcn) {
+            self.unresolved_external_fqcns.insert(fqcn);
         }
         result.map(|id| (id, conf))
     }

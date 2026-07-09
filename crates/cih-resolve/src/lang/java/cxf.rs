@@ -6,6 +6,7 @@
 //! onto the Java `Route` nodes, prepending `servlet_prefix + <jaxrs:server address>` to
 //! each route path. Invoked from [`super::JavaResolver::post_process`].
 
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -188,7 +189,7 @@ pub(crate) fn stitch_route_prefixes(
             None => (String::new(), "none"),
         };
 
-    let mut id_remap: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut id_remap: FxHashMap<NodeId, NodeId> = FxHashMap::default();
 
     for n in nodes.iter_mut() {
         if n.kind != NodeKind::Route {

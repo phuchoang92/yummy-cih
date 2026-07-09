@@ -4,7 +4,7 @@
 //! caches CFGs between Phase 2 and Phase 3 to avoid rebuilding them, and keeps
 //! Phase 1 and Phase 3 confidence adjustments independent of each other.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use cih_core::{Edge, Node, NodeId};
 
@@ -144,10 +144,10 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
 
     // ── Phase 2: build and cache CFGs ─────────────────────────────────────────
     let mut cfg_stats = TaintCfgStats::default();
-    let mut cfg_cache: HashMap<NodeId, crate::cfg::Cfg> = HashMap::new();
+    let mut cfg_cache: FxHashMap<NodeId, crate::cfg::Cfg> = FxHashMap::default();
 
     if phases.run_cfg && !paths.is_empty() {
-        let unique_sources: HashSet<&NodeId> = paths.iter().map(|p| &p.source).collect();
+        let unique_sources: FxHashSet<&NodeId> = paths.iter().map(|p| &p.source).collect();
 
         for source_id in &unique_sources {
             let Some(file) = node_file(source_id) else { continue };

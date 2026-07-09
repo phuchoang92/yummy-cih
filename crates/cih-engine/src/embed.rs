@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::versioning::latest_graph_artifacts;
 
-pub(crate) fn run_embed(
+pub fn run_embed(
     repo: PathBuf,
     pg_url: Option<String>,
     model: String,
@@ -32,7 +32,7 @@ pub(crate) fn run_embed(
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| source.nodes_path.display().to_string());
     let summary = EmbedCommandSummary {
-        source_version: &source.version.0,
+        source_version: source.version.as_str(),
         artifacts_path,
         model: model_kind.label(),
         nodes_read: nodes.len(),

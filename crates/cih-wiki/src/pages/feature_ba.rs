@@ -201,14 +201,14 @@ pub fn render_feature_ba(
             md.push_str(&format!(
                 "| Publishes | `{}` | {} |\n",
                 name,
-                capitalize(&kind)
+                capitalize(kind)
             ));
         }
         for (name, kind) in &consumes {
             md.push_str(&format!(
                 "| Consumes | `{}` | {} |\n",
                 name,
-                capitalize(&kind)
+                capitalize(kind)
             ));
         }
         md.push('\n');

@@ -67,6 +67,6 @@ fn merge_proposals_combines_duplicate_slugs() {
 fn estimate_module_count_ignores_generic_hints() {
     // Minimal graph — just test the logic via the function on a real graph
     // (full graph integration tested by running the wiki command)
-    let count = (8usize).max(8).min(40);
-    assert!(count >= 8);
+    let count = 8usize;
+    assert!((8..=40).contains(&count));
 }

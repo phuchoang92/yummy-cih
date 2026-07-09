@@ -8,6 +8,12 @@ pub struct TestCommandRunner {
     pub recorded: std::cell::RefCell<Vec<(String, String)>>,
 }
 
+impl Default for TestCommandRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestCommandRunner {
     #[allow(dead_code)]
     pub fn new() -> Self {

@@ -9,6 +9,7 @@ cih-core.workspace = true
 cih-lang.workspace = true
 cih-parse.workspace = true
 cih-patterns.workspace = true
+rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 quick-xml.workspace = true

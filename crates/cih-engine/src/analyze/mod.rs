@@ -523,7 +523,7 @@ pub fn analyze_from_scope_with_options(
     let artifacts_dir = cih_dir.join("artifacts").join(&version);
     let artifacts = GraphArtifacts::write(
         &artifacts_dir,
-        VersionId(version.clone()),
+        VersionId::new(version.clone()),
         &all_nodes,
         &edges,
     )

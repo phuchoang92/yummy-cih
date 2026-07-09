@@ -90,7 +90,7 @@ fn load_repo_contracts(entry: &RegistryEntry) -> Result<RepoContracts> {
     let artifacts = GraphArtifacts {
         nodes_path: artifacts_dir.join("nodes.jsonl"),
         edges_path: artifacts_dir.join("edges.jsonl"),
-        version: VersionId(String::new()),
+        version: VersionId::new(String::new()),
     };
     let nodes = artifacts
         .read_nodes()

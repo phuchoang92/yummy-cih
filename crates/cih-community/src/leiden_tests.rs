@@ -27,12 +27,12 @@ fn two_cliques_yield_two_communities() {
     let assignments = leiden(&g, 1.0, 100, 42);
     assert_eq!(assignments.len(), 10);
     let comm_a = assignments[0];
-    for i in 1..5 {
-        assert_eq!(assignments[i], comm_a, "node {i} should be in clique A's community");
+    for (i, &assignment) in assignments.iter().enumerate().take(5).skip(1) {
+        assert_eq!(assignment, comm_a, "node {i} should be in clique A's community");
     }
     let comm_b = assignments[5];
-    for i in 6..10 {
-        assert_eq!(assignments[i], comm_b, "node {i} should be in clique B's community");
+    for (i, &assignment) in assignments.iter().enumerate().take(10).skip(6) {
+        assert_eq!(assignment, comm_b, "node {i} should be in clique B's community");
     }
     assert_ne!(comm_a, comm_b, "the two cliques should be in different communities");
 }

@@ -5,11 +5,11 @@
 //! Phase 2: on-demand CFG construction + dominance tree for Phase 1-confirmed source methods.
 //! Phase 3: PDG-based flow-sensitive, kill-aware taint (reaching defs → DataDep/ControlDep).
 
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cih_core::{GraphArtifacts, Node, NodeId, VersionId};
+use cih_core::{GraphArtifacts, Node, NodeId};
 use cih_taint::{find_taint_paths, TaintPath};
 
 use crate::db::{load_to_falkor, LoadOutcome};
@@ -57,7 +57,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let artifacts = latest_graph_artifacts(&repo)
         .context("no graph artifacts found — run `analyze` first")?;
 
-    tracing::info!(version = %artifacts.version.0, "loaded graph artifacts");
+    tracing::info!(version = %artifacts.version, "loaded graph artifacts");
 
     let nodes = artifacts.read_nodes().context("failed to read nodes.jsonl")?;
     let edges = artifacts.read_edges().context("failed to read edges.jsonl")?;
@@ -81,7 +81,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let sink_name_patterns_owned: Vec<String> = rules.extra_sink_name_patterns.clone();
     let sink_name_patterns: Vec<&str> =
         sink_name_patterns_owned.iter().map(|s| s.as_str()).collect();
-    let node_map: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let node_map: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
     let repo_ref = repo.as_path();
     // Snapshot Phase-0 scores before Phase 1 modifies them.
     // Phase 3 applies its multiplier against this baseline so that a Phase-1 penalty
@@ -120,7 +120,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         ui.spin("Phase 2: CFG construction + dominance tree");
 
         // Build CFG for each unique source method on a taint path.
-        let unique_sources: std::collections::HashSet<&NodeId> =
+        let unique_sources: FxHashSet<&NodeId> =
             paths.iter().map(|p| &p.source).collect();
 
         for source_id in &unique_sources {
@@ -216,12 +216,12 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
 
     let taint_dir = cih_dir
         .join("artifacts-taint")
-        .join(&artifacts.version.0);
+        .join(artifacts.version.as_str());
 
     ui.spin("Writing taint artifacts");
     let taint_artifacts = GraphArtifacts::write(
         &taint_dir,
-        VersionId(artifacts.version.0.clone()),
+        artifacts.version.clone(),
         &empty_nodes,
         &taint_edges,
     )

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap};
 
 use cih_core::{NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ pub fn rrf_merge(
         return Vec::new();
     }
 
-    let mut merged: HashMap<NodeId, SearchHit> = HashMap::new();
+    let mut merged: FxHashMap<NodeId, SearchHit> = FxHashMap::default();
 
     add_ranked_hits(&mut merged, lexical_hits, "bm25");
     add_ranked_hits(&mut merged, semantic_hits, "semantic");
@@ -86,7 +86,7 @@ pub fn rrf_merge(
 }
 
 fn add_ranked_hits(
-    merged: &mut HashMap<NodeId, SearchHit>,
+    merged: &mut FxHashMap<NodeId, SearchHit>,
     hits: Vec<SearchHit>,
     source_name: &str,
 ) {

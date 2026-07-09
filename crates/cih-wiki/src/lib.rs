@@ -1,3 +1,11 @@
+//! Wiki page generation from graph artifacts.
+//!
+//! # Error philosophy
+//!
+//! This is leaf orchestration code consumed only by the `cih-engine` binary,
+//! which reports errors rather than branching on them — so functions return
+//! `anyhow::Result` by design (context strings over structured variants).
+
 pub mod bodies;
 pub mod features;
 pub mod graph;
@@ -108,6 +116,9 @@ pub struct CommunityLlmFull {
     pub dev_entry_points: String,
 }
 
+/// Maps `(node_id, file_path)` to a feature name.
+pub type FeatureOfFn = Box<dyn Fn(&str, &str) -> String + Send>;
+
 pub struct WikiInput<'a> {
     pub nodes: &'a [Node],
     pub edges: &'a [cih_core::Edge],
@@ -150,7 +161,7 @@ pub struct WikiInput<'a> {
     /// `WikiGraph::build_package_grouped`. When grouping is "graph"/"llm" never called.
     /// When a pre-computed artifact is available, `node_id` gives a direct lookup;
     /// otherwise fall back to file-path heuristics.
-    pub feature_of: Box<dyn Fn(&str, &str) -> String + Send>,
+    pub feature_of: FeatureOfFn,
     /// Scheduled jobs and event listeners from `.cih/entrypoints.json`.
     /// Empty when the sidecar does not exist (no such methods in the repo).
     pub entrypoints: Vec<EntrypointRecord>,
@@ -191,7 +202,7 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
         let after_sig = &s[after_start..];
         // Find closing ')' — the signature ends there; take everything after it
         if let Some(paren_close) = after_sig.find(')') {
-            let rest = after_sig[paren_close + 1..].trim_start_matches(|c: char| c == ' ' || c == '\n');
+            let rest = after_sig[paren_close + 1..].trim_start_matches([' ', '\n']);
             if !rest.is_empty() {
                 // Drop connective phrases like "is called to", "is invoked to", "resource method"
                 let rest = rest
@@ -204,7 +215,7 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
         } else {
             // No closing paren — just take everything after the class name
             let rest = after_sig
-                .find(|c: char| c == ' ')
+                .find(' ')
                 .map(|i| after_sig[i..].trim_start())
                 .unwrap_or("");
             if !rest.is_empty() {
@@ -925,7 +936,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
             for (proc_id, summary) in flow_map {
                 if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
                     for step in steps {
-                        let idx = (step.step_number as usize).saturating_sub(1);
+                        let idx = step.step_number.saturating_sub(1);
                         if let Some(desc) = summary.step_descriptions.get(idx) {
                             if !desc.is_empty() {
                                 let id = step.symbol.id.as_str();

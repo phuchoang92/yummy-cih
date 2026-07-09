@@ -1,3 +1,12 @@
+//! Language providers: tree-sitter parsing of each supported language into the IR.
+//!
+//! # Error philosophy
+//!
+//! Provider entrypoints return `anyhow::Result` **by design**: callers
+//! (`cih-parse`) never branch on failure kind — a failed file becomes a
+//! `SkippedFile` diagnostic and indexing continues. Rich context strings
+//! matter here; a structured enum would add surface without a consumer.
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 

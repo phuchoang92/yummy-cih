@@ -33,24 +33,11 @@ jobs:
       - name: Format (non-blocking)
         run: cargo fmt --all --check || true
 
-      # Deny warnings only on the backend crates the MCP tools compute over.
-      # These are clean today, so the gate catches *new* warnings in the code
-      # paths that back impact/taint/graph answers.
-      - name: Clippy (gated crates, deny warnings)
-        run: |
-          cargo clippy --all-targets \
-            -p cih-core \
-            -p cih-graph-store \
-            -p cih-falkor \
-            -p cih-taint \
-            -- -D warnings
-
-      # The remaining crates carry a pre-existing dead_code/unused-import backlog
-      # (notably cih-server's lib/bin module duplication and superseded browser/
-      # layout UI code). Linted here but not gated until a cleanup pass lands.
-      # TODO: promote cih-server into the gated job after that cleanup.
-      - name: Clippy (rest of workspace, non-blocking)
-        run: cargo clippy --workspace --all-targets || true
+      # The whole workspace is warning-clean; keep it that way. (The graph-
+      # browser UI in cih-server's browser.rs/layout.rs is a live, tested
+      # feature served at /graph — not dead code.)
+      - name: Clippy (workspace, deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # No test in the workspace requires FalkorDB/Postgres — unit and
       # artifact-fixture tests (e.g. taint::tests) run without services.

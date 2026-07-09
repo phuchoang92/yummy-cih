@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -230,9 +231,9 @@ pub fn build_calls_digraph(
     nodes: &[Node],
     edges: &[Edge],
     min_confidence: f32,
-) -> (DiGraph<NodeId, f32>, HashMap<NodeId, NodeIndex>) {
+) -> (DiGraph<NodeId, f32>, FxHashMap<NodeId, NodeIndex>) {
     let mut graph = DiGraph::<NodeId, f32>::new();
-    let mut index = HashMap::new();
+    let mut index = FxHashMap::default();
     for node in nodes.iter().filter(|n| is_callable(n.kind)) {
         let idx = graph.add_node(node.id.clone());
         index.insert(node.id.clone(), idx);
@@ -265,13 +266,13 @@ pub fn score_entry_points(
     nodes: &[Node],
     edges: &[Edge],
     digraph: &DiGraph<NodeId, f32>,
-    node_index: &HashMap<NodeId, NodeIndex>,
+    node_index: &FxHashMap<NodeId, NodeIndex>,
     registry: &EntrypointRegistry,
 ) -> Vec<ScoredEntrypoint> {
-    let by_id: HashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+    let by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
-    let mut route_edges: HashMap<NodeId, RouteInfo> = HashMap::new();
-    let mut listens_edges: HashMap<NodeId, Vec<String>> = HashMap::new();
+    let mut route_edges: FxHashMap<NodeId, RouteInfo> = FxHashMap::default();
+    let mut listens_edges: FxHashMap<NodeId, Vec<String>> = FxHashMap::default();
 
     for e in edges {
         match e.kind {
@@ -442,7 +443,7 @@ pub fn to_legacy_pairs(scored: &[ScoredEntrypoint]) -> Vec<(NodeId, f64)> {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-fn is_test_method(node: &Node, by_id: &HashMap<&NodeId, &Node>) -> bool {
+fn is_test_method(node: &Node, by_id: &FxHashMap<&NodeId, &Node>) -> bool {
     if node.file.contains("/test/") || node.file.contains("/src/test/") {
         return true;
     }

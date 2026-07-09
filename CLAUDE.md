@@ -91,12 +91,13 @@ with the `cih-falkor` adapter.
 when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgres on
 5433 → `FALKOR_URL=redis://127.0.0.1:6380`.
 
-**Lint gate** (`.github/workflows/ci.yml`). Blocking: clippy `-D warnings` on the
-backend crates only (`cih-core`, `cih-graph-store`, `cih-falkor`, `cih-taint`) plus
-`cargo test --workspace`. Non-blocking (documented TODOs): `cargo fmt` (the tree
-predates a fmt pass) and clippy on the rest — notably `cih-server` still carries a
-lib/bin module-duplication backlog and dead UI code (`browser.rs`, `layout.rs`), so
-warnings there are expected. Keep new code in the gated crates warning-clean.
+**Lint gate** (`.github/workflows/ci.yml`). Blocking: `cargo clippy --workspace
+--all-targets -- -D warnings` plus `cargo test --workspace` — keep the whole tree
+warning-clean. `cargo fmt` stays non-blocking (the tree predates a fmt pass).
+Note: `browser.rs`/`layout.rs` in cih-server are the live graph-browser UI served at
+`/graph` (tested by `tests/browser.rs`) — not dead code. Both binaries are thin
+shims: server logic lives in `cih_server_lib` (`src/app.rs`), engine modules in
+`cih_engine_lib` (used by `main.rs` via `use cih_engine_lib::…`).
 
 **Config files** (per-repo, at the target repo root): `cih.toml` (analyze/discover/wiki
 option defaults — layered flag > env > repo `cih.toml` > `~/.cih/config.toml` > default;
