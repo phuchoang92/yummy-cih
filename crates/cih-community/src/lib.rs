@@ -4,7 +4,6 @@ mod constants;
 pub mod graph;
 mod label;
 mod leiden;
-mod leiden_impl;
 pub mod registry;
 
 use rustc_hash::FxHashMap;

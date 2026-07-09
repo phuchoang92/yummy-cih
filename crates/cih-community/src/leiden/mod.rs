@@ -1,8 +1,35 @@
+//! Leiden community detection: the crate-facing driver (this file) over a
+//! vendored algorithm implementation (submodules).
+//!
+//! The vendored modules keep the full algorithm API (quality functions,
+//! partition accessors, seeded runs) even where CIH only drives a subset,
+//! and keep literature naming (CPM, RBER) — hence the scoped allows.
+
+#[allow(dead_code)]
+pub(crate) mod algorithm;
+#[allow(dead_code)]
+pub(crate) mod builder;
+#[allow(dead_code)]
+pub(crate) mod error;
+#[allow(dead_code)]
+pub(crate) mod graph_data;
+#[allow(dead_code)]
+pub(crate) mod move_components;
+#[allow(dead_code)]
+pub(crate) mod parallel;
+#[allow(dead_code)]
+pub(crate) mod partition;
+#[allow(dead_code, clippy::upper_case_acronyms)]
+pub(crate) mod quality;
+#[allow(dead_code, clippy::upper_case_acronyms)]
+pub(crate) mod runner;
+
 use petgraph::graph::UnGraph;
 use petgraph::visit::EdgeRef;
 
 use crate::constants::MIN_EDGE_WEIGHT;
-use crate::leiden_impl::{GraphDataBuilder, Leiden, LeidenConfig, QualityType};
+use builder::GraphDataBuilder;
+use runner::{Leiden, LeidenConfig, QualityType};
 
 /// Leiden over an undirected `f32`-weighted graph. Generic over the node weight `N` (unused here —
 /// only graph structure + edge weights matter), so callers can key nodes by `NodeId` or a compact
@@ -52,5 +79,4 @@ pub(crate) fn leiden<N>(
 }
 
 #[cfg(test)]
-#[path = "leiden_tests.rs"]
 mod tests;

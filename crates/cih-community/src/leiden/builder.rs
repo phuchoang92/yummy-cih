@@ -18,8 +18,8 @@
 //! assert_eq!(graph.node_count(), 4);
 //! ```
 
-use crate::leiden_impl::error::{LeidenError, Result};
-use crate::leiden_impl::graph_data::GraphData;
+use crate::leiden::error::{LeidenError, Result};
+use crate::leiden::graph_data::GraphData;
 
 /// Builder that accumulates edges and node weights, then produces a [`GraphData`].
 ///

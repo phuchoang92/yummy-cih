@@ -10,11 +10,11 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 #[cfg(feature = "rayon")]
-use crate::leiden_impl::algorithm;
+use crate::leiden::algorithm;
 #[cfg(feature = "rayon")]
-use crate::leiden_impl::partition::Partition;
+use crate::leiden::partition::Partition;
 #[cfg(feature = "rayon")]
-use crate::leiden_impl::quality::{GraphData, MoveComponents, QualityFunction};
+use crate::leiden::quality::{GraphData, MoveComponents, QualityFunction};
 
 /// Minimum number of edge slots (CSR entries) to use parallel aggregation.
 #[cfg(feature = "rayon")]

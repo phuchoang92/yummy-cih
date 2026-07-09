@@ -1,6 +1,6 @@
 use super::*;
-use crate::leiden_impl::builder::GraphDataBuilder;
-use crate::leiden_impl::graph_data::GraphData;
+use crate::leiden::builder::GraphDataBuilder;
+use crate::leiden::graph_data::GraphData;
 use rand::prelude::IndexedRandom;
 
 fn make_two_cliques() -> GraphData {
@@ -332,7 +332,7 @@ fn test_validate_rejects_zero_iterations() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 
@@ -345,7 +345,7 @@ fn test_validate_rejects_negative_resolution() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 
@@ -358,7 +358,7 @@ fn test_validate_rejects_nan_resolution() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 
@@ -371,7 +371,7 @@ fn test_validate_rejects_infinite_resolution() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 
@@ -384,7 +384,7 @@ fn test_validate_rejects_zero_epsilon() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 
@@ -397,7 +397,7 @@ fn test_validate_rejects_negative_epsilon() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 
@@ -410,7 +410,7 @@ fn test_validate_rejects_nan_epsilon() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 
@@ -423,7 +423,7 @@ fn test_validate_rejects_infinite_epsilon() {
     let err = config.validate().unwrap_err();
     assert!(matches!(
         err,
-        crate::leiden_impl::error::LeidenError::InvalidParameter { .. }
+        crate::leiden::error::LeidenError::InvalidParameter { .. }
     ));
 }
 

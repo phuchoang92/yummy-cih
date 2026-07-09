@@ -1,5 +1,5 @@
 use super::*;
-use crate::leiden_impl::builder::GraphDataBuilder;
+use crate::leiden::builder::GraphDataBuilder;
 
 /// RED TEST: Verify that init_community_stats_into populates PER-LAYER arrays,
 /// NOT accumulated across layers.

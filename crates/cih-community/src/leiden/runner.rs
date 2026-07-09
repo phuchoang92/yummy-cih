@@ -6,12 +6,12 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rustc_hash::FxHashMap;
 
-use crate::leiden_impl::algorithm;
-use crate::leiden_impl::partition::Partition;
-use crate::leiden_impl::quality::{GraphData, Modularity, MoveComponents, QualityFunction};
+use crate::leiden::algorithm;
+use crate::leiden::partition::Partition;
+use crate::leiden::quality::{GraphData, Modularity, MoveComponents, QualityFunction};
 
 #[cfg(feature = "rayon")]
-use crate::leiden_impl::parallel::{
+use crate::leiden::parallel::{
     aggregate_edges_parallel, local_moving_parallel, AGG_PARALLEL_THRESHOLD,
 };
 
@@ -105,14 +105,14 @@ impl LeidenConfig {
     /// Validate configuration parameters.
     ///
     /// Returns `Err(LeidenError)` if any parameter is invalid.
-    pub fn validate(&self) -> crate::leiden_impl::error::Result<()> {
+    pub fn validate(&self) -> crate::leiden::error::Result<()> {
         if self.max_iterations == 0 {
-            return Err(crate::leiden_impl::error::LeidenError::InvalidParameter {
+            return Err(crate::leiden::error::LeidenError::InvalidParameter {
                 message: "max_iterations must be > 0".to_string(),
             });
         }
         if !self.resolution.is_finite() || self.resolution < 0.0 {
-            return Err(crate::leiden_impl::error::LeidenError::InvalidParameter {
+            return Err(crate::leiden::error::LeidenError::InvalidParameter {
                 message: format!(
                     "resolution must be finite and non-negative, got {}",
                     self.resolution
@@ -120,7 +120,7 @@ impl LeidenConfig {
             });
         }
         if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
-            return Err(crate::leiden_impl::error::LeidenError::InvalidParameter {
+            return Err(crate::leiden::error::LeidenError::InvalidParameter {
                 message: format!("epsilon must be finite and positive, got {}", self.epsilon),
             });
         }
@@ -287,9 +287,9 @@ impl LeidenOutput {
 #[allow(clippy::upper_case_acronyms)]
 enum QualityFn {
     Modularity(Modularity),
-    CPM(crate::leiden_impl::quality::CPM),
-    RBConfiguration(crate::leiden_impl::quality::RBConfiguration),
-    RBER(crate::leiden_impl::quality::RBER),
+    CPM(crate::leiden::quality::CPM),
+    RBConfiguration(crate::leiden::quality::RBConfiguration),
+    RBER(crate::leiden::quality::RBER),
 }
 
 impl QualityFunction for QualityFn {
@@ -331,17 +331,15 @@ impl Leiden {
             QualityType::Modularity => {
                 QualityFn::Modularity(Modularity::with_resolution(self.config.resolution))
             }
-            QualityType::CPM => QualityFn::CPM(crate::leiden_impl::quality::CPM::new(
-                self.config.resolution,
-            )),
+            QualityType::CPM => {
+                QualityFn::CPM(crate::leiden::quality::CPM::new(self.config.resolution))
+            }
             QualityType::RBConfiguration => QualityFn::RBConfiguration(
-                crate::leiden_impl::quality::RBConfiguration::with_resolution(
-                    self.config.resolution,
-                ),
+                crate::leiden::quality::RBConfiguration::with_resolution(self.config.resolution),
             ),
-            QualityType::RBER => QualityFn::RBER(crate::leiden_impl::quality::RBER::new(
-                self.config.resolution,
-            )),
+            QualityType::RBER => {
+                QualityFn::RBER(crate::leiden::quality::RBER::new(self.config.resolution))
+            }
         }
     }
 
@@ -361,7 +359,7 @@ impl Leiden {
         quality: &QualityFn,
         initial_partition: Option<Partition>,
         on_iteration: &mut F,
-    ) -> crate::leiden_impl::error::Result<(Partition, f64, Vec<f64>)>
+    ) -> crate::leiden::error::Result<(Partition, f64, Vec<f64>)>
     where
         F: FnMut(&GraphData, &Partition, f64, &[usize], usize),
     {
@@ -462,7 +460,7 @@ impl Leiden {
     ///
     /// Returns a [`LeidenOutput`] containing the community partition and its quality score.
     #[must_use = "algorithm result should be used"]
-    pub fn run(&self, data: &GraphData) -> crate::leiden_impl::error::Result<LeidenOutput> {
+    pub fn run(&self, data: &GraphData) -> crate::leiden::error::Result<LeidenOutput> {
         if data.node_count() == 0 {
             return Ok(LeidenOutput {
                 partition: Partition::new(0),
@@ -493,7 +491,7 @@ impl Leiden {
         &self,
         data: &GraphData,
         mut initial_partition: Partition,
-    ) -> crate::leiden_impl::error::Result<LeidenOutput> {
+    ) -> crate::leiden::error::Result<LeidenOutput> {
         if data.node_count() == 0 {
             return Ok(LeidenOutput {
                 partition: Partition::new(0),
@@ -502,7 +500,7 @@ impl Leiden {
             });
         }
         if initial_partition.len() != data.node_count() {
-            return Err(crate::leiden_impl::error::LeidenError::InvalidPartition {
+            return Err(crate::leiden::error::LeidenError::InvalidPartition {
                 message: format!(
                     "partition size {} does not match graph node count {}",
                     initial_partition.len(),
@@ -513,7 +511,7 @@ impl Leiden {
         // Renumber first so num_communities reflects the actual max community ID.
         initial_partition.renumber();
         if initial_partition.num_communities() > data.node_count() {
-            return Err(crate::leiden_impl::error::LeidenError::InvalidPartition {
+            return Err(crate::leiden::error::LeidenError::InvalidPartition {
                 message: format!(
                     "partition has {} communities but graph only has {} nodes",
                     initial_partition.num_communities(),
@@ -642,7 +640,7 @@ fn aggregate(
     refined_partition: &Partition,
     coarse_partition: &Partition,
     _config: &LeidenConfig,
-) -> crate::leiden_impl::error::Result<(GraphData, Vec<usize>, Partition)> {
+) -> crate::leiden::error::Result<(GraphData, Vec<usize>, Partition)> {
     let n = data.node_count();
     let (orig_to_agg, agg_n) = algorithm::build_orig_to_agg_mapping(n, refined_partition);
 
@@ -677,5 +675,5 @@ fn aggregate(
 }
 
 #[cfg(test)]
-#[path = "leiden_tests.rs"]
+#[path = "runner_tests.rs"]
 mod tests;

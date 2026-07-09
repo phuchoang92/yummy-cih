@@ -1,5 +1,5 @@
 use super::*;
-use crate::leiden_impl::builder::GraphDataBuilder;
+use crate::leiden::builder::GraphDataBuilder;
 
 fn undirected_mc() -> MoveComponents {
     MoveComponents {
