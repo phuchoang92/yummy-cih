@@ -1,6 +1,6 @@
 use cih_core::{ImportBinding, ImportBindingKind};
 
-use crate::common::index::CommonIndex;
+use crate::index::ResolveIndex;
 use crate::lang::{InheritanceModel, LanguageResolver};
 use crate::types::class_of;
 
@@ -23,7 +23,7 @@ impl LanguageResolver for TypeScriptResolver {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        _index: &CommonIndex,
+        _index: &ResolveIndex,
     ) -> Option<String> {
         if keyword == "this" {
             Some(class_of(in_fqcn).to_string())
@@ -40,7 +40,7 @@ impl LanguageResolver for TypeScriptResolver {
         &self,
         binding: &ImportBinding,
         from_file: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         let module = &binding.module;
         if !module.starts_with('.') && !module.starts_with('/') {

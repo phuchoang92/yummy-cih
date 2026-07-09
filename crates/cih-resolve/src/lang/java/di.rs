@@ -1,4 +1,4 @@
-use crate::common::index::CommonIndex;
+use crate::index::ResolveIndex;
 
 const SPRING_BEANS: &[&str] = &[
     "service",
@@ -8,7 +8,7 @@ const SPRING_BEANS: &[&str] = &[
     "configuration",
 ];
 
-pub(crate) fn is_spring_bean(fqcn: &str, index: &CommonIndex) -> bool {
+pub(crate) fn is_spring_bean(fqcn: &str, index: &ResolveIndex) -> bool {
     matches!(
         index.type_metadata_for(fqcn),
         Some(s) if SPRING_BEANS.contains(&s)
@@ -21,7 +21,7 @@ pub(crate) fn is_spring_bean(fqcn: &str, index: &CommonIndex) -> bool {
 /// BFS through the implementors graph so that a concrete `@Service` that extends an
 /// abstract intermediary class (which directly implements the interface) is found even
 /// though it is not a direct implementor of the interface.
-pub(crate) fn single_bean_impl(interface_fqcn: &str, index: &CommonIndex) -> Option<String> {
+pub(crate) fn single_bean_impl(interface_fqcn: &str, index: &ResolveIndex) -> Option<String> {
     let mut visited = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<String> =
         index.implementors(interface_fqcn).iter().cloned().collect();

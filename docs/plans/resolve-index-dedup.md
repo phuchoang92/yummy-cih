@@ -1,5 +1,12 @@
 # Plan: Unify cih-resolve's duplicate index/emit implementations
 
+> **Executed 2026-07-09** (branch `resolve-index-dedup`, 4 commits). Phase-1 triage
+> found exactly one divergence — an intentional production improvement (DI redirect
+> to a single un-stereotyped implementor; test updated to pin it). Legacy pair
+> (~1,124 lines) deleted; `common/` hoisted; `CommonIndex` renamed `ResolveIndex`.
+> Invariant held: servicemix artifacts hash-identical before/after
+> (nodes ef3108bc…, edges d6afacd3…, content version fb24f41d8aa4e6a6).
+
 ## Context
 
 `cih-resolve` carries two parallel implementations of its core resolution machinery:

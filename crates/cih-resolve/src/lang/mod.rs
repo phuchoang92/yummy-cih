@@ -3,7 +3,7 @@ use std::path::Path;
 
 use cih_core::{Edge, ImportBinding, Node, ParsedFile, SymbolDef};
 
-use crate::common::index::CommonIndex;
+use crate::index::ResolveIndex;
 
 /// Declares all resolver modules and generates `all_resolvers()`.
 /// To add a new language: add one line here (plus the implementation file).
@@ -56,7 +56,7 @@ pub trait LanguageResolver: Send + Sync {
         &self,
         keyword: &str,
         in_fqcn: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         let _ = (keyword, in_fqcn, index);
         None
@@ -65,12 +65,12 @@ pub trait LanguageResolver: Send + Sync {
     /// IoC/DI redirect: for an interface/abstract type, return the unambiguous
     /// concrete impl if the framework can determine it (Spring @Service).
     /// Return None when not applicable or ambiguous.
-    fn di_redirect(&self, type_qname: &str, index: &CommonIndex) -> Option<String> {
+    fn di_redirect(&self, type_qname: &str, index: &ResolveIndex) -> Option<String> {
         let _ = (type_qname, index);
         None
     }
 
-    /// Per-language opaque metadata for a type definition, stored in CommonIndex.
+    /// Per-language opaque metadata for a type definition, stored in ResolveIndex.
     /// Java: Spring stereotype string. Only the same LanguageResolver interprets it.
     fn type_metadata(&self, def: &SymbolDef) -> Option<String> {
         let _ = def;
@@ -98,7 +98,7 @@ pub trait LanguageResolver: Send + Sync {
         &self,
         binding: &ImportBinding,
         from_file: &str,
-        index: &CommonIndex,
+        index: &ResolveIndex,
     ) -> Option<String> {
         let _ = (binding, from_file, index);
         None
