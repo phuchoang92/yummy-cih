@@ -1,5 +1,5 @@
-use cih_engine_lib::llm::grouping::*;
-use cih_engine_lib::llm::split_text_chunks;
+use cih_engine::llm::grouping::*;
+use cih_engine::llm::split_text_chunks;
 
 #[test]
 fn parse_grouping_response_extracts_modules() {

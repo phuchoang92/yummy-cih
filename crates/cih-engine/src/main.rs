@@ -1,8 +1,8 @@
-use cih_engine_lib::{
+use cih_engine::{
     analyze, cmd, discover, embed, llm, runtime, scan, settings, start, tui,
     wiki,
 };
-use cih_engine_lib::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+use cih_engine::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
 use std::path::PathBuf;
 

@@ -1,6 +1,6 @@
 use cih_core::NodeId;
 use cih_graph_store::{Direction, FlowHop, FlowNode, Impact, ImpactNode};
-use cih_server_lib::viz::{
+use cih_server::viz::{
     mermaid_key, render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi,
 };
 

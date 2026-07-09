@@ -96,8 +96,8 @@ when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgr
 warning-clean. `cargo fmt` stays non-blocking (the tree predates a fmt pass).
 Note: `browser.rs`/`layout.rs` in cih-server are the live graph-browser UI served at
 `/graph` (tested by `tests/browser.rs`) — not dead code. Both binaries are thin
-shims: server logic lives in `cih_server_lib` (`src/app.rs`), engine modules in
-`cih_engine_lib` (used by `main.rs` via `use cih_engine_lib::…`).
+shims: server logic lives in `cih_server` (`src/app.rs`), engine modules in
+`cih_engine` (used by `main.rs` via `use cih_engine::…`).
 
 **Config files** (per-repo, at the target repo root): `cih.toml` (analyze/discover/wiki
 option defaults — layered flag > env > repo `cih.toml` > `~/.cih/config.toml` > default;

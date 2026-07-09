@@ -70,7 +70,7 @@ Each workstream is independently verifiable (`cargo test --workspace` is hermeti
 
 **Files:** `crates/cih-server/src/main.rs` (762 lines), `src/lib.rs`, CI + CLAUDE.md comment fixes.
 
-1. **Dedup:** `main.rs` currently redeclares `mod` for all 20 modules (compiled twice — once for bin, once for lib `cih_server_lib`). Move main.rs's substance (server wiring, MCP tool definitions, axum router assembly incl. `browser::router` merge at `main.rs:733`) into the lib — e.g. new `src/tools.rs` + `pub fn run(...)` in a `src/app.rs` — and shrink `main.rs` to a shim: parse args/env, call `cih_server_lib::run()`.
+1. **Dedup:** `main.rs` currently redeclares `mod` for all 20 modules (compiled twice — once for bin, once for lib `cih_server`). Move main.rs's substance (server wiring, MCP tool definitions, axum router assembly incl. `browser::router` merge at `main.rs:733`) into the lib — e.g. new `src/tools.rs` + `pub fn run(...)` in a `src/app.rs` — and shrink `main.rs` to a shim: parse args/env, call `cih_server::run()`.
 2. **Façade:** rewrite `lib.rs` — keep `pub mod` only for what external consumers/tests use (`args`, `browser`, `viz`, `utils`, `search`, plus newly promoted `patterns` and the `run` entry point); demote the rest (`agent`, `changes`, `config`, `contracts`, `coverage`, `feature`, `files`, `indexing`, `jobs`, `layout`, `resources`, `server`, `symbol`, `taint`) to `pub(crate) mod`. Tests in `tests/{browser,viz,args,search}.rs` define the stable surface — don't break their imports.
 3. **Browser UI stays.** Update the stale comments: `.github/workflows/ci.yml:48-51` ("superseded browser/layout UI code") and the CLAUDE.md "dead UI code" line → describe it as the local graph-browser UI, kept.
 

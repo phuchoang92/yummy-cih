@@ -1,5 +1,5 @@
-use cih_engine_lib::llm::http_json::*;
-use cih_engine_lib::llm::LlmRequest;
+use cih_engine::llm::http_json::*;
+use cih_engine::llm::LlmRequest;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 

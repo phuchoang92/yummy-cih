@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "cih_engine_lib"
 path = "src/lib.rs"
 
 [[bin]]

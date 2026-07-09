@@ -1,4 +1,4 @@
-use cih_engine_lib::llm::*;
+use cih_engine::llm::*;
 
 #[test]
 fn llm_provider_rejects_unknown_string() {
@@ -80,8 +80,8 @@ fn integration_bedrock_community_full_prompt() {
     let base_url = std::env::var("AWS_BEDROCK_BASE_URL")
         .unwrap_or_else(|_| "https://bedrock-runtime.us-east-1.amazonaws.com".to_string());
 
-    use cih_engine_lib::llm::{make_adapter, LlmProvider, LlmRequest};
-    use cih_engine_lib::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
+    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
+    use cih_engine::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
 
     let adapter = make_adapter(&LlmProvider::Bedrock, &base_url, None).expect("Bedrock adapter");
 
@@ -127,8 +127,8 @@ fn integration_deepseek_community_full_prompt() {
         _ => return, // skip when key not set
     };
 
-    use cih_engine_lib::llm::{make_adapter, LlmProvider, LlmRequest};
-    use cih_engine_lib::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
+    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
+    use cih_engine::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
 
     let adapter = make_adapter(&LlmProvider::DeepSeek, "https://api.deepseek.com", None)
         .expect("DeepSeek adapter");
@@ -167,8 +167,8 @@ fn integration_deepseek_http_flow_prompt() {
         _ => return,
     };
 
-    use cih_engine_lib::llm::{make_adapter, LlmProvider, LlmRequest};
-    use cih_engine_lib::llm::prompts::{http_flow_system, HTTP_FLOW_JSON_TEMPLATE};
+    use cih_engine::llm::{make_adapter, LlmProvider, LlmRequest};
+    use cih_engine::llm::prompts::{http_flow_system, HTTP_FLOW_JSON_TEMPLATE};
 
     let adapter = make_adapter(&LlmProvider::DeepSeek, "https://api.deepseek.com", None)
         .expect("DeepSeek adapter");

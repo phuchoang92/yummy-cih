@@ -1,6 +1,6 @@
 use cih_core::{Edge, EdgeKind, NodeId, NodeKind, Range};
-use cih_engine_lib::llm::evidence::*;
-use cih_engine_lib::llm::split_text_chunks;
+use cih_engine::llm::evidence::*;
+use cih_engine::llm::split_text_chunks;
 use cih_wiki::WikiGraph;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

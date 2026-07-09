@@ -1,4 +1,4 @@
-use cih_engine_lib::scan::build_files::*;
+use cih_engine::scan::build_files::*;
 use std::path::PathBuf;
 
 #[test]

@@ -34,7 +34,7 @@ languages! {
     python: PythonProvider,
     kotlin: KotlinProvider,
     go: GoProvider,
-    rust_lang: RustProvider,
+    rust: RustProvider,
     csharp: CSharpProvider,
     ruby: RubyProvider,
     php: PhpProvider,

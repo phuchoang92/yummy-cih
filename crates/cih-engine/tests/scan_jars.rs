@@ -1,4 +1,4 @@
-use cih_engine_lib::scan::jars::*;
+use cih_engine::scan::jars::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

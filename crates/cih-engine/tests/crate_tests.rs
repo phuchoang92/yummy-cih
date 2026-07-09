@@ -1,10 +1,10 @@
 use cih_core::JarInfo;
-use cih_engine_lib::analyze::{analyze_emit, analyze_from_scope, extract_jar_api};
-use cih_engine_lib::db::LoadOutcome;
-use cih_engine_lib::discover::run_discover_core;
-use cih_engine_lib::scan;
-use cih_engine_lib::scope::{ScopeFile, ScopeRequest};
-use cih_engine_lib::wiki as wiki_cmd;
+use cih_engine::analyze::{analyze_emit, analyze_from_scope, extract_jar_api};
+use cih_engine::db::LoadOutcome;
+use cih_engine::discover::run_discover_core;
+use cih_engine::scan;
+use cih_engine::scope::{ScopeFile, ScopeRequest};
+use cih_engine::wiki as wiki_cmd;
 use cih_wiki::{WikiManifest, WikiMeta};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -388,7 +388,7 @@ fn discover_emits_community_and_process_artifacts() {
 
     let discover = run_discover_core(
         &root,
-        &cih_engine_lib::discover::DiscoverOverrides {
+        &cih_engine::discover::DiscoverOverrides {
             min_community_size: Some(1),
             ..Default::default()
         },
@@ -418,7 +418,7 @@ fn repo_with_wiki_artifacts() -> PathBuf {
     analyze_emit(&scan, all_scope()).unwrap();
     run_discover_core(
         &root,
-        &cih_engine_lib::discover::DiscoverOverrides {
+        &cih_engine::discover::DiscoverOverrides {
             min_community_size: Some(1),
             ..Default::default()
         },
@@ -616,7 +616,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
 
     run_discover_core(
         &root,
-        &cih_engine_lib::discover::DiscoverOverrides::default(),
+        &cih_engine::discover::DiscoverOverrides::default(),
     )
     .unwrap();
 
@@ -629,7 +629,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
         "analyze edges.jsonl must survive discover"
     );
 
-    let latest = cih_engine_lib::versioning::latest_graph_artifacts(&root).unwrap();
+    let latest = cih_engine::versioning::latest_graph_artifacts(&root).unwrap();
     assert_eq!(
         latest.version.as_str(), analyze_version,
         "latest_graph_artifacts must still return the analyze version after discover"
@@ -655,7 +655,7 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
 
     let discover = run_discover_core(
         &root,
-        &cih_engine_lib::discover::DiscoverOverrides::default(),
+        &cih_engine::discover::DiscoverOverrides::default(),
     )
     .unwrap();
 
@@ -704,7 +704,7 @@ fn discover_load_artifacts_are_analyze_then_community() {
 
     let discover = run_discover_core(
         &root,
-        &cih_engine_lib::discover::DiscoverOverrides::default(),
+        &cih_engine::discover::DiscoverOverrides::default(),
     )
     .unwrap();
     let artifact_sets = discover.artifact_sets_for_load();

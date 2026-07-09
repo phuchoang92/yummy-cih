@@ -23,7 +23,7 @@ resolvers! {
     python: PythonResolver,
     typescript: TypeScriptResolver,
     go: GoResolver,
-    rust_lang: RustResolver,
+    rust: RustResolver,
     csharp: CSharpResolver,
     ruby: RubyResolver,
     php: PhpResolver,
