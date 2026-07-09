@@ -118,7 +118,12 @@ impl EmbedClusterStrategy {
         let mut result: HashMap<String, (String, f32, bool)> = HashMap::new();
         for ((info, name), llm) in infos.iter().zip(names).zip(from_llm) {
             for node_id in &info.members {
-                let conf = info.sims.get(node_id).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                let conf = info
+                    .sims
+                    .get(node_id)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
                 result.insert((*node_id).clone(), (name.clone(), conf, llm));
             }
         }
@@ -254,7 +259,10 @@ impl EmbedClusterStrategy {
     fn cluster_infos(&self) -> Vec<ClusterInfo<'_>> {
         let mut members_by_cluster: HashMap<usize, Vec<&String>> = HashMap::new();
         for (node_id, cluster) in &self.clusters {
-            members_by_cluster.entry(*cluster).or_default().push(node_id);
+            members_by_cluster
+                .entry(*cluster)
+                .or_default()
+                .push(node_id);
         }
         let mut cluster_ids: Vec<usize> = members_by_cluster.keys().copied().collect();
         cluster_ids.sort_unstable();
@@ -295,7 +303,12 @@ impl EmbedClusterStrategy {
                 .unwrap_or_else(|| format!("cluster-{cluster_id}"));
             let distinguishers = self.distinguishers(&members, label);
 
-            infos.push(ClusterInfo { members, sims, base, distinguishers });
+            infos.push(ClusterInfo {
+                members,
+                sims,
+                base,
+                distinguishers,
+            });
         }
         infos
     }
@@ -334,7 +347,6 @@ impl EmbedClusterStrategy {
         out.retain(|s| !s.is_empty());
         out
     }
-
 }
 
 impl FeatureStrategy for EmbedClusterStrategy {

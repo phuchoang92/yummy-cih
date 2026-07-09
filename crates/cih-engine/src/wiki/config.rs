@@ -33,7 +33,10 @@ impl std::str::FromStr for WikiMode {
             "graph" => Ok(Self::Graph),
             "llm-summary" => Ok(Self::LlmSummary),
             "llm-full" => Ok(Self::LlmFull),
-            other => anyhow::bail!("unknown --wiki-mode '{}'; expected graph | llm-summary | llm-full", other),
+            other => anyhow::bail!(
+                "unknown --wiki-mode '{}'; expected graph | llm-summary | llm-full",
+                other
+            ),
         }
     }
 }
@@ -64,7 +67,10 @@ impl std::str::FromStr for WikiGrouping {
             "package" => Ok(Self::Package),
             "graph" => Ok(Self::Graph),
             "llm" => Ok(Self::Llm),
-            other => anyhow::bail!("unknown --grouping '{}'; expected package | graph | llm", other),
+            other => anyhow::bail!(
+                "unknown --grouping '{}'; expected package | graph | llm",
+                other
+            ),
         }
     }
 }
@@ -177,6 +183,6 @@ pub(super) struct WikiArtifacts {
     pub repo_name: String,
     pub bodies: HashMap<String, cih_wiki::BodyEntry>,
     pub file_dev_map: HashMap<String, String>,
-#[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
+    #[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
     pub feature_of: Box<dyn Fn(&str, &str) -> String + Send>,
 }

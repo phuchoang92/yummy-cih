@@ -48,5 +48,3 @@ pub fn build_slug_map(community_nodes: &[Node]) -> BTreeMap<String, String> {
     }
     result
 }
-
-

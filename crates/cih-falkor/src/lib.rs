@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
     risk_from_fanout, BulkLoader, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge,
-    FlowHop, FlowNode, GraphStore, GraphOverview, GraphOverviewEdge, GraphOverviewNode,
+    FlowHop, FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore,
     GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadStats, Path,
     Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
 };
@@ -56,7 +56,9 @@ impl FalkorStore {
             conn: tokio::sync::OnceCell::new(),
             // Effectively unlimited by default — the engine's sequential bulk-load
             // path must never be throttled. The server opts into a real bound.
-            query_limit: Arc::new(tokio::sync::Semaphore::new(tokio::sync::Semaphore::MAX_PERMITS)),
+            query_limit: Arc::new(tokio::sync::Semaphore::new(
+                tokio::sync::Semaphore::MAX_PERMITS,
+            )),
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         })
     }
@@ -82,8 +84,11 @@ impl FalkorStore {
     /// Acquire a query permit, shedding with an "overloaded" error if the
     /// concurrency limit is saturated for longer than `acquire_timeout`.
     async fn acquire_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
-        match tokio::time::timeout(self.acquire_timeout, self.query_limit.clone().acquire_owned())
-            .await
+        match tokio::time::timeout(
+            self.acquire_timeout,
+            self.query_limit.clone().acquire_owned(),
+        )
+        .await
         {
             Ok(Ok(permit)) => Ok(permit),
             // Elapsed timeout or a closed semaphore both mean we can't proceed.
@@ -268,7 +273,7 @@ impl GraphStore for FalkorStore {
                 dst: NodeId::new(r[2].clone()),
                 confidence: 1.0,
                 reason: String::new(),
-            props: None,
+                props: None,
             })
             .collect())
     }
@@ -385,12 +390,21 @@ impl GraphStore for FalkorStore {
             .await?
             .into_iter()
             .filter_map(|row| {
-                if row.len() < 2 { return None; }
+                if row.len() < 2 {
+                    return None;
+                }
                 let count = row[1].parse::<u64>().ok()?;
-                Some(KindCount { kind: row[0].clone(), count })
+                Some(KindCount {
+                    kind: row[0].clone(),
+                    count,
+                })
             })
             .collect();
-        Ok(GraphSummary { kinds, total_nodes, total_edges })
+        Ok(GraphSummary {
+            kinds,
+            total_nodes,
+            total_edges,
+        })
     }
 
     async fn graph_overview(
@@ -437,8 +451,12 @@ impl GraphStore for FalkorStore {
                  RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
             );
             for row in self.rows(&node_query).await? {
-                if row.len() < 7 { continue; }
-                let Ok(internal_id) = row[0].parse::<i64>() else { continue; };
+                if row.len() < 7 {
+                    continue;
+                }
+                let Ok(internal_id) = row[0].parse::<i64>() else {
+                    continue;
+                };
                 let id = NodeId::new(row[1].clone());
                 internal_to_node.insert(internal_id, id.clone());
                 nodes.push(GraphOverviewNode {
@@ -457,8 +475,7 @@ impl GraphStore for FalkorStore {
         } else {
             // No filter: two-pass to avoid full-graph degree scan.
             // Pass 1: architectural/runtime nodes — shown regardless of degree.
-            let structural_kinds =
-                "['Community','Process','Route','IntegrationRoute',\
+            let structural_kinds = "['Community','Process','Route','IntegrationRoute',\
                   'MessageDestination','KafkaTopic','ExternalEndpoint',\
                   'DbTable','DbQuery']";
             let pass1_limit = max_nodes.min(2_000);
@@ -469,8 +486,12 @@ impl GraphStore for FalkorStore {
                  LIMIT {pass1_limit}"
             );
             for row in self.rows(&pass1_query).await? {
-                if row.len() < 6 { continue; }
-                let Ok(internal_id) = row[0].parse::<i64>() else { continue; };
+                if row.len() < 6 {
+                    continue;
+                }
+                let Ok(internal_id) = row[0].parse::<i64>() else {
+                    continue;
+                };
                 let id = NodeId::new(row[1].clone());
                 internal_to_node.insert(internal_id, id.clone());
                 nodes.push(GraphOverviewNode {
@@ -501,9 +522,15 @@ impl GraphStore for FalkorStore {
                      RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
                 );
                 for row in self.rows(&pass2_query).await? {
-                    if row.len() < 7 { continue; }
-                    let Ok(internal_id) = row[0].parse::<i64>() else { continue; };
-                    if internal_to_node.contains_key(&internal_id) { continue; }
+                    if row.len() < 7 {
+                        continue;
+                    }
+                    let Ok(internal_id) = row[0].parse::<i64>() else {
+                        continue;
+                    };
+                    if internal_to_node.contains_key(&internal_id) {
+                        continue;
+                    }
                     let id = NodeId::new(row[1].clone());
                     internal_to_node.insert(internal_id, id.clone());
                     nodes.push(GraphOverviewNode {
@@ -772,7 +799,11 @@ impl GraphStore for FalkorStore {
             // Collect unique (parent_id, child_id) pairs that have a parent.
             let pairs: Vec<(String, String)> = flow_nodes
                 .iter()
-                .filter_map(|n| n.parent_id.as_ref().map(|p| (p.as_str().to_string(), n.id.as_str().to_string())))
+                .filter_map(|n| {
+                    n.parent_id
+                        .as_ref()
+                        .map(|p| (p.as_str().to_string(), n.id.as_str().to_string()))
+                })
                 .collect();
             if !pairs.is_empty() {
                 let pair_list = pairs

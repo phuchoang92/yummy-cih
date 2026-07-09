@@ -138,9 +138,7 @@ fn render_openapi_groups_by_path() {
             path: "/api/users/{id}".to_string(),
             http_method: "DELETE".to_string(),
             decorator: "DeleteMapping".to_string(),
-            handler_id: NodeId::new(
-                "Method:com.example.UserController#deleteUser/1".to_string(),
-            ),
+            handler_id: NodeId::new("Method:com.example.UserController#deleteUser/1".to_string()),
             handler_name: "deleteUser".to_string(),
             handler_qualified: "com.example.UserController#deleteUser/1".to_string(),
         },

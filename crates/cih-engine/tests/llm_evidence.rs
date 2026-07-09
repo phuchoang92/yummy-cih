@@ -173,7 +173,12 @@ fn brd_matching_requires_two_distinct_terms_and_caps_to_two_chunks() {
         reason: String::new(),
         props: None,
     }];
-    let graph = WikiGraph::build(&[method], &[], std::slice::from_ref(&community), &comm_edges);
+    let graph = WikiGraph::build(
+        &[method],
+        &[],
+        std::slice::from_ref(&community),
+        &comm_edges,
+    );
     let corpus = EvidenceCorpus {
         file_count: 1,
         chunks: vec![
@@ -241,7 +246,12 @@ fn source_snippet_selection_is_deterministic_and_capped() {
             props: None,
         },
     ];
-    let graph = WikiGraph::build(&[m1, m2, m3], &[], std::slice::from_ref(&community), &comm_edges);
+    let graph = WikiGraph::build(
+        &[m1, m2, m3],
+        &[],
+        std::slice::from_ref(&community),
+        &comm_edges,
+    );
     let pack = build_evidence_pack(Some(&root), &graph, &community, &EvidenceCorpus::default());
     let rendered = pack.render();
     assert!(rendered.contains("[S1] src/A.java:2-11"));

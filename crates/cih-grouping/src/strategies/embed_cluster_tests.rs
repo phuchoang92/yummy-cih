@@ -243,8 +243,7 @@ fn colliding_base_disambiguated_by_subpackage_never_counter() {
         prior_assignments: &[],
     };
     let entries = strategy.assign(&input);
-    let names: std::collections::HashSet<&str> =
-        entries.iter().map(|e| e.name.as_str()).collect();
+    let names: std::collections::HashSet<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names.len(), 2, "slugs must be disambiguated: {names:?}");
     assert!(names.contains("product-dto"), "got {names:?}");
     assert!(names.contains("product-services"), "got {names:?}");
@@ -293,7 +292,9 @@ fn llm_labeling_overrides_deterministic_name() {
         sims,
         m,
         EmbedClusterConfig::default(),
-        Some(std::sync::Arc::new(StubLlm { reply: reply.into() })),
+        Some(std::sync::Arc::new(StubLlm {
+            reply: reply.into(),
+        })),
         Vec::new(),
     );
     let input = StrategyInput {
@@ -318,7 +319,8 @@ struct CountingLlm {
 }
 impl crate::strategies::llm::FeatureLlmCaller for CountingLlm {
     fn classify_batch(&self, _system: &str, _user: &str) -> anyhow::Result<String> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self.reply.clone())
     }
 }
@@ -372,13 +374,32 @@ fn cache_reuses_only_llm_marked_prior() {
         m,
         EmbedClusterConfig::default(),
         Some(llm.clone()),
-        vec![prior_entry("product-catalog", member, "labeler=llm knn-leiden sim=1.000")],
+        vec![prior_entry(
+            "product-catalog",
+            member,
+            "labeler=llm knn-leiden sim=1.000",
+        )],
     );
-    let input = StrategyInput { nodes: &nodes, edges: &[], graph_version: "v1", prior_assignments: &[] };
-    let names: std::collections::HashSet<String> =
-        strategy.assign(&input).into_iter().map(|e| e.name).collect();
-    assert!(names.contains("product-catalog"), "cache hit expected: {names:?}");
-    assert_eq!(llm.calls.load(std::sync::atomic::Ordering::Relaxed), 0, "LLM must not be called on cache hit");
+    let input = StrategyInput {
+        nodes: &nodes,
+        edges: &[],
+        graph_version: "v1",
+        prior_assignments: &[],
+    };
+    let names: std::collections::HashSet<String> = strategy
+        .assign(&input)
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(
+        names.contains("product-catalog"),
+        "cache hit expected: {names:?}"
+    );
+    assert_eq!(
+        llm.calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "LLM must not be called on cache hit"
+    );
 
     // (b) Prior is deterministic (labeler=path) → ignored, LLM IS called (first-enable relabel).
     let (nodes_b, clusters, sims, m) = single_product_cluster();
@@ -392,11 +413,30 @@ fn cache_reuses_only_llm_marked_prior() {
         m,
         EmbedClusterConfig::default(),
         Some(llm.clone()),
-        vec![prior_entry("product-dto", member, "labeler=path knn-leiden sim=1.000")],
+        vec![prior_entry(
+            "product-dto",
+            member,
+            "labeler=path knn-leiden sim=1.000",
+        )],
     );
-    let input_b = StrategyInput { nodes: &nodes_b, edges: &[], graph_version: "v1", prior_assignments: &[] };
-    let names: std::collections::HashSet<String> =
-        strategy.assign(&input_b).into_iter().map(|e| e.name).collect();
-    assert!(names.contains("fresh-label"), "deterministic prior must be ignored → LLM relabels: {names:?}");
-    assert_eq!(llm.calls.load(std::sync::atomic::Ordering::Relaxed), 1, "LLM must be called when prior is path-labeled");
+    let input_b = StrategyInput {
+        nodes: &nodes_b,
+        edges: &[],
+        graph_version: "v1",
+        prior_assignments: &[],
+    };
+    let names: std::collections::HashSet<String> = strategy
+        .assign(&input_b)
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(
+        names.contains("fresh-label"),
+        "deterministic prior must be ignored → LLM relabels: {names:?}"
+    );
+    assert_eq!(
+        llm.calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "LLM must be called when prior is path-labeled"
+    );
 }

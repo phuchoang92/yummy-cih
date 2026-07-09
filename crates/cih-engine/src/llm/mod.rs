@@ -1,10 +1,10 @@
 pub mod anthropic;
 pub mod bedrock;
-pub mod prompts;
 pub mod evidence;
 pub mod grouping;
 pub mod http_json;
 pub mod openai;
+pub mod prompts;
 
 use std::path::Path;
 
@@ -104,7 +104,9 @@ pub fn make_adapter(
         LlmProvider::OpenAiCompatible => Ok(Box::new(openai::OpenAiAdapter::new(base_url))),
         LlmProvider::Anthropic => Ok(Box::new(anthropic::AnthropicAdapter::new(base_url))),
         LlmProvider::Bedrock => Ok(Box::new(bedrock::BedrockAdapter::new(base_url))),
-        LlmProvider::DeepSeek => Ok(Box::new(openai::OpenAiAdapter::new("https://api.deepseek.com"))),
+        LlmProvider::DeepSeek => Ok(Box::new(openai::OpenAiAdapter::new(
+            "https://api.deepseek.com",
+        ))),
         LlmProvider::Gemini => Ok(Box::new(openai::OpenAiAdapter::new(
             "https://generativelanguage.googleapis.com/v1beta/openai",
         ))),

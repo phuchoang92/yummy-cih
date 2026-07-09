@@ -96,7 +96,10 @@ pub fn run_config_decompile(repo: &Path) -> Result<()> {
 
     // ── Tool selection ─────────────────────────────────────────────────────
     let tools = ["vineflower", "cfr", "jadx"];
-    let tool_default = tools.iter().position(|t| *t == cfg.tool.as_str()).unwrap_or(0);
+    let tool_default = tools
+        .iter()
+        .position(|t| *t == cfg.tool.as_str())
+        .unwrap_or(0);
     let tool_idx = Select::with_theme(&theme)
         .with_prompt("Decompiler tool")
         .items(&tools)

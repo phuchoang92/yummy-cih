@@ -363,6 +363,3 @@ fn is_repo_relative(path: &str) -> bool {
         )
     })
 }
-
-
-

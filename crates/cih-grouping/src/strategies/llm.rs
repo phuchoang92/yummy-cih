@@ -41,7 +41,11 @@ impl LlmStrategy {
         config: LlmConfig,
         prior_artifact: Vec<FeatureGroupEntry>,
     ) -> Self {
-        Self { caller, config, prior_artifact }
+        Self {
+            caller,
+            config,
+            prior_artifact,
+        }
     }
 }
 
@@ -51,12 +55,20 @@ impl FeatureStrategy for LlmStrategy {
     }
 
     fn feature_of(&self, _file: &str) -> String {
-        self.config.catch_all_features.first().cloned().unwrap_or_else(|| "shared".into())
+        self.config
+            .catch_all_features
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "shared".into())
     }
 
     fn assign(&self, input: &StrategyInput<'_>) -> Vec<FeatureGroupEntry> {
-        let catch_all: HashSet<&str> =
-            self.config.catch_all_features.iter().map(|s| s.as_str()).collect();
+        let catch_all: HashSet<&str> = self
+            .config
+            .catch_all_features
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
 
         // Build incremental cache from prior run artifact (only llm-strategy entries).
         let prior_cache: HashMap<&str, &FeatureGroupEntry> = self
@@ -126,18 +138,20 @@ impl FeatureStrategy for LlmStrategy {
                     let parsed = parse_response(&raw);
                     for n in &uncached {
                         let h = fnv64_node(n);
-                        let entry = parsed.get(n.id.as_str()).cloned().unwrap_or_else(|| {
-                            ParsedEntry {
-                                feature: self
-                                    .config
-                                    .catch_all_features
-                                    .first()
-                                    .cloned()
-                                    .unwrap_or_else(|| "shared".into()),
-                                confidence: "low".into(),
-                                reason: "no_llm_response".into(),
-                            }
-                        });
+                        let entry =
+                            parsed
+                                .get(n.id.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| ParsedEntry {
+                                    feature: self
+                                        .config
+                                        .catch_all_features
+                                        .first()
+                                        .cloned()
+                                        .unwrap_or_else(|| "shared".into()),
+                                    confidence: "low".into(),
+                                    reason: "no_llm_response".into(),
+                                });
                         results.push(make_entry(n, &entry, h));
                     }
                 }
@@ -174,7 +188,11 @@ fn build_system_prompt(vocab: &[String]) -> String {
     let features_section = if vocab.is_empty() {
         "  (no prior features — invent appropriate kebab-case feature slugs)".to_string()
     } else {
-        vocab.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n")
+        vocab
+            .iter()
+            .map(|f| format!("  - {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     format!(
         r#"You are a Java/Spring codebase classifier. Assign each class to exactly one business feature.
@@ -196,7 +214,12 @@ Rules:
 fn build_user_prompt<'a>(nodes: impl Iterator<Item = &'a Node>, _vocab: &[String]) -> String {
     let mut lines = vec!["Classify these classes:".to_string(), String::new()];
     for node in nodes {
-        let short_name = node.id.as_str().rsplit('.').next().unwrap_or(node.id.as_str());
+        let short_name = node
+            .id
+            .as_str()
+            .rsplit('.')
+            .next()
+            .unwrap_or(node.id.as_str());
         lines.push(format!("id: {}", node.id.as_str()));
         lines.push(format!("  name: {short_name}"));
         lines.push(format!("  file: {}", node.file));
@@ -240,7 +263,14 @@ fn parse_response(raw: &str) -> HashMap<String, ParsedEntry> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        map.insert(id.to_string(), ParsedEntry { feature, confidence, reason });
+        map.insert(
+            id.to_string(),
+            ParsedEntry {
+                feature,
+                confidence,
+                reason,
+            },
+        );
     }
     map
 }

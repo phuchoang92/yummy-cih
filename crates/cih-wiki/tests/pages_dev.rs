@@ -87,7 +87,14 @@ fn simple_dev_graph() -> WikiGraph {
 fn render_dev_community_shows_classes() {
     let g = simple_dev_graph();
     let comm = g.community_nodes[0].clone();
-    let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None, &HashMap::new());
+    let md = render_dev_community(
+        &g,
+        &comm,
+        "shared/dev/order-service",
+        None,
+        None,
+        &HashMap::new(),
+    );
     assert!(md.contains("---\ntitle: Order Service"), "has frontmatter");
     assert!(md.contains("OrderService"), "has class name");
     assert!(md.contains("service"), "has stereotype");
@@ -165,7 +172,14 @@ fn render_dev_community_shows_db_access_when_present() {
     ];
     let g = WikiGraph::build(&nodes, &edges, &[comm], &comm_edges);
     let comm_node = g.community_nodes[0].clone();
-    let md = render_dev_community(&g, &comm_node, "shared/dev/order-service", None, None, &HashMap::new());
+    let md = render_dev_community(
+        &g,
+        &comm_node,
+        "shared/dev/order-service",
+        None,
+        None,
+        &HashMap::new(),
+    );
     assert!(md.contains("## DB Access"), "has db access section");
     assert!(md.contains("ORDERS"), "has table name");
     assert!(md.contains("✓"), "has check mark");
@@ -175,7 +189,14 @@ fn render_dev_community_shows_db_access_when_present() {
 fn render_dev_community_omits_db_access_when_none() {
     let g = simple_dev_graph();
     let comm = g.community_nodes[0].clone();
-    let md = render_dev_community(&g, &comm, "shared/dev/order-service", None, None, &HashMap::new());
+    let md = render_dev_community(
+        &g,
+        &comm,
+        "shared/dev/order-service",
+        None,
+        None,
+        &HashMap::new(),
+    );
     assert!(
         !md.contains("## DB Access"),
         "no db access section when no tables"
@@ -191,7 +212,14 @@ fn render_dev_community_inserts_technical_summary_when_present() {
         ba: String::new(),
         dev: "Service-repository pattern with 8 methods.".to_string(),
     };
-    let md = render_dev_community(&g, &comm, "shared/dev/order-service", Some(&llm), None, &HashMap::new());
+    let md = render_dev_community(
+        &g,
+        &comm,
+        "shared/dev/order-service",
+        Some(&llm),
+        None,
+        &HashMap::new(),
+    );
     assert!(md.contains("## Summary"), "has summary section");
     assert!(md.contains("Service-repository pattern"), "has llm text");
 }

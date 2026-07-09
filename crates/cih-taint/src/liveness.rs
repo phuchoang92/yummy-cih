@@ -20,7 +20,7 @@
 //! the goal is to cut obvious false positives from Phase 0, not to replace a
 //! full-precision analysis.
 
-use rustc_hash::{FxHashMap};
+use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 
 use cih_core::NodeId;
@@ -150,17 +150,14 @@ pub fn refine_paths(
         .iter()
         .enumerate()
         .map(|(idx, path)| {
-            let result = intra_cache
-                .entry(path.source.clone())
-                .or_insert_with(|| {
-                    let file = node_file(&path.source)?;
-                    let src = resolve_src(&file)?;
-                    let body =
-                        crate::java_ir::extract_method_body(&path.source, &src)?;
-                    // Treat all params as tainted — we know the source is an API handler.
-                    let tainted: Vec<String> = body.param_names.clone();
-                    Some(analyze_method(&body, &tainted, sink_name_patterns))
-                });
+            let result = intra_cache.entry(path.source.clone()).or_insert_with(|| {
+                let file = node_file(&path.source)?;
+                let src = resolve_src(&file)?;
+                let body = crate::java_ir::extract_method_body(&path.source, &src)?;
+                // Treat all params as tainted — we know the source is an API handler.
+                let tainted: Vec<String> = body.param_names.clone();
+                Some(analyze_method(&body, &tainted, sink_name_patterns))
+            });
 
             match result {
                 None => PathRefinement {
@@ -176,7 +173,11 @@ pub fn refine_paths(
                         intra_confirmed: confirmed,
                         ir_unavailable: false,
                         // Confirmed intra-flow → boost; no intra-flow → modest penalty.
-                        confidence_multiplier: if confirmed { LIVENESS_CONFIRMED } else { LIVENESS_NO_FLOW },
+                        confidence_multiplier: if confirmed {
+                            LIVENESS_CONFIRMED
+                        } else {
+                            LIVENESS_NO_FLOW
+                        },
                     }
                 }
             }

@@ -21,9 +21,7 @@ fn modules_segment_takes_priority() {
 fn maven_module_name_normalisation() {
     let s = strategy();
     assert_eq!(
-        s.feature_of(
-            "banking-overdraft/src/main/java/com/bank/overdraft/OverdraftService.java"
-        ),
+        s.feature_of("banking-overdraft/src/main/java/com/bank/overdraft/OverdraftService.java"),
         "overdraft"
     );
     assert_eq!(
@@ -76,8 +74,7 @@ fn custom_config_strip_prefixes() {
 #[test]
 fn classify_returns_evidence() {
     let s = strategy();
-    let (feat, ev) =
-        s.classify("payment-service/src/main/java/com/example/PaymentService.java");
+    let (feat, ev) = s.classify("payment-service/src/main/java/com/example/PaymentService.java");
     assert_eq!(feat, "payment");
     assert!(ev.contains("payment-service"), "evidence: {ev}");
 }

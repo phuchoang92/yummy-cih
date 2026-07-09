@@ -113,7 +113,10 @@ impl LeidenConfig {
         }
         if !self.resolution.is_finite() || self.resolution < 0.0 {
             return Err(crate::leiden_impl::error::LeidenError::InvalidParameter {
-                message: format!("resolution must be finite and non-negative, got {}", self.resolution),
+                message: format!(
+                    "resolution must be finite and non-negative, got {}",
+                    self.resolution
+                ),
             });
         }
         if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
@@ -328,11 +331,17 @@ impl Leiden {
             QualityType::Modularity => {
                 QualityFn::Modularity(Modularity::with_resolution(self.config.resolution))
             }
-            QualityType::CPM => QualityFn::CPM(crate::leiden_impl::quality::CPM::new(self.config.resolution)),
+            QualityType::CPM => QualityFn::CPM(crate::leiden_impl::quality::CPM::new(
+                self.config.resolution,
+            )),
             QualityType::RBConfiguration => QualityFn::RBConfiguration(
-                crate::leiden_impl::quality::RBConfiguration::with_resolution(self.config.resolution),
+                crate::leiden_impl::quality::RBConfiguration::with_resolution(
+                    self.config.resolution,
+                ),
             ),
-            QualityType::RBER => QualityFn::RBER(crate::leiden_impl::quality::RBER::new(self.config.resolution)),
+            QualityType::RBER => QualityFn::RBER(crate::leiden_impl::quality::RBER::new(
+                self.config.resolution,
+            )),
         }
     }
 
@@ -370,10 +379,8 @@ impl Leiden {
             None => StdRng::from_rng(&mut rand::rng()),
         };
 
-        let mut local_moving_buffers =
-            algorithm::LocalMovingBuffers::new(data.node_count(), 1);
-        let mut refinement_buffers =
-            algorithm::RefinementBuffers::new(data.node_count(), 1);
+        let mut local_moving_buffers = algorithm::LocalMovingBuffers::new(data.node_count(), 1);
+        let mut refinement_buffers = algorithm::RefinementBuffers::new(data.node_count(), 1);
 
         for iteration in 0..self.config.max_iterations {
             let q_before = quality.total_quality(&data, &partition);
@@ -411,7 +418,14 @@ impl Leiden {
             }
 
             let refined = if !self.config.skip_refinement {
-                refinement(&data, &partition, quality, &mut rng, self.config.epsilon, &mut refinement_buffers)
+                refinement(
+                    &data,
+                    &partition,
+                    quality,
+                    &mut rng,
+                    self.config.epsilon,
+                    &mut refinement_buffers,
+                )
             } else {
                 // In Louvain mode, use the unrefined partition directly
                 partition.clone()
@@ -521,9 +535,7 @@ impl Leiden {
             quality_history,
         })
     }
-
 }
-
 
 fn local_moving_dispatch(
     data: &[GraphData],
@@ -537,8 +549,14 @@ fn local_moving_dispatch(
     #[cfg(feature = "rayon")]
     {
         if should_use_parallel(&data[0], _config) {
-            let (parallel_changed, converged_naturally) =
-                local_moving_parallel(&data[0], partition, quality, rng, cfg.max_comm_size, cfg.epsilon);
+            let (parallel_changed, converged_naturally) = local_moving_parallel(
+                &data[0],
+                partition,
+                quality,
+                rng,
+                cfg.max_comm_size,
+                cfg.epsilon,
+            );
             if converged_naturally {
                 return parallel_changed;
             }
@@ -554,15 +572,7 @@ fn local_moving_dispatch(
             return parallel_changed || sequential_changed;
         }
     }
-    algorithm::local_moving_generic(
-        data,
-        &[1.0],
-        partition,
-        quality,
-        rng,
-        cfg,
-        buffers,
-    )
+    algorithm::local_moving_generic(data, &[1.0], partition, quality, rng, cfg, buffers)
 }
 
 /// Decide whether to use parallel local moving based on graph structure.
@@ -641,7 +651,9 @@ fn aggregate(
         #[cfg(feature = "rayon")]
         {
             let edge_slots = data.out_offsets[n];
-            let threshold = _config.parallel_aggregation_threshold.unwrap_or(AGG_PARALLEL_THRESHOLD);
+            let threshold = _config
+                .parallel_aggregation_threshold
+                .unwrap_or(AGG_PARALLEL_THRESHOLD);
             if edge_slots >= threshold {
                 aggregate_edges_parallel(data, &orig_to_agg, directed)
             } else {

@@ -109,7 +109,10 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
             }
             EdgeKind::Calls => {
                 let target = edge.dst.as_str();
-                if let Some(rule) = rules.sinks.iter().find(|s| target.contains(s.node_id_pattern.as_str()))
+                if let Some(rule) = rules
+                    .sinks
+                    .iter()
+                    .find(|s| target.contains(s.node_id_pattern.as_str()))
                 {
                     sink_map.entry(&edge.src).or_insert(rule.category);
                 }
@@ -198,5 +201,6 @@ pub fn find_taint_paths(nodes: &[Node], edges: &[Edge], rules: &TaintRules) -> V
 }
 
 fn confidence_for_edges(edge_count: usize) -> f32 {
-    (INTERPROC_BASE - (edge_count.saturating_sub(1) as f32 * INTERPROC_HOP_PENALTY)).max(INTERPROC_FLOOR)
+    (INTERPROC_BASE - (edge_count.saturating_sub(1) as f32 * INTERPROC_HOP_PENALTY))
+        .max(INTERPROC_FLOOR)
 }

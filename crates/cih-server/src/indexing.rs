@@ -10,8 +10,14 @@ pub async fn index_repo(
     jobs: &Jobs,
     args: IndexRepoArgs,
 ) -> Result<CallToolResult, McpError> {
-    let (job_id, canonical) =
-        start_index_job(falkor_url, graph_key, jobs, &args.repo_path, &args.languages).await?;
+    let (job_id, canonical) = start_index_job(
+        falkor_url,
+        graph_key,
+        jobs,
+        &args.repo_path,
+        &args.languages,
+    )
+    .await?;
     json_result(&serde_json::json!({
         "job_id": job_id,
         "status": "running",
@@ -83,7 +89,11 @@ pub async fn start_index_job(
                 let output = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 jobs.insert(
                     job_id2,
-                    JobState::Done { started_at_secs, finished_at_secs, output },
+                    JobState::Done {
+                        started_at_secs,
+                        finished_at_secs,
+                        output,
+                    },
                 );
             }
             Ok(out) => {
@@ -101,7 +111,11 @@ pub async fn start_index_job(
                 );
                 jobs.insert(
                     job_id2,
-                    JobState::Failed { started_at_secs, finished_at_secs, error },
+                    JobState::Failed {
+                        started_at_secs,
+                        finished_at_secs,
+                        error,
+                    },
                 );
             }
             Err(e) => {

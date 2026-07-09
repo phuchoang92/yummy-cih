@@ -62,4 +62,3 @@ fn merge_call_sites(winner: &mut Edge, incoming: &Edge) {
 #[cfg(test)]
 #[path = "merge_tests.rs"]
 mod combined_edges_tests;
-

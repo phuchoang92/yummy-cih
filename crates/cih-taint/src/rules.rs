@@ -82,15 +82,21 @@ pub struct TaintRules {
 impl TaintRules {
     /// Append `other`'s rules into `self`, deduplicating by pattern string.
     pub fn merge(mut self, other: TaintRules) -> TaintRules {
-        let existing_sink_pats: std::collections::HashSet<String> =
-            self.sinks.iter().map(|s| s.node_id_pattern.clone()).collect();
+        let existing_sink_pats: std::collections::HashSet<String> = self
+            .sinks
+            .iter()
+            .map(|s| s.node_id_pattern.clone())
+            .collect();
         for s in other.sinks {
             if !existing_sink_pats.contains(&s.node_id_pattern) {
                 self.sinks.push(s);
             }
         }
-        let existing_san_pats: std::collections::HashSet<String> =
-            self.sanitizers.iter().map(|s| s.node_id_pattern.clone()).collect();
+        let existing_san_pats: std::collections::HashSet<String> = self
+            .sanitizers
+            .iter()
+            .map(|s| s.node_id_pattern.clone())
+            .collect();
         for s in other.sanitizers {
             if !existing_san_pats.contains(&s.node_id_pattern) {
                 self.sanitizers.push(s);
@@ -114,12 +120,19 @@ impl TaintRules {
 /// exec/file/HTML cases where the graph may not yet have explicit edges.
 macro_rules! sink {
     ($pat:expr, $cat:expr) => {
-        TaintSink { node_id_pattern: $pat.into(), category: $cat, language: Some(Language::Java) }
+        TaintSink {
+            node_id_pattern: $pat.into(),
+            category: $cat,
+            language: Some(Language::Java),
+        }
     };
 }
 macro_rules! san {
     ($pat:expr) => {
-        TaintSanitizer { node_id_pattern: $pat.into(), language: Some(Language::Java) }
+        TaintSanitizer {
+            node_id_pattern: $pat.into(),
+            language: Some(Language::Java),
+        }
     };
 }
 
@@ -127,25 +140,25 @@ pub fn default_rules() -> TaintRules {
     TaintRules {
         sinks: vec![
             // OS process execution
-            sink!("Runtime#exec",            SinkCategory::Exec),
-            sink!("ProcessBuilder#command",  SinkCategory::Exec),
-            sink!("ProcessBuilder#start",    SinkCategory::Exec),
+            sink!("Runtime#exec", SinkCategory::Exec),
+            sink!("ProcessBuilder#command", SinkCategory::Exec),
+            sink!("ProcessBuilder#start", SinkCategory::Exec),
             // JDBC raw-string execution (parameterized PreparedStatement is NOT a sink)
-            sink!("Statement#execute",       SinkCategory::Sql),
-            sink!("Statement#executeQuery",  SinkCategory::Sql),
+            sink!("Statement#execute", SinkCategory::Sql),
+            sink!("Statement#executeQuery", SinkCategory::Sql),
             sink!("Statement#executeUpdate", SinkCategory::Sql),
-            sink!("JdbcTemplate#execute",    SinkCategory::Sql),
-            sink!("JdbcTemplate#query",      SinkCategory::Sql),
-            sink!("JdbcTemplate#update",     SinkCategory::Sql),
-            sink!("NamedParameterJdbcTemplate#query",  SinkCategory::Sql),
+            sink!("JdbcTemplate#execute", SinkCategory::Sql),
+            sink!("JdbcTemplate#query", SinkCategory::Sql),
+            sink!("JdbcTemplate#update", SinkCategory::Sql),
+            sink!("NamedParameterJdbcTemplate#query", SinkCategory::Sql),
             sink!("NamedParameterJdbcTemplate#update", SinkCategory::Sql),
             // File-system writes
-            sink!("Files#write",                  SinkCategory::File),
-            sink!("Files#createFile",             SinkCategory::File),
-            sink!("FileOutputStream#<init>",      SinkCategory::File),
-            sink!("FileWriter#<init>",            SinkCategory::File),
+            sink!("Files#write", SinkCategory::File),
+            sink!("Files#createFile", SinkCategory::File),
+            sink!("FileOutputStream#<init>", SinkCategory::File),
+            sink!("FileWriter#<init>", SinkCategory::File),
             // HTML output (XSS)
-            sink!("PrintWriter#print",            SinkCategory::Html),
+            sink!("PrintWriter#print", SinkCategory::Html),
             sink!("HttpServletResponse#getWriter", SinkCategory::Html),
         ],
         sanitizers: vec![

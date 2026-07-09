@@ -1,8 +1,8 @@
-use cih_core::{community_id, method_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 use cih_community::{
     bfs::deduplicate_traces, detect_communities, trace_processes, CommunityConfig, ProcessConfig,
 };
 use cih_core::EntrypointRegistry;
+use cih_core::{community_id, method_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 
 fn class_node(fqcn: &str, file: &str) -> Node {
     Node {
@@ -183,8 +183,7 @@ fn process_dedup_keeps_longest() {
     let bi = graph.add_node(b);
     let ci = graph.add_node(c);
     let di = graph.add_node(d);
-    let deduped =
-        deduplicate_traces(vec![vec![ai, bi, ci], vec![ai, bi, ci, di]], &graph);
+    let deduped = deduplicate_traces(vec![vec![ai, bi, ci], vec![ai, bi, ci, di]], &graph);
     assert_eq!(deduped.len(), 1);
     assert_eq!(deduped[0], vec![ai, bi, ci, di]);
 }

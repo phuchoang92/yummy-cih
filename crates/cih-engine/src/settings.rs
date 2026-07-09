@@ -1089,13 +1089,20 @@ mod tests {
         );
         let r = resolve_discover(DiscoverFlagInputs::default(), &layers);
         assert_eq!(r.community_strategy, "graph", "repo beats home");
-        assert_eq!(r.feature_llm_provider.as_deref(), Some("gemini"), "home fills gap");
+        assert_eq!(
+            r.feature_llm_provider.as_deref(),
+            Some("gemini"),
+            "home fills gap"
+        );
         assert_eq!(r.max_processes, Some(7));
         assert_eq!(r.resolution, Some(2.5));
         assert_eq!(r.feature_strategy, DEFAULT_FEATURE_STRATEGY);
         assert_eq!(r.feature_llm_base_url, DEFAULT_FEATURE_LLM_BASE_URL);
         assert_eq!(r.feature_llm_max_tokens, DEFAULT_FEATURE_LLM_MAX_TOKENS);
-        assert!(r.embed_knn.is_none(), "embed knobs stay unset for downstream defaults");
+        assert!(
+            r.embed_knn.is_none(),
+            "embed knobs stay unset for downstream defaults"
+        );
 
         let r = resolve_discover(
             DiscoverFlagInputs {

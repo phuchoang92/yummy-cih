@@ -1,5 +1,5 @@
-use crate::index::ResolveIndex;
 use crate::default_registry;
+use crate::index::ResolveIndex;
 use crate::types::simple_of;
 use cih_core::{
     constructor_id, field_id, method_id, type_id, BindingKind, NodeKind, ParsedFile, Range,

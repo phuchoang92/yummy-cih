@@ -305,7 +305,11 @@ fn hash_unit(value: u32) -> f32 {
 }
 
 fn finite(value: f32) -> f32 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -362,9 +366,13 @@ fn refine(bodies: &mut [Body], edges: &[(usize, usize, EdgeKind)], iterations: u
             force[0] += (body.ax - body.x) * ANCHOR_STRENGTH * body.mass;
             force[1] += (body.ay - body.y) * ANCHOR_STRENGTH * body.mass;
             force[2] += (body.az - body.z) * ANCHOR_STRENGTH * body.mass;
-            let magnitude = (force[0] * force[0] + force[1] * force[1] + force[2] * force[2])
-                .sqrt();
-            let scale = if magnitude > 8.0 { 8.0 / magnitude } else { 1.0 };
+            let magnitude =
+                (force[0] * force[0] + force[1] * force[1] + force[2] * force[2]).sqrt();
+            let scale = if magnitude > 8.0 {
+                8.0 / magnitude
+            } else {
+                1.0
+            };
             body.x += force[0] * scale;
             body.y += force[1] * scale;
             body.z += force[2] * scale;
@@ -389,8 +397,7 @@ fn bounds(bodies: &[Body]) -> Option<([f32; 3], f32)> {
         (min[1] + max[1]) * 0.5,
         (min[2] + max[2]) * 0.5,
     ];
-    let half = ((max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]) * 0.5 + 1.0)
-        .max(1.0);
+    let half = ((max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]) * 0.5 + 1.0).max(1.0);
     Some((origin, half))
 }
 
@@ -485,5 +492,3 @@ fn octree_repulse(
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod tests;
-
-

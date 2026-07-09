@@ -124,10 +124,16 @@ fn jaxrs_routes_extracted_with_path_prefix() {
         .unwrap();
     let props = get.props.as_ref().unwrap();
     assert_eq!(props["source"], "jax_rs");
-    assert_eq!(props["route_annotations"], serde_json::json!(["GET", "Path"]));
+    assert_eq!(
+        props["route_annotations"],
+        serde_json::json!(["GET", "Path"])
+    );
 
     let post = routes.iter().find(|n| n.name == "POST /accounts").unwrap();
-    assert_eq!(post.props.as_ref().unwrap()["route_annotations"], serde_json::json!(["POST"]));
+    assert_eq!(
+        post.props.as_ref().unwrap()["route_annotations"],
+        serde_json::json!(["POST"])
+    );
 }
 
 #[test]
@@ -232,7 +238,10 @@ fn method_level_request_mapping_emits_no_route() {
           Object create() { return null; }
         }
     "#;
-    assert!(route_nodes(src).is_empty(), "expected no routes from method-level @RequestMapping");
+    assert!(
+        route_nodes(src).is_empty(),
+        "expected no routes from method-level @RequestMapping"
+    );
 }
 
 // ── Messaging / HTTP contract sites (ContractKind + messaging_framework) ─────
@@ -260,7 +269,10 @@ fn kafka_listener_is_event_listen_kafka() {
         .find(|s| s.topic.as_deref() == Some("orders.created"))
         .expect("kafka listener contract site");
     assert_eq!(site.kind, cih_core::ContractKind::EventListen);
-    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Kafka));
+    assert_eq!(
+        site.messaging_framework,
+        Some(cih_core::MessagingFramework::Kafka)
+    );
 }
 
 #[test]
@@ -278,7 +290,10 @@ fn spring_event_listener_is_event_listen_spring() {
         .find(|s| s.kind == cih_core::ContractKind::EventListen)
         .expect("spring @EventListener contract site");
     assert_eq!(site.topic.as_deref(), Some("UserSaved"));
-    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Spring));
+    assert_eq!(
+        site.messaging_framework,
+        Some(cih_core::MessagingFramework::Spring)
+    );
 }
 
 #[test]
@@ -298,7 +313,10 @@ fn kafka_template_send_is_event_publish_kafka() {
         .find(|s| s.kind == cih_core::ContractKind::EventPublish)
         .expect("KafkaTemplate.send contract site");
     assert_eq!(site.topic.as_deref(), Some("orders.created"));
-    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Kafka));
+    assert_eq!(
+        site.messaging_framework,
+        Some(cih_core::MessagingFramework::Kafka)
+    );
 }
 
 #[test]
@@ -318,7 +336,10 @@ fn application_event_publisher_is_event_publish_spring() {
         .find(|s| s.kind == cih_core::ContractKind::EventPublish)
         .expect("ApplicationEventPublisher.publishEvent contract site");
     assert_eq!(site.topic.as_deref(), Some("UserSavedEvent"));
-    assert_eq!(site.messaging_framework, Some(cih_core::MessagingFramework::Spring));
+    assert_eq!(
+        site.messaging_framework,
+        Some(cih_core::MessagingFramework::Spring)
+    );
 }
 
 #[test]
@@ -350,12 +371,29 @@ fn retains_generic_annotation_metadata_on_methods() {
             public void pay() {}
         }
     "#;
-    let unit = JavaProvider::new().parse_file("C.java", src).expect("parse");
-    let method = unit.nodes.iter().find(|n| n.kind == cih_core::NodeKind::Method).expect("method");
-    let anns = method.props.as_ref().unwrap().get("annotations").expect("annotations prop");
+    let unit = JavaProvider::new()
+        .parse_file("C.java", src)
+        .expect("parse");
+    let method = unit
+        .nodes
+        .iter()
+        .find(|n| n.kind == cih_core::NodeKind::Method)
+        .expect("method");
+    let anns = method
+        .props
+        .as_ref()
+        .unwrap()
+        .get("annotations")
+        .expect("annotations prop");
     let arr = anns.as_array().unwrap();
-    let be = arr.iter().find(|a| a["name"] == "BankEndpoint").expect("BankEndpoint");
+    let be = arr
+        .iter()
+        .find(|a| a["name"] == "BankEndpoint")
+        .expect("BankEndpoint");
     assert_eq!(be["attrs"]["value"], "/pay");
-    let au = arr.iter().find(|a| a["name"] == "Audited").expect("Audited");
+    let au = arr
+        .iter()
+        .find(|a| a["name"] == "Audited")
+        .expect("Audited");
     assert_eq!(au["attrs"]["level"], "high");
 }

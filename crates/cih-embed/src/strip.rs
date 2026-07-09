@@ -45,26 +45,38 @@ fn is_noise_line(line: &str) -> bool {
 
 fn is_log_call(t: &str) -> bool {
     let prefixes = [
-        "log.", "logger.", "LOG.", "LOGGER.",
-        "log.debug", "log.info", "log.warn", "log.error", "log.trace",
-        "logger.debug", "logger.info", "logger.warn", "logger.error",
+        "log.",
+        "logger.",
+        "LOG.",
+        "LOGGER.",
+        "log.debug",
+        "log.info",
+        "log.warn",
+        "log.error",
+        "log.trace",
+        "logger.debug",
+        "logger.info",
+        "logger.warn",
+        "logger.error",
     ];
     prefixes.iter().any(|p| t.starts_with(p))
-        || (t.contains(".debug(") || t.contains(".info(") || t.contains(".warn(") || t.contains(".error("))
-            && (t.contains("log.") || t.contains("logger.") || t.contains("LOG.") || t.contains("LOGGER."))
+        || (t.contains(".debug(")
+            || t.contains(".info(")
+            || t.contains(".warn(")
+            || t.contains(".error("))
+            && (t.contains("log.")
+                || t.contains("logger.")
+                || t.contains("LOG.")
+                || t.contains("LOGGER."))
 }
 
 fn is_null_guard(t: &str) -> bool {
     // if (x == null) throw ... or if (x == null) { throw ...
-    (t.starts_with("if (") || t.starts_with("if("))
-        && t.contains("== null")
-        && t.contains("throw")
+    (t.starts_with("if (") || t.starts_with("if(")) && t.contains("== null") && t.contains("throw")
 }
 
 fn is_trivial_getter_body(t: &str) -> bool {
     // Only strip explicit this.field returns, not bare variable returns
     // (bare variable returns can carry domain meaning like "return order").
-    (t.starts_with("return this.") && t.ends_with(';') && !t.contains('('))
-        || t == "return this;"
+    (t.starts_with("return this.") && t.ends_with(';') && !t.contains('(')) || t == "return this;"
 }
-

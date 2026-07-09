@@ -24,7 +24,11 @@ class Foo {
 
     let param_id = param_def_id(&id, "input");
     let has_param_dep = pdg.data_edges().any(|e| e.from == param_id);
-    assert!(has_param_dep, "should have data dep from param def; edges: {:?}", pdg.data_edges().collect::<Vec<_>>());
+    assert!(
+        has_param_dep,
+        "should have data dep from param def; edges: {:?}",
+        pdg.data_edges().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -45,7 +49,11 @@ class Foo {
     let pdg = build_pdg(&cfg, Some(&dom), Some(&reaching));
 
     let data_edges: Vec<_> = pdg.data_edges().collect();
-    assert!(data_edges.len() >= 2, "expected ≥2 data deps, got {:?}", data_edges);
+    assert!(
+        data_edges.len() >= 2,
+        "expected ≥2 data deps, got {:?}",
+        data_edges
+    );
 }
 
 #[test]
@@ -66,7 +74,10 @@ class Foo {
     let pdg = build_pdg(&cfg, Some(&dom), Some(&reaching));
 
     let ctrl_edges: Vec<_> = pdg.control_edges().collect();
-    assert!(!ctrl_edges.is_empty(), "if-body should be control-dependent on branch");
+    assert!(
+        !ctrl_edges.is_empty(),
+        "if-body should be control-dependent on branch"
+    );
 }
 
 #[test]
@@ -87,13 +98,15 @@ class Foo {
     let param_def = param_def_id(&id, "x");
     for (stmt_id, rd) in &reaching {
         let x_defs = rd.get("x").cloned().unwrap_or_default();
-        if stmt_id.as_str().contains("stmt")
-            && !x_defs.contains(&param_def) {
-                return;
-            }
+        if stmt_id.as_str().contains("stmt") && !x_defs.contains(&param_def) {
+            return;
+        }
     }
     assert!(
-        reaching.values().any(|rd| rd.get("x").map(|defs| defs.contains(&param_def)).unwrap_or(false)),
+        reaching.values().any(|rd| rd
+            .get("x")
+            .map(|defs| defs.contains(&param_def))
+            .unwrap_or(false)),
         "param def should appear in at least some reaching defs"
     );
 }

@@ -49,8 +49,7 @@ fn contract_kind_filter_accepts_aliases() {
 
 #[test]
 fn trace_flow_args_defaults() {
-    let args: TraceFlowArgs =
-        serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
+    let args: TraceFlowArgs = serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
     assert_eq!(args.entry_point, "Route:GET /");
     assert_eq!(args.max_depth, 0);
     assert!(args.format.is_empty());
@@ -66,10 +65,9 @@ fn impact_args_accepts_format_diagram() {
 
 #[test]
 fn trace_flow_args_accepts_format_mermaid() {
-    let args: TraceFlowArgs = serde_json::from_str(
-        r#"{"entry_point":"Route:GET /api/checkout","format":"mermaid"}"#,
-    )
-    .unwrap();
+    let args: TraceFlowArgs =
+        serde_json::from_str(r#"{"entry_point":"Route:GET /api/checkout","format":"mermaid"}"#)
+            .unwrap();
     assert_eq!(args.entry_point, "Route:GET /api/checkout");
     assert_eq!(args.format, "mermaid");
 }
@@ -84,8 +82,7 @@ fn feature_map_args_defaults() {
 #[test]
 fn regression_scope_args_parses_file_list() {
     let args: RegressionScopeArgs =
-        serde_json::from_str(r#"{"changed_files":["src/main/java/com/acme/Foo.java"]}"#)
-            .unwrap();
+        serde_json::from_str(r#"{"changed_files":["src/main/java/com/acme/Foo.java"]}"#).unwrap();
     assert_eq!(args.changed_files.len(), 1);
     assert_eq!(args.changed_files[0], "src/main/java/com/acme/Foo.java");
 }

@@ -1,6 +1,6 @@
 use super::*;
-use crate::leiden_impl::graph_data::GraphData;
 use crate::leiden_impl::builder::GraphDataBuilder;
+use crate::leiden_impl::graph_data::GraphData;
 
 fn make_two_cliques() -> GraphData {
     let mut b = GraphDataBuilder::new(10);

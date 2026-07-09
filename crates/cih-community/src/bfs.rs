@@ -1,4 +1,4 @@
-use rustc_hash::{FxHashMap};
+use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 #[cfg(feature = "rayon")]

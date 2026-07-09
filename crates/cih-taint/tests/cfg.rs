@@ -43,13 +43,21 @@ class Foo {
 "#;
     let id = mid("Method:com.example.Foo#abs/1");
     let cfg = build_cfg(&id, src).expect("CFG should build");
-    assert!(cfg.block_count() >= 4, "expected ≥4 blocks, got {}", cfg.block_count());
+    assert!(
+        cfg.block_count() >= 4,
+        "expected ≥4 blocks, got {}",
+        cfg.block_count()
+    );
     let entry = cfg.block(&cfg.entry).unwrap();
     assert!(
         entry.stmts.iter().any(|s| s.kind == StatementKind::Branch),
         "entry block should contain Branch stmt"
     );
-    assert_eq!(entry.succs.len(), 2, "if-else: entry should have 2 successors");
+    assert_eq!(
+        entry.succs.len(),
+        2,
+        "if-else: entry should have 2 successors"
+    );
     assert!(entry.succs.iter().any(|(_, k)| *k == CfgEdgeKind::True));
     assert!(entry.succs.iter().any(|(_, k)| *k == CfgEdgeKind::False));
 }
@@ -70,15 +78,24 @@ class Counter {
 "#;
     let id = mid("Method:com.example.Counter#sum/1");
     let cfg = build_cfg(&id, src).expect("CFG should build");
-    let has_back = cfg.blocks.iter().any(|b| b.succs.iter().any(|(_, k)| *k == CfgEdgeKind::Back));
+    let has_back = cfg
+        .blocks
+        .iter()
+        .any(|b| b.succs.iter().any(|(_, k)| *k == CfgEdgeKind::Back));
     assert!(has_back, "while loop must produce a Back edge");
     let header_block = cfg
         .blocks
         .iter()
         .find(|b| b.stmts.iter().any(|s| s.kind == StatementKind::Loop))
         .expect("should find a Loop stmt block");
-    assert!(header_block.succs.iter().any(|(_, k)| *k == CfgEdgeKind::True));
-    assert!(header_block.succs.iter().any(|(_, k)| *k == CfgEdgeKind::False));
+    assert!(header_block
+        .succs
+        .iter()
+        .any(|(_, k)| *k == CfgEdgeKind::True));
+    assert!(header_block
+        .succs
+        .iter()
+        .any(|(_, k)| *k == CfgEdgeKind::False));
 }
 
 #[test]
@@ -96,7 +113,10 @@ class Foo {
 "#;
     let id = mid("Method:com.example.Foo#process/1");
     let cfg = build_cfg(&id, src).expect("CFG should build");
-    let has_exc = cfg.blocks.iter().any(|b| b.succs.iter().any(|(_, k)| *k == CfgEdgeKind::Exception));
+    let has_exc = cfg
+        .blocks
+        .iter()
+        .any(|b| b.succs.iter().any(|(_, k)| *k == CfgEdgeKind::Exception));
     assert!(has_exc, "try-catch must produce an Exception edge");
 }
 

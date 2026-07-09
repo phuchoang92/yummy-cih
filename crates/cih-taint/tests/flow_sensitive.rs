@@ -34,9 +34,16 @@ class Dao {
     }
 }
 "#;
-    let r = run(src, "Method:com.example.Dao#query/1", &["input"], &["execute"]);
+    let r = run(
+        src,
+        "Method:com.example.Dao#query/1",
+        &["input"],
+        &["execute"],
+    );
     assert!(!r.confirmed_sinks.is_empty(), "should confirm sink");
-    assert!(r.confirmed_sinks[0].tainted_args.contains(&"input".to_string()));
+    assert!(r.confirmed_sinks[0]
+        .tainted_args
+        .contains(&"input".to_string()));
 }
 
 #[test]
@@ -50,7 +57,10 @@ class Dao {
 }
 "#;
     let r = run(src, "Method:com.example.Dao#run/1", &["cmd"], &["exec"]);
-    assert!(!r.confirmed_sinks.is_empty(), "should confirm sink via assign chain");
+    assert!(
+        !r.confirmed_sinks.is_empty(),
+        "should confirm sink via assign chain"
+    );
 }
 
 #[test]
@@ -63,7 +73,12 @@ class Dao {
     }
 }
 "#;
-    let r = run(src, "Method:com.example.Dao#process/1", &["x"], &["execute"]);
+    let r = run(
+        src,
+        "Method:com.example.Dao#process/1",
+        &["x"],
+        &["execute"],
+    );
     assert!(
         r.confirmed_sinks.is_empty(),
         "reassignment should kill taint; confirmed_sinks={:?}",
@@ -94,7 +109,12 @@ class Foo {
     }
 }
 "#;
-    let r = run(src, "Method:com.example.Foo#get/1", &["input"], &["execute"]);
+    let r = run(
+        src,
+        "Method:com.example.Foo#get/1",
+        &["input"],
+        &["execute"],
+    );
     assert!(r.taint_return, "should detect tainted return");
 }
 
@@ -120,7 +140,12 @@ class Web {
         "sanitizer should kill taint; confirmed_sinks={:?}",
         r.confirmed_sinks
     );
-    let r2 = run(src, "Method:com.example.Web#render/1", &["input"], &["print"]);
+    let r2 = run(
+        src,
+        "Method:com.example.Web#render/1",
+        &["input"],
+        &["print"],
+    );
     assert!(
         !r2.confirmed_sinks.is_empty(),
         "without sanitizer pattern, print should be confirmed (baseline check)"
@@ -161,7 +186,12 @@ class Dao {
     }
 }
 "#;
-    let r = run(src, "Method:com.example.Dao#run/1", &["input"], &["execute"]);
+    let r = run(
+        src,
+        "Method:com.example.Dao#run/1",
+        &["input"],
+        &["execute"],
+    );
     assert!(
         !r.confirmed_sinks.is_empty(),
         "sink on assignment RHS should be confirmed; sinks={:?}",

@@ -4,7 +4,7 @@ use cih_core::{
 };
 use cih_core::{
     ArchitectureHint, BindingKind, BuildSystem, ContractKind, ContractSite, JarInfo, ModuleInfo,
-    NodeKind, ParsedFile, RawImport, Range, ReferenceSite, RefKind, RepoMap, SymbolDef,
+    NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, RepoMap, SymbolDef,
     TypeBinding,
 };
 

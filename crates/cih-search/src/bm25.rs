@@ -164,7 +164,10 @@ fn node_text(node: &Node) -> String {
             if let Some(p) = props.get("path").and_then(|v| v.as_str()) {
                 // add both the raw path and its slash-split segments
                 parts.push(p.to_string());
-                for seg in p.split('/').filter(|s| !s.is_empty() && !s.starts_with('{')) {
+                for seg in p
+                    .split('/')
+                    .filter(|s| !s.is_empty() && !s.starts_with('{'))
+                {
                     parts.push(seg.to_string());
                 }
             }

@@ -614,11 +614,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
     let analyze_edges = analyze.artifacts.edges_path.clone();
     let analyze_version = analyze.artifacts.version.to_string();
 
-    run_discover_core(
-        &root,
-        &cih_engine::discover::DiscoverOverrides::default(),
-    )
-    .unwrap();
+    run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
         analyze_nodes.exists(),
@@ -631,7 +627,8 @@ fn discover_preserves_analyze_artifacts_on_disk() {
 
     let latest = cih_engine::versioning::latest_graph_artifacts(&root).unwrap();
     assert_eq!(
-        latest.version.as_str(), analyze_version,
+        latest.version.as_str(),
+        analyze_version,
         "latest_graph_artifacts must still return the analyze version after discover"
     );
     assert!(
@@ -653,11 +650,8 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
     let scan = scan::scan_repo(&root).unwrap();
     analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(
-        &root,
-        &cih_engine::discover::DiscoverOverrides::default(),
-    )
-    .unwrap();
+    let discover =
+        run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
         discover
@@ -702,11 +696,8 @@ fn discover_load_artifacts_are_analyze_then_community() {
     let scan = scan::scan_repo(&root).unwrap();
     let analyze = analyze_emit(&scan, all_scope()).unwrap();
 
-    let discover = run_discover_core(
-        &root,
-        &cih_engine::discover::DiscoverOverrides::default(),
-    )
-    .unwrap();
+    let discover =
+        run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
     let artifact_sets = discover.artifact_sets_for_load();
 
     // Canonicalize both sides: macOS temp_dir() symlinks may differ from canonicalized paths.

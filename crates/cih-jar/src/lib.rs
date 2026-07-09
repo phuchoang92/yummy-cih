@@ -224,7 +224,7 @@ impl JarApiExtractor {
                 kind: EdgeKind::HasMethod,
                 confidence: 1.0,
                 reason: "jar-member".into(),
-            props: None,
+                props: None,
             });
         }
 
@@ -257,7 +257,7 @@ impl JarApiExtractor {
                 kind: EdgeKind::HasField,
                 confidence: 1.0,
                 reason: "jar-member".into(),
-            props: None,
+                props: None,
             });
         }
 
@@ -340,5 +340,3 @@ fn normalize(out: &mut JarApiOutput) {
         .dedup_by(|a, b| a.src == b.src && a.dst == b.dst && a.kind == b.kind);
     out.skipped.sort_by(|a, b| a.entry.cmp(&b.entry));
 }
-
-

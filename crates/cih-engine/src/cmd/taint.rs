@@ -54,13 +54,17 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     let cih_dir = repo.join(".cih");
 
     // ── Load latest graph artifacts ───────────────────────────────────────────
-    let artifacts = latest_graph_artifacts(&repo)
-        .context("no graph artifacts found — run `analyze` first")?;
+    let artifacts =
+        latest_graph_artifacts(&repo).context("no graph artifacts found — run `analyze` first")?;
 
     tracing::info!(version = %artifacts.version, "loaded graph artifacts");
 
-    let nodes = artifacts.read_nodes().context("failed to read nodes.jsonl")?;
-    let edges = artifacts.read_edges().context("failed to read edges.jsonl")?;
+    let nodes = artifacts
+        .read_nodes()
+        .context("failed to read nodes.jsonl")?;
+    let edges = artifacts
+        .read_edges()
+        .context("failed to read edges.jsonl")?;
 
     tracing::info!(nodes = nodes.len(), edges = edges.len(), "graph loaded");
 
@@ -79,8 +83,10 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     // Derive intra-proc sink name patterns from the loaded rules so Phase 1 and Phase 3
     // always use the same set (which now includes any user additions from cih.taint.toml).
     let sink_name_patterns_owned: Vec<String> = rules.extra_sink_name_patterns.clone();
-    let sink_name_patterns: Vec<&str> =
-        sink_name_patterns_owned.iter().map(|s| s.as_str()).collect();
+    let sink_name_patterns: Vec<&str> = sink_name_patterns_owned
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     let node_map: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
     let repo_ref = repo.as_path();
     // Snapshot Phase-0 scores before Phase 1 modifies them.
@@ -120,12 +126,15 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         ui.spin("Phase 2: CFG construction + dominance tree");
 
         // Build CFG for each unique source method on a taint path.
-        let unique_sources: FxHashSet<&NodeId> =
-            paths.iter().map(|p| &p.source).collect();
+        let unique_sources: FxHashSet<&NodeId> = paths.iter().map(|p| &p.source).collect();
 
         for source_id in &unique_sources {
-            let Some(node) = node_map.get(source_id) else { continue };
-            let Ok(src) = std::fs::read_to_string(repo_ref.join(&node.file)) else { continue };
+            let Some(node) = node_map.get(source_id) else {
+                continue;
+            };
+            let Ok(src) = std::fs::read_to_string(repo_ref.join(&node.file)) else {
+                continue;
+            };
             let Some(cfg) = cih_taint::build_cfg(source_id, &src) else {
                 cfg_stats.ir_unavailable += 1;
                 continue;
@@ -134,8 +143,7 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
             cfg_stats.methods_analyzed += 1;
             cfg_stats.total_blocks += cfg.block_count();
             cfg_stats.total_edges += cfg.edge_count();
-            cfg_stats.max_cyclomatic =
-                cfg_stats.max_cyclomatic.max(cfg.cyclomatic_complexity());
+            cfg_stats.max_cyclomatic = cfg_stats.max_cyclomatic.max(cfg.cyclomatic_complexity());
             cfg_stats.dominated_pairs += dom.dominated_ids().count();
             tracing::debug!(
                 method = %source_id.as_str(),
@@ -159,8 +167,11 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         ui.spin("Phase 3: PDG construction + flow-sensitive taint");
 
         // Sanitizer node-id patterns from the same rules used by Phase 0.
-        let sanitizer_patterns: Vec<&str> =
-            rules.sanitizers.iter().map(|s| s.node_id_pattern.as_str()).collect();
+        let sanitizer_patterns: Vec<&str> = rules
+            .sanitizers
+            .iter()
+            .map(|s| s.node_id_pattern.as_str())
+            .collect();
 
         let refinements = cih_taint::flow_sensitive::refine_paths(
             &paths,
@@ -274,20 +285,46 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     Ok(())
 }
 
-fn print_human_report(paths: &[TaintPath], load: &LoadOutcome, taint_dir: &Path, cfg: &CfgStats, pdg: &PdgStats) {
+fn print_human_report(
+    paths: &[TaintPath],
+    load: &LoadOutcome,
+    taint_dir: &Path,
+    cfg: &CfgStats,
+    pdg: &PdgStats,
+) {
     crate::ui::print_header("Taint", "Phase 0 + Phase 1 + Phase 2 + Phase 3", None);
     crate::ui::print_row("Paths", &crate::ui::fmt_count(paths.len()));
 
     // Count by category.
-    let sql = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::Sql).count();
-    let exec = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::Exec).count();
-    let file = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::File).count();
-    let html = paths.iter().filter(|p| p.category == cih_taint::SinkCategory::Html).count();
+    let sql = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::Sql)
+        .count();
+    let exec = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::Exec)
+        .count();
+    let file = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::File)
+        .count();
+    let html = paths
+        .iter()
+        .filter(|p| p.category == cih_taint::SinkCategory::Html)
+        .count();
 
-    if sql > 0 { crate::ui::print_row("  SQL", &crate::ui::fmt_count(sql)); }
-    if exec > 0 { crate::ui::print_row("  Exec", &crate::ui::fmt_count(exec)); }
-    if file > 0 { crate::ui::print_row("  File", &crate::ui::fmt_count(file)); }
-    if html > 0 { crate::ui::print_row("  HTML", &crate::ui::fmt_count(html)); }
+    if sql > 0 {
+        crate::ui::print_row("  SQL", &crate::ui::fmt_count(sql));
+    }
+    if exec > 0 {
+        crate::ui::print_row("  Exec", &crate::ui::fmt_count(exec));
+    }
+    if file > 0 {
+        crate::ui::print_row("  File", &crate::ui::fmt_count(file));
+    }
+    if html > 0 {
+        crate::ui::print_row("  HTML", &crate::ui::fmt_count(html));
+    }
 
     if cfg.methods_analyzed > 0 {
         crate::ui::print_row("CFGs built", &crate::ui::fmt_count(cfg.methods_analyzed));
@@ -300,7 +337,10 @@ fn print_human_report(paths: &[TaintPath], load: &LoadOutcome, taint_dir: &Path,
     }
     if pdg.methods_analyzed > 0 {
         crate::ui::print_row("PDG confirmed", &crate::ui::fmt_count(pdg.confirmed_sinks));
-        crate::ui::print_row("PDG conditional", &crate::ui::fmt_count(pdg.conditional_sinks));
+        crate::ui::print_row(
+            "PDG conditional",
+            &crate::ui::fmt_count(pdg.conditional_sinks),
+        );
     }
     if pdg.ir_unavailable > 0 {
         crate::ui::print_row("PDG unavailable", &crate::ui::fmt_count(pdg.ir_unavailable));
@@ -322,7 +362,11 @@ fn print_human_report(paths: &[TaintPath], load: &LoadOutcome, taint_dir: &Path,
     println!();
 
     let mut sorted: Vec<&TaintPath> = paths.iter().collect();
-    sorted.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for (i, path) in sorted.iter().take(show).enumerate() {
         let source_short = short_name(path.source.as_str());

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use cih_wiki::{
-    CommunityLlmSummary, FeatureMetaEntry, FeatureLlmSummary, FlowCacheEntry, FlowLlmSummary,
+    CommunityLlmSummary, FeatureLlmSummary, FeatureMetaEntry, FlowCacheEntry, FlowLlmSummary,
     WikiMeta, WikiModuleCacheEntry,
 };
 

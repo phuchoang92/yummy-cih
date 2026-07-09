@@ -124,4 +124,3 @@ fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
         "semantic",
     )
 }
-

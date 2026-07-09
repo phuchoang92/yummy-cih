@@ -53,7 +53,11 @@ pub(crate) fn c3_linearize(
             .iter()
             .find_map(|list| {
                 let h = &list[0];
-                if !tails.contains(h) { Some(h.clone()) } else { None }
+                if !tails.contains(h) {
+                    Some(h.clone())
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| lists[0][0].clone()); // cycle fallback: take first
         result.push(head.clone());
@@ -70,4 +74,3 @@ pub(crate) fn c3_linearize(
     cache.insert(fqcn.to_string(), result.clone());
     result
 }
-

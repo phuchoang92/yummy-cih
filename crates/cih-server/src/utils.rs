@@ -1,6 +1,9 @@
 use cih_core::{ContractMatchKind, Edge, GraphArtifacts, Node, VersionId};
 use cih_graph_store::{Direction, GraphStoreError};
-use rmcp::{model::{CallToolResult, Content}, ErrorData as McpError};
+use rmcp::{
+    model::{CallToolResult, Content},
+    ErrorData as McpError,
+};
 
 pub fn to_mcp(e: GraphStoreError) -> McpError {
     McpError::internal_error(e.to_string(), None)

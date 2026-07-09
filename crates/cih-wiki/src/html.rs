@@ -266,6 +266,3 @@ fn escape_html_attr(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
-
-
-

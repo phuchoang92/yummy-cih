@@ -72,9 +72,7 @@ fn test_rbconfiguration_matches_modularity() {
     let rb = RBConfiguration::new();
     let m = Modularity::new();
     let c = undirected_mc();
-    assert!(
-        (rb.delta_move_from_components(&c) - m.delta_move_from_components(&c)).abs() < 1e-10
-    );
+    assert!((rb.delta_move_from_components(&c) - m.delta_move_from_components(&c)).abs() < 1e-10);
 }
 
 #[test]
@@ -99,9 +97,7 @@ fn test_rbconfiguration_with_resolution() {
         n_current: 2.0,
         directed: false,
     };
-    assert!(
-        (rb.delta_move_from_components(&c) - m.delta_move_from_components(&c)).abs() < 1e-10
-    );
+    assert!((rb.delta_move_from_components(&c) - m.delta_move_from_components(&c)).abs() < 1e-10);
 }
 
 #[test]
@@ -266,9 +262,7 @@ fn test_rbconfiguration_directed_matches_modularity() {
         n_current: 1.0,
         directed: true,
     };
-    assert!(
-        (rb.delta_move_from_components(&c) - m.delta_move_from_components(&c)).abs() < 1e-10
-    );
+    assert!((rb.delta_move_from_components(&c) - m.delta_move_from_components(&c)).abs() < 1e-10);
 }
 
 #[test]

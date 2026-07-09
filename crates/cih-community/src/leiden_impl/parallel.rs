@@ -1,11 +1,11 @@
 //! Parallel algorithm primitives gated behind the `rayon` feature.
 
 #[cfg(feature = "rayon")]
-use rayon::prelude::*;
-#[cfg(feature = "rayon")]
 use rand::rngs::StdRng;
 #[cfg(feature = "rayon")]
 use rand::seq::SliceRandom;
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 #[cfg(feature = "rayon")]
 use rustc_hash::FxHashMap;
 
@@ -193,8 +193,8 @@ pub(crate) fn local_moving_parallel(
                 .map_init(
                     || {
                         (
-                            vec![0.0f64; n],  // out_neighbor_comm_weights
-                            vec![0.0f64; n],  // in_neighbor_comm_weights
+                            vec![0.0f64; n],                 // out_neighbor_comm_weights
+                            vec![0.0f64; n],                 // in_neighbor_comm_weights
                             Vec::<usize>::with_capacity(64), // touched_list (out)
                             Vec::<usize>::with_capacity(64), // touched_list (in)
                         )

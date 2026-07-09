@@ -184,13 +184,7 @@ fn build_undirected_csr(
         })
         .collect();
 
-    validate_csr(
-        n,
-        &out_offsets,
-        &out_targets,
-        &out_weights,
-        &node_weights,
-    )?;
+    validate_csr(n, &out_offsets, &out_targets, &out_weights, &node_weights)?;
 
     let total_weight = degree.iter().sum::<f64>() / 2.0;
     let total_node_weight: f64 = node_weights.iter().sum();
@@ -305,20 +299,8 @@ fn build_directed_csr(
         })
         .collect();
 
-    validate_csr(
-        n,
-        &out_offsets,
-        &out_targets,
-        &out_weights,
-        &node_weights,
-    )?;
-    validate_csr(
-        n,
-        &in_offsets,
-        &in_targets,
-        &in_weights,
-        &node_weights,
-    )?;
+    validate_csr(n, &out_offsets, &out_targets, &out_weights, &node_weights)?;
+    validate_csr(n, &in_offsets, &in_targets, &in_weights, &node_weights)?;
 
     let total_weight: f64 = edges.iter().map(|&(_, _, w)| w).sum();
     let total_node_weight: f64 = node_weights.iter().sum();

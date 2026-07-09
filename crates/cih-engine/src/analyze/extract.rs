@@ -58,7 +58,11 @@ pub fn extract_integration_xml_in_repo(repo_root: &Path) -> (Vec<Node>, Vec<Edge
                         .and_then(|e| e.to_str())
                         .map(|e| e.eq_ignore_ascii_case("xml"))
                         .unwrap_or(false);
-                    if is_xml { Some(path) } else { None }
+                    if is_xml {
+                        Some(path)
+                    } else {
+                        None
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, "integration-xml: walk error — skipping");

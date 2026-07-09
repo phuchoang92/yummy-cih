@@ -46,25 +46,27 @@ pub mod analyzer;
 pub mod cfg;
 pub mod config;
 pub mod error;
+pub mod flow_sensitive;
+pub mod interproc;
 pub mod ir;
 pub mod java_ir;
-pub mod interproc;
-pub mod pdg;
 pub mod liveness;
+pub mod pdg;
 pub(crate) mod queue;
 pub mod rules;
-pub mod flow_sensitive;
 
 pub use analyzer::{
-    run_taint_analysis, TaintAnalysisInput, TaintAnalysisResult, TaintCfgStats, TaintPdgStats,
-    TaintPass, TaintPhaseConfig,
+    run_taint_analysis, TaintAnalysisInput, TaintAnalysisResult, TaintCfgStats, TaintPass,
+    TaintPdgStats, TaintPhaseConfig,
 };
 pub use cfg::{build_cfg, BasicBlock, BlockId, Cfg, CfgEdgeKind, DomTree};
 pub use config::load_taint_rules;
 pub use error::{TaintError, TaintResult};
-pub use ir::{MethodBody, StatementKind, StatementNode};
-pub use interproc::{find_taint_paths, TaintPath};
-pub use pdg::{build_pdg, compute_reaching_defs, param_def_id, Pdg, PdgEdge, PdgEdgeKind, ReachingDefs};
-pub use liveness::{analyze_method, ConfirmedSink, IntraResult, PathRefinement};
-pub use rules::{default_rules, Language, SinkCategory, TaintRules, TaintSanitizer, TaintSink};
 pub use flow_sensitive::{analyze_with_pdg, PdgRefinement, PdgResult, PdgSink};
+pub use interproc::{find_taint_paths, TaintPath};
+pub use ir::{MethodBody, StatementKind, StatementNode};
+pub use liveness::{analyze_method, ConfirmedSink, IntraResult, PathRefinement};
+pub use pdg::{
+    build_pdg, compute_reaching_defs, param_def_id, Pdg, PdgEdge, PdgEdgeKind, ReachingDefs,
+};
+pub use rules::{default_rules, Language, SinkCategory, TaintRules, TaintSanitizer, TaintSink};

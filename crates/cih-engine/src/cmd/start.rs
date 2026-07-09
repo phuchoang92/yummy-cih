@@ -103,8 +103,7 @@ impl LlmChoice {
 }
 
 /// Indexing strategy for the interactive start workflow.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum IndexMode {
     /// Only scan — no analyze step.
     ScanOnly,
@@ -114,7 +113,6 @@ pub enum IndexMode {
     /// Analyze specific modules by name.
     Modules(Vec<String>),
 }
-
 
 /// Configuration assembled from user prompts / arguments before
 /// building the command plan.

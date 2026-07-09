@@ -7,7 +7,7 @@ mod leiden;
 mod leiden_impl;
 pub mod registry;
 
-use rustc_hash::{FxHashMap};
+use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cih_core::{community_id, process_id, Edge, EdgeKind, Node, NodeId, NodeKind, Range};
@@ -110,8 +110,10 @@ pub fn detect_communities(
     let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
     let mut write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
     // publishes_by_member and consumes_by_member store (topic_node, topic_kind_str)
-    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
-    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
+    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
+        FxHashMap::default();
+    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
+        FxHashMap::default();
     for e in edges {
         match e.kind {
             EdgeKind::HandlesRoute => {
@@ -409,7 +411,7 @@ pub fn detect_communities(
                 kind: EdgeKind::MemberOf,
                 confidence: 1.0,
                 reason: "leiden".into(),
-            props: None,
+                props: None,
             });
             out.memberships.push((member_id, comm_id.clone()));
         }
@@ -451,7 +453,11 @@ pub fn cluster_similarity_edges(
         let b = *index_of
             .entry(dst.clone())
             .or_insert_with(|| graph.add_node(dst.clone()));
-        let key = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        let key = if a.index() <= b.index() {
+            (a, b)
+        } else {
+            (b, a)
+        };
         edge_weight
             .entry(key)
             .and_modify(|w| {
@@ -504,7 +510,11 @@ pub fn cluster_indexed_edges(
         }
         let a = *index_of.entry(src).or_insert_with(|| graph.add_node(src));
         let b = *index_of.entry(dst).or_insert_with(|| graph.add_node(dst));
-        let key = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        let key = if a.index() <= b.index() {
+            (a, b)
+        } else {
+            (b, a)
+        };
         edge_weight
             .entry(key)
             .and_modify(|w| {
@@ -526,7 +536,11 @@ pub fn cluster_indexed_edges(
     let assignments = leiden::leiden(&graph, resolution, max_iterations as usize, seed as u64);
     graph
         .node_indices()
-        .filter_map(|idx| assignments.get(idx.index()).map(|&cluster| (graph[idx], cluster)))
+        .filter_map(|idx| {
+            assignments
+                .get(idx.index())
+                .map(|&cluster| (graph[idx], cluster))
+        })
         .collect()
 }
 
@@ -549,34 +563,54 @@ pub fn detect_communities_from_packages(
     let mut queries_by_method: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
     let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
     let mut write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
-    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
-    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> = FxHashMap::default();
+    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
+        FxHashMap::default();
+    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
+        FxHashMap::default();
     for e in edges {
         match e.kind {
             EdgeKind::HandlesRoute => {
                 if let Some(rn) = source_by_id.get(&e.dst) {
-                    route_nodes_by_handler.entry(e.src.clone()).or_default().push(rn);
+                    route_nodes_by_handler
+                        .entry(e.src.clone())
+                        .or_default()
+                        .push(rn);
                 }
             }
             EdgeKind::ExecutesQuery => {
-                queries_by_method.entry(e.src.clone()).or_default().push(e.dst.clone());
+                queries_by_method
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(e.dst.clone());
             }
             EdgeKind::ReadsTable => {
-                read_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+                read_tables_by_query
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(e.dst.clone());
             }
             EdgeKind::WritesTable => {
-                write_tables_by_query.entry(e.src.clone()).or_default().push(e.dst.clone());
+                write_tables_by_query
+                    .entry(e.src.clone())
+                    .or_default()
+                    .push(e.dst.clone());
             }
             EdgeKind::PublishesEvent => {
                 if let Some(tn) = source_by_id.get(&e.dst) {
                     let kind_str = topic_kind_str(tn);
-                    publishes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
+                    publishes_by_member
+                        .entry(e.src.clone())
+                        .or_default()
+                        .push((tn, kind_str));
                 }
             }
             EdgeKind::ListensTo => {
                 if let Some(tn) = source_by_id.get(&e.dst) {
                     let kind_str = topic_kind_str(tn);
-                    consumes_by_member.entry(e.src.clone()).or_default().push((tn, kind_str));
+                    consumes_by_member
+                        .entry(e.src.clone())
+                        .or_default()
+                        .push((tn, kind_str));
                 }
             }
             _ => {}
@@ -593,7 +627,10 @@ pub fn detect_communities_from_packages(
     // Largest groups first, then alphabetical for a stable, deterministic order.
     let mut groups: Vec<(String, Vec<NodeId>)> = groups.into_iter().collect();
     groups.sort_by(|(a_feat, a_members), (b_feat, b_members)| {
-        b_members.len().cmp(&a_members.len()).then_with(|| a_feat.cmp(b_feat))
+        b_members
+            .len()
+            .cmp(&a_members.len())
+            .then_with(|| a_feat.cmp(b_feat))
     });
 
     let mut out = CommunityOutput::default();
@@ -656,7 +693,10 @@ pub fn detect_communities_from_packages(
                     .flatten()
                     .chain(write_tables_by_query.get(qid).into_iter().flatten())
                 {
-                    let tname = tid.as_str().strip_prefix("DbTable:").unwrap_or(tid.as_str());
+                    let tname = tid
+                        .as_str()
+                        .strip_prefix("DbTable:")
+                        .unwrap_or(tid.as_str());
                     all_tables.insert(tname.to_string());
                     *table_counts.entry(tname.to_string()).or_insert(0) += 1;
                 }
@@ -780,7 +820,8 @@ pub fn trace_processes(
     cfg: &ProcessConfig,
     registry: &EntrypointRegistry,
 ) -> ProcessOutput {
-    let (digraph, node_index) = cih_core::build_calls_digraph(nodes, edges, cfg.min_trace_confidence);
+    let (digraph, node_index) =
+        cih_core::build_calls_digraph(nodes, edges, cfg.min_trace_confidence);
     if digraph.node_count() == 0 {
         return ProcessOutput::default();
     }
@@ -883,7 +924,7 @@ pub fn trace_processes(
                 kind: EdgeKind::StepInProcess,
                 confidence: 1.0,
                 reason: format!("step:{}", step_idx + 1),
-            props: None,
+                props: None,
             });
         }
     }
@@ -1132,23 +1173,35 @@ mod indexed_leiden_tests {
             (0, 2, 0.9), // triangle 1
             (3, 4, 0.9),
             (4, 5, 0.9),
-            (3, 5, 0.9), // triangle 2
+            (3, 5, 0.9),  // triangle 2
             (2, 3, 0.66), // weak bridge
         ];
         let nid_edges: Vec<(NodeId, NodeId, f32)> = raw
             .iter()
-            .map(|&(a, b, w)| (NodeId::new(ids[a].to_string()), NodeId::new(ids[b].to_string()), w))
+            .map(|&(a, b, w)| {
+                (
+                    NodeId::new(ids[a].to_string()),
+                    NodeId::new(ids[b].to_string()),
+                    w,
+                )
+            })
             .collect();
-        let idx_edges: Vec<(u32, u32, f32)> =
-            raw.iter().map(|&(a, b, w)| (a as u32, b as u32, w)).collect();
+        let idx_edges: Vec<(u32, u32, f32)> = raw
+            .iter()
+            .map(|&(a, b, w)| (a as u32, b as u32, w))
+            .collect();
 
         let via_nodeid = cluster_similarity_edges(&nid_edges, 1.0, 0xc0de, 10);
         let via_index = cluster_indexed_edges(&idx_edges, 1.0, 0xc0de, 10);
 
-        let am: HashMap<String, usize> =
-            via_nodeid.into_iter().map(|(id, c)| (id.as_str().to_string(), c)).collect();
-        let bm: HashMap<String, usize> =
-            via_index.into_iter().map(|(u, c)| (ids[u as usize].to_string(), c)).collect();
+        let am: HashMap<String, usize> = via_nodeid
+            .into_iter()
+            .map(|(id, c)| (id.as_str().to_string(), c))
+            .collect();
+        let bm: HashMap<String, usize> = via_index
+            .into_iter()
+            .map(|(u, c)| (ids[u as usize].to_string(), c))
+            .collect();
 
         assert_eq!(am.len(), bm.len(), "both should cluster the same node set");
         // Cluster ids may be numbered differently; assert the *partition* is identical.
@@ -1166,4 +1219,3 @@ mod indexed_leiden_tests {
         }
     }
 }
-

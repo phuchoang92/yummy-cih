@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Result};
-use cih_wiki::{FeatureLlmSummary, WikiGraph};
 use cih_wiki::features::FeatureGroup;
+use cih_wiki::{FeatureLlmSummary, WikiGraph};
 
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
