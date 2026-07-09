@@ -97,6 +97,9 @@ impl ResolveIndex {
                     }
                     idx.language_of_type
                         .insert(def.fqcn.clone(), lang.to_string());
+                    if idx.types_by_fqcn.contains_key(&def.fqcn) {
+                        tracing::warn!(fqcn = %def.fqcn, file = %pf.file, "duplicate type FQCN in scope — later definition overwrites earlier");
+                    }
                     idx.types_by_fqcn.insert(def.fqcn.clone(), def.clone());
                     idx.simple_to_fqcns
                         .entry(simple_of(&def.fqcn))
