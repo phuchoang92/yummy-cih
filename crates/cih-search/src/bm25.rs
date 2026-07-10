@@ -141,6 +141,109 @@ impl SearchIndex {
     }
 }
 
+/// BM25 index over arbitrary text documents, addressed by build-order ordinal.
+///
+/// Unlike [`SearchIndex`], which indexes graph nodes, this scores plain
+/// strings (e.g. rendered wiki pages) and returns `(ordinal, score)` pairs.
+/// Empty documents keep their ordinal so callers can map hits back to their
+/// own collection, but they never match.
+#[derive(Clone, Debug, Default)]
+pub struct TextIndex {
+    docs: Vec<Vec<String>>,
+    avg_doc_len: f32,
+    doc_freq: HashMap<String, usize>,
+}
+
+impl TextIndex {
+    pub fn build<'a, I>(docs: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut token_docs = Vec::new();
+        let mut doc_freq: HashMap<String, usize> = HashMap::new();
+        let mut total_len = 0usize;
+
+        for text in docs {
+            let tokens = tokenize(text);
+            total_len += tokens.len();
+
+            let mut seen = HashSet::new();
+            for token in &tokens {
+                if seen.insert(token.as_str()) {
+                    *doc_freq.entry(token.clone()).or_insert(0) += 1;
+                }
+            }
+
+            token_docs.push(tokens);
+        }
+
+        let indexed = token_docs.iter().filter(|t| !t.is_empty()).count();
+        let avg_doc_len = if indexed == 0 {
+            0.0
+        } else {
+            total_len as f32 / indexed as f32
+        };
+
+        Self {
+            docs: token_docs,
+            avg_doc_len,
+            doc_freq,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.docs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.docs.is_empty()
+    }
+
+    /// Rank documents against `query`, best first. Ties break on ordinal.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<(usize, f32)> {
+        if self.docs.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let query_tokens = tokenize(query);
+        if query_tokens.is_empty() {
+            return Vec::new();
+        }
+        let indexed = self.docs.iter().filter(|t| !t.is_empty()).count();
+
+        let mut hits = Vec::new();
+        for (ordinal, tokens) in self.docs.iter().enumerate() {
+            if tokens.is_empty() {
+                continue;
+            }
+            let mut term_freq: HashMap<&str, usize> = HashMap::new();
+            for token in tokens {
+                *term_freq.entry(token.as_str()).or_insert(0) += 1;
+            }
+
+            let mut score = 0.0;
+            for token in &query_tokens {
+                let tf = *term_freq.get(token.as_str()).unwrap_or(&0) as f32;
+                if tf == 0.0 {
+                    continue;
+                }
+                let df = *self.doc_freq.get(token).unwrap_or(&0) as f32;
+                score += idf(indexed as f32, df) * (tf * (K1 + 1.0))
+                    / (tf
+                        + K1 * (1.0 - B
+                            + B * (tokens.len() as f32 / self.avg_doc_len.max(1.0))));
+            }
+
+            if score > 0.0 {
+                hits.push((ordinal, score));
+            }
+        }
+
+        hits.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        hits.truncate(limit);
+        hits
+    }
+}
+
 fn idf(total_docs: f32, matching_docs: f32) -> f32 {
     ((total_docs - matching_docs + 0.5) / (matching_docs + 0.5) + 1.0).ln()
 }

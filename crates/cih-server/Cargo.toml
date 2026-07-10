@@ -41,3 +41,6 @@ rmcp = { version = "0.7", features = ["server", "macros", "transport-streamable-
 schemars = "1"
 reqwest.workspace = true
 constant_time_eq = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

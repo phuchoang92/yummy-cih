@@ -12,7 +12,7 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 use serde::Serialize;
 
 use crate::args::TaintPathsArgs;
-use crate::utils::{json_result, load_artifact_edges, load_artifact_nodes};
+use crate::utils::{json_result, load_artifact_edges, load_artifact_nodes, resolve_repo};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;
@@ -54,27 +54,6 @@ fn parse_category(s: &str) -> Result<Option<SinkCategory>, String> {
             "unknown category '{other}'; expected all, sql, exec, file, or html"
         )),
     }
-}
-
-/// Resolve `repo` (name/path, or empty for the active graph key) to
-/// `(repo_path, artifacts_dir)` via the registry.
-fn resolve_repo(repo: &str, graph_key: &str) -> Result<(String, String), String> {
-    let reg = cih_core::Registry::load();
-    if reg.entries.is_empty() {
-        return Err("no repos in registry — run `cih-engine analyze <repo>` first".to_string());
-    }
-    let entry = if repo.is_empty() {
-        reg.entries
-            .iter()
-            .find(|e| e.graph_key == graph_key)
-            .ok_or_else(|| {
-                format!("no repo registered for graph_key '{graph_key}'; pass `repo` explicitly")
-            })?
-    } else {
-        reg.find(repo)
-            .ok_or_else(|| format!("repo '{repo}' not in registry"))?
-    };
-    Ok((entry.path.clone(), entry.artifacts_dir.clone()))
 }
 
 pub async fn taint_paths(

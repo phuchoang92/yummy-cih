@@ -41,7 +41,7 @@ use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, parse_direction, text_result, to_mcp};
 use crate::{
     agent, browser, changes, contracts, coverage, feature, files, indexing, patterns, resources,
-    search, server, symbol, taint,
+    search, server, symbol, taint, wiki,
 };
 
 use crate::config::{build_store, Config};
@@ -783,6 +783,9 @@ pub async fn run() -> Result<()> {
     let protected = axum::Router::new()
         .nest_service("/mcp", service)
         .merge(browser::router(browser_state))
+        .merge(wiki::router(wiki::WikiSearchState::new(
+            cfg.graph_key.clone(),
+        )))
         .layer(middleware::from_fn_with_state(
             cfg.api_token.clone(),
             server::auth_middleware,
@@ -805,6 +808,7 @@ pub async fn run() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     tracing::info!("MCP (Streamable HTTP) listening on http://{}/mcp", cfg.bind);
     tracing::info!("CIH graph browser listening on http://{}/graph", cfg.bind);
+    tracing::info!("wiki search listening on http://{}/wiki/search", cfg.bind);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(server::shutdown_signal())

@@ -130,3 +130,25 @@ fn rrf_combined_item_wins_over_single_source_items() {
     assert_eq!(fused[0].node_id.as_str(), "Class:B");
     assert_eq!(fused[0].sources, vec!["bm25", "semantic"]);
 }
+
+#[test]
+fn text_index_scores_generic_documents() {
+    use cih_search::TextIndex;
+
+    let docs = [
+        "Loan repayment schedules and interest accrual",
+        "Invoice generation for monthly billing",
+        "",
+    ];
+    let index = TextIndex::build(docs.iter().copied());
+    assert_eq!(index.len(), 3);
+
+    let hits = index.search("repayment schedule", 10);
+    assert_eq!(hits[0].0, 0);
+    // The empty document never matches.
+    assert!(hits.iter().all(|(ordinal, _)| *ordinal != 2));
+
+    assert!(index.search("", 10).is_empty());
+    assert!(index.search("repayment", 0).is_empty());
+    assert!(TextIndex::build(std::iter::empty()).search("x", 5).is_empty());
+}

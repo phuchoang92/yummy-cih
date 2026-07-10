@@ -2,8 +2,8 @@
 //!
 //! The public surface is deliberately small: [`run`] (the server entry point
 //! used by the `cih-server` binary) plus the modules exercised by integration
-//! tests (`args`, `browser`, `patterns`, `search`, `utils`, `viz`). Everything
-//! else is crate-private wiring.
+//! tests (`args`, `browser`, `patterns`, `search`, `utils`, `viz`, `wiki`).
+//! Everything else is crate-private wiring.
 
 mod app;
 
@@ -13,6 +13,7 @@ pub mod patterns;
 pub mod search;
 pub mod utils;
 pub mod viz;
+pub mod wiki;
 
 pub(crate) mod agent;
 pub(crate) mod changes;

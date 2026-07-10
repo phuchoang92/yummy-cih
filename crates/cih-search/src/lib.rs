@@ -10,7 +10,7 @@ mod tokenize;
 
 use cih_core::NodeKind;
 
-pub use bm25::{IndexedDoc, SearchIndex};
+pub use bm25::{IndexedDoc, SearchIndex, TextIndex};
 pub use rrf::{rrf_merge, SearchHit, RRF_K};
 pub use tokenize::tokenize;
 
