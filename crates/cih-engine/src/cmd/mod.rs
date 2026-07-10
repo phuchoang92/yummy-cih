@@ -16,6 +16,7 @@ pub mod list;
 pub mod start;
 pub mod start_env;
 pub mod status;
+pub mod refresh;
 pub mod taint;
 pub mod tui;
 pub mod wiki;
@@ -85,6 +86,7 @@ pub fn main() -> Result<()> {
             } => group::run_group_sync(&name, json),
         },
         Command::Wiki(a) => wiki::run(a),
+        Command::Refresh(a) => refresh::run(a),
         Command::Features { command } => match command {
             FeaturesCommand::Show { repo, json } => features::run_features_show(repo, json),
             FeaturesCommand::Override {

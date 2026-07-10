@@ -77,9 +77,9 @@ impl std::str::FromStr for WikiGrouping {
 
 /// Increment this whenever any LLM prompt template changes so that cached outputs
 /// produced with old prompts are automatically invalidated.
-pub(super) const PROMPT_VERSION: u32 = 1;
+pub(crate) const PROMPT_VERSION: u32 = 1;
 
-pub(super) fn fnv64(s: &str) -> String {
+pub(crate) fn fnv64(s: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
         h ^= b as u64;
@@ -94,7 +94,7 @@ pub(super) fn llm_cache_key(evidence: &str, model: &str, language: &str) -> Stri
     fnv64(&format!("{}\x00{}\x00{}\x00{}", evidence, model, language, PROMPT_VERSION))
 }
 
-pub(super) fn load_wiki_meta(out_dir: &Path) -> Option<WikiMeta> {
+pub(crate) fn load_wiki_meta(out_dir: &Path) -> Option<WikiMeta> {
     let path = out_dir.join("wiki_meta.json");
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()

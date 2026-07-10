@@ -771,6 +771,30 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     Ok(())
 }
 
+/// Check whether the wiki needs regeneration without actually running it.
+///
+/// Returns `true` when regeneration is needed (HEAD, graph version, or flags changed).
+/// Used by `refresh` to decide whether to call `run_wiki`.
+pub(crate) fn wiki_needs_regen(
+    repo: &std::path::Path,
+    out_dir: &std::path::Path,
+    wiki_mode: super::config::WikiMode,
+    grouping: super::config::WikiGrouping,
+    wiki_language: &str,
+    llm_model: &str,
+) -> bool {
+    let repo_commit = cih_core::git_head(repo);
+    let graph_version = crate::versioning::latest_graph_artifacts(repo)
+        .map(|a| a.version.to_string())
+        .unwrap_or_default();
+    let flags_hash = super::config::fnv64(&format!(
+        "{}\x00{}\x00{}\x00{}\x00{}",
+        wiki_mode, grouping, wiki_language, llm_model, super::config::PROMPT_VERSION
+    ));
+    let existing_meta = super::config::load_wiki_meta(out_dir);
+    !is_wiki_up_to_date(&existing_meta, &repo_commit, &graph_version, &flags_hash)
+}
+
 /// Returns true when the existing wiki output is current and does not need regeneration.
 /// Requires all three signals to match: git HEAD, graph version, and effective wiki flags.
 /// For repos without git, HEAD is None and the gate never fires (safe conservative default).
