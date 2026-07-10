@@ -141,6 +141,9 @@ pub struct WikiConfig {
     /// Only check whether the wiki is up to date; do not regenerate.
     /// Exits 0 if up to date, exits 2 if stale.
     pub check_only: bool,
+    /// Re-render only features affected by files changed since this git ref.
+    /// Requires a previous full wiki run (manifest.json) to merge unchanged feature pages.
+    pub since_ref: Option<String>,
 }
 
 impl Default for WikiConfig {
@@ -167,6 +170,7 @@ impl Default for WikiConfig {
             filter_route: vec![],
             json: false,
             check_only: false,
+            since_ref: None,
         }
     }
 }

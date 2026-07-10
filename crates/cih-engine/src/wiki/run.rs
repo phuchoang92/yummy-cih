@@ -58,6 +58,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         filter_route,
         json,
         check_only,
+        since_ref,
     } = cfg;
     let repo = repo.as_path();
     let default_model = match llm_provider {
@@ -642,6 +643,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         entrypoints,
         repo_commit: repo_commit.clone(),
         flags_hash: Some(flags_hash),
+        changed_files: since_ref.as_deref().map(|r| {
+            cih_core::git_changed_files(repo, r)
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        }),
     };
 
     tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");

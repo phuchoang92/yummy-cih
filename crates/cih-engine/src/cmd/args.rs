@@ -528,6 +528,11 @@ pub struct WikiArgs {
     /// Combine with --json for machine-readable output.
     #[arg(long)]
     pub check: bool,
+    /// Re-render only features affected by files changed since this git ref (commit SHA, branch,
+    /// or tag). Merges with the existing manifest.json for unchanged features. Requires a prior
+    /// full wiki run. Example: --since origin/main
+    #[arg(long)]
+    pub since: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

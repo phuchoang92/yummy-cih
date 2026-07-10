@@ -174,6 +174,10 @@ pub struct WikiInput<'a> {
     /// FNV-1a hash of effective wiki flags (mode‖grouping‖language‖model‖PROMPT_VERSION).
     /// Stored in wiki_meta.json so the no-op gate can detect flag changes between runs.
     pub flags_hash: Option<String>,
+    /// Files changed since the `--since <ref>` git ref.
+    /// When `Some`, only features with nodes in these files are re-rendered.
+    /// `None` = full render (default).
+    pub changed_files: Option<std::collections::HashSet<String>>,
 }
 
 #[derive(Debug)]
@@ -281,8 +285,6 @@ struct PageGenCtx<'a> {
     class_primary_feature: &'a HashMap<String, String>,
     feature_scheduled_counts: &'a HashMap<String, usize>,
     feature_listener_counts: &'a HashMap<String, usize>,
-    /// RFC 3339 timestamp of when this wiki generation run started.
-    generated_at: String,
 }
 
 /// Write the system-level global pages: system index + shared routes.
@@ -381,7 +383,6 @@ fn emit_feature_section(
     };
     let page_meta = pages::WikiPageMeta {
         enrichment_tier,
-        generated_at: &ctx.generated_at,
         graph_version: &ctx.input.graph_version,
     };
     let po_md = pages::feature_po::render_feature_po(
@@ -1133,19 +1134,6 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
     std::fs::create_dir_all(out_dir.join("pages"))?;
     for group in &feature_groups {
         let dev_dir = out_dir.join(format!("pages/{}/dev", group.feature));
-        // Remove stale .md/.json files left over from a prior community-based run
-        if dev_dir.exists() {
-            for entry in std::fs::read_dir(&dev_dir)? {
-                let path = entry?.path();
-                if path
-                    .extension()
-                    .map(|e| e == "md" || e == "json")
-                    .unwrap_or(false)
-                {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-        }
         std::fs::create_dir_all(&dev_dir)?;
         // Feature folder root: position 10 so it sorts after index (1) and routes (2).
         let feature_dir = out_dir.join(format!("pages/{}", group.feature));
@@ -1311,11 +1299,22 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         class_primary_feature: &class_primary_feature,
         feature_scheduled_counts: &feature_scheduled_counts,
         feature_listener_counts: &feature_listener_counts,
-        generated_at: cih_core::now_rfc3339(),
     };
+
+    // Compute which features need re-rendering when --since is active.
+    // Global and community pages are always re-rendered (fast, write-if-different handles mtimes).
+    let affected_features: Option<std::collections::HashSet<String>> =
+        input.changed_files.as_ref().map(|changed| {
+            features_affected_by_changed_files(&feature_groups, &graph, changed)
+        });
 
     // Per-feature pages
     for group in &feature_groups {
+        if let Some(ref af) = affected_features {
+            if !af.contains(&group.feature) {
+                continue;
+            }
+        }
         let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths, &mut sink)?;
         page_count += batch.pages.len();
         all_pages.extend(batch.pages);
@@ -1338,6 +1337,28 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         nav.extend(comm_batch.nav);
     }
 
+    // ── Partial render: merge unchanged features from previous manifest ───────
+    if let Some(ref af) = affected_features {
+        let manifest_path = out_dir.join("manifest.json");
+        if let Ok(old_bytes) = std::fs::read(&manifest_path) {
+            if let Ok(old) = serde_json::from_slice::<WikiManifest>(&old_bytes) {
+                for page in old.pages {
+                    let is_feature_page =
+                        !matches!(page.role.as_str(), "system" | "shared" | "communities");
+                    if is_feature_page && !af.contains(&page.role) {
+                        page_count += 1;
+                        all_pages.push(page);
+                    }
+                }
+                for (feat, navs) in old.nav {
+                    if !af.contains(&feat) {
+                        nav.entry(feat).or_insert(navs);
+                    }
+                }
+            }
+        }
+    }
+
     let manifest = WikiManifest {
         schema_version: 1,
         generated_at: cih_core::now_rfc3339(),
@@ -1355,7 +1376,44 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         warnings: Vec::new(),
     };
 
+    // Snapshot rendered paths before flush so we can prune stale dev files.
+    let rendered_paths: std::collections::HashSet<String> =
+        sink.path_set().into_iter().map(String::from).collect();
     let flush_stats = sink.flush(out_dir)?;
+
+    // Remove stale dev-class .md/.json files left over from a prior run with a different
+    // community assignment. Only runs for features that were actually rendered this pass.
+    for group in &feature_groups {
+        if let Some(ref af) = affected_features {
+            if !af.contains(&group.feature) {
+                continue;
+            }
+        }
+        let dev_dir = out_dir.join(format!("pages/{}/dev", group.feature));
+        if dev_dir.exists() {
+            for entry in std::fs::read_dir(&dev_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let path = entry.path();
+                let is_page = path
+                    .extension()
+                    .map(|e| e == "md" || e == "json")
+                    .unwrap_or(false);
+                if !is_page {
+                    continue;
+                }
+                // Build the relative path as pushed to the sink.
+                if let Ok(rel) = path.strip_prefix(out_dir) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    if !rendered_paths.contains(rel_str.as_str()) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
 
     let manifest_path = out_dir.join("manifest.json");
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
@@ -1400,6 +1458,47 @@ fn count_unresolved_refs(report: Option<&str>) -> usize {
             })
         })
         .unwrap_or(0)
+}
+
+/// Map a set of changed file paths (relative to repo root) to the feature names that contain
+/// nodes from those files. Used by the `--since` partial-render path.
+fn features_affected_by_changed_files(
+    feature_groups: &[FeatureGroup],
+    graph: &WikiGraph,
+    changed_files: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut affected = std::collections::HashSet::new();
+    for group in feature_groups {
+        // Check community member nodes
+        let has_changed_member = group.community_ids.iter().any(|cid| {
+            graph
+                .members_by_community
+                .get(cid)
+                .map(|members| members.iter().any(|m| changed_files.contains(&m.file)))
+                .unwrap_or(false)
+        });
+        if has_changed_member {
+            affected.insert(group.feature.clone());
+            continue;
+        }
+        // For features driven by controller routes (including synthesized groups with no
+        // community_ids), check route handler files.
+        let has_changed_route = graph
+            .routes_by_controller
+            .iter()
+            .filter(|(ctrl, _)| {
+                graph
+                    .controller_feature
+                    .get(*ctrl)
+                    .map(|f| f == &group.feature)
+                    .unwrap_or(false)
+            })
+            .any(|(_, routes)| routes.iter().any(|(h, _)| changed_files.contains(&h.file)));
+        if has_changed_route {
+            affected.insert(group.feature.clone());
+        }
+    }
+    affected
 }
 
 fn count_test_classes(graph: &WikiGraph) -> usize {

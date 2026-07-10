@@ -7,7 +7,6 @@ use std::collections::HashMap;
 
 const TEST_META: WikiPageMeta<'_> = WikiPageMeta {
     enrichment_tier: "graph-only",
-    generated_at: "2026-01-01T00:00:00Z",
     graph_version: "test",
 };
 

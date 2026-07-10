@@ -106,6 +106,24 @@ pub fn git_head(repo_path: &Path) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+/// Returns the list of files changed between `since_ref` and HEAD (`git diff --name-only <ref>`).
+/// Returns an empty vec when git is unavailable or the ref is invalid.
+pub fn git_changed_files(repo_path: &Path, since_ref: &str) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", since_ref])
+        .current_dir(repo_path)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+        _ => vec![],
+    }
+}
+
 impl Registry {
     pub fn load() -> Self {
         registry_path()

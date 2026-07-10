@@ -39,6 +39,11 @@ impl PageSink {
         self.entries.is_empty()
     }
 
+    /// The set of relative paths queued so far.
+    pub fn path_set(&self) -> std::collections::HashSet<&str> {
+        self.entries.iter().map(|(p, _)| p.as_str()).collect()
+    }
+
     /// Flush all queued pages to `out_dir`.
     ///
     /// Each page is compared byte-for-byte against the existing file. If the
