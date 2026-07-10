@@ -9,8 +9,10 @@ fn write_page(dir: &Path, rel: &str, body: &str) {
     fs::write(path, body).unwrap();
 }
 
-/// A minimal generated wiki: one feature page per role plus a dev page,
-/// mirroring the manifest.json shape cih-wiki writes.
+/// A minimal generated wiki mirroring the manifest.json shape cih-wiki writes.
+/// Note the (historical) field semantics: `role` is the feature/module
+/// grouping and `kind` is the page type — persona pages carry their persona
+/// AS the kind (`po`, `ba`, `dev`).
 fn fixture_wiki(dir: &Path) {
     write_page(
         dir,
@@ -39,15 +41,15 @@ fn fixture_wiki(dir: &Path) {
             "roles": ["po", "ba", "dev"],
             "nav": {},
             "pages": [
-                {"slug": "po/loan-repayment", "role": "po", "title": "Loan repayment",
-                 "kind": "feature", "path": "po/loan-repayment.md", "community_id": "c1"},
-                {"slug": "ba/loan-repayment", "role": "ba", "title": "Loan repayment",
-                 "kind": "feature", "path": "ba/loan-repayment.md", "community_id": "c1"},
-                {"slug": "dev/invoice-service", "role": "dev", "title": "InvoiceService",
+                {"slug": "po/loan-repayment", "role": "loan", "title": "Loan repayment",
+                 "kind": "po", "path": "po/loan-repayment.md", "community_id": "c1"},
+                {"slug": "ba/loan-repayment", "role": "loan", "title": "Loan repayment",
+                 "kind": "ba", "path": "ba/loan-repayment.md", "community_id": "c1"},
+                {"slug": "dev/invoice-service", "role": "billing", "title": "InvoiceService",
                  "kind": "dev", "path": "dev/invoice-service.md", "community_id": "c2"},
-                {"slug": "missing", "role": "dev", "title": "Ghost page",
+                {"slug": "missing", "role": "billing", "title": "Ghost page",
                  "kind": "dev", "path": "dev/missing.md"},
-                {"slug": "escape", "role": "dev", "title": "Escape",
+                {"slug": "escape", "role": "billing", "title": "Escape",
                  "kind": "dev", "path": "../outside.md"}
             ]
         })
@@ -72,11 +74,12 @@ fn wiki_index_ranks_and_facets() {
     assert!(hits[0].slug.contains("loan-repayment"));
     assert!(hits.iter().all(|h| h.slug != "dev/invoice-service"));
 
-    // Role facet narrows to a single persona.
+    // Kind facet narrows to a single persona (persona pages carry their
+    // persona as the kind).
     let hits = index.search(
         "repayment schedule",
         &WikiFacets {
-            role: Some("ba"),
+            kind: Some("ba"),
             ..Default::default()
         },
         10,
@@ -98,16 +101,17 @@ fn wiki_index_ranks_and_facets() {
     );
     assert!(hits.iter().all(|h| h.community_id.as_deref() == Some("c2")));
 
-    // Kind facet.
+    // Role facet = feature/module grouping.
     let hits = index.search(
         "invoice billing",
         &WikiFacets {
-            kind: Some("dev"),
+            role: Some("billing"),
             ..Default::default()
         },
         10,
     );
     assert_eq!(hits[0].slug, "dev/invoice-service");
+    assert!(hits.iter().all(|h| h.role == "billing"));
 
     // Limit is honored.
     let hits = index.search("repayment schedule", &WikiFacets::default(), 1);
@@ -141,7 +145,7 @@ fn page_by_slug_and_raw_content() {
 
     // Slug lookup: hit and miss.
     let page = index.page_by_slug("po/loan-repayment").expect("slug exists");
-    assert_eq!(page.role, "po");
+    assert_eq!(page.kind, "po");
     assert!(index.page_by_slug("nope/nothing").is_none());
 
     // Raw page content keeps the front matter (provenance).

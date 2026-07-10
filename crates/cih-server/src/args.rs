@@ -324,10 +324,11 @@ pub struct SearchWikiArgs {
     /// Repo name or absolute path (from registry). Leave empty to use the server's active graph key.
     #[serde(default)]
     pub repo: String,
-    /// Persona facet: `po`, `ba`, or `dev`. Leave empty for all roles.
+    /// Feature/module facet (the manifest `role` grouping, e.g. `loan`, `system`, `shared`). Leave empty for all.
     #[serde(default)]
     pub role: String,
-    /// Page kind facet from the wiki manifest (e.g. `feature`, `dev`, `index`). Leave empty for all kinds.
+    /// Page kind facet — persona pages carry their persona as the kind: `po`, `ba`, `dev`,
+    /// plus `index`, `routes`, `api-flow`. Leave empty for all kinds.
     #[serde(default)]
     pub kind: String,
     /// Feature facet: matches a hit's `community_id`. Leave empty for all features.

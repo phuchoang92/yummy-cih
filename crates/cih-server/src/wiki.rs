@@ -85,11 +85,16 @@ pub struct WikiHit {
 }
 
 /// Facet filters applied to ranked hits. `None` = no filter on that facet.
+///
+/// Field semantics follow the manifest's (historically confusing) naming:
+/// `role` is the feature/module grouping a page belongs to, while `kind` is
+/// the page type — and persona pages carry their persona AS the kind
+/// (`po`, `ba`, `dev`), so persona filtering goes through `kind`.
 #[derive(Debug, Default)]
 pub struct WikiFacets<'a> {
-    /// Persona: `po`, `ba`, `dev`, ...
+    /// Feature/module grouping (manifest `role`): e.g. `loan`, `system`, `shared`.
     pub role: Option<&'a str>,
-    /// Page kind from the manifest: `feature`, `dev`, `index`, ...
+    /// Page kind: `po`, `ba`, `dev`, `index`, `routes`, `api-flow`, ...
     pub kind: Option<&'a str>,
     /// Matches the page's `community_id`.
     pub feature: Option<&'a str>,
