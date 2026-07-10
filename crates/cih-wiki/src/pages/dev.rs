@@ -1,6 +1,7 @@
 use crate::bodies::BodyEntry;
 use crate::graph::{node_stereotype, route_http_method, route_path, WikiGraph};
 use crate::mermaid;
+use crate::pages::WikiPageMeta;
 use crate::{CommunityLlmFull, CommunityLlmSummary};
 use cih_core::{Node, NodeKind, RepoMap};
 use std::collections::{BTreeMap, HashMap};
@@ -639,6 +640,7 @@ pub fn render_dev_class(
     cls: &Node,
     bodies: &HashMap<String, BodyEntry>,
     method_desc: &HashMap<String, String>,
+    meta: &WikiPageMeta<'_>,
 ) -> String {
     let cls_id = cls.id.as_str();
     let cls_name = &cls.name;
@@ -649,7 +651,11 @@ pub fn render_dev_class(
     let all_methods = graph.methods_by_class.get(cls_id).unwrap_or(&empty_methods);
 
     let mut md = String::new();
-    md.push_str(&format!("---\ntitle: {}\nrole: dev\n---\n\n", cls_name));
+    md.push_str(&format!(
+        "---\ntitle: {cls_name}\nsidebar_position: 0\nrole: dev\n\
+         cih_enrichment: {}\ncih_graph_version: {}\n---\n\n",
+        meta.enrichment_tier, meta.graph_version,
+    ));
     md.push_str("<div class=\"role-banner role-dev\"><span class=\"role-dot\"></span>Developer<span class=\"role-desc\">Technical structure, calls &amp; tests</span></div>\n\n");
     md.push_str(&format!("# {} — Technical Reference\n\n", cls_name));
 

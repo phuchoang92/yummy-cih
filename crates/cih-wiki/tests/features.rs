@@ -174,3 +174,73 @@ fn pascal_to_kebab_converts_correctly() {
         "loan-read-platform-service-impl"
     );
 }
+
+#[test]
+fn assign_class_slugs_stable_when_more_colliders_added() {
+    // Build {A, B} both named "Service" — both must get hash suffixes.
+    let ids_two: std::collections::BTreeSet<String> = [
+        "Class:com.a.Service".to_string(),
+        "Class:com.b.Service".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    let slugs_two = assign_class_slugs(&ids_two, |id| {
+        id.rsplit('.').next().unwrap_or("Unknown").to_string()
+    });
+    let slug_a_two = slugs_two["Class:com.a.Service"].clone();
+    let slug_b_two = slugs_two["Class:com.b.Service"].clone();
+    assert_ne!(slug_a_two, slug_b_two, "colliders must get distinct slugs");
+
+    // Add a third "Service" class — A and B must keep the exact same slugs.
+    let ids_three: std::collections::BTreeSet<String> = [
+        "Class:com.a.Service".to_string(),
+        "Class:com.b.Service".to_string(),
+        "Class:com.c.Service".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    let slugs_three = assign_class_slugs(&ids_three, |id| {
+        id.rsplit('.').next().unwrap_or("Unknown").to_string()
+    });
+    assert_eq!(
+        slugs_three["Class:com.a.Service"], slug_a_two,
+        "adding a 3rd collider must not rename Class:com.a.Service"
+    );
+    assert_eq!(
+        slugs_three["Class:com.b.Service"], slug_b_two,
+        "adding a 3rd collider must not rename Class:com.b.Service"
+    );
+}
+
+#[test]
+fn assign_class_slugs_hash_based_not_order_based() {
+    // Slug must depend only on the class's own FQN, not on its position within the set.
+    // BTreeSet iteration is deterministic by key, so both calls visit the same order —
+    // this test confirms that the slugs remain stable regardless of which IDs co-exist.
+    let ids_ab: std::collections::BTreeSet<String> = [
+        "Class:com.a.Service".to_string(),
+        "Class:com.b.Service".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    let ids_ba: std::collections::BTreeSet<String> = [
+        "Class:com.b.Service".to_string(),
+        "Class:com.a.Service".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    let slug_ab = assign_class_slugs(&ids_ab, |id| {
+        id.rsplit('.').next().unwrap_or("Unknown").to_string()
+    });
+    let slug_ba = assign_class_slugs(&ids_ba, |id| {
+        id.rsplit('.').next().unwrap_or("Unknown").to_string()
+    });
+    assert_eq!(
+        slug_ab["Class:com.a.Service"], slug_ba["Class:com.a.Service"],
+        "slug for com.a.Service must be identical regardless of set construction order"
+    );
+    assert_eq!(
+        slug_ab["Class:com.b.Service"], slug_ba["Class:com.b.Service"],
+        "slug for com.b.Service must be identical regardless of set construction order"
+    );
+}

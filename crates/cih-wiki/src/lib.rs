@@ -426,9 +426,27 @@ fn emit_feature_section(
         .collect();
     class_dev_links.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Provenance metadata shared by all pages in this feature section.
+    let feature_llm = ctx
+        .input
+        .feature_llm_summaries
+        .as_ref()
+        .and_then(|m| m.get(feature.as_str()));
+    let enrichment_tier = if ctx.input.llm_full.is_some() {
+        "llm-full"
+    } else if ctx.input.llm_summaries.is_some() || ctx.input.feature_llm_summaries.is_some() {
+        "llm-summary"
+    } else {
+        "graph-only"
+    };
+    let page_meta = pages::WikiPageMeta {
+        enrichment_tier,
+        graph_version: &ctx.input.graph_version,
+    };
+
     // D1 — Feature landing index
     let idx_md =
-        pages::feature_index::render_feature_index(feature, cids, &class_dev_links, ctx.graph);
+        pages::feature_index::render_feature_index(feature, cids, &class_dev_links, ctx.graph, &page_meta);
     sink.push(format!("pages/{}/index.md", feature), idx_md);
     batch
         .nav
@@ -449,23 +467,7 @@ fn emit_feature_section(
         community_id: None,
     });
 
-    // D2 — Feature PO
-    let feature_llm = ctx
-        .input
-        .feature_llm_summaries
-        .as_ref()
-        .and_then(|m| m.get(feature.as_str()));
-    let enrichment_tier = if ctx.input.llm_full.is_some() {
-        "llm-full"
-    } else if ctx.input.llm_summaries.is_some() || ctx.input.feature_llm_summaries.is_some() {
-        "llm-summary"
-    } else {
-        "graph-only"
-    };
-    let page_meta = pages::WikiPageMeta {
-        enrichment_tier,
-        graph_version: &ctx.input.graph_version,
-    };
+    // D2 — Feature PO (feature_llm, enrichment_tier, page_meta computed above)
     let po_md = pages::feature_po::render_feature_po(
         feature,
         cids,
@@ -578,6 +580,7 @@ fn emit_feature_section(
             cls_node,
             &ctx.input.bodies,
             ctx.method_flow_desc,
+            &page_meta,
         );
         let json_val = pages::dev::render_dev_class_json(ctx.graph, cls_node);
         sink.push(format!("pages/{}.md", page_path), md);

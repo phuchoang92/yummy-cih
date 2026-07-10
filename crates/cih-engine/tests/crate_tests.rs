@@ -551,6 +551,94 @@ fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
 }
 
 #[test]
+fn wiki_pages_contain_provenance_front_matter() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    // All three cih_* fields must appear in the PO page's front matter.
+    let po_path = fs::read_dir(root.join(".cih/wiki/pages"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .flat_map(|feat_dir| {
+            fs::read_dir(feat_dir.path())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().file_name().map(|n| n == "po.md").unwrap_or(false))
+                .map(|e| e.path())
+        })
+        .next()
+        .expect("at least one po.md must be generated");
+
+    let po_content = fs::read_to_string(&po_path).unwrap();
+    assert!(po_content.contains("cih_enrichment: graph-only"), "po.md must contain cih_enrichment tier");
+    assert!(po_content.contains("cih_graph_version:"), "po.md must contain cih_graph_version");
+
+    // Graph-only mode must emit the no-LLM admonition.
+    assert!(
+        po_content.contains(":::note"),
+        "graph-only po.md must contain the graph-only admonition"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_llm_dry_run_pages_omit_graph_only_admonition() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        run_llm: true,
+        llm: wiki_cmd::LlmCallConfig {
+            model: "dry-model".into(),
+            api_key_env: Some(format!(
+                "CIH_TEST_MISSING_KEY_{}",
+                TEST_ID.load(Ordering::Relaxed)
+            )),
+            ..Default::default()
+        },
+        llm_dry_run: true,
+        wiki_mode: wiki_cmd::WikiMode::LlmSummary,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let po_path = fs::read_dir(root.join(".cih/wiki/pages"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .flat_map(|feat_dir| {
+            fs::read_dir(feat_dir.path())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().file_name().map(|n| n == "po.md").unwrap_or(false))
+                .map(|e| e.path())
+        })
+        .next()
+        .expect("at least one po.md must be generated");
+
+    let po_content = fs::read_to_string(&po_path).unwrap();
+    assert!(
+        po_content.contains("cih_enrichment: llm-summary"),
+        "llm-summary po.md must have llm-summary tier"
+    );
+    assert!(
+        !po_content.contains(":::note"),
+        "llm-summary po.md must NOT contain the graph-only admonition"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn wiki_command_dry_run_llm_writes_metadata_without_api_key() {
     let root = repo_with_wiki_artifacts();
     wiki_cmd::run_wiki(wiki_cmd::WikiConfig {

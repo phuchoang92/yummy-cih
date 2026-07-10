@@ -1,5 +1,6 @@
 use crate::capitalize;
 use crate::graph::WikiGraph;
+use crate::pages::{provenance_front_matter, WikiPageMeta};
 
 /// Render the feature landing page that links to po/ba pages and lists dev classes.
 ///
@@ -11,13 +12,11 @@ pub fn render_feature_index(
     community_ids: &[String],
     class_dev_links: &[(String, String)],
     graph: &WikiGraph,
+    meta: &WikiPageMeta<'_>,
 ) -> String {
     let title = format!("{} — Feature Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\nsidebar_position: 0\n---\n\n",
-        title
-    ));
+    md.push_str(&provenance_front_matter(&title, 0, meta));
     md.push_str(&format!("# {}\n\n", title));
 
     let total_routes: usize = community_ids
