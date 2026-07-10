@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use cih_core::{Node, NodeId, NodeKind, Range};
-use features::{build_dev_page_paths, group_communities_by_feature, group_nodes_by_package};
+use features::{group_communities_by_feature, group_nodes_by_package};
 use graph::node_stereotype;
 use slugify::slugify;
 
@@ -332,7 +332,6 @@ fn emit_feature_section(
     group: &FeatureGroup,
     ctx: &PageGenCtx<'_>,
     class_dev_slugs: &mut HashMap<String, String>,
-    dev_paths: &HashMap<String, String>,
     sink: &mut PageSink,
     dev_entries: &mut Vec<(String, String, String)>,
 ) -> Result<PageBatch> {
@@ -348,8 +347,88 @@ fn emit_feature_section(
     let cids = &group.community_ids;
     let mut batch = PageBatch::new();
 
+    // D4 — Pre-compute per-class slugs using the FQN-hash algorithm so the feature
+    // index links to the same paths that will be written by the dev-class loop below.
+    let mut feature_class_set: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for comm_id in cids {
+        if let Some(members) = ctx.graph.members_by_community.get(comm_id) {
+            for m in members {
+                if !matches!(
+                    m.kind,
+                    NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+                ) {
+                    continue;
+                }
+                if let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
+                    let fqcn = prefix
+                        .trim_start_matches("Method:")
+                        .trim_start_matches("Constructor:")
+                        .trim_start_matches("Function:");
+                    ["Class:", "Interface:", "Enum:", "Record:"]
+                        .iter()
+                        .map(|pfx| format!("{}{}", pfx, fqcn))
+                        .find(|id| {
+                            ctx.graph.nodes_by_id.contains_key(id.as_str())
+                                || ctx.graph.methods_by_class.contains_key(id.as_str())
+                        })
+                        .unwrap_or_else(|| format!("Class:{}", fqcn))
+                }) {
+                    if ctx
+                        .class_primary_feature
+                        .get(&cls_id)
+                        .map(|f| f == feature)
+                        .unwrap_or(true)
+                    {
+                        feature_class_set.insert(cls_id);
+                    }
+                }
+            }
+        }
+    }
+    let slug_for = features::assign_class_slugs(&feature_class_set, |id| {
+        ctx.graph
+            .nodes_by_id
+            .get(id)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| {
+                id.trim_start_matches("Class:")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string()
+            })
+    });
+    // Build (class_name, dev_slug) list sorted by class name for the feature index table.
+    let mut class_dev_links: Vec<(String, String)> = feature_class_set
+        .iter()
+        .map(|id| {
+            let name = ctx
+                .graph
+                .nodes_by_id
+                .get(id.as_str())
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| {
+                    id.trim_start_matches("Class:")
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("Unknown")
+                        .to_string()
+                });
+            let slug = slug_for
+                .get(id.as_str())
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            // Prefix with "dev/" so the link from pages/{feature}/index.md resolves
+            // correctly to pages/{feature}/dev/{slug}.md.
+            (name, format!("dev/{}", slug))
+        })
+        .collect();
+    class_dev_links.sort_by(|a, b| a.0.cmp(&b.0));
+
     // D1 — Feature landing index
-    let idx_md = pages::feature_index::render_feature_index(feature, cids, dev_paths, ctx.graph);
+    let idx_md =
+        pages::feature_index::render_feature_index(feature, cids, &class_dev_links, ctx.graph);
     sink.push(format!("pages/{}/index.md", feature), idx_md);
     batch
         .nav
@@ -456,59 +535,7 @@ fn emit_feature_section(
         community_id: None,
     });
 
-    // D4 — Per-class dev pages
-    let mut feature_class_set: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for comm_id in cids {
-        if let Some(members) = ctx.graph.members_by_community.get(comm_id) {
-            for m in members {
-                if !matches!(
-                    m.kind,
-                    NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-                ) {
-                    continue;
-                }
-                if let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
-                    let fqcn = prefix
-                        .trim_start_matches("Method:")
-                        .trim_start_matches("Constructor:")
-                        .trim_start_matches("Function:");
-                    ["Class:", "Interface:", "Enum:", "Record:"]
-                        .iter()
-                        .map(|pfx| format!("{}{}", pfx, fqcn))
-                        .find(|id| {
-                            ctx.graph.nodes_by_id.contains_key(id.as_str())
-                                || ctx.graph.methods_by_class.contains_key(id.as_str())
-                        })
-                        .unwrap_or_else(|| format!("Class:{}", fqcn))
-                }) {
-                    if ctx
-                        .class_primary_feature
-                        .get(&cls_id)
-                        .map(|f| f == feature)
-                        .unwrap_or(true)
-                    {
-                        feature_class_set.insert(cls_id);
-                    }
-                }
-            }
-        }
-    }
-
-    let slug_for = features::assign_class_slugs(&feature_class_set, |id| {
-        ctx.graph
-            .nodes_by_id
-            .get(id)
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| {
-                id.trim_start_matches("Class:")
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("Unknown")
-                    .to_string()
-            })
-    });
-
+    // D4 — Per-class dev pages (feature_class_set and slug_for pre-computed above)
     for class_id in &feature_class_set {
         let slug = slug_for
             .get(class_id.as_str())
@@ -1024,8 +1051,6 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         });
     }
 
-    let dev_paths = build_dev_page_paths(&feature_groups, &graph);
-
     // Pre-collect known feature names so the controller filter below can validate
     // LLM-suggested feature slugs — prevents controllers from being silently dropped
     // when DeepSeek/Gemini returns a slug that doesn't match any real wiki feature.
@@ -1321,7 +1346,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
                 continue;
             }
         }
-        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths, &mut sink, &mut dev_entries)?;
+        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &mut sink, &mut dev_entries)?;
         page_count += batch.pages.len();
         all_pages.extend(batch.pages);
         nav.extend(batch.nav);

@@ -887,3 +887,63 @@ fn wiki_command_writes_agent_index_json() {
 
     fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn wiki_feature_index_links_resolve_to_existing_files() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let wiki_dir = root.join(".cih/wiki");
+    let mut broken: Vec<String> = Vec::new();
+    collect_broken_links(&wiki_dir, &wiki_dir, &mut broken);
+
+    assert!(
+        broken.is_empty(),
+        "Found {} broken .md link(s) in generated wiki:\n  {}",
+        broken.len(),
+        broken.join("\n  ")
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// Recursively walk `dir`, check every relative *.md link in each .md file.
+fn collect_broken_links(dir: &Path, wiki_dir: &Path, broken: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_broken_links(&path, wiki_dir, broken);
+        } else if path.extension().map(|x| x == "md").unwrap_or(false) {
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let page_dir = path.parent().unwrap_or(dir);
+            let mut rest = content.as_str();
+            while let Some(start) = rest.find("](") {
+                rest = &rest[start + 2..];
+                let end = rest.find(')').unwrap_or(rest.len());
+                let target_raw = &rest[..end];
+                let target = target_raw.split('#').next().unwrap_or(target_raw);
+                if target.ends_with(".md") && !target.starts_with("http") {
+                    let resolved = page_dir.join(target);
+                    if !resolved.exists() {
+                        broken.push(format!(
+                            "{}: broken link [{target}]",
+                            path.strip_prefix(wiki_dir).unwrap_or(&path).display(),
+                        ));
+                    }
+                }
+                if end < rest.len() {
+                    rest = &rest[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+}
