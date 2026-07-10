@@ -10,6 +10,10 @@ const path = require('path');
 const INDEX_OUT = path.join(__dirname, '..', 'src', 'pages', 'index.js');
 fs.mkdirSync(path.dirname(INDEX_OUT), { recursive: true });
 
+// Live-search backend, baked in at build time and fetched by the BROWSER —
+// it must be reachable from the user's machine, not the container network.
+const serverUrl = process.env.CIH_SERVER_URL || 'http://localhost:8080';
+
 // ── Single-repo mode ──────────────────────────────────────────────────────────
 if (process.env.CIH_WIKI_PATH) {
   const pagesDir = path.resolve(process.env.CIH_WIKI_PATH);
@@ -55,6 +59,14 @@ if (process.env.CIH_WIKI_PATH) {
   const jsx = `// Auto-generated at startup by scripts/gen-index.js — do not edit
 import React from 'react';
 import Layout from '@theme/Layout';
+import WikiSearch from '../components/WikiSearch';
+
+// name is the registry repo name /wiki/search expects; routeBase is where
+// this repo's docs are served.
+const SEARCH = {
+  serverUrl: ${JSON.stringify(serverUrl)},
+  repos: [{ name: ${JSON.stringify(repoName)}, routeBase: '/docs' }],
+};
 
 const COMMUNITIES = [
 ${cardsJs}
@@ -95,6 +107,8 @@ export default function Home() {
       <main className="cih-hero">
         <h1>${repoName} ${llmBadge}</h1>
         <p className="cih-subtitle">Code Intelligence Hub — role-based documentation</p>
+
+        <WikiSearch serverUrl={SEARCH.serverUrl} repos={SEARCH.repos} />
 
         <div className="cih-stats-row">
           <StatCard num={${communities}} label="Communities" />
@@ -173,9 +187,19 @@ const emptyMsg = repos.length === 0
         </p>`
   : '';
 
+const searchRepos = repos.map(r => ({ name: r.name, routeBase: `/${r.slug}` }));
+
 const jsx = `// Auto-generated at startup by scripts/gen-index.js — do not edit
 import React from 'react';
 import Layout from '@theme/Layout';
+import WikiSearch from '../components/WikiSearch';
+
+// name is the registry repo name /wiki/search expects; routeBase is the
+// mounted directory slug the docs are served under — they can differ.
+const SEARCH = {
+  serverUrl: ${JSON.stringify(serverUrl)},
+  repos: ${JSON.stringify(searchRepos)},
+};
 
 const REPOS = [
 ${repoCardsJs}
@@ -201,6 +225,7 @@ export default function Home() {
         <h1>Code Intelligence Hub</h1>
         <p className="cih-subtitle">Select a repository to explore its documentation.</p>
         ${emptyMsg ? emptyMsg : `
+        <WikiSearch serverUrl={SEARCH.serverUrl} repos={SEARCH.repos} />
         <div className="cih-section-title">{REPOS.length} {REPOS.length === 1 ? 'repository' : 'repositories'}</div>
         <div className="cih-repo-grid">
           {REPOS.map(r => <RepoCard key={r.slug} {...r} />)}

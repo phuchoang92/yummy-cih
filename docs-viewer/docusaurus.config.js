@@ -88,7 +88,20 @@ module.exports = {
     },
   },
 
-  themes: ['@docusaurus/theme-mermaid'],
+  themes: [
+    '@docusaurus/theme-mermaid',
+    // Offline navbar search — the fallback when the landing page's live
+    // /wiki/search (cih-server) is unreachable.
+    [
+      require.resolve('@easyops-cn/docusaurus-search-local'),
+      {
+        hashed: true,
+        indexBlog: false,
+        docsRouteBasePath: multiMode ? repoDirs.map(slug => `/${slug}`) : '/docs',
+        docsDir: multiMode ? repoDirs.map(slug => path.join(reposDir, slug)) : [singlePath],
+      },
+    ],
+  ],
   plugins: repoPlugins,
 
   presets: [

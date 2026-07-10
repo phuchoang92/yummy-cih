@@ -94,7 +94,13 @@ services:
       - "3001:3001"
     environment:
       CIH_WIKI_REPOS_DIR: /wiki
-      NODE_OPTIONS: --max-old-space-size=4096
+      # Live-search backend, baked into the landing page at build time and
+      # fetched by the BROWSER — it must be reachable from the user's machine
+      # (published cih-server port), NOT the compose-internal hostname.
+      CIH_SERVER_URL: ${CIH_SERVER_URL:-http://localhost:8080}
+      # 8192: the offline search index (docusaurus-search-local) OOMs a 4 GiB
+      # heap on ~5k-page wikis (measured on the Fineract corpus).
+      NODE_OPTIONS: --max-old-space-size=8192
     # Build the static site at startup, then serve it — avoids the webpack dev
     # server (docusaurus start) which holds ~2GB in memory and OOM-loops.
     command: sh -c "node scripts/gen-index.js && ./node_modules/.bin/docusaurus build && ./node_modules/.bin/docusaurus serve --port 3001 --host 0.0.0.0"
