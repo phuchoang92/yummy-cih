@@ -67,6 +67,26 @@ pub struct WikiMeta {
     /// Added in schema v3; `#[serde(default)]` keeps existing files loadable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flow_cache: BTreeMap<String, FlowCacheEntry>,
+    /// Cached llm-full community enrichment (keyed by community_id).
+    /// Added in schema v4; `#[serde(default)]` keeps existing files loadable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub full_cache: BTreeMap<String, CommunityFullCacheEntry>,
+}
+
+/// Cached llm-full enrichment for one community (keyed by community_id in `WikiMeta.full_cache`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommunityFullCacheEntry {
+    pub evidence_hash: String,
+    pub po_summary: String,
+    pub po_capabilities: String,
+    pub po_workflows: String,
+    pub po_open_questions: String,
+    pub ba_process_overview: String,
+    pub ba_contracts: String,
+    pub ba_business_rules: String,
+    pub dev_responsibility: String,
+    pub dev_key_classes: String,
+    pub dev_entry_points: String,
 }
 
 /// Cached LLM enrichment for one class (keyed by FQCN in `ClassEnrichmentStore`).
@@ -309,6 +329,7 @@ pub fn build_wiki_meta(
         module_cache: BTreeMap::new(),
         feature_cache: BTreeMap::new(),
         flow_cache: BTreeMap::new(),
+        full_cache: BTreeMap::new(),
     }
 }
 

@@ -23,8 +23,9 @@ pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
 pub use module_tree::{
     build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
-    ClassCacheEntry, ClassEnrichmentStore, FeatureMetaEntry, FlowCacheEntry, ModuleTreeSource,
-    WikiMeta, WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
+    ClassCacheEntry, ClassEnrichmentStore, CommunityFullCacheEntry, FeatureMetaEntry,
+    FlowCacheEntry, ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode,
+    WikiModuleTree,
 };
 
 use std::collections::{BTreeMap, HashMap};
@@ -268,6 +269,8 @@ struct PageGenCtx<'a> {
     class_primary_feature: &'a HashMap<String, String>,
     feature_scheduled_counts: &'a HashMap<String, usize>,
     feature_listener_counts: &'a HashMap<String, usize>,
+    /// RFC 3339 timestamp of when this wiki generation run started.
+    generated_at: String,
 }
 
 /// Write the system-level global pages: system index + shared routes.
@@ -362,6 +365,18 @@ fn emit_feature_section(
         .feature_llm_summaries
         .as_ref()
         .and_then(|m| m.get(feature.as_str()));
+    let enrichment_tier = if ctx.input.llm_full.is_some() {
+        "llm-full"
+    } else if ctx.input.llm_summaries.is_some() || ctx.input.feature_llm_summaries.is_some() {
+        "llm-summary"
+    } else {
+        "graph-only"
+    };
+    let page_meta = pages::WikiPageMeta {
+        enrichment_tier,
+        generated_at: &ctx.generated_at,
+        graph_version: &ctx.input.graph_version,
+    };
     let po_md = pages::feature_po::render_feature_po(
         feature,
         cids,
@@ -378,6 +393,7 @@ fn emit_feature_section(
             .get(feature.as_str())
             .copied()
             .unwrap_or(0),
+        &page_meta,
     );
     std::fs::write(ctx.out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
     batch
@@ -408,6 +424,7 @@ fn emit_feature_section(
         ctx.input.llm_full.as_ref(),
         feature_llm,
         ctx.input.flow_llm_summaries.as_ref(),
+        &page_meta,
     );
     std::fs::write(ctx.out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
     batch
@@ -1283,6 +1300,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         class_primary_feature: &class_primary_feature,
         feature_scheduled_counts: &feature_scheduled_counts,
         feature_listener_counts: &feature_listener_counts,
+        generated_at: cih_core::now_rfc3339(),
     };
 
     // Per-feature pages

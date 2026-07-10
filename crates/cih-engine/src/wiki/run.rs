@@ -4,9 +4,9 @@ use anyhow::{bail, Context, Result};
 use cih_wiki::features::group_communities_by_feature;
 use cih_wiki::graph::route_path;
 use cih_wiki::{
-    generate_wiki, ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary,
-    ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo, WikiInput,
-    WikiLlmInfo, WikiModuleTree,
+    generate_wiki, ClassEnrichmentStore, CommunityFullCacheEntry, CommunityLlmFull,
+    CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary,
+    WikiGenerationInfo, WikiInput, WikiLlmInfo, WikiModuleTree,
 };
 
 use crate::llm::evidence::EvidenceCorpus;
@@ -230,12 +230,20 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         (None, None)
     };
 
+    let prev_full_cache: BTreeMap<String, CommunityFullCacheEntry> = if incremental {
+        load_wiki_meta(&out_dir)
+            .map(|m| m.full_cache)
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+    let mut full_cache_updates: Vec<(String, String, CommunityLlmFull)> = Vec::new();
     let llm_full_map: Option<HashMap<String, CommunityLlmFull>> =
         if wiki_mode == WikiMode::LlmFull && llm_no_call {
             tracing::info!("skipping llm-full enrichment because dry-run/debug mode is enabled");
             None
         } else if wiki_mode == WikiMode::LlmFull {
-            run_community_full_enrichment(
+            let (map, updates) = run_community_full_enrichment(
                 &community_nodes,
                 &wiki_graph,
                 repo,
@@ -245,8 +253,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 llm_params
                     .as_ref()
                     .expect("LLM params set when run_llm is active"),
+                &prev_full_cache,
                 json,
-            )
+            );
+            full_cache_updates = updates;
+            map
         } else {
             None
         };
@@ -590,7 +601,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "wiki generation complete"
     );
 
-    persist_wiki_meta_caches(&out_dir, &[], &feature_cache_updates, &flow_cache_updates)?;
+    persist_wiki_meta_caches(&out_dir, &[], &feature_cache_updates, &flow_cache_updates, &full_cache_updates)?;
 
     if let Some(store) = &class_enrichment_store {
         let cih_dir = repo.join(".cih");

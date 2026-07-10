@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use cih_core::Node;
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
-use crate::pages::{escape_table_cell, mdx_safe};
+use crate::pages::{escape_table_cell, mdx_safe, provenance_front_matter, WikiPageMeta};
 use crate::slugify::slugify;
 use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
@@ -20,14 +20,16 @@ pub fn render_feature_po(
     flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
     scheduled_count: usize,
     listener_count: usize,
+    meta: &WikiPageMeta<'_>,
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\nsidebar_position: 1\n---\n\n",
-        title
-    ));
+    md.push_str(&provenance_front_matter(&title, 1, meta));
     md.push_str(&format!("# {}\n\n", title));
+
+    if meta.enrichment_tier == "graph-only" {
+        md.push_str(":::note Graph-only mode\nThis page was generated from graph structure only — no LLM narrative is available.\n:::\n\n");
+    }
 
     // Feature-level LLM overview (highest quality — one call across all communities).
     if let Some(flm) = feature_llm {

@@ -9,6 +9,24 @@ pub mod po;
 pub mod shared;
 pub mod system_index;
 
+/// Provenance metadata attached to each generated wiki page.
+pub struct WikiPageMeta<'a> {
+    /// One of `"graph-only"`, `"llm-summary"`, or `"llm-full"`.
+    pub enrichment_tier: &'a str,
+    pub generated_at: &'a str,
+    pub graph_version: &'a str,
+}
+
+/// Emit YAML front matter with provenance fields for a Docusaurus MDX page.
+pub fn provenance_front_matter(title: &str, sidebar_position: u32, meta: &WikiPageMeta<'_>) -> String {
+    format!(
+        "---\ntitle: {title}\nsidebar_position: {sidebar_position}\ncih_enrichment: {tier}\ncih_generated_at: {at}\ncih_graph_version: {ver}\n---\n\n",
+        tier = meta.enrichment_tier,
+        at = meta.generated_at,
+        ver = meta.graph_version,
+    )
+}
+
 /// Escape a string for use as a Markdown table cell value.
 /// Prevents `|` from breaking table column boundaries.
 pub fn escape_table_cell(s: &str) -> String {

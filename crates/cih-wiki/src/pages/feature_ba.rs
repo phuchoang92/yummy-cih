@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::WikiGraph;
 use crate::mermaid;
-use crate::pages::{escape_table_cell, mdx_safe};
+use crate::pages::{escape_table_cell, mdx_safe, provenance_front_matter, WikiPageMeta};
 use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
 /// Render the feature-level BA (business analysis) page.
 /// Aggregates workflows, cross-module calls, and LLM summaries.
+#[allow(clippy::too_many_arguments)] // page-renderer context bundle; refactor tracked with wiki rework
 pub fn render_feature_ba(
     feature: &str,
     community_ids: &[String],
@@ -15,14 +16,16 @@ pub fn render_feature_ba(
     llm_full: Option<&HashMap<String, CommunityLlmFull>>,
     feature_llm: Option<&FeatureLlmSummary>,
     flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
+    meta: &WikiPageMeta<'_>,
 ) -> String {
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\nsidebar_position: 2\n---\n\n",
-        title
-    ));
+    md.push_str(&provenance_front_matter(&title, 2, meta));
     md.push_str(&format!("# {}\n\n", title));
+
+    if meta.enrichment_tier == "graph-only" {
+        md.push_str(":::note Graph-only mode\nThis page was generated from graph structure only — no LLM narrative is available.\n:::\n\n");
+    }
 
     // Mermaid process flow diagram (business flows only)
     if let Some(diagram) = mermaid::process_flow_diagram(graph, community_ids, true) {
