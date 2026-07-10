@@ -55,12 +55,14 @@ struct CihServer {
     falkor_url: String,
     jobs: Jobs,
     read_file_limits: files::ReadFileLimits,
+    wiki: wiki::WikiSearchState,
     tool_router: ToolRouter<CihServer>,
     agent: Option<agent::AgentRunner>,
 }
 
 #[tool_router]
 impl CihServer {
+    #[allow(clippy::too_many_arguments)] // one-time wiring called only from run()
     fn new(
         store: Arc<dyn GraphStore>,
         artifacts_dir: Option<PathBuf>,
@@ -68,6 +70,7 @@ impl CihServer {
         graph_key: String,
         falkor_url: String,
         read_file_limits: files::ReadFileLimits,
+        wiki: wiki::WikiSearchState,
         agent: Option<agent::AgentRunner>,
     ) -> Self {
         Self {
@@ -77,6 +80,7 @@ impl CihServer {
             falkor_url,
             jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             read_file_limits,
+            wiki,
             tool_router: Self::tool_router(),
             agent,
         }
@@ -545,6 +549,32 @@ impl CihServer {
     }
 
     #[tool(
+        description = "Search the generated wiki (role-based docs produced by `cih-engine wiki`). \
+            BM25 over page titles and bodies with facets for role (`po`/`ba`/`dev`), page kind, \
+            and feature (community id). Returns ranked hits with slug, title, snippet, and \
+            provenance (graph_version, generated_at). Use get_wiki_page(slug=...) to fetch a \
+            full page."
+    )]
+    async fn search_wiki(
+        &self,
+        Parameters(args): Parameters<SearchWikiArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        wiki::search_wiki(&self.wiki, args).await
+    }
+
+    #[tool(
+        description = "Fetch one generated wiki page's full markdown by slug (find slugs with \
+            search_wiki). The YAML front matter carries provenance: enrichment tier and \
+            graph_version."
+    )]
+    async fn get_wiki_page(
+        &self,
+        Parameters(args): Parameters<GetWikiPageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        wiki::get_wiki_page(&self.wiki, args).await
+    }
+
+    #[tool(
         description = "Index a repository so its code graph becomes queryable by the other tools. \
             Runs scan → parse → resolve → load into the live FalkorDB graph. \
             Returns immediately with a `job_id`; use index_status(job_id=...) to poll for completion. \
@@ -676,6 +706,11 @@ impl ServerHandler for CihServer {
                  ## Indexing\n\
                  `index_repo(repo_path=\"/abs/path\")` → returns job_id → poll with `index_status(job_id=...)`.\n\
                  \n\
+                 ## Wiki\n\
+                 `search_wiki(query=..., role=\"po\"|\"ba\"|\"dev\")` — search the generated role-based docs; \
+                 `get_wiki_page(slug=...)` — fetch a page's markdown. \
+                 Pages are also readable as `cih://repo/{name}/wiki/{slug}` resources.\n\
+                 \n\
                  ## Other tools\n\
                  `feature_map`, `query`, `ask_codebase`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
                  `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`, `grep_files`.\n\
@@ -756,6 +791,9 @@ pub async fn run() -> Result<()> {
             )
         })
         .transpose()?;
+    // One shared state: the axum /wiki/search route and the MCP wiki tools use
+    // the same mtime-invalidated index cache.
+    let wiki_state = wiki::WikiSearchState::new(cfg.graph_key.clone());
     let cih = CihServer::new(
         store.clone(),
         cfg.artifacts_dir.clone(),
@@ -766,6 +804,7 @@ pub async fn run() -> Result<()> {
             max_bytes: cfg.read_file_max_bytes,
             max_lines: cfg.read_file_max_lines,
         },
+        wiki_state.clone(),
         agent,
     );
     let browser_state = browser::BrowserState::new(
@@ -783,9 +822,7 @@ pub async fn run() -> Result<()> {
     let protected = axum::Router::new()
         .nest_service("/mcp", service)
         .merge(browser::router(browser_state))
-        .merge(wiki::router(wiki::WikiSearchState::new(
-            cfg.graph_key.clone(),
-        )))
+        .merge(wiki::router(wiki_state))
         .layer(middleware::from_fn_with_state(
             cfg.api_token.clone(),
             server::auth_middleware,

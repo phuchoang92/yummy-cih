@@ -19,10 +19,12 @@ use axum::{
     Json, Router,
 };
 use cih_search::TextIndex;
+use rmcp::{model::CallToolResult, ErrorData as McpError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::utils::resolve_repo;
+use crate::args::{GetWikiPageArgs, SearchWikiArgs};
+use crate::utils::{json_result, resolve_repo, text_result};
 
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_LIMIT: usize = 50;
@@ -31,16 +33,17 @@ pub const SNIPPET_MAX_CHARS: usize = 240;
 
 /// The subset of `WikiManifest` the search endpoint needs. Parsed leniently
 /// (`serde(default)`) so older manifests without newer fields still load.
+/// Also used by `resources.rs` for slug→path lookup.
 #[derive(Debug, Deserialize)]
-struct Manifest {
+pub(crate) struct Manifest {
     #[serde(default)]
-    repo_name: String,
+    pub(crate) repo_name: String,
     #[serde(default)]
-    graph_version: String,
+    pub(crate) graph_version: String,
     #[serde(default)]
-    generated_at: String,
+    pub(crate) generated_at: String,
     #[serde(default)]
-    pages: Vec<PageMeta>,
+    pub(crate) pages: Vec<PageMeta>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,6 +133,16 @@ impl WikiIndex {
         self.pages.len()
     }
 
+    pub fn page_by_slug(&self, slug: &str) -> Option<&PageMeta> {
+        self.pages.iter().find(|page| page.slug == slug)
+    }
+
+    /// A page's raw markdown, front matter included — the front matter carries
+    /// provenance (enrichment tier, graph_version) callers should see.
+    pub fn page_raw(&self, page: &PageMeta) -> Option<String> {
+        read_page_raw(&self.wiki_dir, &page.path)
+    }
+
     /// Rank pages against `query`, best first, then apply facet filters and
     /// truncate to `limit`. Duplicate manifest entries (same slug) collapse to
     /// their best-ranked hit. Snippets are read from disk for surviving hits only.
@@ -173,9 +186,9 @@ impl WikiIndex {
     }
 }
 
-/// Read a page's markdown body with front matter stripped. Returns `None` for
+/// Read a page's raw markdown (front matter included). Returns `None` for
 /// unreadable files or manifest paths that would escape `wiki_dir`.
-fn read_page_body(wiki_dir: &Path, rel: &str) -> Option<String> {
+pub(crate) fn read_page_raw(wiki_dir: &Path, rel: &str) -> Option<String> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute()
         || rel_path
@@ -184,8 +197,12 @@ fn read_page_body(wiki_dir: &Path, rel: &str) -> Option<String> {
     {
         return None;
     }
-    let text = std::fs::read_to_string(wiki_dir.join(rel_path)).ok()?;
-    Some(strip_front_matter(&text).to_string())
+    std::fs::read_to_string(wiki_dir.join(rel_path)).ok()
+}
+
+/// Read a page's markdown body with front matter stripped.
+fn read_page_body(wiki_dir: &Path, rel: &str) -> Option<String> {
+    read_page_raw(wiki_dir, rel).map(|text| strip_front_matter(&text).to_string())
 }
 
 /// Strip a leading `---\n...\n---\n` YAML front matter block, if present.
@@ -239,6 +256,23 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     format!("{cut}…")
 }
 
+/// Errors from wiki lookup/search, mapped to HTTP statuses by the axum handler
+/// and to `McpError`s by the MCP tools.
+pub(crate) enum WikiError {
+    BadRequest(String),
+    NotFound(String),
+    Internal(String),
+}
+
+fn wiki_err_to_mcp(err: WikiError) -> McpError {
+    match err {
+        WikiError::BadRequest(msg) | WikiError::NotFound(msg) => {
+            McpError::invalid_params(msg, None)
+        }
+        WikiError::Internal(msg) => McpError::internal_error(msg, None),
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct WikiSearchState {
     graph_key: String,
@@ -251,6 +285,24 @@ impl WikiSearchState {
             graph_key,
             cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Resolve `repo` (registry name/path, or empty for the active graph key)
+    /// to its cached wiki index. The single entry point shared by the axum
+    /// handler and the MCP tools.
+    pub(crate) async fn index_for(&self, repo: &str) -> Result<Arc<WikiIndex>, WikiError> {
+        let (repo_path, _) =
+            resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
+        let wiki_dir = Path::new(&repo_path).join(".cih").join("wiki");
+        if !wiki_dir.join("manifest.json").is_file() {
+            return Err(WikiError::NotFound(format!(
+                "no generated wiki at {} — run `cih-engine wiki <repo>` first",
+                wiki_dir.display()
+            )));
+        }
+        self.get_or_load(&wiki_dir)
+            .await
+            .map_err(|err| WikiError::Internal(format!("failed to load wiki index: {err}")))
     }
 
     /// Return the cached index for `wiki_dir`, (re)loading when the manifest's
@@ -300,27 +352,12 @@ async fn wiki_search_handler(
     if query.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "missing query parameter 'q'");
     }
-    let (repo_path, _) = match resolve_repo(&params.repo, &state.graph_key) {
-        Ok(resolved) => resolved,
-        Err(err) => return error_response(StatusCode::BAD_REQUEST, &err),
-    };
-    let wiki_dir = Path::new(&repo_path).join(".cih").join("wiki");
-    if !wiki_dir.join("manifest.json").is_file() {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            &format!(
-                "no generated wiki at {} — run `cih-engine wiki <repo>` first",
-                wiki_dir.display()
-            ),
-        );
-    }
-    let index = match state.get_or_load(&wiki_dir).await {
+    let index = match state.index_for(&params.repo).await {
         Ok(index) => index,
-        Err(err) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to load wiki index: {err}"),
-            )
+        Err(WikiError::BadRequest(msg)) => return error_response(StatusCode::BAD_REQUEST, &msg),
+        Err(WikiError::NotFound(msg)) => return error_response(StatusCode::NOT_FOUND, &msg),
+        Err(WikiError::Internal(msg)) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg)
         }
     };
 
@@ -345,4 +382,63 @@ async fn wiki_search_handler(
 
 fn error_response(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
+}
+
+/// MCP tool body for `search_wiki` — same envelope as the HTTP handler.
+pub(crate) async fn search_wiki(
+    state: &WikiSearchState,
+    args: SearchWikiArgs,
+) -> Result<CallToolResult, McpError> {
+    let query = args.query.trim();
+    if query.is_empty() {
+        return Err(McpError::invalid_params("query must not be empty", None));
+    }
+    let index = state.index_for(&args.repo).await.map_err(wiki_err_to_mcp)?;
+    let limit = if args.limit == 0 {
+        DEFAULT_LIMIT
+    } else {
+        args.limit
+    }
+    .clamp(1, MAX_LIMIT);
+    fn non_empty(s: &str) -> Option<&str> {
+        (!s.is_empty()).then_some(s)
+    }
+    let facets = WikiFacets {
+        role: non_empty(&args.role),
+        kind: non_empty(&args.kind),
+        feature: non_empty(&args.feature),
+    };
+    let hits = index.search(query, &facets, limit);
+    json_result(&json!({
+        "repo": index.repo_name,
+        "graph_version": index.graph_version,
+        "generated_at": index.generated_at,
+        "query": query,
+        "page_count": index.page_count(),
+        "hits": hits,
+    }))
+}
+
+/// MCP tool body for `get_wiki_page` — full page markdown by slug.
+pub(crate) async fn get_wiki_page(
+    state: &WikiSearchState,
+    args: GetWikiPageArgs,
+) -> Result<CallToolResult, McpError> {
+    let index = state.index_for(&args.repo).await.map_err(wiki_err_to_mcp)?;
+    let page = index.page_by_slug(&args.slug).ok_or_else(|| {
+        McpError::invalid_params(
+            format!(
+                "no wiki page with slug '{}' — use search_wiki to find slugs",
+                args.slug
+            ),
+            None,
+        )
+    })?;
+    let markdown = index.page_raw(page).ok_or_else(|| {
+        McpError::internal_error(
+            format!("wiki page '{}' exists in the manifest but its file is unreadable", args.slug),
+            None,
+        )
+    })?;
+    text_result(markdown)
 }

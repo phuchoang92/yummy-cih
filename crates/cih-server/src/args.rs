@@ -316,3 +316,33 @@ pub struct FindDuplicatesArgs {
     #[serde(default)]
     pub limit: usize,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchWikiArgs {
+    /// Search query (keywords or natural language) over generated wiki pages.
+    pub query: String,
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active graph key.
+    #[serde(default)]
+    pub repo: String,
+    /// Persona facet: `po`, `ba`, or `dev`. Leave empty for all roles.
+    #[serde(default)]
+    pub role: String,
+    /// Page kind facet from the wiki manifest (e.g. `feature`, `dev`, `index`). Leave empty for all kinds.
+    #[serde(default)]
+    pub kind: String,
+    /// Feature facet: matches a hit's `community_id`. Leave empty for all features.
+    #[serde(default)]
+    pub feature: String,
+    /// Max hits to return (default 20, max 50, pass 0 for default).
+    #[serde(default)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetWikiPageArgs {
+    /// Page slug from search_wiki hits (e.g. `fineract-provider/dev/loan-service`).
+    pub slug: String,
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active graph key.
+    #[serde(default)]
+    pub repo: String,
+}

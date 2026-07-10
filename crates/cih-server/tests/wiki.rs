@@ -133,6 +133,28 @@ fn missing_and_escaping_pages_still_index_on_metadata() {
     assert!(hits.iter().all(|h| !h.snippet.contains("secret")));
 }
 
+#[test]
+fn page_by_slug_and_raw_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_wiki(tmp.path());
+    let index = load_wiki_index(tmp.path()).unwrap();
+
+    // Slug lookup: hit and miss.
+    let page = index.page_by_slug("po/loan-repayment").expect("slug exists");
+    assert_eq!(page.role, "po");
+    assert!(index.page_by_slug("nope/nothing").is_none());
+
+    // Raw page content keeps the front matter (provenance).
+    let raw = index.page_raw(page).expect("file readable");
+    assert!(raw.starts_with("---\n"));
+    assert!(raw.contains("enrichment: graph"));
+    assert!(raw.contains("# Loan repayment"));
+
+    // Traversal paths from the manifest never read outside the wiki dir.
+    let escape = index.page_by_slug("escape").expect("in manifest");
+    assert!(index.page_raw(escape).is_none());
+}
+
 /// Smoke test against a real generated wiki. Run manually with:
 /// `CIH_WIKI_SMOKE_DIR=<repo>/.cih/wiki cargo test -p cih-server --test wiki -- --ignored --nocapture`
 #[test]

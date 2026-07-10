@@ -90,6 +90,17 @@ pub fn list_resource_templates(
             mime_type: Some("application/json".to_string()),
         }
         .no_annotation(),
+        RawResourceTemplate {
+            uri_template: "cih://repo/{name}/wiki/{slug}".to_string(),
+            name: "repo-wiki-page".to_string(),
+            title: Some("Wiki page".to_string()),
+            description: Some(
+                "One generated wiki page (markdown) by slug — find slugs with search_wiki"
+                    .to_string(),
+            ),
+            mime_type: Some("text/markdown".to_string()),
+        }
+        .no_annotation(),
     ];
     Ok(ListResourceTemplatesResult::with_all_items(templates))
 }
@@ -102,6 +113,13 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
     let rest = uri
         .strip_prefix("cih://repo/")
         .ok_or_else(|| McpError::invalid_params(format!("unknown URI scheme: {uri}"), None))?;
+
+    // Wiki page URIs must be handled before the generic name/section split:
+    // slugs contain slashes, which rsplit_once would misattribute to the name.
+    if let Some((name, slug)) = split_wiki_uri(rest) {
+        return read_wiki_page(name, slug, uri);
+    }
+
     let (name, section) = rest
         .rsplit_once('/')
         .ok_or_else(|| McpError::invalid_params(format!("malformed CIH URI: {uri}"), None))?;
@@ -127,6 +145,51 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
 
     Ok(ReadResourceResult {
         contents: vec![ResourceContents::text(text, uri)],
+    })
+}
+
+/// Split `"{name}/wiki/{slug}"` on the FIRST `/wiki/` into `(name, slug)`.
+/// Registry repo names never contain slashes, so first-occurrence is correct
+/// even when the slug itself contains a `wiki` segment.
+pub fn split_wiki_uri(rest: &str) -> Option<(&str, &str)> {
+    rest.split_once("/wiki/")
+        .filter(|(name, slug)| !name.is_empty() && !slug.is_empty())
+}
+
+/// Serve one wiki page as markdown. Uncached like the other resource reads:
+/// registry → `<repo>/.cih/wiki/manifest.json` → slug lookup → page file.
+fn read_wiki_page(name: &str, slug: &str, uri: &str) -> Result<ReadResourceResult, McpError> {
+    let reg = Registry::load();
+    let entry = reg
+        .find(name)
+        .ok_or_else(|| McpError::invalid_params(format!("repo '{name}' not in registry"), None))?;
+    let wiki_dir = std::path::Path::new(&entry.path).join(".cih").join("wiki");
+    let manifest_raw = std::fs::read_to_string(wiki_dir.join("manifest.json")).map_err(|_| {
+        McpError::invalid_params(
+            format!("no generated wiki for '{name}' — run `cih-engine wiki` first"),
+            None,
+        )
+    })?;
+    let manifest: crate::wiki::Manifest = serde_json::from_str(&manifest_raw)
+        .map_err(|e| McpError::internal_error(format!("invalid wiki manifest: {e}"), None))?;
+    let page = manifest
+        .pages
+        .iter()
+        .find(|page| page.slug == slug)
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                format!("no wiki page '{slug}' in repo '{name}' — find slugs with search_wiki"),
+                None,
+            )
+        })?;
+    let markdown = crate::wiki::read_page_raw(&wiki_dir, &page.path).ok_or_else(|| {
+        McpError::internal_error(
+            format!("wiki page '{slug}' exists in the manifest but its file is unreadable"),
+            None,
+        )
+    })?;
+    Ok(ReadResourceResult {
+        contents: vec![ResourceContents::text(markdown, uri)],
     })
 }
 
@@ -200,4 +263,29 @@ fn schema_json() -> String {
         ],
     };
     serde_json::to_string_pretty(&schema).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_wiki_uri;
+
+    #[test]
+    fn wiki_uri_splits_on_first_wiki_segment() {
+        assert_eq!(
+            split_wiki_uri("fineract/wiki/fineract-provider/dev/loan-x"),
+            Some(("fineract", "fineract-provider/dev/loan-x"))
+        );
+        // A slug containing "wiki" still splits on the first occurrence.
+        assert_eq!(
+            split_wiki_uri("repo1/wiki/docs/wiki/setup"),
+            Some(("repo1", "docs/wiki/setup"))
+        );
+    }
+
+    #[test]
+    fn non_wiki_uris_fall_through() {
+        assert_eq!(split_wiki_uri("repo1/context"), None);
+        assert_eq!(split_wiki_uri("repo1/wiki/"), None);
+        assert_eq!(split_wiki_uri("/wiki/slug"), None);
+    }
 }
