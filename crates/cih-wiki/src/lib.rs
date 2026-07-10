@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod mermaid;
 pub mod module_tree;
 pub mod pages;
+pub mod sink;
 pub mod slugify;
 
 pub use bodies::{source_bodies, BodyEntry};
@@ -27,6 +28,8 @@ pub use module_tree::{
     FlowCacheEntry, ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode,
     WikiModuleTree,
 };
+
+use sink::PageSink;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -181,6 +184,10 @@ pub struct WikiOutcome {
     pub community_count: usize,
     pub route_count: usize,
     pub llm_enriched: bool,
+    /// Pages actually written to disk (new or content changed).
+    pub pages_written: usize,
+    /// Pages skipped because content was identical to the existing file.
+    pub pages_unchanged: usize,
 }
 
 /// Strip redundant class/method references that the LLM sometimes prepends to descriptions.
@@ -283,12 +290,12 @@ fn emit_global_pages(
     feature_groups: &[FeatureGroup],
     graph: &WikiGraph,
     repo_name: &str,
-    out_dir: &Path,
+    sink: &mut PageSink,
 ) -> Result<PageBatch> {
     let mut batch = PageBatch::new();
 
     let system_md = pages::system_index::render_system_index(feature_groups, graph, repo_name);
-    std::fs::write(out_dir.join("pages/index.md"), &system_md)?;
+    sink.push("pages/index.md", system_md);
     batch.pages.push(PageEntry {
         slug: "index".into(),
         role: "system".into(),
@@ -301,11 +308,8 @@ fn emit_global_pages(
 
     let routes_md = pages::shared::render_routes_page(graph);
     let routes_json = pages::shared::render_routes_json(graph);
-    std::fs::write(out_dir.join("pages/routes.md"), &routes_md)?;
-    std::fs::write(
-        out_dir.join("pages/routes.json"),
-        serde_json::to_string_pretty(&routes_json)?,
-    )?;
+    sink.push("pages/routes.md", routes_md);
+    sink.push("pages/routes.json", serde_json::to_string_pretty(&routes_json)?);
     batch.pages.push(PageEntry {
         slug: "routes".into(),
         role: "shared".into(),
@@ -326,6 +330,7 @@ fn emit_feature_section(
     ctx: &PageGenCtx<'_>,
     class_dev_slugs: &mut HashMap<String, String>,
     dev_paths: &HashMap<String, String>,
+    sink: &mut PageSink,
 ) -> Result<PageBatch> {
     let feature = &group.feature;
     // Guard: feature names are used as filesystem path segments; they must only contain
@@ -341,10 +346,7 @@ fn emit_feature_section(
 
     // D1 — Feature landing index
     let idx_md = pages::feature_index::render_feature_index(feature, cids, dev_paths, ctx.graph);
-    std::fs::write(
-        ctx.out_dir.join(format!("pages/{}/index.md", feature)),
-        &idx_md,
-    )?;
+    sink.push(format!("pages/{}/index.md", feature), idx_md);
     batch
         .nav
         .entry(feature.clone())
@@ -400,7 +402,7 @@ fn emit_feature_section(
             .unwrap_or(0),
         &page_meta,
     );
-    std::fs::write(ctx.out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
+    sink.push(format!("pages/{}/po.md", feature), po_md);
     batch
         .nav
         .entry(feature.clone())
@@ -431,7 +433,7 @@ fn emit_feature_section(
         ctx.input.flow_llm_summaries.as_ref(),
         &page_meta,
     );
-    std::fs::write(ctx.out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
+    sink.push(format!("pages/{}/ba.md", feature), ba_md);
     batch
         .nav
         .entry(feature.clone())
@@ -548,11 +550,8 @@ fn emit_feature_section(
             ctx.method_flow_desc,
         );
         let json_val = pages::dev::render_dev_class_json(ctx.graph, cls_node);
-        std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
-        std::fs::write(
-            ctx.out_dir.join(format!("pages/{}.json", page_path)),
-            serde_json::to_string_pretty(&json_val)?,
-        )?;
+        sink.push(format!("pages/{}.md", page_path), md);
+        sink.push(format!("pages/{}.json", page_path), serde_json::to_string_pretty(&json_val)?);
         let dev_title = cls_node.name.clone();
         batch
             .nav
@@ -651,7 +650,7 @@ fn emit_feature_section(
                 description,
                 method_descriptions,
             );
-            std::fs::write(ctrl_dir.join("index.md"), &ctrl_md)?;
+            sink.push(format!("pages/{}/api/{}/index.md", feature, ctrl_slug), ctrl_md);
 
             for (route_pos, (handler, route)) in routes.iter().enumerate() {
                 let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
@@ -674,10 +673,7 @@ fn emit_feature_section(
                     ctx.method_flow_desc,
                 );
                 let page_path = format!("{}/api/{}/{}", feature, ctrl_slug, handler_slug);
-                std::fs::write(
-                    ctx.out_dir.join(format!("pages/{}.md", page_path)),
-                    &flow_md,
-                )?;
+                sink.push(format!("pages/{}.md", page_path), flow_md);
                 let flow_title = pages::api_flow::handler_title(handler.id.as_str());
                 batch
                     .nav
@@ -708,6 +704,7 @@ fn emit_feature_section(
 fn emit_entrypoint_section(
     ctx: &PageGenCtx<'_>,
     class_dev_slugs: &HashMap<String, String>,
+    sink: &mut PageSink,
 ) -> Result<PageBatch> {
     let mut batch = PageBatch::new();
     if ctx.input.entrypoints.is_empty() {
@@ -764,7 +761,7 @@ fn emit_entrypoint_section(
                 &all_method_desc,
             );
             let page_path = format!("{}/api/scheduled/{}", feature, slug);
-            std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
+            sink.push(format!("pages/{}.md", page_path), md);
             let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
             batch
                 .nav
@@ -811,7 +808,7 @@ fn emit_entrypoint_section(
                 &all_method_desc,
             );
             let page_path = format!("{}/api/events/{}", feature, slug);
-            std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
+            sink.push(format!("pages/{}.md", page_path), md);
             let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
             batch
                 .nav
@@ -838,7 +835,7 @@ fn emit_entrypoint_section(
 }
 
 /// Write community-level pages: community index and per-community detail/PO/BA pages.
-fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
+fn emit_community_section(ctx: &PageGenCtx<'_>, sink: &mut PageSink) -> Result<PageBatch> {
     let mut batch = PageBatch::new();
     let comm_slug_map = slugify::build_slug_map(&ctx.graph.community_nodes);
     std::fs::create_dir_all(ctx.out_dir.join("pages/communities"))?;
@@ -848,7 +845,7 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
         &comm_slug_map,
         ctx.graph,
     );
-    std::fs::write(ctx.out_dir.join("pages/communities/index.md"), &comm_idx)?;
+    sink.push("pages/communities/index.md", comm_idx);
     batch.pages.push(PageEntry {
         slug: "communities/index".into(),
         role: "communities".into(),
@@ -891,7 +888,7 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
 
         let detail_md =
             pages::community::render_community_detail(comm, ctx.graph, &processes_here, llm);
-        std::fs::write(dir.join("index.md"), &detail_md)?;
+        sink.push(format!("pages/communities/{dir_name}/index.md"), detail_md);
         batch.pages.push(PageEntry {
             slug: format!("communities/{dir_name}/index"),
             role: "communities".into(),
@@ -904,7 +901,7 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
 
         if let Some(full) = llm_full {
             let po_md = pages::community::render_community_po(comm, ctx.graph, full);
-            std::fs::write(dir.join("po.md"), &po_md)?;
+            sink.push(format!("pages/communities/{dir_name}/po.md"), po_md);
             batch.pages.push(PageEntry {
                 slug: format!("communities/{dir_name}/po"),
                 role: "communities".into(),
@@ -917,7 +914,7 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
 
             let ba_md =
                 pages::community::render_community_ba(comm, ctx.graph, &processes_here, full);
-            std::fs::write(dir.join("ba.md"), &ba_md)?;
+            sink.push(format!("pages/communities/{dir_name}/ba.md"), ba_md);
             batch.pages.push(PageEntry {
                 slug: format!("communities/{dir_name}/ba"),
                 role: "communities".into(),
@@ -1205,10 +1202,14 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
             community_count: graph.community_nodes.len(),
             route_count: graph.routes.len(),
             llm_enriched,
+            pages_written: 0,
+            pages_unchanged: 0,
         });
     }
 
-    let global_batch = emit_global_pages(&feature_groups, &graph, &input.repo_name, out_dir)?;
+    let mut sink = PageSink::new();
+
+    let global_batch = emit_global_pages(&feature_groups, &graph, &input.repo_name, &mut sink)?;
     page_count += global_batch.pages.len();
     all_pages.extend(global_batch.pages);
     nav.extend(global_batch.nav);
@@ -1315,7 +1316,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // Per-feature pages
     for group in &feature_groups {
-        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths)?;
+        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths, &mut sink)?;
         page_count += batch.pages.len();
         all_pages.extend(batch.pages);
         nav.extend(batch.nav);
@@ -1323,7 +1324,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // ── Scheduled jobs & event listeners ────────────────────────────────────
     {
-        let ep_batch = emit_entrypoint_section(&ctx, &class_dev_slugs)?;
+        let ep_batch = emit_entrypoint_section(&ctx, &class_dev_slugs, &mut sink)?;
         page_count += ep_batch.pages.len();
         all_pages.extend(ep_batch.pages);
         nav.extend(ep_batch.nav);
@@ -1331,7 +1332,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // ── Community pages ──────────────────────────────────────────────────────
     {
-        let comm_batch = emit_community_section(&ctx)?;
+        let comm_batch = emit_community_section(&ctx, &mut sink)?;
         page_count += comm_batch.pages.len();
         all_pages.extend(comm_batch.pages);
         nav.extend(comm_batch.nav);
@@ -1354,6 +1355,8 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         warnings: Vec::new(),
     };
 
+    let flush_stats = sink.flush(out_dir)?;
+
     let manifest_path = out_dir.join("manifest.json");
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
     if input.generation.html_viewer {
@@ -1367,6 +1370,8 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         community_count: graph.community_nodes.len(),
         route_count: graph.routes.len(),
         llm_enriched,
+        pages_written: flush_stats.written,
+        pages_unchanged: flush_stats.unchanged,
     })
 }
 

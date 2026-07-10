@@ -655,6 +655,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
 
     tracing::info!(
         pages = outcome.page_count,
+        pages_written = outcome.pages_written,
+        pages_unchanged = outcome.pages_unchanged,
         communities = outcome.community_count,
         routes = outcome.route_count,
         llm_enriched = outcome.llm_enriched,
@@ -678,6 +680,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 "out_dir": outcome.out_dir.display().to_string(),
                 "manifest_path": outcome.manifest_path.display().to_string(),
                 "page_count": outcome.page_count,
+                "pages_written": outcome.pages_written,
+                "pages_unchanged": outcome.pages_unchanged,
                 "community_count": outcome.community_count,
                 "route_count": outcome.route_count,
                 "llm_enriched": outcome.llm_enriched,
