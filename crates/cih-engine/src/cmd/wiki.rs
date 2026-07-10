@@ -60,5 +60,8 @@ pub fn run(args: WikiArgs) -> Result<()> {
         filter_feature: args.filter_feature,
         filter_route: args.filter_route,
         json: args.json,
+        check_only: args.check,
+        since_ref: args.since,
+        stage_and_swap: args.stage_and_swap,
     })
 }

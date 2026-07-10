@@ -75,7 +75,11 @@ impl std::str::FromStr for WikiGrouping {
     }
 }
 
-pub(super) fn fnv64(s: &str) -> String {
+/// Increment this whenever any LLM prompt template changes so that cached outputs
+/// produced with old prompts are automatically invalidated.
+pub(crate) const PROMPT_VERSION: u32 = 1;
+
+pub(crate) fn fnv64(s: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
         h ^= b as u64;
@@ -84,7 +88,13 @@ pub(super) fn fnv64(s: &str) -> String {
     format!("{:016x}", h)
 }
 
-pub(super) fn load_wiki_meta(out_dir: &Path) -> Option<WikiMeta> {
+/// Composite LLM cache key: combines evidence content with model, language, and
+/// prompt version so that switching provider/model/language/prompt invalidates cache.
+pub(super) fn llm_cache_key(evidence: &str, model: &str, language: &str) -> String {
+    fnv64(&format!("{}\x00{}\x00{}\x00{}", evidence, model, language, PROMPT_VERSION))
+}
+
+pub(crate) fn load_wiki_meta(out_dir: &Path) -> Option<WikiMeta> {
     let path = out_dir.join("wiki_meta.json");
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
@@ -128,6 +138,15 @@ pub struct WikiConfig {
     pub filter_feature: Vec<String>,
     pub filter_route: Vec<String>,
     pub json: bool,
+    /// Only check whether the wiki is up to date; do not regenerate.
+    /// Exits 0 if up to date, exits 2 if stale.
+    pub check_only: bool,
+    /// Re-render only features affected by files changed since this git ref.
+    /// Requires a previous full wiki run (manifest.json) to merge unchanged feature pages.
+    pub since_ref: Option<String>,
+    /// Generate pages into a sibling `.tmp` directory, then atomically rename it into
+    /// `out_dir` on success. Guarantees that readers never observe a partially-written wiki.
+    pub stage_and_swap: bool,
 }
 
 impl Default for WikiConfig {
@@ -153,6 +172,9 @@ impl Default for WikiConfig {
             filter_feature: vec![],
             filter_route: vec![],
             json: false,
+            check_only: false,
+            since_ref: None,
+            stage_and_swap: false,
         }
     }
 }

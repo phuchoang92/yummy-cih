@@ -97,6 +97,8 @@ fn cached_feature_summary_returns_some_on_hash_match() {
         module_cache: Default::default(),
         feature_cache: cache,
         flow_cache: Default::default(),
+        full_cache: Default::default(),
+        flags_hash: None,
     };
 
     let hit = cached_feature_summary("payments", "ev1", Some(&meta));

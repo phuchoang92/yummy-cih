@@ -8,7 +8,7 @@ use cih_wiki::{
 };
 use rayon::prelude::*;
 
-use super::config::fnv64;
+use super::config::llm_cache_key;
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
 
@@ -113,7 +113,7 @@ pub fn enrich_classes_for_chains(
                         .map(|(_, b)| *b)
                         .collect::<Vec<_>>()
                         .join("\n---\n");
-                    let content_hash = fnv64(&combined);
+                    let content_hash = llm_cache_key(&combined, model, language);
 
                     if let Some(cached) = prev_entries.get(fqcn.as_str()) {
                         if cached.content_hash == content_hash {
@@ -186,11 +186,10 @@ pub fn enrich_classes_for_chains(
                                 }
                             }
                         }
-                        ok.unwrap_or_else(|| ClassCacheEntry {
-                            content_hash,
-                            method_descriptions: HashMap::new(),
-                            class_summary: String::new(),
-                        })
+                        // Do not cache failures — return None so the class is retried
+                        // on the next incremental run rather than permanently poisoning
+                        // the cache with an empty entry.
+                        ok?
                     };
 
                     Some(((*fqcn).clone(), entry))
@@ -281,7 +280,7 @@ fn build_class_enrich_prompt(fqcn: &str, bodies: &[(&str, &str)]) -> String {
             .nth(1)
             .and_then(|x| x.split('/').next())
             .unwrap_or("unknown");
-        let truncated = if body.len() > 600 { &body[..600] } else { body };
+        let truncated = truncate_utf8(body, 600);
         s.push_str(&format!("{}. {}\n{}\n\n", i + 1, method_name, truncated));
     }
     s.push_str(
@@ -375,4 +374,16 @@ fn parse_class_enrich_response(text: &str) -> Result<(String, HashMap<String, St
         "failed to extract class JSON from LLM response: {:?}",
         &text[..text.len().min(200)]
     )
+}
+
+/// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8 char.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }

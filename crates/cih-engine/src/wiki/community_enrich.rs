@@ -1,17 +1,24 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Result};
 use cih_core::Node;
-use cih_wiki::{CommunityLlmFull, FlowLlmSummary, WikiGraph};
+use cih_wiki::{CommunityFullCacheEntry, CommunityLlmFull, FlowLlmSummary, WikiGraph};
 use rayon::prelude::*;
 
-use super::config::LlmRunParams;
+use super::config::{llm_cache_key, LlmRunParams};
 use super::flow_enrich::enrich_one_flow;
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
 
+type FullEnrichResult = (Option<HashMap<String, CommunityLlmFull>>, Vec<(String, String, CommunityLlmFull)>);
+
+/// Returns `(full_map, cache_updates)` where `cache_updates` contains only newly-enriched
+/// entries (cache hits are excluded since they don't need to be re-persisted).
+#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub(super) fn run_community_full_enrichment(
     community_nodes: &[Node],
     graph: &WikiGraph,
@@ -19,8 +26,9 @@ pub(super) fn run_community_full_enrichment(
     evidence_corpus: &EvidenceCorpus,
     pool: &rayon::ThreadPool,
     llm: &LlmRunParams<'_>,
+    prev_cache: &BTreeMap<String, CommunityFullCacheEntry>,
     json: bool,
-) -> Option<HashMap<String, CommunityLlmFull>> {
+) -> FullEnrichResult {
     let total_full = community_nodes.len();
     tracing::info!(communities = total_full, "starting LLM full enrichment");
 
@@ -30,16 +38,43 @@ pub(super) fn run_community_full_enrichment(
     }
     ui_full.start_phase("Deep enrichment (PO/BA)", Some(total_full as u64));
 
-    let results: Vec<(String, Result<CommunityLlmFull>)> = pool.install(|| {
+    // Each entry: (id, ev_hash, full, is_new)
+    // is_new=true  → newly enriched, add to cache_updates
+    // is_new=false → cache hit, already stored, skip persisting
+    let results: Vec<(String, String, CommunityLlmFull)> = pool.install(|| {
         community_nodes
             .par_iter()
-            .map(|comm| {
+            .filter_map(|comm| {
+                let evidence_pack = build_evidence_pack(Some(repo), graph, comm, evidence_corpus);
+                let evidence = evidence_pack.render();
+                let ev_hash = llm_cache_key(&evidence, llm.model, llm.language);
+
+                if let Some(cached) = prev_cache.get(comm.id.as_str()) {
+                    if cached.evidence_hash == ev_hash {
+                        ui_full.inc_ok();
+                        return Some((
+                            comm.id.as_str().to_string(),
+                            ev_hash,
+                            CommunityLlmFull {
+                                po_summary: cached.po_summary.clone(),
+                                po_capabilities: cached.po_capabilities.clone(),
+                                po_workflows: cached.po_workflows.clone(),
+                                po_open_questions: cached.po_open_questions.clone(),
+                                ba_process_overview: cached.ba_process_overview.clone(),
+                                ba_contracts: cached.ba_contracts.clone(),
+                                ba_business_rules: cached.ba_business_rules.clone(),
+                                dev_responsibility: cached.dev_responsibility.clone(),
+                                dev_key_classes: cached.dev_key_classes.clone(),
+                                dev_entry_points: cached.dev_entry_points.clone(),
+                            },
+                        ));
+                    }
+                }
+
                 ui_full.tick(comm.name.as_str());
-                let r = enrich_one_community_full(
+                match enrich_one_community_full_with_evidence(
                     comm,
-                    graph,
-                    repo,
-                    evidence_corpus,
+                    &evidence,
                     llm.adapter,
                     llm.api_key,
                     llm.model,
@@ -47,32 +82,42 @@ pub(super) fn run_community_full_enrichment(
                     llm.timeout_secs,
                     llm.retries,
                     llm.language,
-                );
-                if r.is_ok() {
-                    ui_full.inc_ok();
-                } else {
-                    ui_full.inc_failed();
+                ) {
+                    Ok(full) => {
+                        ui_full.inc_ok();
+                        Some((comm.id.as_str().to_string(), ev_hash, full))
+                    }
+                    Err(err) => {
+                        tracing::warn!(community = %comm.id, error = %err, "LLM full enrichment failed");
+                        ui_full.inc_failed();
+                        None
+                    }
                 }
-                (comm.id.as_str().to_string(), r)
             })
             .collect()
     });
     ui_full.finish_phase();
 
-    let mut map = HashMap::new();
-    for (id, result) in results {
-        match result {
-            Ok(full) => {
-                map.insert(id, full);
-            }
-            Err(err) => tracing::warn!(community = %id, error = %err, "LLM full enrichment failed"),
+    let mut map: HashMap<String, CommunityLlmFull> = HashMap::new();
+    let mut cache_updates: Vec<(String, String, CommunityLlmFull)> = Vec::new();
+
+    for (id, ev_hash, full) in results {
+        // Only emit a cache update for entries whose hash we don't already have stored.
+        let already_cached = prev_cache
+            .get(id.as_str())
+            .map(|e| e.evidence_hash == ev_hash)
+            .unwrap_or(false);
+        if !already_cached {
+            cache_updates.push((id.clone(), ev_hash, full.clone()));
         }
+        map.insert(id, full);
     }
-    tracing::info!(enriched = map.len(), "LLM full enrichment complete");
+
+    tracing::info!(enriched = map.len(), cached = map.len() - cache_updates.len(), "LLM full enrichment complete");
     if map.is_empty() {
-        None
+        (None, cache_updates)
     } else {
-        Some(map)
+        (Some(map), cache_updates)
     }
 }
 
@@ -176,11 +221,9 @@ fn parse_llm_full(text: &str) -> Result<CommunityLlmFull> {
 }
 
 #[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
-fn enrich_one_community_full(
+fn enrich_one_community_full_with_evidence(
     community: &cih_core::Node,
-    graph: &WikiGraph,
-    repo: &Path,
-    evidence_corpus: &EvidenceCorpus,
+    evidence: &str,
     adapter: &dyn LlmAdapter,
     api_key: Option<&str>,
     model: &str,
@@ -189,10 +232,8 @@ fn enrich_one_community_full(
     retries: u32,
     language: &str,
 ) -> Result<CommunityLlmFull> {
-    let evidence_pack = build_evidence_pack(Some(repo), graph, community, evidence_corpus);
-    let evidence = evidence_pack.render();
     let system = crate::llm::prompts::community_system(language);
-    let user = build_full_prompt(&community.name, &evidence);
+    let user = build_full_prompt(&community.name, evidence);
     let request = LlmRequest {
         system,
         user,

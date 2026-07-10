@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::WikiGraph;
 use crate::mermaid;
+use crate::pages::{escape_table_cell, mdx_safe, provenance_front_matter, WikiPageMeta};
 use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
 /// Render the feature-level BA (business analysis) page.
 /// Aggregates workflows, cross-module calls, and LLM summaries.
+#[allow(clippy::too_many_arguments)] // page-renderer context bundle; refactor tracked with wiki rework
 pub fn render_feature_ba(
     feature: &str,
     community_ids: &[String],
@@ -14,14 +16,16 @@ pub fn render_feature_ba(
     llm_full: Option<&HashMap<String, CommunityLlmFull>>,
     feature_llm: Option<&FeatureLlmSummary>,
     flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
+    meta: &WikiPageMeta<'_>,
 ) -> String {
     let title = format!("{} — Business Analysis", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\nsidebar_position: 2\n---\n\n",
-        title
-    ));
+    md.push_str(&provenance_front_matter(&title, 2, meta));
     md.push_str(&format!("# {}\n\n", title));
+
+    if meta.enrichment_tier == "graph-only" {
+        md.push_str(":::note Graph-only mode\nThis page was generated from graph structure only — no LLM narrative is available.\n:::\n\n");
+    }
 
     // Mermaid process flow diagram (business flows only)
     if let Some(diagram) = mermaid::process_flow_diagram(graph, community_ids, true) {
@@ -35,12 +39,12 @@ pub fn render_feature_ba(
     if let Some(flm) = feature_llm {
         if !flm.ba_process_overview.is_empty() {
             md.push_str("## Process Overview\n\n");
-            md.push_str(&flm.ba_process_overview);
+            md.push_str(&mdx_safe(&flm.ba_process_overview));
             md.push_str("\n\n");
         }
         if !flm.ba_business_rules.is_empty() {
             md.push_str("## Business Rules\n\n");
-            md.push_str(&flm.ba_business_rules);
+            md.push_str(&mdx_safe(&flm.ba_business_rules));
             md.push_str("\n\n");
         }
     } else {
@@ -59,7 +63,7 @@ pub fn render_feature_ba(
             if !overviews.is_empty() {
                 md.push_str("## Process Overview\n\n");
                 for s in &overviews {
-                    md.push_str(s);
+                    md.push_str(&mdx_safe(s));
                     md.push_str("\n\n");
                 }
             }
@@ -71,7 +75,7 @@ pub fn render_feature_ba(
             if !contracts.is_empty() {
                 md.push_str("## Contracts\n\n");
                 for s in &contracts {
-                    md.push_str(s);
+                    md.push_str(&mdx_safe(s));
                     md.push_str("\n\n");
                 }
             }
@@ -83,7 +87,7 @@ pub fn render_feature_ba(
             if !rules.is_empty() {
                 md.push_str("## Business Rules\n\n");
                 for s in &rules {
-                    md.push_str(s);
+                    md.push_str(&mdx_safe(s));
                     md.push_str("\n\n");
                 }
             }
@@ -98,7 +102,7 @@ pub fn render_feature_ba(
             if !ba_texts.is_empty() {
                 md.push_str("## Process Overview\n\n");
                 for text in &ba_texts {
-                    md.push_str(text);
+                    md.push_str(&mdx_safe(text));
                     md.push_str("\n\n");
                 }
             }
@@ -126,7 +130,7 @@ pub fn render_feature_ba(
                 if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
                     if let Some(fs) = flow_summary {
                         if !fs.narrative.is_empty() {
-                            md.push_str(&format!("*{}*\n\n", fs.narrative));
+                            md.push_str(&format!("*{}*\n\n", mdx_safe(&fs.narrative)));
                         }
                         md.push_str("| Step | Method | What it does |\n");
                         md.push_str("|---|---|---|\n");
@@ -139,8 +143,8 @@ pub fn render_feature_ba(
                             md.push_str(&format!(
                                 "| {} | `{}` | {} |\n",
                                 i + 1,
-                                step.symbol.name,
-                                desc
+                                escape_table_cell(&step.symbol.name),
+                                escape_table_cell(&mdx_safe(desc))
                             ));
                         }
                         md.push('\n');

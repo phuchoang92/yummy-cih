@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use cih_core::Node;
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
+use crate::pages::{escape_table_cell, mdx_safe, provenance_front_matter, WikiPageMeta};
 use crate::slugify::slugify;
 use crate::{capitalize, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary, FlowLlmSummary};
 
@@ -19,25 +20,27 @@ pub fn render_feature_po(
     flow_llm_summaries: Option<&HashMap<String, FlowLlmSummary>>,
     scheduled_count: usize,
     listener_count: usize,
+    meta: &WikiPageMeta<'_>,
 ) -> String {
     let title = format!("{} — Business Overview", capitalize(feature));
     let mut md = String::new();
-    md.push_str(&format!(
-        "---\ntitle: {}\nsidebar_position: 1\n---\n\n",
-        title
-    ));
+    md.push_str(&provenance_front_matter(&title, 1, meta));
     md.push_str(&format!("# {}\n\n", title));
+
+    if meta.enrichment_tier == "graph-only" {
+        md.push_str(":::note Graph-only mode\nThis page was generated from graph structure only — no LLM narrative is available.\n:::\n\n");
+    }
 
     // Feature-level LLM overview (highest quality — one call across all communities).
     if let Some(flm) = feature_llm {
         if !flm.po_overview.is_empty() {
             md.push_str("## Overview\n\n");
-            md.push_str(&flm.po_overview);
+            md.push_str(&mdx_safe(&flm.po_overview));
             md.push_str("\n\n");
         }
         if !flm.po_capabilities.is_empty() {
             md.push_str("## Capabilities\n\n");
-            md.push_str(&flm.po_capabilities);
+            md.push_str(&mdx_safe(&flm.po_capabilities));
             md.push_str("\n\n");
         }
     } else {
@@ -56,7 +59,7 @@ pub fn render_feature_po(
             if !summaries.is_empty() {
                 md.push_str("## Overview\n\n");
                 for s in &summaries {
-                    md.push_str(s);
+                    md.push_str(&mdx_safe(s));
                     md.push_str("\n\n");
                 }
             }
@@ -68,7 +71,7 @@ pub fn render_feature_po(
             if !caps.is_empty() {
                 md.push_str("## Capabilities\n\n");
                 for s in &caps {
-                    md.push_str(s);
+                    md.push_str(&mdx_safe(s));
                     md.push_str("\n\n");
                 }
             }
@@ -80,7 +83,7 @@ pub fn render_feature_po(
             if !workflows.is_empty() {
                 md.push_str("## Workflows\n\n");
                 for s in &workflows {
-                    md.push_str(s);
+                    md.push_str(&mdx_safe(s));
                     md.push_str("\n\n");
                 }
             }
@@ -92,7 +95,7 @@ pub fn render_feature_po(
             if !questions.is_empty() {
                 md.push_str("## Open Questions\n\n");
                 for s in &questions {
-                    md.push_str(s);
+                    md.push_str(&mdx_safe(s));
                     md.push_str("\n\n");
                 }
             }
@@ -107,7 +110,7 @@ pub fn render_feature_po(
             if !po_texts.is_empty() {
                 md.push_str("## Overview\n\n");
                 for text in &po_texts {
-                    md.push_str(text);
+                    md.push_str(&mdx_safe(text));
                     md.push_str("\n\n");
                 }
             }
@@ -250,7 +253,7 @@ pub fn render_feature_po(
                     md.push_str(&format!("### {}\n\n", proc_node.name));
                 }
                 if !fs.business_impact.is_empty() {
-                    md.push_str(&fs.business_impact);
+                    md.push_str(&mdx_safe(&fs.business_impact));
                     md.push_str("\n\n");
                 }
                 if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
@@ -264,7 +267,11 @@ pub fn render_feature_po(
                                 .get(i)
                                 .map(|s| s.as_str())
                                 .unwrap_or("");
-                            md.push_str(&format!("| `{}` | {} |\n", step.symbol.name, desc));
+                            md.push_str(&format!(
+                                "| `{}` | {} |\n",
+                                escape_table_cell(&step.symbol.name),
+                                escape_table_cell(&mdx_safe(desc))
+                            ));
                         }
                         md.push_str("\n</details>\n\n");
                     }

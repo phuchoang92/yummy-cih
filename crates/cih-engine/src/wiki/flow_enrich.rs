@@ -5,7 +5,7 @@ use cih_core::Node;
 use cih_wiki::{FlowCacheEntry, FlowLlmSummary, WikiGraph};
 use rayon::prelude::*;
 
-use super::config::fnv64;
+use super::config::llm_cache_key;
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
 
@@ -210,7 +210,7 @@ pub(super) fn enrich_route_flows(
                 }
                 let step_count = chain.len();
                 let steps_text = chain_steps_text(&chain, graph);
-                let evidence_hash = fnv64(&steps_text);
+                let evidence_hash = llm_cache_key(&steps_text, model, language);
 
                 if let Some(cached) = flow_cache.get(handler_id.as_str()) {
                     if cached.evidence_hash == evidence_hash {
