@@ -819,3 +819,71 @@ fn discover_load_artifacts_are_analyze_then_community() {
 
     fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn wiki_command_update_agents_md_writes_pointer_block() {
+    let root = repo_with_wiki_artifacts();
+
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        update_agents_md: true,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let agents_md = root.join("AGENTS.md");
+    assert!(agents_md.exists(), "AGENTS.md must be created by --update-agents-md");
+    let content = fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        content.contains("<!-- cih-wiki:start -->"),
+        "AGENTS.md must contain cih-wiki:start marker"
+    );
+    assert!(
+        content.contains("<!-- cih-wiki:end -->"),
+        "AGENTS.md must contain cih-wiki:end marker"
+    );
+    assert!(
+        content.contains("agent-index.json"),
+        "AGENTS.md must reference agent-index.json"
+    );
+
+    // Running again must not alter the file (idempotent second run).
+    let before = fs::read_to_string(&agents_md).unwrap();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        update_agents_md: true,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+    let after = fs::read_to_string(&agents_md).unwrap();
+    assert_eq!(before, after, "second run must not alter AGENTS.md");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_command_writes_agent_index_json() {
+    let root = repo_with_wiki_artifacts();
+
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let index_path = root.join(".cih/wiki/agent-index.json");
+    assert!(index_path.exists(), "agent-index.json must be written by wiki run");
+    let raw = fs::read_to_string(&index_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["schema_version"], 1, "schema_version must be 1");
+    assert!(v["fqn_to_page"].is_object(), "fqn_to_page must be an object");
+    assert!(v["file_to_pages"].is_object(), "file_to_pages must be an object");
+
+    fs::remove_dir_all(&root).unwrap();
+}

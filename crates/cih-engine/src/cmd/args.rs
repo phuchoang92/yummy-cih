@@ -541,6 +541,10 @@ pub struct WikiArgs {
     /// Prevents readers from observing a partially-written wiki output during generation.
     #[arg(long)]
     pub stage_and_swap: bool,
+    /// After generating the wiki, write or update a CIH pointer block in AGENTS.md and
+    /// CLAUDE.md at the repo root so that AI agents can locate the wiki and agent-index.json.
+    #[arg(long)]
+    pub update_agents_md: bool,
 }
 
 #[derive(Debug, clap::Args)]

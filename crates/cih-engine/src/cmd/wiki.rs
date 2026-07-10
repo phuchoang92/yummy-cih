@@ -63,5 +63,6 @@ pub fn run(args: WikiArgs) -> Result<()> {
         check_only: args.check,
         since_ref: args.since,
         stage_and_swap: args.stage_and_swap,
+        update_agents_md: args.update_agents_md,
     })
 }

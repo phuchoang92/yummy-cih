@@ -147,6 +147,9 @@ pub struct WikiConfig {
     /// Generate pages into a sibling `.tmp` directory, then atomically rename it into
     /// `out_dir` on success. Guarantees that readers never observe a partially-written wiki.
     pub stage_and_swap: bool,
+    /// After generating the wiki, write (or update) a pointer block in AGENTS.md and CLAUDE.md
+    /// at the repo root so that AI agents know where to find the wiki and agent-index.json.
+    pub update_agents_md: bool,
 }
 
 impl Default for WikiConfig {
@@ -175,6 +178,7 @@ impl Default for WikiConfig {
             check_only: false,
             since_ref: None,
             stage_and_swap: false,
+            update_agents_md: false,
         }
     }
 }

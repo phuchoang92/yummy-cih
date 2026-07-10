@@ -184,6 +184,7 @@ pub struct WikiInput<'a> {
 pub struct WikiOutcome {
     pub out_dir: PathBuf,
     pub manifest_path: PathBuf,
+    pub agent_index_path: PathBuf,
     pub page_count: usize,
     pub community_count: usize,
     pub route_count: usize,
@@ -333,6 +334,7 @@ fn emit_feature_section(
     class_dev_slugs: &mut HashMap<String, String>,
     dev_paths: &HashMap<String, String>,
     sink: &mut PageSink,
+    dev_entries: &mut Vec<(String, String, String)>,
 ) -> Result<PageBatch> {
     let feature = &group.feature;
     // Guard: feature names are used as filesystem path segments; they must only contain
@@ -553,6 +555,7 @@ fn emit_feature_section(
         let json_val = pages::dev::render_dev_class_json(ctx.graph, cls_node);
         sink.push(format!("pages/{}.md", page_path), md);
         sink.push(format!("pages/{}.json", page_path), serde_json::to_string_pretty(&json_val)?);
+        dev_entries.push((class_id.clone(), cls_node.file.clone(), format!("pages/{}.md", page_path)));
         let dev_title = cls_node.name.clone();
         batch
             .nav
@@ -1186,6 +1189,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         return Ok(WikiOutcome {
             out_dir: out_dir.to_path_buf(),
             manifest_path,
+            agent_index_path: out_dir.join("agent-index.json"),
             page_count: 0,
             community_count: graph.community_nodes.len(),
             route_count: graph.routes.len(),
@@ -1271,6 +1275,8 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // class_id → dev page slug (populated during dev page generation below).
     let mut class_dev_slugs: HashMap<String, String> = HashMap::new();
+    // Agent-index collector: (class_node_id, source_file, relative_page_path).
+    let mut dev_entries: Vec<(String, String, String)> = Vec::new();
 
     // Pre-compute per-feature entrypoint counts for the PO page API Surface table.
     let mut feature_scheduled_counts: HashMap<String, usize> = HashMap::new();
@@ -1315,7 +1321,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
                 continue;
             }
         }
-        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths, &mut sink)?;
+        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths, &mut sink, &mut dev_entries)?;
         page_count += batch.pages.len();
         all_pages.extend(batch.pages);
         nav.extend(batch.nav);
@@ -1421,9 +1427,38 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         html::write_html_viewer(out_dir, &manifest)?;
     }
 
+    // ── Agent index ──────────────────────────────────────────────────────────
+    // Emit agent-index.json: two lookup maps for coding agents.
+    //   fqn_to_page   — class node-id  → dev page path (relative to wiki out_dir)
+    //   file_to_pages — source file     → [dev page paths]
+    let agent_index_path = out_dir.join("agent-index.json");
+    {
+        let mut fqn_to_page: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut file_to_pages: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (class_id, file, page_path) in &dev_entries {
+            fqn_to_page.insert(class_id.clone(), page_path.clone());
+            file_to_pages
+                .entry(file.clone())
+                .or_default()
+                .push(page_path.clone());
+        }
+        let index_json = serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "wiki_dir": out_dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("wiki"),
+            "fqn_to_page": fqn_to_page,
+            "file_to_pages": file_to_pages,
+        }))?;
+        std::fs::write(&agent_index_path, index_json)?;
+    }
+
     Ok(WikiOutcome {
         out_dir: out_dir.to_path_buf(),
         manifest_path,
+        agent_index_path,
         page_count,
         community_count: graph.community_nodes.len(),
         route_count: graph.routes.len(),

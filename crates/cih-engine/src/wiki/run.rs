@@ -60,6 +60,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         check_only,
         since_ref,
         stage_and_swap,
+        update_agents_md,
     } = cfg;
     let repo = repo.as_path();
     let default_model = match llm_provider {
@@ -723,7 +724,56 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         if let Ok(rel) = outcome.manifest_path.strip_prefix(&stage_dir) {
             outcome.manifest_path = out_dir.join(rel);
         }
+        if let Ok(rel) = outcome.agent_index_path.strip_prefix(&stage_dir) {
+            outcome.agent_index_path = out_dir.join(rel);
+        }
         outcome.out_dir = out_dir.clone();
+    }
+
+    if update_agents_md {
+        let wiki_rel = outcome
+            .out_dir
+            .strip_prefix(repo)
+            .unwrap_or(&outcome.out_dir)
+            .display()
+            .to_string();
+        let index_rel = outcome
+            .agent_index_path
+            .strip_prefix(repo)
+            .unwrap_or(&outcome.agent_index_path)
+            .display()
+            .to_string();
+        // Core block (no leading newline — surrounding newlines are managed per-case below).
+        let block_core = format!(
+            "<!-- cih-wiki:start -->\n## CIH Wiki\n\
+             This repository's wiki is at `{wiki_rel}/`. \
+             Agent navigation index: `{index_rel}`.\n\
+             <!-- cih-wiki:end -->"
+        );
+        for filename in &["AGENTS.md", "CLAUDE.md"] {
+            let path = repo.join(filename);
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            let updated = if let (Some(start), Some(end)) = (
+                existing.find("<!-- cih-wiki:start -->"),
+                existing.find("<!-- cih-wiki:end -->"),
+            ) {
+                // Replace in-place: keep whatever surrounds the block as-is.
+                let end_pos = end + "<!-- cih-wiki:end -->".len();
+                format!("{}{}{}", &existing[..start], &block_core, &existing[end_pos..])
+            } else {
+                // Append: add a blank-line separator then a trailing newline.
+                let prefix = existing.trim_end_matches('\n');
+                if prefix.is_empty() {
+                    format!("\n{}\n", block_core)
+                } else {
+                    format!("{}\n\n{}\n", prefix, block_core)
+                }
+            };
+            if updated != existing {
+                std::fs::write(&path, &updated)
+                    .with_context(|| format!("writing pointer block to {}", path.display()))?;
+            }
+        }
     }
 
     if json {
@@ -732,6 +782,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "out_dir": outcome.out_dir.display().to_string(),
                 "manifest_path": outcome.manifest_path.display().to_string(),
+                "agent_index_path": outcome.agent_index_path.display().to_string(),
                 "page_count": outcome.page_count,
                 "pages_written": outcome.pages_written,
                 "pages_unchanged": outcome.pages_unchanged,
@@ -765,6 +816,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         }
         crate::ui::print_row("Output", &outcome.out_dir.display().to_string());
         crate::ui::print_row("Manifest", &outcome.manifest_path.display().to_string());
+        crate::ui::print_row("Agent index", &outcome.agent_index_path.display().to_string());
         eprintln!();
     }
 
