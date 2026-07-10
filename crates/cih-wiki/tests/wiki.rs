@@ -61,6 +61,8 @@ fn minimal_input<'a>(
         bodies: HashMap::new(),
         feature_of: Box::new(|_, _| "shared".to_string()),
         entrypoints: vec![],
+        repo_commit: None,
+        flags_hash: None,
     }
 }
 
@@ -166,6 +168,8 @@ fn generate_wiki_records_llm_model_in_manifest_when_enriched() {
         bodies: HashMap::new(),
         feature_of: Box::new(|_, _| "shared".to_string()),
         entrypoints: vec![],
+        repo_commit: None,
+        flags_hash: None,
     };
     let outcome = generate_wiki(input, &out).unwrap();
 

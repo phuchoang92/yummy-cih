@@ -16,8 +16,8 @@ use super::cache::persist_wiki_meta_caches;
 use super::class_enrich::enrich_classes_for_chains;
 use super::community_enrich::{run_community_full_enrichment, run_process_flow_enrichment};
 use super::config::{
-    llm_cache_key, load_class_enrichment, load_wiki_meta, save_class_enrichment, LlmRunParams,
-    WikiConfig, WikiGrouping, WikiMode,
+    fnv64, llm_cache_key, load_class_enrichment, load_wiki_meta, save_class_enrichment,
+    LlmRunParams, WikiConfig, WikiGrouping, WikiMode, PROMPT_VERSION,
 };
 use super::feature_enrich::{
     build_feature_citation_map, build_feature_evidence, cached_feature_summary, enrich_one_feature,
@@ -57,6 +57,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         filter_feature,
         filter_route,
         json,
+        check_only,
     } = cfg;
     let repo = repo.as_path();
     let default_model = match llm_provider {
@@ -125,6 +126,64 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         feature_of,
     } = art;
     let repo_name_display = repo_name.clone();
+
+    // ── No-op gate (P1.1) ──────────────────────────────────────────────────────
+    // Read current HEAD and compute a hash of the flags that affect page content.
+    // If all three match the stored wiki_meta.json, the output is already up to date.
+    let repo_commit = cih_core::git_head(repo);
+    let flags_hash = fnv64(&format!(
+        "{}\x00{}\x00{}\x00{}\x00{}",
+        wiki_mode, grouping, wiki_language, llm_model, PROMPT_VERSION
+    ));
+    let existing_meta = load_wiki_meta(&out_dir);
+    let wiki_up_to_date = is_wiki_up_to_date(&existing_meta, &repo_commit, &graph_version, &flags_hash);
+    if check_only {
+        if wiki_up_to_date {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "up_to_date",
+                        "head": repo_commit,
+                        "graph_version": graph_version,
+                    }))?
+                );
+            } else {
+                println!(
+                    "wiki is up to date (HEAD={}, graph={})",
+                    repo_commit.as_deref().unwrap_or("unknown"),
+                    graph_version
+                );
+            }
+            return Ok(());
+        } else {
+            let reason = wiki_stale_reason(&existing_meta, &repo_commit, &graph_version, &flags_hash);
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "stale",
+                        "reason": reason,
+                    }))?
+                );
+            } else {
+                eprintln!("wiki is stale: {reason}");
+            }
+            std::process::exit(2);
+        }
+    }
+    if wiki_up_to_date {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"status": "up_to_date"}))?
+            );
+        } else {
+            println!("wiki is up to date — nothing to do");
+        }
+        return Ok(());
+    }
+    // ──────────────────────────────────────────────────────────────────────────
 
     let (adapter, api_key): (Option<Box<dyn crate::llm::LlmAdapter>>, Option<String>) =
         if effective_run_llm || grouping == WikiGrouping::Llm {
@@ -581,6 +640,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         bodies,
         feature_of,
         entrypoints,
+        repo_commit: repo_commit.clone(),
+        flags_hash: Some(flags_hash),
     };
 
     tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");
@@ -651,4 +712,113 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Returns true when the existing wiki output is current and does not need regeneration.
+/// Requires all three signals to match: git HEAD, graph version, and effective wiki flags.
+/// For repos without git, HEAD is None and the gate never fires (safe conservative default).
+pub(super) fn is_wiki_up_to_date(
+    meta: &Option<cih_wiki::WikiMeta>,
+    head: &Option<String>,
+    graph_version: &str,
+    flags_hash: &str,
+) -> bool {
+    meta.as_ref().is_some_and(|m| {
+        m.repo_commit.is_some()
+            && m.repo_commit == *head
+            && m.graph_version == graph_version
+            && m.flags_hash.as_deref() == Some(flags_hash)
+    })
+}
+
+fn wiki_stale_reason(
+    meta: &Option<cih_wiki::WikiMeta>,
+    head: &Option<String>,
+    graph_version: &str,
+    flags_hash: &str,
+) -> String {
+    let Some(m) = meta else {
+        return "wiki has not been generated yet".to_string();
+    };
+    let mut reasons: Vec<&str> = Vec::new();
+    if m.repo_commit.as_deref() != head.as_deref() {
+        reasons.push("HEAD changed");
+    }
+    if m.graph_version != graph_version {
+        reasons.push("graph version changed");
+    }
+    if m.flags_hash.as_deref() != Some(flags_hash) {
+        reasons.push("wiki flags changed");
+    }
+    if reasons.is_empty() {
+        "repo_commit is not set in existing wiki_meta.json".to_string()
+    } else {
+        reasons.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_wiki::WikiMeta;
+    use std::collections::BTreeMap;
+
+    fn make_meta(commit: Option<&str>, graph: &str, flags: Option<&str>) -> WikiMeta {
+        WikiMeta {
+            schema_version: 1,
+            repo_commit: commit.map(str::to_string),
+            graph_version: graph.to_string(),
+            community_version: "v1".to_string(),
+            model: None,
+            language: None,
+            prompt_version: "1".to_string(),
+            module_cache: BTreeMap::new(),
+            feature_cache: BTreeMap::new(),
+            flow_cache: BTreeMap::new(),
+            full_cache: BTreeMap::new(),
+            flags_hash: flags.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn gate_fires_when_all_three_signals_match() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv1", "fh1"));
+    }
+
+    #[test]
+    fn gate_misses_when_head_changes() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(&meta, &Some("def456".into()), "gv1", "fh1"));
+    }
+
+    #[test]
+    fn gate_misses_when_graph_version_changes() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv2", "fh1"));
+    }
+
+    #[test]
+    fn gate_misses_when_flags_change() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv1", "fh2"));
+    }
+
+    #[test]
+    fn gate_misses_when_no_existing_meta() {
+        assert!(!is_wiki_up_to_date(&None, &Some("abc123".into()), "gv1", "fh1"));
+    }
+
+    #[test]
+    fn gate_misses_for_non_git_repos() {
+        // When git_head() returns None, gate never fires even if other signals match.
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(&meta, &None, "gv1", "fh1"));
+    }
+
+    #[test]
+    fn gate_misses_when_meta_has_no_commit() {
+        let meta = Some(make_meta(None, "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv1", "fh1"));
+    }
 }

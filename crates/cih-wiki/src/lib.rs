@@ -166,6 +166,11 @@ pub struct WikiInput<'a> {
     /// Scheduled jobs and event listeners from `.cih/entrypoints.json`.
     /// Empty when the sidecar does not exist (no such methods in the repo).
     pub entrypoints: Vec<EntrypointRecord>,
+    /// Current git HEAD SHA of the target repo, stamped into wiki_meta.json for the no-op gate.
+    pub repo_commit: Option<String>,
+    /// FNV-1a hash of effective wiki flags (mode‖grouping‖language‖model‖PROMPT_VERSION).
+    /// Stored in wiki_meta.json so the no-op gate can detect flag changes between runs.
+    pub flags_hash: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1091,21 +1096,26 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         }
     }
 
-    let module_tree = input.module_tree.take().unwrap_or_else(|| {
+    let mut module_tree = input.module_tree.take().unwrap_or_else(|| {
         build_graph_module_tree(
             &graph,
             input.repo_map.as_ref(),
             &input.graph_version,
             &input.community_version,
-            None,
+            input.repo_commit.clone(),
         )
     });
+    // For user-provided trees that predate HEAD stamping, fill in the current commit.
+    if module_tree.repo_commit.is_none() {
+        module_tree.repo_commit = input.repo_commit.clone();
+    }
     validate_module_tree(&module_tree, &graph)?;
-    let wiki_meta = build_wiki_meta(
+    let mut wiki_meta = build_wiki_meta(
         &module_tree,
         input.llm_info.as_ref().map(|info| info.model.clone()),
         input.llm_info.as_ref().map(|info| info.language.clone()),
     );
+    wiki_meta.flags_hash = input.flags_hash.clone();
 
     // Create directories
     std::fs::create_dir_all(out_dir)?;

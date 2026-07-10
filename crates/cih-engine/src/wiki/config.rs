@@ -138,6 +138,9 @@ pub struct WikiConfig {
     pub filter_feature: Vec<String>,
     pub filter_route: Vec<String>,
     pub json: bool,
+    /// Only check whether the wiki is up to date; do not regenerate.
+    /// Exits 0 if up to date, exits 2 if stale.
+    pub check_only: bool,
 }
 
 impl Default for WikiConfig {
@@ -163,6 +166,7 @@ impl Default for WikiConfig {
             filter_feature: vec![],
             filter_route: vec![],
             json: false,
+            check_only: false,
         }
     }
 }

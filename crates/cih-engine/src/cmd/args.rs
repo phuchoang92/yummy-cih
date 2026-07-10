@@ -522,6 +522,12 @@ pub struct WikiArgs {
     /// Print outcome as JSON instead of the human summary.
     #[arg(long)]
     pub json: bool,
+    /// Check whether the wiki is up to date without regenerating.
+    /// Exits 0 if the wiki matches the current HEAD, graph version, and wiki flags.
+    /// Exits 2 if the wiki is stale or has never been generated.
+    /// Combine with --json for machine-readable output.
+    #[arg(long)]
+    pub check: bool,
 }
 
 #[derive(Debug, clap::Args)]

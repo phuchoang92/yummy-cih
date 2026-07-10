@@ -71,6 +71,12 @@ pub struct WikiMeta {
     /// Added in schema v4; `#[serde(default)]` keeps existing files loadable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub full_cache: BTreeMap<String, CommunityFullCacheEntry>,
+    /// FNV-1a hash of (wiki_mode‖grouping‖language‖llm_model‖PROMPT_VERSION).
+    /// The no-op gate uses this together with `repo_commit` and `graph_version` to
+    /// skip full regeneration when nothing has changed since the last run.
+    /// Added in schema v5; `#[serde(default)]` keeps existing files loadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags_hash: Option<String>,
 }
 
 /// Cached llm-full enrichment for one community (keyed by community_id in `WikiMeta.full_cache`).
@@ -330,6 +336,7 @@ pub fn build_wiki_meta(
         feature_cache: BTreeMap::new(),
         flow_cache: BTreeMap::new(),
         full_cache: BTreeMap::new(),
+        flags_hash: None,
     }
 }
 
