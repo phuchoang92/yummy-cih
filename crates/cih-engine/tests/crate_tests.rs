@@ -428,6 +428,83 @@ fn repo_with_wiki_artifacts() -> PathBuf {
 }
 
 #[test]
+fn refresh_command_runs_analyze_and_writes_fingerprint_state() {
+    let root = temp_repo();
+
+    cih_engine::cmd::refresh::run(cih_engine::cmd::args::RefreshArgs {
+        repo: root.clone(),
+        db: cih_engine::cmd::args::DbArgs {
+            falkor_url: None,
+            graph_key: None,
+            no_load: true,
+        },
+        json: false,
+        force: false,
+        no_analyze: false,
+        no_discover: true,
+        no_wiki: true,
+        wiki_mode: None,
+        grouping: None,
+        wiki_language: None,
+        wiki_out: None,
+        llm: false,
+        llm_provider: None,
+        llm_api_key_env: None,
+        llm_model: None,
+        stage_and_swap: false,
+    })
+    .unwrap();
+
+    let state_path = root.join(".cih/refresh-state.json");
+    assert!(state_path.exists(), "refresh-state.json must be written after analyze");
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    // analyze_head is None when repo has no git (safe conservative default)
+    assert!(state.get("analyze_head").is_some());
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn refresh_command_skips_stages_when_no_flags_set() {
+    // With --no-analyze --no-discover --no-wiki every stage should be skipped
+    // and the command should succeed without touching the filesystem.
+    let root = temp_repo();
+
+    cih_engine::cmd::refresh::run(cih_engine::cmd::args::RefreshArgs {
+        repo: root.clone(),
+        db: cih_engine::cmd::args::DbArgs {
+            falkor_url: None,
+            graph_key: None,
+            no_load: true,
+        },
+        json: true,
+        force: false,
+        no_analyze: true,
+        no_discover: true,
+        no_wiki: true,
+        wiki_mode: None,
+        grouping: None,
+        wiki_language: None,
+        wiki_out: None,
+        llm: false,
+        llm_provider: None,
+        llm_api_key_env: None,
+        llm_model: None,
+        stage_and_swap: false,
+    })
+    .unwrap();
+
+    // No artifacts should have been written.
+    assert!(
+        !root.join(".cih/artifacts").exists(),
+        "analyze must not have run with --no-analyze"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn wiki_command_stage_and_swap_installs_output_atomically() {
     let root = repo_with_wiki_artifacts();
     let out_dir = root.join(".cih/wiki");
