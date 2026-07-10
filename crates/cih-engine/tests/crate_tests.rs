@@ -428,6 +428,31 @@ fn repo_with_wiki_artifacts() -> PathBuf {
 }
 
 #[test]
+fn wiki_command_stage_and_swap_installs_output_atomically() {
+    let root = repo_with_wiki_artifacts();
+    let out_dir = root.join(".cih/wiki");
+    let stage_dir = root.join(".cih/wiki.tmp");
+    let bak_dir = root.join(".cih/wiki.bak");
+
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        stage_and_swap: true,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    // Final output exists at out_dir; staging and backup dirs are cleaned up.
+    assert!(out_dir.exists(), "out_dir must exist after stage-and-swap");
+    assert!(!stage_dir.exists(), "staging dir must be removed after successful swap");
+    assert!(!bak_dir.exists(), "backup dir must be removed after successful swap");
+    assert!(out_dir.join("manifest.json").exists(), "manifest.json must be in out_dir");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
     let root = repo_with_wiki_artifacts();
     wiki_cmd::run_wiki(wiki_cmd::WikiConfig {

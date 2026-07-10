@@ -59,6 +59,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         json,
         check_only,
         since_ref,
+        stage_and_swap,
     } = cfg;
     let repo = repo.as_path();
     let default_model = match llm_provider {
@@ -650,13 +651,30 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         }),
     };
 
-    tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");
+    // ── Stage-and-swap setup ───────────────────────────────────────────────────
+    // When --stage-and-swap is set, write all pages into a sibling `.tmp`
+    // directory so that the final rename into `out_dir` is atomic.  This
+    // prevents readers (Docusaurus dev server, rsync, CI) from observing a
+    // partially-written wiki during the generation pass.
+    let stage_dir = out_dir.with_extension("tmp");
+    let effective_out = if stage_and_swap {
+        // Wipe any leftover staging dir from a previous interrupted run.
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(&stage_dir)
+                .context("removing leftover staging dir")?;
+        }
+        stage_dir.clone()
+    } else {
+        out_dir.clone()
+    };
+
+    tracing::info!(out_dir = %effective_out.display(), "generating wiki pages");
     let mut ui_gen = crate::ui::PhaseProgress::new();
     if json {
         ui_gen.hide();
     }
     ui_gen.spin("Generating pages");
-    let outcome = generate_wiki(input, &out_dir)?;
+    let mut outcome = generate_wiki(input, &effective_out)?;
     ui_gen.finish_with(format!("{} pages", outcome.page_count));
 
     tracing::info!(
@@ -666,17 +684,46 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         communities = outcome.community_count,
         routes = outcome.route_count,
         llm_enriched = outcome.llm_enriched,
-        out_dir = %outcome.out_dir.display(),
+        out_dir = %effective_out.display(),
         "wiki generation complete"
     );
 
-    persist_wiki_meta_caches(&out_dir, &[], &feature_cache_updates, &flow_cache_updates, &full_cache_updates)?;
+    persist_wiki_meta_caches(&effective_out, &[], &feature_cache_updates, &flow_cache_updates, &full_cache_updates)?;
 
     if let Some(store) = &class_enrichment_store {
         let cih_dir = repo.join(".cih");
         if let Err(e) = save_class_enrichment(&cih_dir, store) {
             tracing::warn!(error = %e, "failed to save class enrichment cache");
         }
+    }
+
+    // ── Atomic swap ───────────────────────────────────────────────────────────
+    if stage_and_swap {
+        let bak_dir = out_dir.with_extension("bak");
+        // Rotate: old → .bak so we can restore on failure.
+        if out_dir.exists() {
+            if bak_dir.exists() {
+                std::fs::remove_dir_all(&bak_dir)
+                    .context("removing stale .bak dir")?;
+            }
+            std::fs::rename(&out_dir, &bak_dir)
+                .context("rotating out_dir to .bak")?;
+        }
+        if let Err(e) = std::fs::rename(&stage_dir, &out_dir) {
+            // Restore the previous output so the site keeps serving.
+            if bak_dir.exists() {
+                let _ = std::fs::rename(&bak_dir, &out_dir);
+            }
+            return Err(e).context("swapping staging dir into out_dir");
+        }
+        // Swap succeeded — remove the backup and fix outcome paths.
+        if bak_dir.exists() {
+            let _ = std::fs::remove_dir_all(&bak_dir);
+        }
+        if let Ok(rel) = outcome.manifest_path.strip_prefix(&stage_dir) {
+            outcome.manifest_path = out_dir.join(rel);
+        }
+        outcome.out_dir = out_dir.clone();
     }
 
     if json {

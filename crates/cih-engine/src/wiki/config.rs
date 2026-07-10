@@ -144,6 +144,9 @@ pub struct WikiConfig {
     /// Re-render only features affected by files changed since this git ref.
     /// Requires a previous full wiki run (manifest.json) to merge unchanged feature pages.
     pub since_ref: Option<String>,
+    /// Generate pages into a sibling `.tmp` directory, then atomically rename it into
+    /// `out_dir` on success. Guarantees that readers never observe a partially-written wiki.
+    pub stage_and_swap: bool,
 }
 
 impl Default for WikiConfig {
@@ -171,6 +174,7 @@ impl Default for WikiConfig {
             json: false,
             check_only: false,
             since_ref: None,
+            stage_and_swap: false,
         }
     }
 }

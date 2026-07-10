@@ -62,5 +62,6 @@ pub fn run(args: WikiArgs) -> Result<()> {
         json: args.json,
         check_only: args.check,
         since_ref: args.since,
+        stage_and_swap: args.stage_and_swap,
     })
 }

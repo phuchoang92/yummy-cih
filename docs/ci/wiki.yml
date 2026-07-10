@@ -1,0 +1,139 @@
+# docs/ci/wiki.yml
+#
+# CIH wiki CI integration — copy and adapt for your target repo.
+#
+# Two jobs:
+#   1. wiki-check  — runs on every push/PR; exits 2 if the wiki is stale (no
+#                    regeneration, no writes).  Fast: typically <5 s.
+#   2. wiki-regen  — runs on push to main only; regenerates with --stage-and-swap
+#                    so readers never observe a partially-written wiki, then
+#                    commits and pushes the updated output.
+#
+# PR-preview pattern (optional, shown at the bottom):
+#   On pull_request, run wiki --since <base-branch> to regenerate only the
+#   features touched by the PR and push to a preview branch for Netlify/Vercel.
+#
+# Prerequisites:
+#   - cih-engine binary on PATH (install via `cargo install --path crates/cih-engine`
+#     or fetch a pre-built release artifact)
+#   - FalkorDB reachable at $FALKOR_URL (or redis://127.0.0.1:6380 by default)
+#   - Prior analyze + discover run (artifacts in .cih/) committed or restored from cache
+#   - For LLM enrichment: set LLM_API_KEY in repository secrets
+
+name: CIH Wiki
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      # Regenerate when source or graph artifacts change.
+      - 'src/**'
+      - '.cih/artifacts/**'
+      - '.cih/communities/**'
+  pull_request:
+    branches: [main, master]
+
+env:
+  # Override to point at your FalkorDB instance.
+  FALKOR_URL: redis://127.0.0.1:6380
+  # Set in repository secrets for LLM enrichment.
+  # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+jobs:
+  # ── Staleness check (all branches / PRs) ────────────────────────────────────
+  wiki-check:
+    name: Wiki staleness check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cih-engine
+        run: cargo install --path crates/cih-engine --locked
+
+      - name: Check wiki freshness
+        # Exits 0 if wiki matches current HEAD + graph version + flags.
+        # Exits 2 if stale — treated as a warning, not a blocking failure.
+        # Remove `|| true` to make staleness a hard CI failure.
+        run: cih-engine wiki . --check --json || true
+
+  # ── Regeneration (main branch only) ─────────────────────────────────────────
+  wiki-regen:
+    name: Wiki regeneration
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch full history so --since can resolve refs.
+          fetch-depth: 0
+
+      - name: Install cih-engine
+        run: cargo install --path crates/cih-engine --locked
+
+      # Fast path: skip if wiki is already up to date.
+      - name: Check if wiki needs regeneration
+        id: freshness
+        run: |
+          if cih-engine wiki . --check --json 2>/dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Regenerate wiki
+        if: steps.freshness.outputs.skip != 'true'
+        run: |
+          cih-engine wiki . \
+            --stage-and-swap \
+            --json
+        # Add --wiki-mode llm-summary and --llm-api-key-env OPENAI_API_KEY
+        # for LLM-enriched output.
+
+      - name: Commit and push wiki output
+        if: steps.freshness.outputs.skip != 'true'
+        run: |
+          git config user.name  "cih-bot"
+          git config user.email "cih-bot@users.noreply.github.com"
+          git add .cih/wiki
+          git diff --cached --quiet || git commit -m "chore(wiki): regen wiki [skip ci]"
+          git push
+
+  # ── PR preview (optional) ────────────────────────────────────────────────────
+  #
+  # Regenerate only the features touched by the PR, push to a preview branch,
+  # and let Netlify/Vercel pick it up for a deploy preview.
+  #
+  # Uncomment and adapt to enable:
+  #
+  # wiki-preview:
+  #   name: Wiki PR preview
+  #   runs-on: ubuntu-latest
+  #   if: github.event_name == 'pull_request'
+  #   permissions:
+  #     contents: write
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #
+  #     - name: Install cih-engine
+  #       run: cargo install --path crates/cih-engine --locked
+  #
+  #     - name: Partial regen for changed features
+  #       run: |
+  #         cih-engine wiki . \
+  #           --since origin/${{ github.base_ref }} \
+  #           --stage-and-swap \
+  #           --json
+  #
+  #     - name: Push preview branch
+  #       run: |
+  #         PREVIEW_BRANCH="wiki-preview/pr-${{ github.event.number }}"
+  #         git config user.name  "cih-bot"
+  #         git config user.email "cih-bot@users.noreply.github.com"
+  #         git checkout -B "$PREVIEW_BRANCH"
+  #         git add .cih/wiki
+  #         git diff --cached --quiet || git commit -m "wiki preview for PR #${{ github.event.number }}"
+  #         git push --force origin "$PREVIEW_BRANCH"

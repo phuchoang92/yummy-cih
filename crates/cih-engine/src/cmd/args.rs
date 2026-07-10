@@ -533,6 +533,10 @@ pub struct WikiArgs {
     /// full wiki run. Example: --since origin/main
     #[arg(long)]
     pub since: Option<String>,
+    /// Generate pages into a sibling `.tmp` directory and rename it into place atomically.
+    /// Prevents readers from observing a partially-written wiki output during generation.
+    #[arg(long)]
+    pub stage_and_swap: bool,
 }
 
 #[derive(Debug, clap::Args)]
