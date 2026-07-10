@@ -550,10 +550,11 @@ impl CihServer {
 
     #[tool(
         description = "Search the generated wiki (role-based docs produced by `cih-engine wiki`). \
-            BM25 over page titles and bodies with facets for role (`po`/`ba`/`dev`), page kind, \
-            and feature (community id). Returns ranked hits with slug, title, snippet, and \
-            provenance (graph_version, generated_at). Use get_wiki_page(slug=...) to fetch a \
-            full page."
+            BM25 over page titles and bodies. Facets: kind (persona pages carry their persona \
+            as the kind — `po`, `ba`, `dev` — plus `index`, `routes`, `api-flow`), role (the \
+            feature/module grouping, e.g. `loan`, `system`), and feature (community id). \
+            Returns ranked hits with slug, title, snippet, and provenance (graph_version, \
+            generated_at). Use get_wiki_page(slug=...) to fetch a full page."
     )]
     async fn search_wiki(
         &self,
@@ -707,7 +708,8 @@ impl ServerHandler for CihServer {
                  `index_repo(repo_path=\"/abs/path\")` → returns job_id → poll with `index_status(job_id=...)`.\n\
                  \n\
                  ## Wiki\n\
-                 `search_wiki(query=..., role=\"po\"|\"ba\"|\"dev\")` — search the generated role-based docs; \
+                 `search_wiki(query=..., kind=\"po\"|\"ba\"|\"dev\")` — search the generated role-based docs \
+                 (persona pages carry their persona as the kind); \
                  `get_wiki_page(slug=...)` — fetch a page's markdown. \
                  Pages are also readable as `cih://repo/{name}/wiki/{slug}` resources.\n\
                  \n\
@@ -822,11 +824,25 @@ pub async fn run() -> Result<()> {
     let protected = axum::Router::new()
         .nest_service("/mcp", service)
         .merge(browser::router(browser_state))
-        .merge(wiki::router(wiki_state))
         .layer(middleware::from_fn_with_state(
             cfg.api_token.clone(),
             server::auth_middleware,
         ));
+
+    // Wiki search is fetched by browsers (docs-viewer), so it needs CORS.
+    // The CorsLayer must wrap the auth middleware (layers run outermost-last):
+    // OPTIONS preflights carry no Authorization header and would otherwise 401
+    // whenever CIH_API_TOKEN is set.
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([axum::http::Method::GET])
+        .allow_headers([axum::http::header::AUTHORIZATION]);
+    let wiki_routes = wiki::router(wiki_state)
+        .layer(middleware::from_fn_with_state(
+            cfg.api_token.clone(),
+            server::auth_middleware,
+        ))
+        .layer(cors);
 
     let ready_state = (store, cfg.artifacts_dir.clone());
     let public = axum::Router::new()
@@ -835,6 +851,7 @@ pub async fn run() -> Result<()> {
 
     let app = public
         .merge(protected)
+        .merge(wiki_routes)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
