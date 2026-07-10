@@ -28,7 +28,8 @@ fn feature_from_path(path: &str) -> Option<&str> {
 
 /// Infer the dominant feature for a community from its member node file paths.
 pub fn infer_community_feature(community_id: &str, graph: &WikiGraph) -> String {
-    // Fast-path: prefer enriched prop written by cih-community
+    // Fast-path: prefer enriched prop written by cih-community.
+    // Always slugify so graph-stored values cannot become path-traversal segments.
     if let Some(feature) = graph
         .nodes_by_id
         .get(community_id)
@@ -37,7 +38,10 @@ pub fn infer_community_feature(community_id: &str, graph: &WikiGraph) -> String 
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty() && *s != "shared")
     {
-        return feature.to_string();
+        let safe = slugify(feature);
+        if !safe.is_empty() && safe != "community" {
+            return safe;
+        }
     }
 
     let empty = Vec::new();
@@ -317,20 +321,11 @@ pub fn build_dev_page_paths(
     result
 }
 
-/// Assign dev-page slugs to a sorted set of class IDs using a two-pass collision counter.
+/// Assign dev-page slugs to a sorted set of class IDs.
 ///
-/// `get_name` returns the simple class name for a given class_id; used to compute the base
-/// kebab slug. When two class IDs in the same set produce the same base slug, `-2`, `-3`, …
-/// are appended in BTreeSet iteration order so the result is fully deterministic.
-///
-/// Both `lib.rs` page generation and `wiki_cmd.rs` citation-map building must call this
-/// function with the same `class_ids` set to guarantee they produce identical slugs.
-/// Assign dev-page slugs to a sorted set of class IDs using a two-pass collision counter.
-///
-/// `get_name` returns the simple class name for a given class_id (returned as an owned
-/// `String` to avoid lifetime constraints on borrows from external maps). When two class
-/// IDs in the same set produce the same base kebab slug, `-2`, `-3`, … are appended in
-/// BTreeSet iteration order so the result is fully deterministic.
+/// When multiple class IDs share the same base kebab slug, a 7-hex-char FQN hash is
+/// appended (`utils-a3f1b9c`) so that adding a new same-named class never renames
+/// an existing page's URL.
 ///
 /// Both `lib.rs` page generation and `wiki_cmd.rs` citation-map building must call this
 /// function with the same `class_ids` set to guarantee they produce identical slugs.
@@ -344,20 +339,30 @@ where
         let base = pascal_to_kebab(&get_name(id.as_str()));
         *slug_counts.entry(base).or_insert(0) += 1;
     }
-    // Pass 2: assign final slugs (BTreeSet guarantees sorted/deterministic order).
-    let mut slug_assign: BTreeMap<String, usize> = BTreeMap::new();
+    // Pass 2: assign final slugs.
+    // When multiple classes share a base slug, append a short FQN hash so that
+    // adding a new same-named class never renames an existing page's URL.
     let mut result: HashMap<String, String> = HashMap::with_capacity(class_ids.len());
     for id in class_ids {
         let base = pascal_to_kebab(&get_name(id.as_str()));
         let n = slug_counts.get(&base).copied().unwrap_or(1);
-        let idx = slug_assign.entry(base.clone()).or_insert(0);
-        *idx += 1;
         let slug = if n == 1 {
             base
         } else {
-            format!("{}-{}", base, idx)
+            format!("{}-{}", base, fqn_short_hash(id.as_str()))
         };
         result.insert(id.clone(), slug);
     }
     result
+}
+
+/// 7-hex-char FNV-1a hash of a fully-qualified class ID used as a stable slug suffix.
+/// Short enough to stay readable, long enough to avoid collisions in any real codebase.
+fn fqn_short_hash(fqn: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in fqn.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:07x}", h & 0x0fff_ffff)
 }

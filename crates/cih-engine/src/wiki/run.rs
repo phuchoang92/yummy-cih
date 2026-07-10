@@ -16,8 +16,8 @@ use super::cache::persist_wiki_meta_caches;
 use super::class_enrich::enrich_classes_for_chains;
 use super::community_enrich::{run_community_full_enrichment, run_process_flow_enrichment};
 use super::config::{
-    fnv64, load_class_enrichment, load_wiki_meta, save_class_enrichment, LlmRunParams, WikiConfig,
-    WikiGrouping, WikiMode,
+    llm_cache_key, load_class_enrichment, load_wiki_meta, save_class_enrichment, LlmRunParams,
+    WikiConfig, WikiGrouping, WikiMode,
 };
 use super::feature_enrich::{
     build_feature_citation_map, build_feature_evidence, cached_feature_summary, enrich_one_feature,
@@ -328,7 +328,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                             repo,
                             &evidence_corpus,
                         );
-                        let ev_hash = fnv64(&merged_ev);
+                        let ev_hash = llm_cache_key(&merged_ev, llm_model, wiki_language);
                         let citation_map = build_feature_citation_map(
                             &group.community_ids,
                             &wiki_graph,

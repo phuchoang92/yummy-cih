@@ -320,6 +320,14 @@ fn emit_feature_section(
     dev_paths: &HashMap<String, String>,
 ) -> Result<PageBatch> {
     let feature = &group.feature;
+    // Guard: feature names are used as filesystem path segments; they must only contain
+    // safe slug characters ([a-z0-9-]) so that a malformed graph value cannot write
+    // outside the wiki output directory.
+    anyhow::ensure!(
+        is_safe_page_slug(feature),
+        "unsafe feature name rejected as write-path segment: {:?}",
+        feature
+    );
     let cids = &group.community_ids;
     let mut batch = PageBatch::new();
 
@@ -1340,6 +1348,12 @@ pub(crate) fn capitalize(s: &str) -> String {
         first.make_ascii_uppercase();
     }
     out
+}
+
+/// Returns true iff `s` is safe to use as a single filesystem path segment in the wiki
+/// output directory. Only allows characters produced by `slugify` ([a-z0-9-]).
+fn is_safe_page_slug(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn count_unresolved_refs(report: Option<&str>) -> usize {

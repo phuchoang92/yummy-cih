@@ -41,8 +41,8 @@ pub fn render_feature_index(
     ));
 
     md.push_str("## Role Pages\n\n");
-    md.push_str(&format!("- [Business Overview]({feature}/po.md)\n"));
-    md.push_str(&format!("- [Business Analysis]({feature}/ba.md)\n\n"));
+    md.push_str("- [Business Overview](po.md)\n");
+    md.push_str("- [Business Analysis](ba.md)\n\n");
 
     md.push_str("## Technical Modules\n\n");
     md.push_str("| Module | Routes | Methods | Dev Page |\n");
