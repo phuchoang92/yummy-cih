@@ -117,3 +117,11 @@ fn git_diff_staged_args_are_correct() {
     }
     // structural test only — verifies no panic in argument setup
 }
+
+#[test]
+fn trace_flow_x_args_repo_defaults_empty() {
+    let args: cih_server::args::TraceFlowXArgs =
+        serde_json::from_str(r#"{"entry_point":"Route:GET /x","group":"g"}"#).unwrap();
+    assert!(args.repo.is_empty());
+    assert_eq!(args.max_depth, 0);
+}

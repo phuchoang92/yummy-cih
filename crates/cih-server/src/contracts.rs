@@ -207,8 +207,26 @@ fn consumer_callers(
     Ok(callers)
 }
 
-/// Cross-repo downstream trace: walk the bound repo's artifacts, hop through
+/// `Err(message naming the group's members)` when `repo_name` is not one of them.
+pub(crate) fn validate_group_member(
+    group: &str,
+    members: &[String],
+    repo_name: &str,
+) -> Result<(), String> {
+    if members.iter().any(|member| member == repo_name) {
+        return Ok(());
+    }
+    Err(format!(
+        "repo '{repo_name}' is not a member of group '{group}' (members: {}) — \
+         pass `repo` naming one of them or add it with `cih-engine group add`",
+        members.join(", ")
+    ))
+}
+
+/// Cross-repo downstream trace: walk the start repo's artifacts, hop through
 /// the group's contract matches into provider/consumer repos, continue there.
+/// The start repo is `args.repo` (registry name/path) or, when empty, the
+/// first registry entry bound to the server's graph key.
 pub async fn trace_flow_x(
     args: TraceFlowXArgs,
     graph_key: &str,
@@ -216,20 +234,28 @@ pub async fn trace_flow_x(
 ) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
     let registry = Registry::load();
-    let entry = registry
-        .entries
-        .iter()
-        .find(|e| e.graph_key == graph_key)
-        .ok_or_else(|| {
-            McpError::invalid_params(
-                format!("no repo registered for graph_key '{graph_key}'; run analyze first"),
-                None,
-            )
-        })?;
+    let entry = crate::utils::resolve_repo_entry(&args.repo, graph_key)
+        .map_err(|e| McpError::invalid_params(e, None))?;
     let start_repo = entry.name.clone();
+
+    let groups = cih_core::GroupRegistry::load();
+    let group_entry = groups.find(&args.group).ok_or_else(|| {
+        McpError::invalid_params(
+            format!(
+                "group '{}' not found — create it with `cih-engine group create` and sync it",
+                args.group
+            ),
+            None,
+        )
+    })?;
+    validate_group_member(&args.group, &group_entry.repos, &start_repo)
+        .map_err(|e| McpError::invalid_params(e, None))?;
+
     let start_graph = xflow.graph_for(&entry.artifacts_dir).map_err(|e| {
-        McpError::internal_error(
-            format!("cannot load artifacts for '{start_repo}': {e}"),
+        McpError::invalid_params(
+            format!(
+                "cannot load artifacts for '{start_repo}': {e} — re-run `cih-engine analyze {start_repo}`"
+            ),
             None,
         )
     })?;
@@ -490,4 +516,24 @@ pub async fn shape_check(args: ShapeCheckArgs) -> Result<CallToolResult, McpErro
         "contracts_synced_at": synced_at,
         "contracts_stale": stale,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_group_member;
+
+    #[test]
+    fn group_member_accepted() {
+        let members = vec!["212ecom-be".to_string(), "212ecom-fe".to_string()];
+        assert!(validate_group_member("shop", &members, "212ecom-fe").is_ok());
+    }
+
+    #[test]
+    fn non_member_rejected_naming_members() {
+        let members = vec!["212ecom-be".to_string(), "212ecom-fe".to_string()];
+        let err = validate_group_member("shop", &members, "yummy-cih").unwrap_err();
+        assert!(err.contains("yummy-cih"));
+        assert!(err.contains("shop"));
+        assert!(err.contains("212ecom-be") && err.contains("212ecom-fe"));
+    }
 }

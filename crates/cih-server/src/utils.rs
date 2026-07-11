@@ -47,9 +47,9 @@ pub fn load_artifact_edges(artifacts_dir: &str) -> std::io::Result<Vec<Edge>> {
     .read_edges()
 }
 
-/// Resolve `repo` (name/path, or empty for the active graph key) to
-/// `(repo_path, artifacts_dir)` via the registry.
-pub fn resolve_repo(repo: &str, graph_key: &str) -> Result<(String, String), String> {
+/// Resolve `repo` (name/path, or empty for the active graph key) to its full
+/// registry entry.
+pub fn resolve_repo_entry(repo: &str, graph_key: &str) -> Result<cih_core::RegistryEntry, String> {
     let reg = cih_core::Registry::load();
     if reg.entries.is_empty() {
         return Err("no repos in registry — run `cih-engine analyze <repo>` first".to_string());
@@ -65,7 +65,13 @@ pub fn resolve_repo(repo: &str, graph_key: &str) -> Result<(String, String), Str
         reg.find(repo)
             .ok_or_else(|| format!("repo '{repo}' not in registry"))?
     };
-    Ok((entry.path.clone(), entry.artifacts_dir.clone()))
+    Ok(entry.clone())
+}
+
+/// Resolve `repo` (name/path, or empty for the active graph key) to
+/// `(repo_path, artifacts_dir)` via the registry.
+pub fn resolve_repo(repo: &str, graph_key: &str) -> Result<(String, String), String> {
+    resolve_repo_entry(repo, graph_key).map(|entry| (entry.path, entry.artifacts_dir))
 }
 
 pub fn node_prop_str_owned(node: &Node, key: &str) -> Option<String> {

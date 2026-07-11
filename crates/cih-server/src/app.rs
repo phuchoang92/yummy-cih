@@ -388,8 +388,9 @@ impl CihServer {
         description = "Cross-repo downstream trace: like trace_flow, but hops between repos \
         through the group's synced contract matches (HTTP consumer → provider route → handler; \
         Kafka publisher → listener). Walks each repo's graph artifacts; the entry point resolves \
-        in this server's bound repo. Run `cih-engine group sync <group>` first. Steps carry \
-        `repo` and `via.kind` (`CONTRACT` marks a cross-repo crossing)."
+        in the start repo — pass `repo` (a group member's registry name/path) to choose it, or \
+        leave empty for the server's active graph key. Run `cih-engine group sync <group>` \
+        first. Steps carry `repo` and `via.kind` (`CONTRACT` marks a cross-repo crossing)."
     )]
     async fn trace_flow_x(
         &self,

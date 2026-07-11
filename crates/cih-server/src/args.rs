@@ -118,10 +118,14 @@ pub struct TraceFlowArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TraceFlowXArgs {
-    /// Entry node in the server's bound repo: a full node id
+    /// Entry node in the start repo: a full node id
     /// (e.g. `Route:GET /api/checkout`, `Method:pkg.Cls#m/1`) or a unique
     /// name/qualified name (ambiguity returns candidates).
     pub entry_point: String,
+    /// Repo name or absolute path (from registry) to start the trace in.
+    /// Leave empty to use the server's active graph key. Must be a member of `group`.
+    #[serde(default)]
+    pub repo: String,
     /// Repo group whose synced contracts bridge the repos
     /// (`cih-engine group sync <group>` must have run).
     pub group: String,
