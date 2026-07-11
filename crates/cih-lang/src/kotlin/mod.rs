@@ -5,6 +5,7 @@ use tree_sitter::{Language, Node as TsNode, Query};
 
 use crate::{LanguageProvider, SourceScan, Stereotype};
 
+mod framework;
 mod parse;
 
 pub const KT_SCOPE_QUERY: &str = include_str!("query.scm");

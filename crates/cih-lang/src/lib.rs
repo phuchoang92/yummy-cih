@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 pub mod constant_resolver;
+pub(crate) mod contracts_common;
 pub mod fingerprint;
 pub mod generic_parse;
 

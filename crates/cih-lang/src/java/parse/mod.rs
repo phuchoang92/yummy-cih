@@ -274,32 +274,12 @@ pub(super) fn annotation_metadata(node: TsNode<'_>, src: &str) -> Vec<serde_json
     out
 }
 
-pub(super) fn rest_template_http_method(method: &str) -> Option<&'static str> {
-    match method {
-        "getForObject" | "getForEntity" => Some("GET"),
-        "postForObject" | "postForEntity" | "postForLocation" => Some("POST"),
-        "put" => Some("PUT"),
-        "delete" => Some("DELETE"),
-        "patchForObject" => Some("PATCH"),
-        "exchange" => None,
-        _ => None,
-    }
-}
-
-pub(super) fn infer_webclient_http_method(receiver: &str) -> Option<&'static str> {
-    for (needle, method) in [
-        (".get()", "GET"),
-        (".post()", "POST"),
-        (".put()", "PUT"),
-        (".delete()", "DELETE"),
-        (".patch()", "PATCH"),
-    ] {
-        if receiver.contains(needle) {
-            return Some(method);
-        }
-    }
-    None
-}
+// Pure string helpers shared with other framework detectors (Kotlin) live in
+// `contracts_common`; re-exported here so java submodule call sites are unchanged.
+pub(crate) use crate::contracts_common::{
+    base_type_simple, infer_webclient_http_method, normalize_external_url, normalize_route_path,
+    rest_template_http_method, spring_http_method,
+};
 
 pub(super) fn first_string_argument(node: TsNode<'_>, src: &str) -> Option<String> {
     let arguments = node.child_by_field_name("arguments")?;
@@ -370,36 +350,6 @@ fn binding_has_type(builder: &FileBuilder, in_fqcn: &str, name: &str, expected: 
 
 fn class_of_signature(in_fqcn: &str) -> &str {
     in_fqcn.split('#').next().unwrap_or(in_fqcn)
-}
-
-pub(super) fn base_type_simple(raw: &str) -> String {
-    raw.split('<')
-        .next()
-        .unwrap_or(raw)
-        .replace("[]", "")
-        .rsplit('.')
-        .next()
-        .unwrap_or(raw)
-        .trim()
-        .to_string()
-}
-
-pub(super) fn normalize_external_url(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if let Some(rest) = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-    {
-        return rest
-            .find('/')
-            .map(|idx| collapse_slashes(&rest[idx..]))
-            .unwrap_or_else(|| "/".to_string());
-    }
-    if trimmed.starts_with('/') {
-        collapse_slashes(trimmed)
-    } else {
-        trimmed.to_string()
-    }
 }
 
 pub(super) fn spring_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> {
@@ -537,17 +487,6 @@ pub(super) fn annotation_name(node: TsNode<'_>, src: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-fn spring_http_method(annotation: &str) -> Option<&'static str> {
-    match annotation {
-        "GetMapping" => Some("GET"),
-        "PostMapping" => Some("POST"),
-        "PutMapping" => Some("PUT"),
-        "DeleteMapping" => Some("DELETE"),
-        "PatchMapping" => Some("PATCH"),
-        _ => None,
-    }
-}
-
 fn jaxrs_http_method(annotation: &str) -> Option<&'static str> {
     match annotation {
         "GET" => Some("GET"),
@@ -647,40 +586,6 @@ pub(super) fn unquote_spring_literal(raw: &str) -> Option<String> {
         return Some(raw[start..end].to_string());
     }
     Some(raw.to_string())
-}
-
-pub(super) fn normalize_route_path(route_path: &str, prefix: &str) -> String {
-    let path_part = route_path.trim().trim_matches('/');
-    let prefix_part = prefix.trim().trim_matches('/');
-    let joined = if prefix_part.is_empty() {
-        format!("/{path_part}")
-    } else if path_part.is_empty() {
-        format!("/{prefix_part}")
-    } else {
-        format!("/{prefix_part}/{path_part}")
-    };
-    collapse_slashes(&joined)
-}
-
-fn collapse_slashes(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    let mut previous_slash = false;
-    for ch in path.chars() {
-        if ch == '/' {
-            if !previous_slash {
-                out.push(ch);
-            }
-            previous_slash = true;
-        } else {
-            out.push(ch);
-            previous_slash = false;
-        }
-    }
-    if out.is_empty() {
-        "/".into()
-    } else {
-        out
-    }
 }
 
 pub(super) fn base_name_node(node: TsNode<'_>) -> Option<TsNode<'_>> {

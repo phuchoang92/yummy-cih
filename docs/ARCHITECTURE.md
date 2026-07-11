@@ -24,6 +24,26 @@ graph can be incomplete" list.
 - **Feign clients**: `@FeignClient` URL/path is read from the annotation literally;
   dynamic URL interpolation (`${...}`, concatenation) is not followed.
 
+## Kotlin routes & contract sites (`cih-lang/src/kotlin/framework.rs`)
+
+A 1:1 port of the Java Spring/Feign/Kafka detector (string normalization is
+shared via `cih-lang/src/contracts_common.rs`; tree walking is per-language).
+Same verb-shortcut and path-composition rules as Java above, plus:
+
+- **Receiver typing is a light per-class env**: a call like
+  `restTemplate.getForObject(...)` only counts as an outbound HTTP contract when
+  the receiver's simple name matches a *typed primary-constructor parameter* or
+  a *typed property* of the enclosing class (`class C(private val rest:
+  RestTemplate)`). No inheritance, no local variables, no `this.`-qualified
+  chains — an untyped or externally-provided receiver emits nothing.
+- **Literal strings only (Phase A)**: an interpolated URL (`"$base/items/$id"`)
+  still emits the HTTP contract site but with no `url_template`; an interpolated
+  topic in `kafkaTemplate.send(...)` emits nothing. Neither can participate in
+  cross-repo matching until dynamic-URL folding lands.
+- **Top-level `fun`s** get contract sites (as `Function:` callables); calls in
+  `init {}` blocks and property initializers have no callable context and are
+  skipped, mirroring Java.
+
 ## CXF / OSGi route stitching (`cih-resolve/src/lang/java/cxf.rs`)
 
 - **Base paths come from XML, per bundle.** Each JAX-RS route gets
