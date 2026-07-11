@@ -6,6 +6,7 @@ use tree_sitter::{Language, Node as TsNode, Parser, Query};
 
 use crate::{LanguageProvider, SourceScan, Stereotype};
 
+mod framework;
 pub mod parse;
 
 pub const GO_SCOPE_QUERY: &str = include_str!("query.scm");

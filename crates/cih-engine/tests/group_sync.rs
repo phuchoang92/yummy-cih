@@ -169,3 +169,64 @@ fn auto_sync_swallows_member_resolution_failures() {
 fn auto_sync_is_a_noop_without_matching_groups() {
     auto_sync_groups_for_repo(&GroupRegistry::default(), &Registry::default(), "orders");
 }
+
+#[test]
+fn any_method_provider_matches_concrete_consumer_verbs() {
+    // Go net/http HandleFunc routes register as method "ANY"; consumers with
+    // concrete verbs must still match them.
+    let provider = RepoContracts {
+        routes: vec![RouteContract {
+            repo: "orders".into(),
+            id: "Route:go:ANY:/orders".into(),
+            method: "ANY".into(),
+            path: "/orders".into(),
+        }],
+        ..RepoContracts::default()
+    };
+    let consumer = RepoContracts {
+        endpoints: vec![
+            EndpointContract {
+                repo: "checkout".into(),
+                id: "ExternalEndpoint:GET:/orders".into(),
+                method: "GET".into(),
+                path: "/orders".into(),
+            },
+            EndpointContract {
+                repo: "checkout".into(),
+                id: "ExternalEndpoint:POST:/orders".into(),
+                method: "POST".into(),
+                path: "/orders".into(),
+            },
+        ],
+        ..RepoContracts::default()
+    };
+
+    let matches = match_contracts(&[provider, consumer]);
+    assert_eq!(matches.len(), 2, "both verbs match the ANY provider");
+    let keys: Vec<&str> = matches.iter().map(|m| m.match_key.as_str()).collect();
+    assert!(keys.contains(&"GET /orders"));
+    assert!(keys.contains(&"POST /orders"));
+}
+
+#[test]
+fn exact_verb_provider_does_not_match_other_verbs() {
+    let provider = RepoContracts {
+        routes: vec![RouteContract {
+            repo: "orders".into(),
+            id: "Route:GET /orders".into(),
+            method: "GET".into(),
+            path: "/orders".into(),
+        }],
+        ..RepoContracts::default()
+    };
+    let consumer = RepoContracts {
+        endpoints: vec![EndpointContract {
+            repo: "checkout".into(),
+            id: "ExternalEndpoint:POST:/orders".into(),
+            method: "POST".into(),
+            path: "/orders".into(),
+        }],
+        ..RepoContracts::default()
+    };
+    assert!(match_contracts(&[provider, consumer]).is_empty());
+}

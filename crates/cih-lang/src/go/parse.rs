@@ -1,10 +1,14 @@
+use std::collections::HashMap;
+
 use cih_core::{
     file_id, function_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
     Range, RawImport, RefKind, ReferenceSite, SymbolDef,
 };
 use tree_sitter::Node as TsNode;
 
-fn range_of(node: TsNode<'_>) -> Range {
+use super::framework;
+
+pub(super) fn range_of(node: TsNode<'_>) -> Range {
     let start = node.start_position();
     let end = node.end_position();
     Range {
@@ -15,13 +19,15 @@ fn range_of(node: TsNode<'_>) -> Range {
     }
 }
 
-fn text<'a>(node: TsNode<'_>, src: &'a str) -> &'a str {
+pub(super) fn text<'a>(node: TsNode<'_>, src: &'a str) -> &'a str {
     node.utf8_text(src.as_bytes()).unwrap_or("").trim()
 }
 
-fn unquote(s: &str) -> String {
+pub(super) fn unquote(s: &str) -> String {
     let s = s.trim();
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+    if (s.starts_with('"') && s.ends_with('"') || s.starts_with('`') && s.ends_with('`'))
+        && s.len() >= 2
+    {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -98,6 +104,11 @@ pub fn parse_go_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
     let mut defs: Vec<SymbolDef> = Vec::new();
     let mut imports: Vec<RawImport> = Vec::new();
     let mut reference_sites: Vec<ReferenceSite> = Vec::new();
+    let mut contract_sites: Vec<cih_core::ContractSite> = Vec::new();
+    // Function/method bodies to re-walk for framework contracts, plus the
+    // same-file `name → id` map used to resolve plain-identifier handlers.
+    let mut callable_bodies: Vec<(TsNode<'_>, NodeId)> = Vec::new();
+    let mut file_fn_ids: HashMap<String, NodeId> = HashMap::new();
 
     // Walk top-level declarations
     let mut cursor = root.walk();
@@ -111,6 +122,8 @@ pub fn parse_go_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
                     extract_function(child, src, rel, &pkg, &file_node_id)
                 {
                     collect_calls(child, src, &def.fqcn, &def.id, &mut reference_sites);
+                    file_fn_ids.insert(def.name.clone(), def.id.clone());
+                    callable_bodies.push((child, def.id.clone()));
                     defs.push(def);
                     nodes.push(node);
                     edges.push(edge);
@@ -121,6 +134,7 @@ pub fn parse_go_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
                     extract_method(child, src, rel, &pkg, &file_node_id)
                 {
                     collect_calls(child, src, &def.fqcn, &def.id, &mut reference_sites);
+                    callable_bodies.push((child, def.id.clone()));
                     defs.push(def);
                     nodes.push(node);
                     edges.push(edge);
@@ -133,6 +147,24 @@ pub fn parse_go_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
         }
     }
 
+    // Framework pass — import-gated; most files skip it entirely.
+    let framework_ctx = framework::GoFrameworkCtx::from_imports(&imports);
+    if framework_ctx.any() {
+        for (body, callable_id) in &callable_bodies {
+            framework::collect_contracts(
+                *body,
+                src,
+                &framework_ctx,
+                callable_id,
+                &file_fn_ids,
+                rel,
+                &mut nodes,
+                &mut edges,
+                &mut contract_sites,
+            );
+        }
+    }
+
     let parsed_file = ParsedFile {
         file: rel.to_string(),
         language: "go".to_string(),
@@ -140,6 +172,7 @@ pub fn parse_go_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
         defs,
         imports,
         reference_sites,
+        contract_sites,
         ..Default::default()
     };
 

@@ -70,7 +70,9 @@ tree-sitter-java = "0.23.5"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-kotlin-updated = "0.1.0"
-tree-sitter-go      = "0.25.0"
+# Pinned to the 0.23 line: 0.25.0 ships language ABI 15, which the
+# tree-sitter 0.24 runtime rejects at `set_language` — every Go parse panicked.
+tree-sitter-go      = "0.23.4"
 tree-sitter-rust    = "0.24.0"
 tree-sitter-c-sharp = "0.23.0"
 tree-sitter-ruby    = "0.23.0"

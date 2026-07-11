@@ -120,6 +120,8 @@ pub enum RouteSource {
     Flask,
     FastApi,
     Django,
+    /// net/http, gin, echo, chi, gorilla/mux (import-gated Go detection).
+    Go,
 }
 
 pub fn function_id(fqn: &str, name: &str, arity: u16) -> NodeId {

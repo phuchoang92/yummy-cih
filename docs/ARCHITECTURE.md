@@ -44,6 +44,34 @@ Same verb-shortcut and path-composition rules as Java above, plus:
   `init {}` blocks and property initializers have no callable context and are
   skipped, mirroring Java.
 
+## Go routes & outbound HTTP (`cih-lang/src/go/framework.rs`)
+
+Go has no annotations, so detection is **import-gated per library**, then
+shape-gated:
+
+- **Route registrations**: gin/echo uppercase verbs (`r.GET("/path", h)`) only
+  when gin/echo is imported; chi capitalized verbs (`r.Get(...)`) only when chi
+  is imported; `Handle`/`HandleFunc` only when net/http or gorilla/mux is
+  imported. The first argument must be a string starting with `/`, or a
+  Go 1.22 method pattern (`"GET /orders/{id}"`, which splits into its verb).
+  Plain `HandleFunc("/path", h)` routes register with method **`ANY`**;
+  `match_contracts` lets consumers with concrete verbs match `ANY` providers.
+- **Route id convention** (deliberate decision): `Route:go:{METHOD}:{path}` —
+  the Express-style prefixed format, not Java/Spring's `Route:{METHOD} {path}`.
+  Both formats already coexist; nothing parses route ids (props are the
+  contract), and the CXF stitcher's id rewriting is Java-specific.
+- **`HandlesRoute` only for plain identifier handlers** naming a same-file
+  function. Closures, method values, and cross-file handlers produce a Route
+  node with `handler: null` and no edge.
+- **Outbound**: `http.Get|Post|Head|PostForm` and
+  `http.NewRequest(WithContext)` with a literal method argument; `client.Do`
+  is skipped (the URL lives on the request). URLs reuse the dynamic-parts
+  model; `fmt.Sprintf` format strings split on `%` directives (`Lit` chunks +
+  `Dynamic` per directive).
+- Historical note: tree-sitter-go is pinned to the 0.23 line — 0.25 ships
+  language ABI 15, which the tree-sitter 0.24 runtime rejects, making every
+  Go parse panic at parser construction.
+
 ## TypeScript / Python outbound HTTP (`typescript/parse.rs`, `python/parse.rs`)
 
 Deliberately tight recognizers — false positives poison cross-repo matching:

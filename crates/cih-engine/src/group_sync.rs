@@ -254,14 +254,20 @@ pub fn match_contracts(repos: &[RepoContracts]) -> Vec<ContractMatch> {
     let mut matches = Vec::new();
     for repo in repos {
         for endpoint in &repo.endpoints {
-            let key = (
-                endpoint.method.clone(),
-                normalize_contract_path(&endpoint.path),
-            );
-            let Some(providers) = route_providers.get(&key) else {
-                continue;
-            };
-            for provider in providers {
+            let path = normalize_contract_path(&endpoint.path);
+            // Exact verb first, then method-agnostic providers (Go net/http
+            // `HandleFunc` routes register as "ANY" and would never match a
+            // concrete consumer verb otherwise).
+            let mut candidates: Vec<&RouteContract> = Vec::new();
+            if let Some(providers) = route_providers.get(&(endpoint.method.clone(), path.clone())) {
+                candidates.extend(providers.iter().copied());
+            }
+            if endpoint.method != "ANY" {
+                if let Some(providers) = route_providers.get(&("ANY".to_string(), path.clone())) {
+                    candidates.extend(providers.iter().copied());
+                }
+            }
+            for provider in candidates {
                 if provider.repo == endpoint.repo {
                     continue;
                 }
@@ -271,7 +277,7 @@ pub fn match_contracts(repos: &[RepoContracts]) -> Vec<ContractMatch> {
                     provider_id: provider.id.clone(),
                     consumer_repo: endpoint.repo.clone(),
                     consumer_id: endpoint.id.clone(),
-                    match_key: format!("{} {}", key.0, key.1),
+                    match_key: format!("{} {path}", endpoint.method),
                 });
             }
         }
