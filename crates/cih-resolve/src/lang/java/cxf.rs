@@ -126,6 +126,7 @@ pub(crate) fn stitch_route_prefixes(
             };
             targets.push(Target {
                 server_id: n.id.clone(),
+                server_file: n.file.clone(),
                 address: address.to_string(),
                 fqcn: fqcn.clone(),
             });
@@ -160,6 +161,7 @@ pub(crate) fn stitch_route_prefixes(
             let fqcn = resolve_class_fqcn(raw.trim(), &simple_to_fqcns);
             targets.push(Target {
                 server_id: n.id.clone(),
+                server_file: n.file.clone(),
                 address: address.to_string(),
                 fqcn: fqcn.clone(),
             });
@@ -182,12 +184,10 @@ pub(crate) fn stitch_route_prefixes(
         return;
     }
 
-    // Only now (there is CXF to stitch) resolve the outermost servlet base path.
-    let (servlet_prefix, servlet_source) =
-        match resolve_servlet_prefix(repo_root, nodes, route_base_path) {
-            Some((p, s)) => (p, s),
-            None => (String::new(), "none"),
-        };
+    // Servlet base paths are per-bundle on OSGi platforms (each bundle declares
+    // its own whiteboard pattern), so resolve them per server file, memoized.
+    let resolver = ServletPrefixResolver::build(nodes, route_base_path);
+    let mut prefix_memo: FxHashMap<String, (String, &'static str)> = FxHashMap::default();
 
     let mut id_remap: FxHashMap<NodeId, NodeId> = FxHashMap::default();
 
@@ -212,6 +212,15 @@ pub(crate) fn stitch_route_prefixes(
         else {
             continue;
         };
+
+        let (servlet_prefix, servlet_source) = prefix_memo
+            .entry(target.server_file.clone())
+            .or_insert_with(|| {
+                resolver
+                    .prefix_for(repo_root, &target.server_file)
+                    .unwrap_or((String::new(), "none"))
+            })
+            .clone();
 
         let method = props
             .get("httpMethod")
@@ -266,46 +275,132 @@ pub(crate) fn stitch_route_prefixes(
 
 struct Target {
     server_id: NodeId,
+    /// Repo-relative path of the XML file declaring the `<jaxrs:server>` —
+    /// the anchor for per-bundle servlet-prefix resolution.
+    server_file: String,
     address: String,
     fqcn: String,
 }
 
-/// Best-effort resolution of the CXF servlet base path (e.g. `/rest`) — the outermost URL
-/// layer above a `<jaxrs:server address>`. Returns the prefix and its source label, or
-/// `None` when no source declares one. Priority, highest first:
+/// Per-bundle servlet base-path resolution (the outermost URL layer above a
+/// `<jaxrs:server address>`). Built once per stitch from the graph nodes.
+///
+/// Priority per server: config override (global) → the OSGi whiteboard pattern
+/// whose declaring file shares the most leading directory components with the
+/// server's file (each bundle declares its own `/rest/<name>/*`) → a lone
+/// repo-wide pattern (single-bundle repos, where files may share no directory)
+/// → `web.xml` / Spring Boot `cxf.path` (global, lazily scanned) → none.
+struct ServletPrefixResolver {
+    config: Option<String>,
+    /// `(declaring file, normalized pattern)`, sorted so equal-score ties
+    /// resolve to the lexicographically first file deterministically.
+    osgi: Vec<(String, String)>,
+    fs_fallback: std::cell::OnceCell<Option<(String, &'static str)>>,
+}
+
+impl ServletPrefixResolver {
+    fn build(nodes: &[Node], config_override: Option<&str>) -> Self {
+        let config = config_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(normalize_prefix);
+        let mut osgi: Vec<(String, String)> = nodes
+            .iter()
+            .filter_map(|n| {
+                let props = n.props.as_ref()?;
+                if props.get("source")?.as_str()? != "osgi_servlet" {
+                    return None;
+                }
+                let pattern = props.get("servlet_pattern")?.as_str()?;
+                Some((n.file.clone(), normalize_prefix(pattern)))
+            })
+            .collect();
+        osgi.sort();
+        osgi.dedup();
+        Self {
+            config,
+            osgi,
+            fs_fallback: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn fs_fallback(&self, repo_root: &Path) -> Option<(String, &'static str)> {
+        self.fs_fallback
+            .get_or_init(|| {
+                if let Some(p) = scan_web_xml_cxf_prefix(repo_root) {
+                    return Some((normalize_prefix(&p), "web_xml"));
+                }
+                if let Some(p) = scan_spring_boot_cxf_path(repo_root) {
+                    return Some((normalize_prefix(&p), "spring_boot"));
+                }
+                None
+            })
+            .clone()
+    }
+
+    fn prefix_for(&self, repo_root: &Path, server_file: &str) -> Option<(String, &'static str)> {
+        if let Some(p) = &self.config {
+            return Some((p.clone(), "config"));
+        }
+        let server_dir = dir_components(server_file);
+        let mut best: Option<(usize, &(String, String))> = None;
+        for entry in &self.osgi {
+            let score = shared_leading(&server_dir, &dir_components(&entry.0));
+            if score == 0 {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((best_score, best_entry)) => {
+                    score > best_score
+                        || (score == best_score && entry.0.len() < best_entry.0.len())
+                }
+            };
+            if better {
+                best = Some((score, entry));
+            }
+        }
+        if let Some((_, entry)) = best {
+            return Some((entry.1.clone(), "osgi_whiteboard"));
+        }
+        // A lone pattern still applies repo-wide (single-bundle repos, or
+        // synthetic graphs whose nodes carry no directory structure). Multiple
+        // unrelated patterns must NOT cross-apply — skip the osgi layer.
+        if self.osgi.len() == 1 {
+            return Some((self.osgi[0].1.clone(), "osgi_whiteboard"));
+        }
+        self.fs_fallback(repo_root)
+    }
+}
+
+/// Directory components of a repo-relative path (file name dropped).
+fn dir_components(path: &str) -> Vec<&str> {
+    let mut parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    parts.pop();
+    parts
+}
+
+fn shared_leading(a: &[&str], b: &[&str]) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+}
+
+/// Best-effort resolution of the CXF servlet base path (e.g. `/rest`) without a
+/// per-bundle anchor — [`ServletPrefixResolver::prefix_for`] with no server file,
+/// so only the config override / lone-pattern / filesystem layers apply. Kept as
+/// the stable entry point for callers (and tests) that predate per-bundle
+/// resolution. Priority, highest first:
 ///
 /// 1. `config_override` — `cxf_base_path` from `cih.toml` / `--cxf-base-path`
-/// 2. OSGi HTTP-whiteboard `osgi.http.whiteboard.servlet.pattern` (from `nodes`)
+/// 2. a lone OSGi HTTP-whiteboard `osgi.http.whiteboard.servlet.pattern` (from `nodes`)
 /// 3. `web.xml` `CXFServlet` `<url-pattern>`
 /// 4. Spring Boot `cxf.path` property (`application.properties` / `.yml`)
-pub(crate) fn resolve_servlet_prefix(
+#[cfg(test)]
+fn resolve_servlet_prefix(
     repo_root: &Path,
     nodes: &[Node],
     config_override: Option<&str>,
 ) -> Option<(String, &'static str)> {
-    if let Some(p) = config_override.map(str::trim).filter(|s| !s.is_empty()) {
-        return Some((normalize_prefix(p), "config"));
-    }
-    if let Some(pattern) = nodes.iter().find_map(|n| {
-        let props = n.props.as_ref()?;
-        if props.get("source").and_then(|s| s.as_str()) == Some("osgi_servlet") {
-            props
-                .get("servlet_pattern")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        } else {
-            None
-        }
-    }) {
-        return Some((normalize_prefix(&pattern), "osgi_whiteboard"));
-    }
-    if let Some(p) = scan_web_xml_cxf_prefix(repo_root) {
-        return Some((normalize_prefix(&p), "web_xml"));
-    }
-    if let Some(p) = scan_spring_boot_cxf_path(repo_root) {
-        return Some((normalize_prefix(&p), "spring_boot"));
-    }
-    None
+    ServletPrefixResolver::build(nodes, config_override).prefix_for(repo_root, "")
 }
 
 /// Normalize a servlet/base-path prefix: strip a trailing `/*` (or `*`) wildcard and any
@@ -563,6 +658,169 @@ mod tests {
             std::env::temp_dir().join(format!("cih-cxf-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Re-home a synthetic node to a specific repo-relative file (the default
+    /// helpers hardcode `beans.xml`, which puts everything in one "bundle").
+    fn at_file(mut node: Node, file: &str) -> Node {
+        node.file = file.to_string();
+        node
+    }
+
+    /// One OCB-style bundle: a `<jaxrs:server>` + bean in `beans_rest.xml` and a
+    /// whiteboard servlet pattern in `beans_rest_web_servlets.xml`, all under
+    /// `<bundle_dir>/resources/META-INF/spring/`.
+    fn bundle(bundle_dir: &str, pattern: &str, address: &str, bean_id: &str, class: &str) -> Vec<Node> {
+        let spring_dir = format!("{bundle_dir}/resources/META-INF/spring");
+        let mut nodes: Vec<Node> = server_and_bean(address, bean_id, class)
+            .into_iter()
+            .map(|n| {
+                let file = format!("{spring_dir}/beans_rest.xml");
+                at_file(n, &file)
+            })
+            .collect();
+        nodes.push(at_file(
+            integration_route(
+                pattern,
+                "osgi_servlet",
+                serde_json::json!({ "servlet_pattern": pattern }),
+            ),
+            &format!("{spring_dir}/beans_rest_web_servlets.xml"),
+        ));
+        nodes
+    }
+
+    #[test]
+    fn per_bundle_servlet_prefix_selected_by_directory() {
+        let dir = temp_dir("bundles");
+        let mut nodes = bundle("custom-a", "/rest/a/*", "/v1", "aImpl", "com.acme.a.AImpl");
+        nodes.extend(bundle("custom-b", "/rest/b/*", "/v1", "bImpl", "com.acme.b.BImpl"));
+        nodes.push(route_node("GET", "/x", "com.acme.a.AImpl#x/0"));
+        nodes.push(route_node("GET", "/y", "com.acme.b.BImpl#y/0"));
+        let mut edges = vec![
+            handles_route_edge("com.acme.a.AImpl#x/0", "GET", "/x"),
+            handles_route_edge("com.acme.b.BImpl#y/0", "GET", "/y"),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let paths: Vec<&str> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Route)
+            .filter_map(|n| prop(n, "path"))
+            .collect();
+        assert!(paths.contains(&"/rest/a/v1/x"), "paths: {paths:?}");
+        assert!(paths.contains(&"/rest/b/v1/y"), "paths: {paths:?}");
+        assert!(nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Route)
+            .all(|n| prop(n, "servlet_prefix_source") == Some("osgi_whiteboard")));
+    }
+
+    #[test]
+    fn single_osgi_servlet_applies_across_directories() {
+        // A lone whiteboard pattern still applies repo-wide even when it shares
+        // no directory with the server (single-bundle repos, root-level XML).
+        let dir = temp_dir("lone");
+        let mut nodes = server_and_bean("/v1", "impl", "com.acme.Impl")
+            .into_iter()
+            .map(|n| at_file(n, "app/config/beans_rest.xml"))
+            .collect::<Vec<_>>();
+        nodes.push(at_file(
+            integration_route(
+                "/rest/*",
+                "osgi_servlet",
+                serde_json::json!({ "servlet_pattern": "/rest/*" }),
+            ),
+            "web/servlets.xml",
+        ));
+        nodes.push(route_node("GET", "/x", "com.acme.Impl#x/0"));
+        let mut edges = vec![handles_route_edge("com.acme.Impl#x/0", "GET", "/x")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/rest/v1/x"));
+        assert_eq!(
+            prop(route, "servlet_prefix_source"),
+            Some("osgi_whiteboard")
+        );
+    }
+
+    #[test]
+    fn multiple_unrelated_osgi_servlets_do_not_cross_apply() {
+        // Two bundles declare patterns; a server in a THIRD bundle must not
+        // inherit either one (previously: first-node-wins repo-wide).
+        let dir = temp_dir("unrelated");
+        let mut nodes = bundle("custom-a", "/rest/a/*", "/v1", "aImpl", "com.acme.a.AImpl");
+        nodes.extend(bundle("custom-b", "/rest/b/*", "/v1", "bImpl", "com.acme.b.BImpl"));
+        nodes.extend(
+            server_and_bean("/v1", "cImpl", "com.acme.c.CImpl")
+                .into_iter()
+                .map(|n| at_file(n, "custom-c/resources/META-INF/spring/beans_rest.xml")),
+        );
+        nodes.push(route_node("GET", "/z", "com.acme.c.CImpl#z/0"));
+        let mut edges = vec![handles_route_edge("com.acme.c.CImpl#z/0", "GET", "/z")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Route && prop(n, "handler") == Some("com.acme.c.CImpl#z/0"))
+            .unwrap();
+        assert_eq!(prop(route, "path"), Some("/v1/z"));
+        assert_eq!(prop(route, "servlet_prefix_source"), Some("none"));
+    }
+
+    #[test]
+    fn config_override_beats_per_bundle_pattern() {
+        let dir = temp_dir("cfgwins");
+        let mut nodes = bundle("custom-a", "/rest/a/*", "/v1", "aImpl", "com.acme.a.AImpl");
+        nodes.push(route_node("GET", "/x", "com.acme.a.AImpl#x/0"));
+        let mut edges = vec![handles_route_edge("com.acme.a.AImpl#x/0", "GET", "/x")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, Some("/api"));
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/api/v1/x"));
+        assert_eq!(prop(route, "servlet_prefix_source"), Some("config"));
+    }
+
+    #[test]
+    fn servlet_prefix_tie_breaks_deterministically() {
+        // Two patterns equidistant from the server (same shared directory
+        // depth): the lexicographically-first shortest file wins.
+        let dir = temp_dir("ties");
+        let mut nodes = server_and_bean("/v1", "impl", "com.acme.Impl")
+            .into_iter()
+            .map(|n| at_file(n, "app/spring/beans_rest.xml"))
+            .collect::<Vec<_>>();
+        for (file, pattern) in [
+            ("app/z/servlets.xml", "/rest/z/*"),
+            ("app/a/servlets.xml", "/rest/a/*"),
+        ] {
+            nodes.push(at_file(
+                integration_route(
+                    pattern,
+                    "osgi_servlet",
+                    serde_json::json!({ "servlet_pattern": pattern }),
+                ),
+                file,
+            ));
+        }
+        nodes.push(route_node("GET", "/x", "com.acme.Impl#x/0"));
+        let mut edges = vec![handles_route_edge("com.acme.Impl#x/0", "GET", "/x")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        // Both score 1 ("app"); files have equal length → lexicographic first.
+        assert_eq!(prop(route, "path"), Some("/rest/a/v1/x"));
     }
 
     #[test]
