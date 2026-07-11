@@ -1,7 +1,7 @@
 use cih_core::{
     file_id, function_id, type_id, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId,
     NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource,
-    StringConstant, SymbolDef, UrlPart,
+    HttpWrapperDef, StringConstant, SymbolDef, UrlPart,
 };
 use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_typescript};
@@ -167,6 +167,7 @@ struct Builder {
     reference_sites: Vec<ReferenceSite>,
     contract_sites: Vec<ContractSite>,
     string_constants: Vec<StringConstant>,
+    http_wrappers: Vec<HttpWrapperDef>,
 }
 
 impl Builder {
@@ -488,11 +489,25 @@ fn try_emit_http_contract(
     let Some(func) = node.child_by_field_name("function") else {
         return;
     };
+    let mut via_wrapper = None;
     let http_method = match func.kind() {
         "identifier" => match text(func, src).as_str() {
             // Method comes from the second-arg options object, default GET.
             "fetch" | "axios" => call_options_method(node, src).unwrap_or_else(|| "GET".into()),
-            _ => return,
+            // Any other plain identifier MAY be a same-repo HTTP wrapper
+            // (`apiFetch('/admin/x', { method: 'POST' }, token)`). Emit a
+            // PROVISIONAL site only when arg 0 is URL-ish; the resolve phase
+            // joins it against detected wrapper defs and drops non-matches.
+            callee => {
+                let Some(arg0) = ts_positional_argument(node, 0) else {
+                    return;
+                };
+                if !ts_arg_is_url_ish(arg0, src) {
+                    return;
+                }
+                via_wrapper = Some(callee.to_string());
+                call_options_method(node, src).unwrap_or_else(|| "GET".into())
+            }
         },
         "member_expression" => {
             let object = func.child_by_field_name("object").map(|n| text(n, src));
@@ -513,15 +528,27 @@ fn try_emit_http_contract(
         return;
     };
 
-    let url_template = literal_ts_string(url_node, src).map(|url| normalize_external_url(&url));
-    let url_parts = if url_template.is_none() {
-        ts_url_parts(url_node, src)
+    let (url_template, url_parts) = if via_wrapper.is_some() {
+        // Wrapper calls ALWAYS carry parts — even plain literals — because the
+        // resolve join must prepend the wrapper's base parts.
+        let mut parts = Vec::new();
+        fold_ts_url_expr(url_node, src, &mut parts);
+        if parts.is_empty() {
+            return;
+        }
+        (None, Some(parts))
     } else {
-        None
+        let template = literal_ts_string(url_node, src).map(|url| normalize_external_url(&url));
+        let parts = if template.is_none() {
+            ts_url_parts(url_node, src)
+        } else {
+            None
+        };
+        if template.is_none() && parts.is_none() {
+            return;
+        }
+        (template, parts)
     };
-    if url_template.is_none() && url_parts.is_none() {
-        return;
-    }
     let in_callable = enclosing_fn
         .cloned()
         .unwrap_or_else(|| file_id(&builder.rel));
@@ -532,10 +559,19 @@ fn try_emit_http_contract(
         http_method: Some(http_method),
         messaging_framework: None,
         url_parts,
-        via_wrapper: None,
+        via_wrapper,
         in_callable,
         range: range_of(node),
     });
+}
+
+/// URL-ish gate for provisional wrapper calls: a string starting with `/`, a
+/// template whose first fragment starts with `/`, or a concat whose folded
+/// first part is such a Lit. Keeps `t('common.title')` / `helper(id)` out.
+fn ts_arg_is_url_ish(node: TsNode<'_>, src: &str) -> bool {
+    let mut parts = Vec::new();
+    fold_ts_url_expr(node, src, &mut parts);
+    matches!(parts.first(), Some(UrlPart::Lit(lit)) if lit.starts_with('/'))
 }
 
 fn ts_positional_argument(call: TsNode<'_>, n: usize) -> Option<TsNode<'_>> {
@@ -710,6 +746,263 @@ fn collect_module_string_constants(node: TsNode<'_>, src: &str, builder: &mut Bu
     }
 }
 
+// ── HTTP wrapper detection (apiFetch pattern) ────────────────────────────────
+
+/// One piece of a candidate wrapper's URL expression: a regular part, or the
+/// pass-through parameter slot.
+enum WrapperUrlPiece {
+    Part(UrlPart),
+    Param,
+}
+
+/// Detect a same-repo HTTP wrapper: a module-scope function whose FIRST param
+/// is a plain identifier and whose body calls fetch/axios with a URL that is
+/// `<Lit/ConstRef prefix…><param>` (param LAST) — directly or via one level of
+/// `const url = <expr>` same-body indirection. Anything fancier bails: a
+/// missed wrapper degrades coverage, a wrong one would fabricate endpoints.
+fn try_collect_http_wrapper(name: &str, fn_node: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let Some(param_name) = first_param_identifier(fn_node, src) else {
+        return;
+    };
+    let Some(body) = fn_node.child_by_field_name("body") else {
+        return;
+    };
+    let Some(http_call) = find_inner_http_call(body, src) else {
+        return;
+    };
+    let Some(mut url_expr) = ts_positional_argument(http_call, 0) else {
+        return;
+    };
+    // One-level indirection: `const url = <expr>; … fetch(url, …)`.
+    if url_expr.kind() == "identifier" {
+        let local = text(url_expr, src);
+        if local == param_name {
+            // fetch(param) directly: empty prefix — a pure pass-through.
+            builder.http_wrappers.push(HttpWrapperDef {
+                name: name.to_string(),
+                module: builder.module.clone(),
+                prefix_parts: Vec::new(),
+                options_arg_index: 1,
+                range: range_of(fn_node),
+            });
+            return;
+        }
+        match find_unique_const_initializer(body, &local, src) {
+            Some(value) => url_expr = value,
+            None => return,
+        }
+    }
+    let mut pieces = Vec::new();
+    fold_wrapper_url_expr(url_expr, src, &param_name, &mut pieces);
+    // Param must be the FINAL piece, appear exactly once, and everything
+    // before it must be Lit/ConstRef.
+    let Some(WrapperUrlPiece::Param) = pieces.last() else {
+        return;
+    };
+    let prefix: Vec<UrlPart> = pieces[..pieces.len() - 1]
+        .iter()
+        .map(|piece| match piece {
+            WrapperUrlPiece::Part(part) => Some(part.clone()),
+            WrapperUrlPiece::Param => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    if pieces.len() > 1 && prefix.is_empty() {
+        return; // a second Param (or nothing collectible) — bail
+    }
+    if prefix
+        .iter()
+        .any(|part| matches!(part, UrlPart::Dynamic))
+    {
+        return;
+    }
+    builder.http_wrappers.push(HttpWrapperDef {
+        name: name.to_string(),
+        module: builder.module.clone(),
+        prefix_parts: prefix,
+        options_arg_index: 1,
+        range: range_of(fn_node),
+    });
+}
+
+/// The function's first parameter when it is a plain identifier pattern
+/// (typed `endpoint: string` included); destructuring → None.
+fn first_param_identifier(fn_node: TsNode<'_>, src: &str) -> Option<String> {
+    let params = fn_node
+        .child_by_field_name("parameters")
+        .or_else(|| fn_node.child_by_field_name("parameter"))?;
+    if params.kind() == "identifier" {
+        // bare single-param arrow: `endpoint => …`
+        return Some(text(params, src));
+    }
+    let mut cursor = params.walk();
+    let first = params
+        .named_children(&mut cursor)
+        .find(|child| matches!(child.kind(), "required_parameter" | "optional_parameter"))?;
+    let pattern = first.child_by_field_name("pattern")?;
+    (pattern.kind() == "identifier").then(|| text(pattern, src))
+}
+
+/// First fetch/axios call inside `body`, NOT descending into nested function
+/// definitions (a closure must not make its enclosing function a wrapper).
+fn find_inner_http_call<'a>(body: TsNode<'a>, src: &str) -> Option<TsNode<'a>> {
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "function_declaration" | "arrow_function" | "function_expression" | "method_definition"
+        ) {
+            continue;
+        }
+        if child.kind() == "call_expression" {
+            if let Some(func) = child.child_by_field_name("function") {
+                let is_http = match func.kind() {
+                    "identifier" => {
+                        let callee = text(func, src);
+                        callee == "fetch" || callee == "axios"
+                    }
+                    "member_expression" => {
+                        func.child_by_field_name("object")
+                            .map(|obj| text(obj, src) == "axios")
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if is_http {
+                    return Some(child);
+                }
+            }
+        }
+        if let Some(found) = find_inner_http_call(child, src) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The unique same-body `const <local> = <expr>` initializer, or None when
+/// absent or ambiguous (shadowing across branches → refuse to guess).
+fn find_unique_const_initializer<'a>(
+    body: TsNode<'a>,
+    local: &str,
+    src: &str,
+) -> Option<TsNode<'a>> {
+    let mut found: Option<TsNode<'a>> = None;
+    collect_const_initializers(body, local, src, &mut found, &mut 0);
+    found
+}
+
+fn collect_const_initializers<'a>(
+    node: TsNode<'a>,
+    local: &str,
+    src: &str,
+    found: &mut Option<TsNode<'a>>,
+    count: &mut u32,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "function_declaration" | "arrow_function" | "function_expression" | "method_definition"
+        ) {
+            continue;
+        }
+        if child.kind() == "lexical_declaration" {
+            let mut dcursor = child.walk();
+            for declarator in child.named_children(&mut dcursor) {
+                if declarator.kind() != "variable_declarator" {
+                    continue;
+                }
+                let name = declarator
+                    .child_by_field_name("name")
+                    .map(|n| text(n, src))
+                    .unwrap_or_default();
+                if name == local {
+                    if let Some(value) = declarator.child_by_field_name("value") {
+                        *count += 1;
+                        if *count > 1 {
+                            *found = None;
+                            return;
+                        }
+                        *found = Some(value);
+                    }
+                }
+            }
+        }
+        collect_const_initializers(child, local, src, found, count);
+        if *count > 1 {
+            return;
+        }
+    }
+}
+
+/// Fold a wrapper's URL expression like [`fold_ts_url_expr`], except any
+/// identifier equal to the pass-through param becomes [`WrapperUrlPiece::Param`].
+fn fold_wrapper_url_expr(
+    node: TsNode<'_>,
+    src: &str,
+    param: &str,
+    out: &mut Vec<WrapperUrlPiece>,
+) {
+    match node.kind() {
+        "identifier" if text(node, src) == param => out.push(WrapperUrlPiece::Param),
+        "template_string" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_fragment" | "escape_sequence" => {
+                        out.push(WrapperUrlPiece::Part(UrlPart::Lit(
+                            child
+                                .utf8_text(src.as_bytes())
+                                .unwrap_or_default()
+                                .to_string(),
+                        )))
+                    }
+                    "template_substitution" => match child.named_child(0) {
+                        Some(inner) if inner.kind() == "identifier" && text(inner, src) == param => {
+                            out.push(WrapperUrlPiece::Param)
+                        }
+                        Some(inner)
+                            if inner.kind() == "identifier"
+                                && crate::contracts_common::is_screaming_snake(&text(
+                                    inner, src,
+                                )) =>
+                        {
+                            out.push(WrapperUrlPiece::Part(UrlPart::ConstRef(text(inner, src))))
+                        }
+                        _ => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+                    },
+                    _ => {}
+                }
+            }
+        }
+        "binary_expression" => {
+            let op = node.child_by_field_name("operator").map(|op| text(op, src));
+            if op.as_deref() != Some("+") {
+                out.push(WrapperUrlPiece::Part(UrlPart::Dynamic));
+                return;
+            }
+            for field in ["left", "right"] {
+                match node.child_by_field_name(field) {
+                    Some(side) => fold_wrapper_url_expr(side, src, param, out),
+                    None => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+                }
+            }
+        }
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => fold_wrapper_url_expr(inner, src, param, out),
+            None => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+        },
+        "string" => out.push(WrapperUrlPiece::Part(UrlPart::Lit(unquote(&text(
+            node, src,
+        ))))),
+        "identifier" if crate::contracts_common::is_screaming_snake(&text(node, src)) => {
+            out.push(WrapperUrlPiece::Part(UrlPart::ConstRef(text(node, src))))
+        }
+        _ => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+    }
+}
+
 // ── Recursive AST walker ──────────────────────────────────────────────────────
 
 /// `enclosing_fn` is the function/method that lexically contains `node`, or
@@ -744,6 +1037,23 @@ fn walk(
             // regardless — initializers can contain contract calls.
             if class_fqn.is_none() && enclosing_fn.is_none() {
                 collect_module_string_constants(node, src, builder);
+                // `export const apiFetch = async (endpoint, …) => …` — the
+                // dominant wrapper shape.
+                let mut cursor = node.walk();
+                for declarator in node.named_children(&mut cursor) {
+                    if declarator.kind() != "variable_declarator" {
+                        continue;
+                    }
+                    let (Some(name_node), Some(value)) = (
+                        declarator.child_by_field_name("name"),
+                        declarator.child_by_field_name("value"),
+                    ) else {
+                        continue;
+                    };
+                    if name_node.kind() == "identifier" && value.kind() == "arrow_function" {
+                        try_collect_http_wrapper(&text(name_node, src), value, src, builder);
+                    }
+                }
             }
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
@@ -794,6 +1104,9 @@ fn walk(
             }
             let arity = parameter_count(node);
             let decorators = collect_sibling_decorators(node, src);
+            if class_fqn.is_none() {
+                try_collect_http_wrapper(&name, node, src, builder);
+            }
             let fn_id = builder.emit_function(node, src, &name, arity, class_fqn);
 
             // Check NestJS decorators
@@ -973,7 +1286,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
             string_constants: builder.string_constants,
-        http_wrappers: Vec::new(),
-    },
+            http_wrappers: builder.http_wrappers,
+        },
     })
 }

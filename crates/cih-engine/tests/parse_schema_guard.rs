@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (3, "d1b86459df44723d");
+const GOLDEN: (u32, &str) = (4, "8ff4935ee47dc295");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -49,6 +49,27 @@ class PingController {
     @GetMapping("/{id}")
     fun ping(@PathVariable id: String): String = "pong"
 }
+"#,
+    ),
+    (
+        "src/services/apiClient.ts",
+        r#"export const API_BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1';
+
+export const apiFetch = async (endpoint: string, options = {}, token?: string) => {
+    const url = `${API_BASE_URL}${endpoint}`;
+    try {
+        return await fetch(url, { ...options });
+    } catch (e) {
+        throw e;
+    }
+};
+"#,
+    ),
+    (
+        "src/services/caller.ts",
+        r#"import { apiFetch } from './apiClient';
+export const createItem = (body: any, token: string) =>
+    apiFetch('/items', { method: 'POST' }, token);
 "#,
     ),
     (

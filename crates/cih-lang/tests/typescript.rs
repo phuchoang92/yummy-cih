@@ -298,3 +298,160 @@ fn non_literal_and_non_const_declarations_emit_nothing() {
         ts_string_constants("export function f() { const X = '/inner'; return X; }\n").is_empty()
     );
 }
+
+// ── HTTP wrapper detection + provisional call sites ─────────────────────────
+
+fn ts_http_wrappers(src: &str) -> Vec<cih_core::HttpWrapperDef> {
+    TypescriptProvider::new()
+        .parse_file("src/services/apiClient.ts", src)
+        .expect("should parse")
+        .parsed_file
+        .http_wrappers
+}
+
+const API_CLIENT_SHAPE: &str = r#"
+export const API_BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1';
+
+export const apiFetch = async <T = unknown>(endpoint: string, options: any = {}, token?: string): Promise<T> => {
+    if (/^https?:\/\//i.test(endpoint)) {
+        throw new Error('relative paths only');
+    }
+    const url = `${API_BASE_URL}${endpoint}`;
+    try {
+        const response = await fetch(url, { ...options });
+        return response.json();
+    } catch (e) {
+        throw e;
+    }
+};
+"#;
+
+#[test]
+fn wrapper_def_detected_via_local_url_indirection() {
+    let wrappers = ts_http_wrappers(API_CLIENT_SHAPE);
+    assert_eq!(wrappers.len(), 1, "wrappers: {wrappers:?}");
+    let w = &wrappers[0];
+    assert_eq!(w.name, "apiFetch");
+    assert_eq!(w.module, "src/services/apiClient");
+    assert_eq!(
+        w.prefix_parts,
+        vec![cih_core::UrlPart::ConstRef("API_BASE_URL".into())]
+    );
+    assert_eq!(w.options_arg_index, 1);
+}
+
+#[test]
+fn wrapper_def_function_declaration_form() {
+    let wrappers = ts_http_wrappers(
+        r#"
+const BASE = '/api';
+export function apiGet(path: string) {
+    return fetch(`${BASE}${path}`);
+}
+"#,
+    );
+    assert_eq!(wrappers.len(), 1);
+    assert_eq!(wrappers[0].name, "apiGet");
+}
+
+#[test]
+fn wrapper_rejections() {
+    // Param mid-URL.
+    assert!(
+        ts_http_wrappers("export const f = (p: string) => fetch(`/a/${p}/suffix`);\n").is_empty()
+    );
+    // No inner fetch.
+    assert!(ts_http_wrappers("export const f = (p: string) => compute(p);\n").is_empty());
+    // Destructured first param.
+    assert!(
+        ts_http_wrappers("export const f = ({ path }: any) => fetch(`/x${path}`);\n").is_empty()
+    );
+    // Ambiguous const url (two declarators across branches).
+    assert!(ts_http_wrappers(
+        r#"
+export const f = (p: string, flag: boolean) => {
+    if (flag) {
+        const url = `/a${p}`;
+        return fetch(url);
+    } else {
+        const url = `/b${p}`;
+        return fetch(url);
+    }
+};
+"#
+    )
+    .is_empty());
+    // Closure must not fake a wrapper.
+    assert!(ts_http_wrappers(
+        r#"
+export const f = (p: string) => {
+    return () => fetch(`/x${p}`);
+};
+"#
+    )
+    .is_empty());
+}
+
+#[test]
+fn provisional_sites_for_wrapper_calls() {
+    let sites = ts_contract_sites(
+        r#"
+import { apiFetch } from './apiClient';
+export const create = (body: any, token: string) =>
+    apiFetch('/admin/llm/providers', { method: 'POST' }, token);
+export const logs = (id: number, token: string) =>
+    apiFetch(`/admin/activity-logs/${id}`, {}, token);
+"#,
+    );
+    assert_eq!(sites.len(), 2, "sites: {sites:?}");
+    assert_eq!(sites[0].via_wrapper.as_deref(), Some("apiFetch"));
+    assert_eq!(sites[0].http_method.as_deref(), Some("POST"));
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(&[cih_core::UrlPart::Lit("/admin/llm/providers".into())][..])
+    );
+    assert_eq!(
+        sites[0].url_template, None,
+        "wrapper sites always carry parts"
+    );
+    assert_eq!(sites[1].http_method.as_deref(), Some("GET"));
+    assert_eq!(
+        sites[1].url_parts.as_deref(),
+        Some(
+            &[
+                cih_core::UrlPart::Lit("/admin/activity-logs/".into()),
+                cih_core::UrlPart::Dynamic
+            ][..]
+        )
+    );
+}
+
+#[test]
+fn provisional_not_emitted_for_non_url_args() {
+    let sites = ts_contract_sites(
+        r#"
+export const f = (id: string) => {
+    t('common.title');
+    helper(id);
+    navigate(computePath());
+};
+"#,
+    );
+    assert!(sites.is_empty(), "sites: {sites:?}");
+}
+
+#[test]
+fn wrapper_inner_fetch_stays_unresolvable() {
+    // The wrapper's own fetch(url, …) folds to a bare local → all-{*} at
+    // resolve → dropped. Pin the parse-side shape here.
+    let sites = ts_contract_sites(API_CLIENT_SHAPE);
+    assert_eq!(sites.len(), 1);
+    assert!(sites[0].via_wrapper.is_none());
+    // The bare local becomes ConstRef("url") — lowercase, so the resolver's
+    // convention gate blocks cross-file lookup and (with no same-module
+    // constant named `url`) it stays unresolved → all-{*} → dropped.
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(&[cih_core::UrlPart::ConstRef("url".into())][..])
+    );
+}
