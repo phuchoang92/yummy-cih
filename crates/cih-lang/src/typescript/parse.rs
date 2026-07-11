@@ -532,6 +532,7 @@ fn try_emit_http_contract(
         http_method: Some(http_method),
         messaging_framework: None,
         url_parts,
+        via_wrapper: None,
         in_callable,
         range: range_of(node),
     });
@@ -928,7 +929,8 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
                     sql_constants: Vec::new(),
                     sql_execution_sites: Vec::new(),
                     string_constants: Vec::new(),
-                },
+                http_wrappers: Vec::new(),
+            },
             });
         }
     };
@@ -971,6 +973,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
             string_constants: builder.string_constants,
-        },
+        http_wrappers: Vec::new(),
+    },
     })
 }

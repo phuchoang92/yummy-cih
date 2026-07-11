@@ -160,6 +160,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let service = ParsedFile {
         file: "com/acme/OwnerService.java".into(),
@@ -181,6 +182,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let controller = ParsedFile {
         file: "com/acme/OwnerController.java".into(),
@@ -211,6 +213,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let thing = ParsedFile {
         file: "com/other/Thing.java".into(),
@@ -224,6 +227,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![repo, service, controller, thing]
 }
@@ -248,6 +252,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 http_method: Some("get".into()),
                 messaging_framework: None,
                 url_parts: None,
+                via_wrapper: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -258,6 +263,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Kafka),
                 url_parts: None,
+                via_wrapper: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -268,6 +274,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Spring),
                 url_parts: None,
+                via_wrapper: None,
                 in_callable: listener.clone(),
                 range: Range::default(),
             },
@@ -275,6 +282,7 @@ fn contract_sites_emit_nodes_and_edges() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
 
     let out = resolve_edges(&[file]);
@@ -339,6 +347,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let mammal = ParsedFile {
         file: "com/acme/Mammal.java".into(),
@@ -355,6 +364,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let dog = ParsedFile {
         file: "com/acme/Dog.java".into(),
@@ -375,6 +385,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![animal, mammal, dog]
 }
@@ -556,6 +567,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let marker = ParsedFile {
         file: "com/acme/Marker.java".into(),
@@ -572,6 +584,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let child = ParsedFile {
         file: "com/acme/Child.java".into(),
@@ -591,6 +604,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[base, marker, child]);
     assert!(
@@ -648,6 +662,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let impl_def = SymbolDef {
         id: type_id(NodeKind::Class, "com.acme.UserServiceImpl"),
@@ -684,6 +699,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let caller = ParsedFile {
         file: "com/acme/OrderController.java".into(),
@@ -731,6 +747,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![iface, impl_file, caller]
 }
@@ -815,6 +832,7 @@ fn di_falls_back_when_multiple_service_impls() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let make_impl = |name: &str| -> ParsedFile {
         let fqcn = format!("com.acme.{name}");
@@ -848,6 +866,7 @@ fn di_falls_back_when_multiple_service_impls() {
             sql_constants: vec![],
             sql_execution_sites: vec![],
             string_constants: vec![],
+            http_wrappers: Vec::new(),
         }
     };
     let caller = ParsedFile {
@@ -896,6 +915,7 @@ fn di_falls_back_when_multiple_service_impls() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[
         iface,
@@ -953,6 +973,7 @@ fn di_not_applied_to_concrete_class_receiver() {
             sql_constants: vec![],
             sql_execution_sites: vec![],
             string_constants: vec![],
+            http_wrappers: Vec::new(),
         };
         let caller = ParsedFile {
             file: "com/acme/OrderController.java".into(),
@@ -1004,6 +1025,7 @@ fn di_not_applied_to_concrete_class_receiver() {
             sql_constants: vec![],
             sql_execution_sites: vec![],
             string_constants: vec![],
+            http_wrappers: Vec::new(),
         };
         vec![concrete, caller]
     };
@@ -1066,6 +1088,7 @@ fn unresolved_ref_receiver_type_unknown() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[file]);
     assert_eq!(out.skipped, 1);
@@ -1094,6 +1117,7 @@ fn unresolved_ref_member_not_found() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let caller = ParsedFile {
         file: "com/acme/Caller.java".into(),
@@ -1124,6 +1148,7 @@ fn unresolved_ref_member_not_found() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[service, caller]);
     assert_eq!(out.skipped, 1);
@@ -1153,6 +1178,7 @@ fn unresolved_ref_heritage_type_unknown() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[child]);
     assert_eq!(out.skipped, 1);
@@ -1178,6 +1204,7 @@ fn callresult_factory_pattern_resolved() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let order = ParsedFile {
         file: "com/acme/Order.java".into(),
@@ -1194,6 +1221,7 @@ fn callresult_factory_pattern_resolved() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let service = ParsedFile {
         file: "com/acme/OrderService.java".into(),
@@ -1233,6 +1261,7 @@ fn callresult_factory_pattern_resolved() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[order_factory, order, service]);
     let calls: Vec<_> = out
@@ -1282,6 +1311,7 @@ fn callresult_factory_pattern_unresolved_when_return_type_absent() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[service]);
     assert_eq!(out.skipped, 1);
@@ -1339,6 +1369,7 @@ fn python_free_function_call_resolves() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[file]);
     assert!(
@@ -1369,6 +1400,7 @@ fn empty_file(file: &str) -> ParsedFile {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     }
 }
 
@@ -1380,6 +1412,7 @@ fn http_parts_site(in_callable: NodeId, parts: Vec<UrlPart>) -> ContractSite {
         http_method: Some("GET".into()),
         messaging_framework: None,
         url_parts: Some(parts),
+        via_wrapper: None,
         in_callable,
         range: Range::default(),
     }
@@ -1516,6 +1549,7 @@ fn dynamic_topic_folds_only_to_full_literal() {
             http_method: None,
             messaging_framework: Some(MessagingFramework::Kafka),
             url_parts: Some(vec![UrlPart::ConstRef("TOPIC".into())]),
+            via_wrapper: None,
             in_callable: caller.clone(),
             range: Range::default(),
         },
@@ -1526,6 +1560,7 @@ fn dynamic_topic_folds_only_to_full_literal() {
             http_method: None,
             messaging_framework: Some(MessagingFramework::Kafka),
             url_parts: Some(vec![UrlPart::Lit("orders.".into()), UrlPart::Dynamic]),
+            via_wrapper: None,
             in_callable: caller,
             range: Range::default(),
         },

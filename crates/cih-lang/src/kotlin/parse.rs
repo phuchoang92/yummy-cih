@@ -271,7 +271,8 @@ pub fn parse_kotlin_file(rel: &str, src: &str) -> Result<ParsedUnit> {
             sql_constants: vec![],
             sql_execution_sites: vec![],
             string_constants: builder.string_constants,
-        },
+        http_wrappers: Vec::new(),
+    },
     })
 }
 

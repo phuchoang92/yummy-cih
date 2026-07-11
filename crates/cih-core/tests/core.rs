@@ -246,6 +246,7 @@ fn parsed_file_round_trips_json() {
             http_method: None,
             messaging_framework: Some(cih_core::MessagingFramework::Spring),
             url_parts: None,
+            via_wrapper: None,
             in_callable: method_id("com.acme.UserService", "save", 1),
             range: Range {
                 start_line: 12,
@@ -257,6 +258,7 @@ fn parsed_file_round_trips_json() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
 
     let encoded = serde_json::to_string(&parsed).unwrap();
@@ -300,6 +302,7 @@ fn contract_site_messaging_framework_roundtrips_and_defaults() {
         http_method: None,
         messaging_framework: Some(MessagingFramework::Spring),
         url_parts: None,
+        via_wrapper: None,
         in_callable: NodeId::new("Method:com.acme.X#m/0"),
         range: Range::default(),
     };

@@ -15,7 +15,10 @@ pub(crate) mod contracts_common;
 pub mod fingerprint;
 pub mod generic_parse;
 
-pub use constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
+pub use constant_resolver::{
+    resolve_relative_module, strip_source_extension, ConstantResolver, NullConstantResolver,
+    ResolutionContext,
+};
 pub use contracts_common::normalize_external_url;
 
 /// Version of the on-disk parse cache (`.cih/parse-cache/v<N>/`).

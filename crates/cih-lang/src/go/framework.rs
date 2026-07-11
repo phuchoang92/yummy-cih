@@ -257,6 +257,7 @@ fn try_emit_outbound(
         http_method: Some(http_method),
         messaging_framework: None,
         url_parts,
+        via_wrapper: None,
         in_callable: in_callable.clone(),
         range: range_of(call),
     });

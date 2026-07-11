@@ -120,6 +120,7 @@ fn field_injection_emits_calls_edge() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     }];
 
     let out = extract_di_xml(&dir, &parsed);
@@ -193,6 +194,7 @@ fn osgi_reference_in_meta_inf_spring_emits_calls_edge() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     }];
 
     let out = extract_di_xml(&dir, &parsed);

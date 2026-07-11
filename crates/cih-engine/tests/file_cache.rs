@@ -78,6 +78,7 @@ fn parsed(file: &str, package: &str, class_name: &str, imports: Vec<&str>) -> Pa
         sql_constants: Vec::new(),
         sql_execution_sites: Vec::new(),
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     }
 }
 

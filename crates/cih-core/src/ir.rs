@@ -40,6 +40,10 @@ pub struct ParsedFile {
     /// All `static final String` fields (superset of sql_constants); used by constant propagation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub string_constants: Vec<StringConstant>,
+    /// Same-repo HTTP wrapper functions detected in this file (script
+    /// languages; see [`HttpWrapperDef`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_wrappers: Vec<HttpWrapperDef>,
 }
 
 /// A `static final String` field (or script-language module constant) with its
@@ -60,6 +64,25 @@ pub struct StringConstant {
     /// runtime value may differ; consumers surface this as provenance.
     #[serde(default)]
     pub env_default: bool,
+    pub range: Range,
+}
+
+/// A same-repo HTTP wrapper function: `apiFetch(endpoint, options?) =>
+/// fetch(BASE + endpoint)`. Call sites to it become HTTP contract sites at
+/// resolve time (URL = `prefix_parts` + the caller's arg-0 parts). v1 rules:
+/// the pass-through param is the FINAL url piece, `prefix_parts` contain only
+/// `Lit`/`ConstRef`, and the caller's options object sits at
+/// `options_arg_index`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpWrapperDef {
+    /// Function name callers use (`apiFetch`).
+    pub name: String,
+    /// Extensionless repo-relative module path (`src/services/apiClient`).
+    pub module: String,
+    /// URL parts BEFORE the pass-through param.
+    pub prefix_parts: Vec<UrlPart>,
+    /// Positional index of the options object at call sites (v1: always 1).
+    pub options_arg_index: u32,
     pub range: Range,
 }
 
@@ -115,6 +138,12 @@ pub struct ContractSite {
     /// fully-literal URLs (`url_template` carries those unchanged).
     #[serde(default)]
     pub url_parts: Option<Vec<UrlPart>>,
+    /// Set when this site is a call to a (potential) same-repo HTTP wrapper
+    /// function rather than fetch/axios directly — the callee identifier.
+    /// PROVISIONAL: the resolve phase joins it against detected
+    /// [`HttpWrapperDef`]s and silently drops sites with no match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_wrapper: Option<String>,
     /// Graph id of the enclosing callable that makes/listens to this contract.
     pub in_callable: NodeId,
     pub range: Range,

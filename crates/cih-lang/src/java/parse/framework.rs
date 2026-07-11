@@ -118,6 +118,7 @@ fn emit_feign_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) 
                 http_method: Some(route.http_method.to_string()),
                 messaging_framework: None,
                 url_parts: None,
+                via_wrapper: None,
                 in_callable: callable.id.clone(),
                 range: route.range,
             });
@@ -142,6 +143,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilde
                         http_method: None,
                         messaging_framework: Some(MessagingFramework::Kafka),
                         url_parts: None,
+                        via_wrapper: None,
                         in_callable: callable.id.clone(),
                         range: range_of(annotation),
                     });
@@ -156,6 +158,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilde
                         http_method: None,
                         messaging_framework: Some(MessagingFramework::Spring),
                         url_parts: None,
+                        via_wrapper: None,
                         in_callable: callable.id.clone(),
                         range: range_of(annotation),
                     });
@@ -195,6 +198,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                 http_method: Some(http_method.to_string()),
                 messaging_framework: None,
                 url_parts,
+                via_wrapper: None,
                 in_callable: callable.id,
                 range: range_of(node),
             });
@@ -219,6 +223,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                     http_method: Some(http_method.to_string()),
                     messaging_framework: None,
                     url_parts,
+                    via_wrapper: None,
                     in_callable: callable.id,
                     range: range_of(node),
                 });
@@ -245,6 +250,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Kafka),
                 url_parts,
+                via_wrapper: None,
                 in_callable: callable.id,
                 range: range_of(node),
             });
@@ -268,6 +274,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Spring),
                 url_parts: None,
+                via_wrapper: None,
                 in_callable: callable.id,
                 range: range_of(node),
             });

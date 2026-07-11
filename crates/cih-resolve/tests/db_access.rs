@@ -22,6 +22,7 @@ fn make_parsed_file(
         sql_constants,
         sql_execution_sites,
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     }
 }
 

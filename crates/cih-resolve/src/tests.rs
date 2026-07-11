@@ -133,6 +133,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let service = ParsedFile {
         file: "com/acme/OwnerService.java".into(),
@@ -154,6 +155,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let controller = ParsedFile {
         file: "com/acme/OwnerController.java".into(),
@@ -184,6 +186,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let thing = ParsedFile {
         file: "com/other/Thing.java".into(),
@@ -197,6 +200,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![repo, service, controller, thing]
 }

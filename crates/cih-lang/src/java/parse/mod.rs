@@ -127,7 +127,8 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
             sql_constants: builder.sql_constants,
             sql_execution_sites: builder.sql_execution_sites,
             string_constants: builder.string_constants,
-        },
+        http_wrappers: Vec::new(),
+    },
     })
 }
 
