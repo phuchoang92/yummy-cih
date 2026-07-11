@@ -57,7 +57,8 @@ Full: `Kind:fully.qualified.Name` (e.g. `Class:com.acme.OrderService`,
 | Tests to re-run / coverage gaps | `regression_scope`, `test_coverage`, `untested_paths` |
 | Source→sink taint (SQLi, exec, file, XSS) | `taint_paths` |
 | Complexity / duplication | `complexity_hotspots`, `find_duplicates` |
-| Cross-repo contracts | `group_contracts`, `api_impact`, `shape_check` |
+| Cross-repo contracts | `group_contracts`, `api_impact` (`include_callers` walks consumer call chains), `shape_check` |
+| Cross-repo execution chain | `trace_flow_x` (hops repos via group contracts; steps carry `repo` + `via.kind == "CONTRACT"` at crossings) |
 | Read source (size-capped) | `read_file` |
 | Registry / freshness | `list_repos`, `status` |
 

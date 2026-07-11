@@ -83,6 +83,13 @@ pub struct ApiImpactArgs {
     pub method: String,
     /// Route path template, e.g. `/api/orders/{id}`. Path variables are normalized to `{*}`.
     pub path: String,
+    /// Also walk each consumer's callers (reverse CALLS from the call site,
+    /// with the enclosing route when one handles the caller).
+    #[serde(default)]
+    pub include_callers: bool,
+    /// Reverse-CALLS depth for the caller walk (default 3, clamped to 6, pass 0 for default).
+    #[serde(default)]
+    pub caller_depth: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -107,6 +114,23 @@ pub struct TraceFlowArgs {
     /// Output format. Omit or pass empty for default JSON. Pass `"mermaid"` for a Mermaid flowchart string.
     #[serde(default)]
     pub format: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TraceFlowXArgs {
+    /// Entry node in the server's bound repo: a full node id
+    /// (e.g. `Route:GET /api/checkout`, `Method:pkg.Cls#m/1`) or a unique
+    /// name/qualified name (ambiguity returns candidates).
+    pub entry_point: String,
+    /// Repo group whose synced contracts bridge the repos
+    /// (`cih-engine group sync <group>` must have run).
+    pub group: String,
+    /// Per-repo traversal depth (default 6, clamped to 10, pass 0 for default).
+    #[serde(default)]
+    pub max_depth: u32,
+    /// Maximum cross-repo contract hops (default 3, clamped to 5, pass 0 for default).
+    #[serde(default)]
+    pub max_hops: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

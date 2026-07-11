@@ -1,11 +1,39 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind, Registry};
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
-use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs};
+use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
 use crate::utils::{
     json_result, load_artifact_edges, load_artifact_nodes, node_prop_str_owned,
     parse_contract_kind_filter, short_class_name, strip_response_wrapper,
 };
+use crate::xflow::{self, XflowState};
+
+/// Read and parse a group's synced contracts, with the canonical
+/// "run group sync first" error when they don't exist yet.
+fn load_group_contracts(group: &str) -> Result<Vec<ContractMatch>, McpError> {
+    let path = cih_core::contracts_path(group).ok_or_else(|| {
+        McpError::internal_error("cannot determine HOME for group contracts path", None)
+    })?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| {
+        McpError::invalid_params(
+            format!(
+                "cannot read contracts for group '{group}': {e}. \
+                 Run `cih-engine group sync {group}` first"
+            ),
+            None,
+        )
+    })?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<ContractMatch>(line).map_err(|e| {
+                McpError::internal_error(format!("malformed contracts artifact: {e}"), None)
+            })
+        })
+        .collect()
+}
 
 /// Contract-sync freshness for a group: `(contracts_synced_at, contracts_stale)`.
 /// Conservative on missing data: an unstamped or unregistered group reads as stale.
@@ -63,40 +91,53 @@ pub async fn group_contracts(args: GroupContractsArgs) -> Result<CallToolResult,
     }))
 }
 
-pub async fn api_impact(args: ApiImpactArgs) -> Result<CallToolResult, McpError> {
-    let contracts_file = cih_core::contracts_path(&args.group).ok_or_else(|| {
-        McpError::internal_error("cannot determine HOME for group contracts path", None)
-    })?;
-    let raw = std::fs::read_to_string(&contracts_file).map_err(|e| {
-        McpError::invalid_params(
-            format!(
-                "cannot read contracts for group '{}': {e}. \
-                 Run `cih-engine group sync {}` first",
-                args.group, args.group
-            ),
-            None,
-        )
-    })?;
+pub async fn api_impact(
+    args: ApiImpactArgs,
+    xflow: &XflowState,
+) -> Result<CallToolResult, McpError> {
+    let contracts = load_group_contracts(&args.group)?;
     let method = args.method.to_ascii_uppercase();
     let target_key = format!(
         "{} {}",
         method,
         cih_core::normalize_contract_path(&args.path)
     );
+    let caller_depth = (if args.caller_depth == 0 {
+        3
+    } else {
+        args.caller_depth
+    })
+    .clamp(1, 6);
+    let registry = if args.include_callers {
+        Some(Registry::load())
+    } else {
+        None
+    };
+
     let mut consumers = Vec::new();
-    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
-        let item: ContractMatch = serde_json::from_str(line).map_err(|e| {
-            McpError::internal_error(format!("malformed contracts artifact: {e}"), None)
-        })?;
+    for item in &contracts {
         if item.kind != ContractMatchKind::HttpRoute || item.match_key != target_key {
             continue;
         }
-        consumers.push(serde_json::json!({
+        let mut row = serde_json::json!({
             "provider_repo": item.provider_repo,
             "provider_route": item.provider_id,
             "consumer_repo": item.consumer_repo,
             "consumer_endpoint": item.consumer_id,
-        }));
+        });
+        if let Some(registry) = &registry {
+            row["consumer_callers"] = match consumer_callers(
+                registry,
+                xflow,
+                &item.consumer_repo,
+                &item.consumer_id,
+                caller_depth,
+            ) {
+                Ok(callers) => serde_json::json!(callers),
+                Err(reason) => serde_json::json!({ "error": reason }),
+            };
+        }
+        consumers.push(row);
     }
     let (synced_at, stale) = group_freshness(&args.group);
     json_result(&serde_json::json!({
@@ -106,6 +147,155 @@ pub async fn api_impact(args: ApiImpactArgs) -> Result<CallToolResult, McpError>
         "consumers": consumers,
         "contracts_synced_at": synced_at,
         "contracts_stale": stale,
+    }))
+}
+
+#[derive(serde::Serialize)]
+struct ConsumerCaller {
+    method_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+}
+
+/// Reverse-CALLS walk in the consumer repo: methods that (transitively) reach
+/// the `ExternalCall` site, each with its enclosing route when one handles it.
+fn consumer_callers(
+    registry: &Registry,
+    xflow: &XflowState,
+    consumer_repo: &str,
+    consumer_endpoint: &str,
+    depth_limit: u32,
+) -> Result<Vec<ConsumerCaller>, String> {
+    let entry = registry
+        .find(consumer_repo)
+        .ok_or_else(|| format!("consumer '{consumer_repo}' not in registry"))?;
+    let graph = xflow
+        .graph_for(&entry.artifacts_dir)
+        .map_err(|e| format!("consumer artifacts unreadable: {e}"))?;
+
+    // Direct callers: ExternalCall edges into the endpoint node.
+    let mut queue: VecDeque<(String, u32)> = graph
+        .incoming(consumer_endpoint)
+        .filter(|edge| edge.kind == EdgeKind::ExternalCall)
+        .map(|edge| (edge.src.as_str().to_string(), 0))
+        .collect();
+    let mut seen: HashSet<String> = queue.iter().map(|(id, _)| id.clone()).collect();
+    let mut callers = Vec::new();
+
+    while let Some((method_id, depth)) = queue.pop_front() {
+        let route = graph
+            .out(&method_id)
+            .find(|edge| edge.kind == EdgeKind::HandlesRoute)
+            .map(|edge| edge.dst.as_str().to_string());
+        callers.push(ConsumerCaller {
+            method_id: method_id.clone(),
+            route,
+        });
+        if depth >= depth_limit {
+            continue;
+        }
+        for edge in graph.incoming(&method_id) {
+            if edge.kind != EdgeKind::Calls {
+                continue;
+            }
+            let src = edge.src.as_str().to_string();
+            if seen.insert(src.clone()) {
+                queue.push_back((src, depth + 1));
+            }
+        }
+    }
+    Ok(callers)
+}
+
+/// Cross-repo downstream trace: walk the bound repo's artifacts, hop through
+/// the group's contract matches into provider/consumer repos, continue there.
+pub async fn trace_flow_x(
+    args: TraceFlowXArgs,
+    graph_key: &str,
+    xflow: &XflowState,
+) -> Result<CallToolResult, McpError> {
+    let contracts = load_group_contracts(&args.group)?;
+    let registry = Registry::load();
+    let entry = registry
+        .entries
+        .iter()
+        .find(|e| e.graph_key == graph_key)
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                format!("no repo registered for graph_key '{graph_key}'; run analyze first"),
+                None,
+            )
+        })?;
+    let start_repo = entry.name.clone();
+    let start_graph = xflow.graph_for(&entry.artifacts_dir).map_err(|e| {
+        McpError::internal_error(
+            format!("cannot load artifacts for '{start_repo}': {e}"),
+            None,
+        )
+    })?;
+
+    let entry_id = match xflow::resolve_entry(&start_graph, &args.entry_point) {
+        Ok(id) => id,
+        Err(candidates) if candidates.is_empty() => {
+            return Err(McpError::invalid_params(
+                format!(
+                    "entry point '{}' not found in repo '{start_repo}'",
+                    args.entry_point
+                ),
+                None,
+            ));
+        }
+        Err(candidates) => {
+            return json_result(&serde_json::json!({
+                "status": "ambiguous",
+                "candidates": candidates,
+            }));
+        }
+    };
+
+    let max_depth = (if args.max_depth == 0 {
+        xflow::DEFAULT_DEPTH
+    } else {
+        args.max_depth
+    })
+    .clamp(1, xflow::MAX_DEPTH);
+    let max_hops = (if args.max_hops == 0 {
+        xflow::DEFAULT_HOPS
+    } else {
+        args.max_hops
+    })
+    .clamp(1, 5);
+
+    let artifacts_by_repo: HashMap<String, String> = registry
+        .entries
+        .iter()
+        .map(|e| (e.name.clone(), e.artifacts_dir.clone()))
+        .collect();
+    let mut source = |repo: &str| {
+        let dir = artifacts_by_repo.get(repo)?;
+        xflow.graph_for(dir).ok()
+    };
+    let trace = xflow::trace_across(
+        &mut source,
+        &contracts,
+        &start_repo,
+        &entry_id,
+        max_depth,
+        max_hops,
+    );
+
+    let (synced_at, stale) = group_freshness(&args.group);
+    json_result(&serde_json::json!({
+        "entry_point": entry_id,
+        "repo": start_repo,
+        "group": args.group,
+        "max_depth": max_depth,
+        "max_hops": max_hops,
+        "contracts_synced_at": synced_at,
+        "contracts_stale": stale,
+        "step_count": trace.steps.len(),
+        "steps": trace.steps,
+        "truncated": trace.truncated,
     }))
 }
 

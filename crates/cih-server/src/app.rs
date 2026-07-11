@@ -41,7 +41,7 @@ use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, parse_direction, text_result, to_mcp};
 use crate::{
     agent, browser, changes, contracts, coverage, feature, files, indexing, patterns, resources,
-    search, server, symbol, taint, wiki,
+    search, server, symbol, taint, wiki, xflow,
 };
 
 use crate::config::{build_store, Config};
@@ -56,6 +56,9 @@ struct CihServer {
     jobs: Jobs,
     read_file_limits: files::ReadFileLimits,
     wiki: wiki::WikiSearchState,
+    /// Cross-call artifact-graph cache for cross-repo tools (trace_flow_x,
+    /// api_impact caller walks).
+    xflow: xflow::XflowState,
     tool_router: ToolRouter<CihServer>,
     agent: Option<agent::AgentRunner>,
 }
@@ -81,6 +84,7 @@ impl CihServer {
             jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             read_file_limits,
             wiki,
+            xflow: xflow::XflowState::new(),
             tool_router: Self::tool_router(),
             agent,
         }
@@ -377,7 +381,21 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ApiImpactArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::api_impact(args).await
+        contracts::api_impact(args, &self.xflow).await
+    }
+
+    #[tool(
+        description = "Cross-repo downstream trace: like trace_flow, but hops between repos \
+        through the group's synced contract matches (HTTP consumer → provider route → handler; \
+        Kafka publisher → listener). Walks each repo's graph artifacts; the entry point resolves \
+        in this server's bound repo. Run `cih-engine group sync <group>` first. Steps carry \
+        `repo` and `via.kind` (`CONTRACT` marks a cross-repo crossing)."
+    )]
+    async fn trace_flow_x(
+        &self,
+        Parameters(args): Parameters<TraceFlowXArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        contracts::trace_flow_x(args, &self.graph_key, &self.xflow).await
     }
 
     #[tool(
