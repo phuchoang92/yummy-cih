@@ -1,5 +1,19 @@
 # Fix the three cross-repo review findings: parse-cache versioning, TS/Py URL constants, trace_flow_x repo override
 
+> **STATUS: COMPLETED 2026-07-11** — all three findings fixed, risk resolutions included, landed on `dev`.
+>
+> | Finding | Commit | Live proof |
+> |---|---|---|
+> | F1 parse-cache versioning + schema guard | `e49ded8` | cached analyze (no --no-cache) now picks up new extraction; parse-cache/v3 only, legacy pruned; guard caught BOTH parser-output changes in this branch as designed |
+> | F3 trace_flow_x repo override + validation | `bbff6b4` | MCP: repo="212ecom-be" traces in be; non-member rejected naming members; api_impact lists the fe caller |
+> | F2 TS/Py URL constants + gated fallback | `44f57d6` | fe endpoint folds to literal `GET /api/v1/admin/notifications/unread-count` with `base_source: env_default` → **first real fe→be contract match (1 HttpRoute)**; schema bumped to 3 |
+>
+> Added during implementation (guard-driven): ConstRef gating on SCREAMING_SNAKE identifiers — params/locals (`${id}`) stay Dynamic so the
+> cross-file fallback can never see them; the resolver's import-scoped and unique steps enforce the same convention.
+>
+> **Verification:** 104 workspace test suites green, clippy clean; servicemix byte-identical; fineract routes/reasons identical except
+> 3 additive `event-publish` edges attributable to the pre-existing Phase-B Java topic folding (baseline predated it) — inspected and legitimate.
+
 ## Context
 
 The code review of the cross-repo microservice implementation (dev@`b3cbbba`) proved three defects live:
