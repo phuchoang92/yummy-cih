@@ -7,6 +7,23 @@ use crate::utils::{
     parse_contract_kind_filter, short_class_name, strip_response_wrapper,
 };
 
+/// Contract-sync freshness for a group: `(contracts_synced_at, contracts_stale)`.
+/// Conservative on missing data: an unstamped or unregistered group reads as stale.
+fn group_freshness(group_name: &str) -> (Option<String>, bool) {
+    let state = cih_core::group_dir(group_name).and_then(|dir| cih_core::SyncState::load(&dir));
+    let synced_at = state.as_ref().map(|s| s.synced_at.clone());
+    let group_registry = cih_core::GroupRegistry::load();
+    let Some(group) = group_registry.find(group_name) else {
+        // Contracts were readable but the group is gone from groups.json —
+        // freshness can't be verified against members, so flag it.
+        return (synced_at, true);
+    };
+    let contracts_exist = cih_core::contracts_path(group_name).is_some_and(|path| path.exists());
+    let stale =
+        cih_core::group_contracts_stale(group, &Registry::load(), state.as_ref(), contracts_exist);
+    (synced_at, stale)
+}
+
 pub async fn group_contracts(args: GroupContractsArgs) -> Result<CallToolResult, McpError> {
     let path = cih_core::contracts_path(&args.group).ok_or_else(|| {
         McpError::internal_error("cannot determine HOME for group contracts path", None)
@@ -37,7 +54,13 @@ pub async fn group_contracts(args: GroupContractsArgs) -> Result<CallToolResult,
             matches.push(item);
         }
     }
-    json_result(&matches)
+    let (synced_at, stale) = group_freshness(&args.group);
+    json_result(&serde_json::json!({
+        "group": args.group,
+        "contracts_synced_at": synced_at,
+        "contracts_stale": stale,
+        "matches": matches,
+    }))
 }
 
 pub async fn api_impact(args: ApiImpactArgs) -> Result<CallToolResult, McpError> {
@@ -75,11 +98,14 @@ pub async fn api_impact(args: ApiImpactArgs) -> Result<CallToolResult, McpError>
             "consumer_endpoint": item.consumer_id,
         }));
     }
+    let (synced_at, stale) = group_freshness(&args.group);
     json_result(&serde_json::json!({
         "method": method,
         "path": args.path,
         "match_key": target_key,
         "consumers": consumers,
+        "contracts_synced_at": synced_at,
+        "contracts_stale": stale,
     }))
 }
 
@@ -266,9 +292,12 @@ pub async fn shape_check(args: ShapeCheckArgs) -> Result<CallToolResult, McpErro
         }));
     }
 
+    let (synced_at, stale) = group_freshness(&args.group);
     json_result(&serde_json::json!({
         "provider": args.provider,
         "consumer": args.consumer,
         "contracts": results,
+        "contracts_synced_at": synced_at,
+        "contracts_stale": stale,
     }))
 }

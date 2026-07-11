@@ -13,10 +13,10 @@ pub mod features;
 pub mod group;
 pub mod group_sync;
 pub mod list;
+pub mod refresh;
 pub mod start;
 pub mod start_env;
 pub mod status;
-pub mod refresh;
 pub mod taint;
 pub mod tui;
 pub mod wiki;
@@ -84,6 +84,7 @@ pub fn main() -> Result<()> {
                 falkor_url: _,
                 json,
             } => group::run_group_sync(&name, json),
+            GroupCommand::Status { name, json } => group::run_group_status(&name, json),
         },
         Command::Wiki(a) => wiki::run(a),
         Command::Refresh(a) => refresh::run(a),

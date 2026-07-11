@@ -19,8 +19,8 @@ pub use entrypoints::{
     EntrypointKind, EntrypointRegistry, ScoredEntrypoint,
 };
 pub use group::{
-    contracts_path, group_dir, normalize_contract_path, ContractMatch, ContractMatchKind,
-    GroupEntry, GroupRegistry,
+    contracts_path, group_contracts_stale, group_dir, normalize_contract_path, sync_state_path,
+    ContractMatch, ContractMatchKind, GroupEntry, GroupRegistry, SyncRepoSnapshot, SyncState,
 };
 pub use ir::{
     BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind, ContractSite,
@@ -28,7 +28,9 @@ pub use ir::{
     RefKind, ReferenceSite, SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile,
     SymbolDef, TypeBinding,
 };
-pub use registry::{git_changed_files, git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
+pub use registry::{
+    git_changed_files, git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats,
+};
 pub use repo_map::{
     auto_detect_architecture, ArchitectureHint, BuildSystem, JarInfo, ModuleInfo, RepoMap,
 };

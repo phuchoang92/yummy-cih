@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use cih_core::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
+use cih_core::{git_head, now_rfc3339, GroupRegistry, Registry, RegistryEntry, RegistryStats};
 
 use crate::analyze::EmitOutcome;
 use crate::discover::DiscoverOutcome;
@@ -44,11 +44,13 @@ pub(crate) fn update_entry_from_discover(entry: &mut RegistryEntry, disc: &Disco
 /// Persist an `EmitOutcome` to the global registry.  Silently logs on failure.
 pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) {
     let entry = entry_from_analyze(emit, graph_key);
+    let repo = entry.name.clone();
     let mut reg = Registry::load();
     reg.upsert(entry);
     if let Err(e) = reg.save() {
         tracing::warn!(error = %e, "failed to update registry");
     }
+    crate::group_sync::auto_sync_groups_for_repo(&GroupRegistry::load(), &reg, &repo);
 }
 
 /// Persist a `DiscoverOutcome` update to the global registry.  Silently logs on failure.
@@ -57,9 +59,11 @@ pub(crate) fn persist_discover(repo_path: &Path, disc: &DiscoverOutcome) {
     let mut reg = Registry::load();
     if let Some(entry) = reg.find_mut(&path_str) {
         update_entry_from_discover(entry, disc);
+        let repo = entry.name.clone();
         if let Err(e) = reg.save() {
             tracing::warn!(error = %e, "failed to update registry after discover");
         }
+        crate::group_sync::auto_sync_groups_for_repo(&GroupRegistry::load(), &reg, &repo);
     } else {
         tracing::debug!("registry entry not found for {path_str}; run analyze first");
     }

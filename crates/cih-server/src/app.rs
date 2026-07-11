@@ -292,7 +292,10 @@ impl CihServer {
         json_result(&reg.entries)
     }
 
-    #[tool(description = "Return registry entry and staleness for one repo (by name or path).")]
+    #[tool(
+        description = "Return registry entry and staleness for one repo (by name or path), \
+        plus contract-sync freshness for every group the repo belongs to."
+    )]
     async fn status(
         &self,
         Parameters(args): Parameters<StatusArgs>,
@@ -300,12 +303,38 @@ impl CihServer {
         let reg = cih_core::Registry::load();
         if let Some(entry) = reg.find(&args.name) {
             let stale = reg.is_stale(&args.name);
+            let group_registry = cih_core::GroupRegistry::load();
+            let groups: Vec<serde_json::Value> = group_registry
+                .groups_containing(&entry.name)
+                .map(|group| {
+                    let state = cih_core::group_dir(&group.name)
+                        .and_then(|dir| cih_core::SyncState::load(&dir));
+                    let contracts_exist =
+                        cih_core::contracts_path(&group.name).is_some_and(|path| path.exists());
+                    let group_stale = cih_core::group_contracts_stale(
+                        group,
+                        &reg,
+                        state.as_ref(),
+                        contracts_exist,
+                    );
+                    serde_json::json!({
+                        "name": group.name,
+                        "contracts_synced_at": state.map(|s| s.synced_at),
+                        "stale": group_stale,
+                    })
+                })
+                .collect();
             #[derive(serde::Serialize)]
             struct Out<'a> {
                 entry: &'a cih_core::RegistryEntry,
                 stale: bool,
+                groups: Vec<serde_json::Value>,
             }
-            json_result(&Out { entry, stale })
+            json_result(&Out {
+                entry,
+                stale,
+                groups,
+            })
         } else {
             Err(McpError::invalid_params(
                 format!("repo '{}' not in registry", args.name),

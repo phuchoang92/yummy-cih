@@ -109,3 +109,54 @@ pub fn run_group_sync(name: &str, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn run_group_status(name: &str, json: bool) -> Result<()> {
+    validate_group_name(name)?;
+    let group_registry = GroupRegistry::load();
+    let group = group_registry
+        .find(name)
+        .ok_or_else(|| anyhow!("group '{name}' does not exist"))?;
+    let registry = Registry::load();
+    let dir =
+        cih_core::group_dir(name).ok_or_else(|| anyhow!("cannot determine HOME for group path"))?;
+    let state = cih_core::SyncState::load(&dir);
+    let contracts_exist = dir.join("contracts.jsonl").exists();
+    let stale = cih_core::group_contracts_stale(group, &registry, state.as_ref(), contracts_exist);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "group": group.name,
+                "repos": group.repos,
+                "contracts_exist": contracts_exist,
+                "contracts_synced_at": state.as_ref().map(|s| s.synced_at.clone()),
+                "generation": state.as_ref().map(|s| s.generation),
+                "stale": stale,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("group:      {}", group.name);
+    println!("repos:      {}", group.repos.join(", "));
+    match &state {
+        Some(state) => println!(
+            "last sync:  {} (generation {})",
+            state.synced_at, state.generation
+        ),
+        None if contracts_exist => println!("last sync:  unknown (contracts exist but unstamped)"),
+        None => println!("last sync:  never"),
+    }
+    println!(
+        "contracts:  {}",
+        if stale {
+            "STALE — run `cih-engine group sync`"
+        } else if contracts_exist {
+            "fresh"
+        } else {
+            "not synced yet"
+        }
+    );
+    Ok(())
+}

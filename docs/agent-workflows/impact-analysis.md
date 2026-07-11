@@ -156,3 +156,8 @@ Present the list to the user and ask which symbol they mean, then retry with the
 - Use `max_depth: 6` for library utilities that may have deep transitive callers.
 - `direction: "both"` shows the full call neighbourhood but is noisy; prefer explicit
   `upstream` for blast radius and `downstream` for dependency analysis.
+- Cross-repo blast radius: if the repo belongs to a group, `status` lists each group
+  with `contracts_synced_at` and `stale`. When `stale` is true (a member repo was
+  re-indexed since the last sync), `api_impact`/`group_contracts` results may miss or
+  misreport consumers — re-run `cih-engine group sync <group>` first. Contract tool
+  responses carry the same `contracts_synced_at`/`contracts_stale` fields.

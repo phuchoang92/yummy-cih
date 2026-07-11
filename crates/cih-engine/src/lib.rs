@@ -26,6 +26,7 @@ pub mod cmd;
 pub mod db;
 pub mod discover;
 pub mod file_cache;
+pub mod group_sync;
 pub mod llm;
 pub mod scan;
 pub mod scope;

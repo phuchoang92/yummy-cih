@@ -60,6 +60,12 @@ Full: `Kind:fully.qualified.Name` (e.g. `Class:com.acme.OrderService`,
 | Cross-repo contracts | `group_contracts`, `api_impact`, `shape_check` |
 | Read source (size-capped) | `read_file` |
 | Registry / freshness | `list_repos`, `status` |
+
+Contract freshness: groups re-sync automatically after `analyze`/`discover`/`refresh`
+of a member repo (disable with `CIH_NO_AUTO_GROUP_SYNC=1`). `status` reports per-group
+`contracts_synced_at`/`stale`, and every contract tool response carries
+`contracts_synced_at`/`contracts_stale` — treat stale contracts as suspect and re-run
+`cih-engine group sync <group>` (or check `cih-engine group status <group>`).
 | Index a repo | `index_repo`, `index_status` |
 
 ## Resources

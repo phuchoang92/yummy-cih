@@ -224,6 +224,14 @@ pub enum GroupCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show contract sync freshness for a group (last sync + staleness).
+    Status {
+        /// Group name.
+        name: String,
+        /// Print status as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,7 +335,10 @@ pub struct AnalyzeArgs {
     #[arg(long, overrides_with = "no_skip_xml_integration")]
     pub skip_xml_integration: bool,
     /// Re-enable integration XML extraction even if cih.toml has skip_xml_integration = true.
-    #[arg(long = "no-skip-xml-integration", overrides_with = "skip_xml_integration")]
+    #[arg(
+        long = "no-skip-xml-integration",
+        overrides_with = "skip_xml_integration"
+    )]
     pub no_skip_xml_integration: bool,
     /// Limit analysis to these languages (comma-delimited or repeated). Default: all.
     /// Example: --language java,typescript
