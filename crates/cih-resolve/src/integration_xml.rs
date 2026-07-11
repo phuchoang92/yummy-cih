@@ -24,6 +24,12 @@ fn is_integration_xml(content: &str) -> Option<&'static str> {
     if content.contains("http://www.osgi.org/xmlns/blueprint") {
         return Some("blueprint");
     }
+    // Spring-DM (OSGi service registry wiring, e.g. SAP-OCB bundle-context-*-osgi.xml).
+    // Checked without the `<bean` gate: these files often hold only
+    // `<osgi:reference>` / `<osgi:service>` elements.
+    if content.contains("http://www.springframework.org/schema/osgi") {
+        return Some("spring");
+    }
     if content.contains("http://www.springframework.org/schema/beans") && content.contains("<bean")
     {
         return Some("spring");
@@ -390,8 +396,16 @@ fn extract_structured_xml(
                             if let (Some(iface), Some(refer)) =
                                 (attr_val(e, b"interface"), attr_val(e, b"ref"))
                             {
+                                // Spring keys the node as `service:{ref}` so it can't collide
+                                // with a same-file `<bean id={ref}>` (blueprint already
+                                // namespaces its beans as `bean:{id}` — keep its ids stable).
+                                let key = if source_label == "blueprint_xml" {
+                                    refer.clone()
+                                } else {
+                                    format!("service:{refer}")
+                                };
                                 nodes.push(Node {
-                                    id: cih_core::integration_route_id(rel_path, &refer),
+                                    id: cih_core::integration_route_id(rel_path, &key),
                                     kind: NodeKind::IntegrationRoute,
                                     name: refer.clone(),
                                     qualified_name: Some(format!("{rel_path}#service:{refer}")),
@@ -400,7 +414,7 @@ fn extract_structured_xml(
                                     props: Some(serde_json::json!({
                                         "interface": iface,
                                         "ref": refer,
-                                        "source": "blueprint_xml",
+                                        "source": source_label,
                                     })),
                                 });
                             }

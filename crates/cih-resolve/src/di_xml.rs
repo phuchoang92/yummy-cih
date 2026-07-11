@@ -34,21 +34,25 @@ pub struct BeanDef {
     pub file: String,
 }
 
-/// A `<reference interface="...">` lookup parsed from Blueprint XML.
+/// A `<reference interface="...">` lookup parsed from Blueprint or Spring-DM
+/// (`<osgi:reference>`) XML — the namespace prefix is stripped during parsing.
 #[derive(Clone, Debug)]
 #[doc(hidden)]
 pub struct ReferenceDef {
     pub interface: String,
 }
 
-/// Returns true when the file content looks like a Spring / Blueprint DI config.
+/// Returns true when the file content looks like a Spring / Blueprint / Spring-DM DI config.
 fn is_di_xml(content: &str) -> bool {
     content.contains("http://www.springframework.org/schema/beans")
         || content.contains("http://www.osgi.org/xmlns/blueprint")
+        || content.contains("http://www.springframework.org/schema/osgi")
 }
 
 /// Returns true when a repo-relative path matches one of the DI XML name patterns:
-/// `applicationContext*.xml`, `beans.xml`, `blueprint*.xml`, `OSGI-INF/blueprint/*.xml`.
+/// `applicationContext*.xml`, `beans.xml`, `blueprint*.xml`, `OSGI-INF/blueprint/*.xml`,
+/// `META-INF/spring/*.xml` (OSGi bundles, e.g. SAP-OCB `bundle-context-*.xml` /
+/// `beans_rest*.xml` — the [`is_di_xml`] content gate is the real filter there).
 #[doc(hidden)]
 pub fn is_di_xml_path(rel: &str) -> bool {
     let file_name = rel.rsplit('/').next().unwrap_or(rel);
@@ -63,6 +67,9 @@ pub fn is_di_xml_path(rel: &str) -> bool {
         return true;
     }
     if rel.contains("OSGI-INF/blueprint/") && lower.ends_with(".xml") {
+        return true;
+    }
+    if rel.contains("META-INF/spring/") && lower.ends_with(".xml") {
         return true;
     }
     false
