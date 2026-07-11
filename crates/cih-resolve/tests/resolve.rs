@@ -1,9 +1,13 @@
 use cih_core::{
     constructor_id, external_endpoint_id, field_id, file_id, function_id, kafka_topic_id,
     method_id, type_id, BindingKind, ContractKind, ContractSite, EdgeKind, MessagingFramework,
-    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, StringConstant,
+    SymbolDef, TypeBinding, UrlPart,
 };
-use cih_resolve::resolve_edges;
+use cih_resolve::{
+    build_java_constant_resolver, default_registry, resolve_edges, resolve_with_registry,
+    ResolveOptions,
+};
 
 fn simple_of(fqcn: &str) -> String {
     fqcn.rsplit('.').next().unwrap_or(fqcn).to_string()
@@ -243,6 +247,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 topic: None,
                 http_method: Some("get".into()),
                 messaging_framework: None,
+                url_parts: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -252,6 +257,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 topic: Some("orders.created".into()),
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Kafka),
+                url_parts: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -261,6 +267,7 @@ fn contract_sites_emit_nodes_and_edges() {
                 topic: Some("orders.created".into()),
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Spring),
+                url_parts: None,
                 in_callable: listener.clone(),
                 range: Range::default(),
             },
@@ -1345,4 +1352,188 @@ fn python_free_function_call_resolves() {
             .map(|e| (e.src.as_str(), e.dst.as_str()))
             .collect::<Vec<_>>()
     );
+}
+
+// ── Dynamic-URL folding (url_parts → constants + {*} wildcards) ─────────────
+
+fn empty_file(file: &str) -> ParsedFile {
+    ParsedFile {
+        file: file.into(),
+        language: String::new(),
+        package: Some("com.acme".into()),
+        defs: vec![],
+        imports: vec![],
+        reference_sites: vec![],
+        type_bindings: vec![],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+    }
+}
+
+fn http_parts_site(in_callable: NodeId, parts: Vec<UrlPart>) -> ContractSite {
+    ContractSite {
+        kind: ContractKind::HttpCall,
+        url_template: None,
+        topic: None,
+        http_method: Some("GET".into()),
+        messaging_framework: None,
+        url_parts: Some(parts),
+        in_callable,
+        range: Range::default(),
+    }
+}
+
+fn resolve_with_constants(parsed: Vec<ParsedFile>) -> cih_resolve::ResolveOutput {
+    let resolver = build_java_constant_resolver(&parsed);
+    resolve_with_registry(
+        &parsed,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: Some(Box::new(resolver)),
+        },
+    )
+}
+
+#[test]
+fn dynamic_url_parts_fold_constants_and_wildcards() {
+    // Two-file fold: the constant lives in another file; the trailing `id`
+    // identifier never resolves and wildcards its segment.
+    let mut constants = empty_file("com/acme/Constants.java");
+    constants.defs = vec![type_def(NodeKind::Class, "com.acme.Constants")];
+    constants.string_constants = vec![StringConstant {
+        const_name: "BASE".into(),
+        owner_fqcn: "com.acme.Constants".into(),
+        value: "/api/orders".into(),
+        dynamic: false,
+        range: Range::default(),
+    }];
+
+    let caller = method_id("com.acme.Client", "call", 1);
+    let mut client = empty_file("com/acme/Client.java");
+    client.imports = vec![import("com.acme.Constants")];
+    client.contract_sites = vec![http_parts_site(
+        caller.clone(),
+        vec![
+            UrlPart::ConstRef("Constants.BASE".into()),
+            UrlPart::Lit("/".into()),
+            UrlPart::ConstRef("id".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![constants, client]);
+    let endpoint = external_endpoint_id("GET", "/api/orders/{*}");
+    let node = out
+        .nodes
+        .iter()
+        .find(|node| node.id == endpoint)
+        .expect("folded wildcard endpoint");
+    assert_eq!(
+        node.props.as_ref().and_then(|p| p.get("dynamic")),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| edge.kind == EdgeKind::ExternalCall && edge.src == caller)
+        .expect("ExternalCall edge");
+    assert!(
+        edge.confidence < 0.75,
+        "dynamic endpoints carry a confidence discount, got {}",
+        edge.confidence
+    );
+}
+
+#[test]
+fn same_class_constant_resolves_without_qualifier() {
+    let caller = method_id("com.acme.Client", "call", 0);
+    let mut client = empty_file("com/acme/Client.java");
+    client.defs = vec![type_def(NodeKind::Class, "com.acme.Client")];
+    client.string_constants = vec![StringConstant {
+        const_name: "BASE".into(),
+        owner_fqcn: "com.acme.Client".into(),
+        value: "/api/items".into(),
+        dynamic: false,
+        range: Range::default(),
+    }];
+    client.contract_sites = vec![http_parts_site(
+        caller,
+        vec![
+            UrlPart::ConstRef("BASE".into()),
+            UrlPart::Lit("/all".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![client]);
+    let endpoint = external_endpoint_id("GET", "/api/items/all");
+    assert!(out.nodes.iter().any(|node| node.id == endpoint));
+}
+
+#[test]
+fn all_wildcard_dynamic_url_is_skipped() {
+    let caller = method_id("com.acme.Client", "call", 0);
+    let mut client = empty_file("com/acme/Client.java");
+    client.contract_sites = vec![
+        http_parts_site(caller.clone(), vec![UrlPart::Dynamic]),
+        http_parts_site(
+            caller,
+            vec![UrlPart::ConstRef("nope".into()), UrlPart::Dynamic],
+        ),
+    ];
+
+    let out = resolve_with_constants(vec![client]);
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::ExternalEndpoint),
+        "uninformative all-wildcard URLs must not become endpoints"
+    );
+}
+
+#[test]
+fn dynamic_topic_folds_only_to_full_literal() {
+    let caller = method_id("com.acme.Producer", "send", 0);
+    let mut producer = empty_file("com/acme/Producer.java");
+    producer.defs = vec![type_def(NodeKind::Class, "com.acme.Producer")];
+    producer.string_constants = vec![StringConstant {
+        const_name: "TOPIC".into(),
+        owner_fqcn: "com.acme.Producer".into(),
+        value: "orders.created".into(),
+        dynamic: false,
+        range: Range::default(),
+    }];
+    producer.contract_sites = vec![
+        ContractSite {
+            kind: ContractKind::EventPublish,
+            url_template: None,
+            topic: None,
+            http_method: None,
+            messaging_framework: Some(MessagingFramework::Kafka),
+            url_parts: Some(vec![UrlPart::ConstRef("TOPIC".into())]),
+            in_callable: caller.clone(),
+            range: Range::default(),
+        },
+        ContractSite {
+            kind: ContractKind::EventPublish,
+            url_template: None,
+            topic: None,
+            http_method: None,
+            messaging_framework: Some(MessagingFramework::Kafka),
+            url_parts: Some(vec![UrlPart::Lit("orders.".into()), UrlPart::Dynamic]),
+            in_callable: caller,
+            range: Range::default(),
+        },
+    ];
+
+    let out = resolve_with_constants(vec![producer]);
+    let topics: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::KafkaTopic)
+        .map(|node| node.name.as_str())
+        .collect();
+    assert_eq!(topics, vec!["orders.created"]);
 }

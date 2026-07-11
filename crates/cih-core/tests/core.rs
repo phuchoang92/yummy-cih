@@ -245,6 +245,7 @@ fn parsed_file_round_trips_json() {
             topic: Some("user-saved".into()),
             http_method: None,
             messaging_framework: Some(cih_core::MessagingFramework::Spring),
+            url_parts: None,
             in_callable: method_id("com.acme.UserService", "save", 1),
             range: Range {
                 start_line: 12,
@@ -298,6 +299,7 @@ fn contract_site_messaging_framework_roundtrips_and_defaults() {
         topic: Some("orders".into()),
         http_method: None,
         messaging_framework: Some(MessagingFramework::Spring),
+        url_parts: None,
         in_callable: NodeId::new("Method:com.acme.X#m/0"),
         range: Range::default(),
     };

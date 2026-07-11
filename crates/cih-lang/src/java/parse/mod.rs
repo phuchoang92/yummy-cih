@@ -292,6 +292,73 @@ pub(super) fn first_string_argument(node: TsNode<'_>, src: &str) -> Option<Strin
     None
 }
 
+/// The call's first argument when it is a plain string literal, unquoted.
+/// Positional extraction — unlike [`first_string_argument`], which scans the
+/// whole list — for arguments that are positional by API contract (Kafka
+/// topics: `send(topic, payload)` must not read the payload as the topic).
+pub(super) fn first_argument_string_literal(node: TsNode<'_>, src: &str) -> Option<String> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let first = arguments
+        .named_children(&mut cursor)
+        .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))?;
+    (first.kind() == "string_literal")
+        .then(|| unquote_spring_literal(&text(first, src)))
+        .flatten()
+}
+
+/// Structured parts of a call's first (URL/topic) argument when it is *not* a
+/// plain literal: `+`-concat folds like `fold_string_init` does for SQL —
+/// literal → `Lit`, identifier / field access → `ConstRef`, anything else →
+/// `Dynamic`. Returns `None` for a plain literal (covered by `url_template`)
+/// or when there is no argument.
+pub(super) fn url_argument_parts(node: TsNode<'_>, src: &str) -> Option<Vec<cih_core::UrlPart>> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let first = arguments
+        .named_children(&mut cursor)
+        .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))?;
+    let mut parts = Vec::new();
+    fold_url_expr(first, src, &mut parts);
+    parts
+        .iter()
+        .any(|part| !matches!(part, cih_core::UrlPart::Lit(_)))
+        .then_some(parts)
+}
+
+fn fold_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<cih_core::UrlPart>) {
+    use cih_core::UrlPart;
+    match node.kind() {
+        "string_literal" => {
+            let value = unquote_spring_literal(&text(node, src)).unwrap_or_default();
+            out.push(UrlPart::Lit(value));
+        }
+        "binary_expression" => {
+            let op = node
+                .child_by_field_name("operator")
+                .map(|op| text(op, src));
+            if op.as_deref() != Some("+") {
+                out.push(UrlPart::Dynamic);
+                return;
+            }
+            match node.child_by_field_name("left") {
+                Some(left) => fold_url_expr(left, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+            match node.child_by_field_name("right") {
+                Some(right) => fold_url_expr(right, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+        }
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => fold_url_expr(inner, src, out),
+            None => out.push(UrlPart::Dynamic),
+        },
+        "identifier" | "field_access" => out.push(UrlPart::ConstRef(text(node, src))),
+        _ => out.push(UrlPart::Dynamic),
+    }
+}
+
 pub(super) fn first_constructor_argument_type(node: TsNode<'_>, src: &str) -> Option<String> {
     let arguments = node.child_by_field_name("arguments")?;
     let mut cursor = arguments.walk();

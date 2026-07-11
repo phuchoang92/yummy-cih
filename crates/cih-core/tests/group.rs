@@ -209,3 +209,11 @@ fn member_added_after_sync_is_stale() {
         true
     ));
 }
+
+#[test]
+fn normalize_contract_path_is_idempotent_on_wildcards() {
+    use cih_core::normalize_contract_path;
+    let once = normalize_contract_path("/api/orders/{id}");
+    assert_eq!(once, "/api/orders/{*}");
+    assert_eq!(normalize_contract_path(&once), once);
+}

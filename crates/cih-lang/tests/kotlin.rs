@@ -310,3 +310,100 @@ class HealthController {
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].id.as_str(), "Route:GET /health");
 }
+
+// ── Dynamic-URL parts (Phase B: interpolation + concat → url_parts) ─────────
+
+#[test]
+fn interpolated_url_yields_parts() {
+    use cih_core::UrlPart;
+    let src = r#"package com.acme
+
+class OrderClient(private val restTemplate: RestTemplate) {
+    fun fetch(id: Long): String {
+        return restTemplate.getForObject("$BASE/items/$id", String::class.java)
+    }
+}
+"#;
+    let sites = contract_sites(src);
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].url_template, None);
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(
+            &[
+                UrlPart::ConstRef("BASE".into()),
+                UrlPart::Lit("/items/".into()),
+                UrlPart::ConstRef("id".into()),
+            ][..]
+        )
+    );
+}
+
+#[test]
+fn interpolated_expression_is_dynamic_part() {
+    use cih_core::UrlPart;
+    let src = r#"package com.acme
+
+class OrderClient(private val restTemplate: RestTemplate) {
+    fun fetch(): String {
+        return restTemplate.getForObject("${svc.base()}/x", String::class.java)
+    }
+}
+"#;
+    let sites = contract_sites(src);
+    let parts = sites[0].url_parts.as_deref().expect("parts");
+    assert!(parts.contains(&UrlPart::Dynamic));
+    assert!(parts.contains(&UrlPart::Lit("/x".into())));
+}
+
+#[test]
+fn plus_concat_yields_parts() {
+    use cih_core::UrlPart;
+    let src = r#"package com.acme
+
+class OrderClient(private val restTemplate: RestTemplate) {
+    fun fetch(): String {
+        return restTemplate.getForObject(Constants.BASE + "/items", String::class.java)
+    }
+}
+"#;
+    let sites = contract_sites(src);
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(
+            &[
+                UrlPart::ConstRef("Constants.BASE".into()),
+                UrlPart::Lit("/items".into()),
+            ][..]
+        )
+    );
+}
+
+#[test]
+fn companion_object_constants_are_indexed_on_outer_class() {
+    let src = r#"package com.acme
+
+class OrderClient {
+    companion object {
+        const val BASE = "/api/orders"
+    }
+}
+
+object Endpoints {
+    val ITEMS = "/api/items"
+}
+"#;
+    let constants = parse(src).parsed_file.string_constants;
+    let base = constants
+        .iter()
+        .find(|c| c.const_name == "BASE")
+        .expect("companion constant");
+    assert_eq!(base.owner_fqcn, "com.acme.OrderClient");
+    assert_eq!(base.value, "/api/orders");
+    let items = constants
+        .iter()
+        .find(|c| c.const_name == "ITEMS")
+        .expect("object constant");
+    assert_eq!(items.owner_fqcn, "com.acme.Endpoints");
+    assert_eq!(items.value, "/api/items");
+}

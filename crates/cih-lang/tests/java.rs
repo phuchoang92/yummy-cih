@@ -397,3 +397,89 @@ fn retains_generic_annotation_metadata_on_methods() {
         .expect("Audited");
     assert_eq!(au["attrs"]["level"], "high");
 }
+
+// ── Dynamic-URL parts (Phase B: constants + concat → url_parts) ─────────────
+
+#[test]
+fn concat_url_yields_url_parts() {
+    use cih_core::UrlPart;
+    let src = r#"
+        package com.acme;
+        class Client {
+            private final RestTemplate restTemplate;
+            void fetch(String id) {
+                restTemplate.getForObject(BASE + "/" + id, String.class);
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(sites.len(), 1, "expected one site, got {sites:?}");
+    let site = &sites[0];
+    assert_eq!(site.url_template, None);
+    assert_eq!(
+        site.url_parts.as_deref(),
+        Some(
+            &[
+                UrlPart::ConstRef("BASE".into()),
+                UrlPart::Lit("/".into()),
+                UrlPart::ConstRef("id".into()),
+            ][..]
+        )
+    );
+}
+
+#[test]
+fn qualified_constant_and_call_in_url_parts() {
+    use cih_core::UrlPart;
+    let src = r#"
+        package com.acme;
+        class Client {
+            private final RestTemplate restTemplate;
+            void fetch() {
+                restTemplate.getForObject(Constants.BASE + suffix(), String.class);
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(&[UrlPart::ConstRef("Constants.BASE".into()), UrlPart::Dynamic][..])
+    );
+}
+
+#[test]
+fn literal_url_has_no_parts() {
+    let src = r#"
+        package com.acme;
+        class Client {
+            private final RestTemplate restTemplate;
+            void fetch() {
+                restTemplate.getForObject("/api/orders", String.class);
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(sites[0].url_template.as_deref(), Some("/api/orders"));
+    assert_eq!(sites[0].url_parts, None);
+}
+
+#[test]
+fn dynamic_kafka_topic_yields_parts() {
+    use cih_core::UrlPart;
+    let src = r#"
+        package com.acme;
+        class Producer {
+            private final KafkaTemplate kafkaTemplate;
+            void send() {
+                kafkaTemplate.send(TOPIC, "payload");
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].topic, None);
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(&[UrlPart::ConstRef("TOPIC".into())][..])
+    );
+}

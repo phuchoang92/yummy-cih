@@ -44,6 +44,31 @@ Same verb-shortcut and path-composition rules as Java above, plus:
   `init {}` blocks and property initializers have no callable context and are
   skipped, mirroring Java.
 
+## Dynamic-URL folding (`ContractSite.url_parts`, `cih-resolve/src/contracts.rs`)
+
+Outbound URLs/topics that are not plain literals are captured as structured
+parts — `Lit` / `ConstRef` / `Dynamic` — and folded at resolve time through the
+cross-file constant index (Java `static final String`; Kotlin
+companion-object/`object` `val`s with literal initializers):
+
+- **Unresolved parts degrade to `{*}`, never to wrong matches.** A `ConstRef`
+  the index can't resolve, and every `Dynamic` part (method call, `${expr}`
+  interpolation, arithmetic), wildcard their *entire* path segment — the fold
+  of `BASE + "/" + id` is `/api/orders/{*}`, never `v{*}`-style partial
+  segments. Fully-literal URLs are untouched (`url_template`, no parts).
+- **Matching stays normalized-string equality.** `{*}` pairs only with provider
+  path variables (`{id}`/`:id` normalize to `{*}` in
+  `normalize_contract_path`); segment-wise true wildcard matching is an
+  explicit non-goal. Endpoints that fold to `/` or all-`{*}` are dropped as
+  uninformative; folded endpoints carry `dynamic: true` and a confidence
+  discount (0.65 vs 0.75).
+- **Topics must fold to a full literal** — topic matching is exact-string, so a
+  partially-dynamic topic emits nothing.
+- **Kotlin constant scope is companion/`object` only.** Top-level `const val`
+  has no declaring class, so bare-name references to it don't resolve (they
+  degrade to `{*}`). Kafka `send` reads its topic from positional arg 0 only —
+  a literal payload is never mistaken for the topic.
+
 ## CXF / OSGi route stitching (`cih-resolve/src/lang/java/cxf.rs`)
 
 - **Base paths come from XML, per bundle.** Each JAX-RS route gets

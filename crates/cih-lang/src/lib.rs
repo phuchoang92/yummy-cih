@@ -16,6 +16,7 @@ pub mod fingerprint;
 pub mod generic_parse;
 
 pub use constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
+pub use contracts_common::normalize_external_url;
 
 /// Declares all language modules and generates `all_providers()`.
 /// To add a new language: add one line here (plus the implementation files).

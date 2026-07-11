@@ -155,7 +155,8 @@ impl<'a> EdgeEmitter<'a> {
         self.emit_import_edges();
         self.emit_heritage_edges();
         self.emit_mro_edges();
-        let (contract_nodes, contract_edges) = resolve_contract_edges(self.parsed);
+        let (contract_nodes, contract_edges) =
+            resolve_contract_edges(self.parsed, self.constant_resolver.as_ref());
         self.nodes.extend(contract_nodes);
         self.edges.extend(contract_edges);
         self.finish()

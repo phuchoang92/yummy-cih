@@ -6,10 +6,11 @@ use tree_sitter::Node as TsNode;
 
 use super::{
     FileBuilder, annotation_name, annotation_string_values, annotations, base_type_simple,
-    callable_context_at, first_constructor_argument_type, first_string_argument,
-    infer_webclient_http_method, method_declarations, method_routes, normalize_external_url,
-    normalize_route_path, param_type_names, range_of, receiver_has_type, rest_template_http_method,
-    root_receiver_has_type, spring_method_routes_inner, text, type_context_at,
+    callable_context_at, first_argument_string_literal, first_constructor_argument_type,
+    first_string_argument, infer_webclient_http_method, method_declarations, method_routes,
+    normalize_external_url, normalize_route_path, param_type_names, range_of, receiver_has_type,
+    rest_template_http_method, root_receiver_has_type, spring_method_routes_inner, text,
+    type_context_at, url_argument_parts,
 };
 
 pub(super) fn collect_method_routes(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
@@ -116,6 +117,7 @@ fn emit_feign_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) 
                 topic: None,
                 http_method: Some(route.http_method.to_string()),
                 messaging_framework: None,
+                url_parts: None,
                 in_callable: callable.id.clone(),
                 range: route.range,
             });
@@ -139,6 +141,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilde
                         topic: Some(topic),
                         http_method: None,
                         messaging_framework: Some(MessagingFramework::Kafka),
+                        url_parts: None,
                         in_callable: callable.id.clone(),
                         range: range_of(annotation),
                     });
@@ -152,6 +155,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut FileBuilde
                         topic: Some(base_type_simple(&topic)),
                         http_method: None,
                         messaging_framework: Some(MessagingFramework::Spring),
+                        url_parts: None,
                         in_callable: callable.id.clone(),
                         range: range_of(annotation),
                     });
@@ -177,13 +181,20 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
 
     if let Some(http_method) = rest_template_http_method(&method) {
         if receiver_has_type(builder, &callable.in_fqcn, &receiver, "RestTemplate") {
+            let url_template =
+                first_string_argument(node, src).map(|url| normalize_external_url(&url));
+            let url_parts = if url_template.is_none() {
+                url_argument_parts(node, src)
+            } else {
+                None
+            };
             builder.contract_sites.push(ContractSite {
                 kind: ContractKind::HttpCall,
-                url_template: first_string_argument(node, src)
-                    .map(|url| normalize_external_url(&url)),
+                url_template,
                 topic: None,
                 http_method: Some(http_method.to_string()),
                 messaging_framework: None,
+                url_parts,
                 in_callable: callable.id,
                 range: range_of(node),
             });
@@ -194,13 +205,20 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
     if method == "uri" {
         if let Some(http_method) = infer_webclient_http_method(&receiver) {
             if root_receiver_has_type(builder, &callable.in_fqcn, &receiver, "WebClient") {
+                let url_template =
+                    first_string_argument(node, src).map(|url| normalize_external_url(&url));
+                let url_parts = if url_template.is_none() {
+                    url_argument_parts(node, src)
+                } else {
+                    None
+                };
                 builder.contract_sites.push(ContractSite {
                     kind: ContractKind::HttpCall,
-                    url_template: first_string_argument(node, src)
-                        .map(|url| normalize_external_url(&url)),
+                    url_template,
                     topic: None,
                     http_method: Some(http_method.to_string()),
                     messaging_framework: None,
+                    url_parts,
                     in_callable: callable.id,
                     range: range_of(node),
                 });
@@ -211,13 +229,22 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
 
     if method == "send" && receiver_has_type(builder, &callable.in_fqcn, &receiver, "KafkaTemplate")
     {
-        if let Some(topic) = first_string_argument(node, src) {
+        // Topic is positional arg 0; scanning the whole list would read a
+        // literal payload as the topic when the topic is a constant.
+        let topic = first_argument_string_literal(node, src);
+        let url_parts = if topic.is_none() {
+            url_argument_parts(node, src)
+        } else {
+            None
+        };
+        if topic.is_some() || url_parts.is_some() {
             builder.contract_sites.push(ContractSite {
                 kind: ContractKind::EventPublish,
                 url_template: None,
-                topic: Some(topic),
+                topic,
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Kafka),
+                url_parts,
                 in_callable: callable.id,
                 range: range_of(node),
             });
@@ -240,6 +267,7 @@ fn emit_invocation_contract(node: TsNode<'_>, src: &str, builder: &mut FileBuild
                 topic: Some(topic),
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Spring),
+                url_parts: None,
                 in_callable: callable.id,
                 range: range_of(node),
             });

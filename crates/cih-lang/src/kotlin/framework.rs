@@ -9,7 +9,7 @@
 
 use cih_core::{
     ContractKind, ContractSite, Edge, EdgeKind, MessagingFramework, Node, NodeId, NodeKind, Range,
-    RouteSource,
+    RouteSource, UrlPart,
 };
 use tree_sitter::Node as TsNode;
 
@@ -177,6 +177,7 @@ fn emit_feign_contracts(node: TsNode<'_>, src: &str, builder: &mut Builder) {
                 topic: None,
                 http_method: Some(route.http_method.to_string()),
                 messaging_framework: None,
+                url_parts: None,
                 in_callable: callable_id.clone(),
                 range: route.range,
             });
@@ -203,6 +204,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut Builder) {
                         topic: Some(topic),
                         http_method: None,
                         messaging_framework: Some(MessagingFramework::Kafka),
+                        url_parts: None,
                         in_callable: callable_id.clone(),
                         range: range_of(annotation),
                     });
@@ -216,6 +218,7 @@ fn emit_listener_contracts(node: TsNode<'_>, src: &str, builder: &mut Builder) {
                         topic: Some(base_type_simple(&topic)),
                         http_method: None,
                         messaging_framework: Some(MessagingFramework::Spring),
+                        url_parts: None,
                         in_callable: callable_id.clone(),
                         range: range_of(annotation),
                     });
@@ -258,13 +261,20 @@ fn emit_call_contract(node: TsNode<'_>, src: &str, builder: &mut Builder) {
 
     if let Some(http_method) = rest_template_http_method(&method) {
         if receiver_has_type(builder, &signature, &receiver, "RestTemplate") {
+            let url_template =
+                first_string_argument(node, src).map(|url| normalize_external_url(&url));
+            let url_parts = if url_template.is_none() {
+                url_argument_parts(node, src)
+            } else {
+                None
+            };
             builder.contract_sites.push(ContractSite {
                 kind: ContractKind::HttpCall,
-                url_template: first_string_argument(node, src)
-                    .map(|url| normalize_external_url(&url)),
+                url_template,
                 topic: None,
                 http_method: Some(http_method.to_string()),
                 messaging_framework: None,
+                url_parts,
                 in_callable: callable_id,
                 range: range_of(node),
             });
@@ -275,13 +285,20 @@ fn emit_call_contract(node: TsNode<'_>, src: &str, builder: &mut Builder) {
     if method == "uri" {
         if let Some(http_method) = infer_webclient_http_method(&receiver) {
             if root_receiver_has_type(builder, &signature, &receiver, "WebClient") {
+                let url_template =
+                    first_string_argument(node, src).map(|url| normalize_external_url(&url));
+                let url_parts = if url_template.is_none() {
+                    url_argument_parts(node, src)
+                } else {
+                    None
+                };
                 builder.contract_sites.push(ContractSite {
                     kind: ContractKind::HttpCall,
-                    url_template: first_string_argument(node, src)
-                        .map(|url| normalize_external_url(&url)),
+                    url_template,
                     topic: None,
                     http_method: Some(http_method.to_string()),
                     messaging_framework: None,
+                    url_parts,
                     in_callable: callable_id,
                     range: range_of(node),
                 });
@@ -291,13 +308,24 @@ fn emit_call_contract(node: TsNode<'_>, src: &str, builder: &mut Builder) {
     }
 
     if method == "send" && receiver_has_type(builder, &signature, &receiver, "KafkaTemplate") {
-        if let Some(topic) = first_string_argument(node, src) {
+        // Topic is positional arg 0; scanning the whole list would read a
+        // literal payload as the topic when the topic is a constant.
+        let topic = first_argument_value(node)
+            .filter(|value| value.kind() == "string_literal")
+            .and_then(|value| literal_string_text(value, src));
+        let url_parts = if topic.is_none() {
+            url_argument_parts(node, src)
+        } else {
+            None
+        };
+        if topic.is_some() || url_parts.is_some() {
             builder.contract_sites.push(ContractSite {
                 kind: ContractKind::EventPublish,
                 url_template: None,
-                topic: Some(topic),
+                topic,
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Kafka),
+                url_parts,
                 in_callable: callable_id,
                 range: range_of(node),
             });
@@ -315,10 +343,92 @@ fn emit_call_contract(node: TsNode<'_>, src: &str, builder: &mut Builder) {
                 topic: Some(topic),
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Spring),
+                url_parts: None,
                 in_callable: callable_id,
                 range: range_of(node),
             });
         }
+    }
+}
+
+/// Value expression of the call's first argument (unwrapping a named
+/// argument's `key =` prefix).
+fn first_argument_value(call: TsNode<'_>) -> Option<TsNode<'_>> {
+    let arguments = call_value_arguments(call)?;
+    let mut cursor = arguments.walk();
+    let first = arguments
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "value_argument")?;
+    let mut inner = first.walk();
+    let children: Vec<_> = first.named_children(&mut inner).collect();
+    match children.as_slice() {
+        [only] => Some(*only),
+        // `key = value`: the leading simple_identifier is the parameter name.
+        [key, .., value] if key.kind() == "simple_identifier" => Some(*value),
+        _ => None,
+    }
+}
+
+/// Structured parts of the first (URL/topic) argument when it is not a plain
+/// literal: interpolated strings (`"$base/items"` → `[ConstRef, Lit]`,
+/// `${expr}` → `Dynamic`) and `+`-concatenation. `None` for plain literals.
+fn url_argument_parts(call: TsNode<'_>, src: &str) -> Option<Vec<UrlPart>> {
+    let value = first_argument_value(call)?;
+    let mut parts = Vec::new();
+    fold_url_expr(value, src, &mut parts);
+    parts
+        .iter()
+        .any(|part| !matches!(part, UrlPart::Lit(_)))
+        .then_some(parts)
+}
+
+fn fold_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
+    match node.kind() {
+        "string_literal" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_content" | "character_escape_seq" => out.push(UrlPart::Lit(
+                        child.utf8_text(src.as_bytes()).unwrap_or_default().to_string(),
+                    )),
+                    "interpolated_identifier" => {
+                        let name = text(child, src);
+                        out.push(UrlPart::ConstRef(
+                            name.trim_start_matches('$').to_string(),
+                        ));
+                    }
+                    _ => out.push(UrlPart::Dynamic),
+                }
+            }
+        }
+        "additive_expression" => {
+            let mut has_plus = false;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "+" {
+                    has_plus = true;
+                }
+            }
+            if !has_plus {
+                out.push(UrlPart::Dynamic);
+                return;
+            }
+            let mut named = node.walk();
+            let children: Vec<_> = node.named_children(&mut named).collect();
+            for child in children {
+                fold_url_expr(child, src, out);
+            }
+        }
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => fold_url_expr(inner, src, out),
+            None => out.push(UrlPart::Dynamic),
+        },
+        "simple_identifier" => out.push(UrlPart::ConstRef(text(node, src))),
+        "navigation_expression" => {
+            // `Constants.BASE` — a bare navigation with no call suffix.
+            out.push(UrlPart::ConstRef(text(node, src)));
+        }
+        _ => out.push(UrlPart::Dynamic),
     }
 }
 
@@ -466,7 +576,7 @@ fn collect_literal_strings(node: TsNode<'_>, src: &str, out: &mut Vec<String>) {
 }
 
 /// Text of a fully-literal string (no `$id`/`${expr}` interpolation).
-fn literal_string_text(node: TsNode<'_>, src: &str) -> Option<String> {
+pub(super) fn literal_string_text(node: TsNode<'_>, src: &str) -> Option<String> {
     if node.kind() != "string_literal" {
         return None;
     }

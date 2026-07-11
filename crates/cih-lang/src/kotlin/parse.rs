@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use cih_core::{
     constructor_id, field_id, file_id, function_id, method_id, type_id, BindingKind, ContractSite,
-    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport, SymbolDef,
-    TypeBinding,
+    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport,
+    StringConstant, SymbolDef, TypeBinding,
 };
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_kotlin};
 use tree_sitter::Node as TsNode;
@@ -131,6 +131,7 @@ pub(super) struct Builder {
     imports: Vec<RawImport>,
     pub(super) contract_sites: Vec<ContractSite>,
     pub(super) type_bindings: Vec<TypeBinding>,
+    string_constants: Vec<StringConstant>,
     pub(super) type_contexts: Vec<TypeCtx>,
     pub(super) callable_contexts: Vec<CallableCtx>,
 }
@@ -269,7 +270,7 @@ pub fn parse_kotlin_file(rel: &str, src: &str) -> Result<ParsedUnit> {
             contract_sites: builder.contract_sites,
             sql_constants: vec![],
             sql_execution_sites: vec![],
-            string_constants: vec![],
+            string_constants: builder.string_constants,
         },
     })
 }
@@ -436,6 +437,18 @@ fn emit_object_decl(
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
     });
+
+    // Constants declared in a companion object are referenced through the
+    // *outer* class (`MyCls.BASE`), so record that as the owner; a named
+    // `object` is its own referencable owner.
+    let constants_owner = if node.kind() == "companion_object" {
+        outer_fqcn.map(str::to_string).unwrap_or_else(|| fqcn.clone())
+    } else {
+        fqcn.clone()
+    };
+    if let Some(body) = find_named_child(node, "class_body") {
+        collect_object_string_constants(body, src, builder, &constants_owner);
+    }
 
     builder.nodes.push(Node {
         id: type_node_id.clone(),
@@ -608,6 +621,40 @@ pub(super) fn declared_type_text(node: TsNode<'_>, src: &str) -> Option<String> 
     find_named_child(node, "nullable_type")
         .and_then(|nullable| find_named_child(nullable, "user_type"))
         .map(|ty| text(ty, src))
+}
+
+/// String constants in an `object` / `companion object` body: `val BASE =
+/// "/api"` (fully-literal initializers only) feed the resolve-phase constant
+/// index that folds dynamic contract URLs.
+fn collect_object_string_constants(
+    body: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    owner_fqcn: &str,
+) {
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() != "property_declaration" {
+            continue;
+        }
+        let Some(name) = find_named_child(child, "variable_declaration")
+            .and_then(|decl| first_simple_identifier(decl, src))
+        else {
+            continue;
+        };
+        let Some(value) = find_named_child(child, "string_literal")
+            .and_then(|lit| framework::literal_string_text(lit, src))
+        else {
+            continue;
+        };
+        builder.string_constants.push(StringConstant {
+            const_name: name,
+            owner_fqcn: owner_fqcn.to_string(),
+            value,
+            dynamic: false,
+            range: range_of(child),
+        });
+    }
 }
 
 /// Record a receiver-typing binding for every typed primary-constructor

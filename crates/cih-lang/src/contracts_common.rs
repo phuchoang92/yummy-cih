@@ -61,7 +61,9 @@ pub(crate) fn base_type_simple(raw: &str) -> String {
 
 /// Normalize an outbound-call URL to its path part: strips scheme + host,
 /// collapses duplicate slashes. Non-path fragments pass through unchanged.
-pub(crate) fn normalize_external_url(raw: &str) -> String {
+/// `pub` (re-exported as `cih_lang::normalize_external_url`) so the resolve
+/// phase folds dynamic URLs with the exact same normalization the parsers use.
+pub fn normalize_external_url(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed
         .strip_prefix("http://")

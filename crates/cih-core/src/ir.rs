@@ -103,9 +103,29 @@ pub struct ContractSite {
     /// contract carries its own Kafka-vs-Spring identity instead of consumers guessing.
     #[serde(default)]
     pub messaging_framework: Option<MessagingFramework>,
+    /// Structured pieces of a URL (or topic) built from non-literal parts —
+    /// constants and concatenation — for the resolve phase to fold. `None` for
+    /// fully-literal URLs (`url_template` carries those unchanged).
+    #[serde(default)]
+    pub url_parts: Option<Vec<UrlPart>>,
     /// Graph id of the enclosing callable that makes/listens to this contract.
     pub in_callable: NodeId,
     pub range: Range,
+}
+
+/// One piece of a URL argument that isn't a plain string literal.
+/// Produced by the parsers, folded by `cih-resolve` via the constant index:
+/// resolved `ConstRef`s inline their value; unresolved refs and `Dynamic`
+/// parts wildcard their whole path segment to `{*}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UrlPart {
+    /// Literal fragment, as written.
+    Lit(String),
+    /// Reference to a named constant (`BASE`, `Constants.BASE`).
+    ConstRef(String),
+    /// Statically unresolvable expression (call, arithmetic, `${expr}`).
+    Dynamic,
 }
 
 /// Messaging framework behind an event contract, determined by the parser
