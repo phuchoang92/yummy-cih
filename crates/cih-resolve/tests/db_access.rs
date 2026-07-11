@@ -267,7 +267,11 @@ fn emit_db_access_resolves_cross_file_unique_const() {
         "src/main/java/AdapterImpl.java",
         caller_fqcn,
         vec![],
-        vec![make_site("executeQuery", Some("QUERY_CROSS"), callable.clone())],
+        vec![make_site(
+            "executeQuery",
+            Some("QUERY_CROSS"),
+            callable.clone(),
+        )],
     );
 
     let (nodes, edges) = emit_db_access(&[constants_file, adapter_file]);
@@ -276,19 +280,27 @@ fn emit_db_access_resolves_cross_file_unique_const() {
     let table_id = db_table_id("ACCOUNTS");
 
     assert!(
-        nodes.iter().any(|n| n.id == query_id && n.kind == NodeKind::DbQuery),
+        nodes
+            .iter()
+            .any(|n| n.id == query_id && n.kind == NodeKind::DbQuery),
         "DbQuery node missing for cross-file constant"
     );
     assert!(
-        nodes.iter().any(|n| n.id == table_id && n.kind == NodeKind::DbTable),
+        nodes
+            .iter()
+            .any(|n| n.id == table_id && n.kind == NodeKind::DbTable),
         "DbTable node missing — cross-file resolution failed"
     );
     assert!(
-        edges.iter().any(|e| e.src == callable && e.dst == query_id && e.kind == EdgeKind::ExecutesQuery),
+        edges
+            .iter()
+            .any(|e| e.src == callable && e.dst == query_id && e.kind == EdgeKind::ExecutesQuery),
         "EXECUTES_QUERY edge missing"
     );
     assert!(
-        edges.iter().any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable),
+        edges
+            .iter()
+            .any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable),
         "READS_TABLE edge missing"
     );
     // Must not be flagged dynamic — the constant was fully resolved.
@@ -314,13 +326,21 @@ fn emit_db_access_marks_dynamic_when_const_name_ambiguous() {
     let file_a = make_parsed_file(
         "src/main/java/SqlConstantsA.java",
         fqcn_a,
-        vec![make_constant("QUERY_SHARED", fqcn_a, "SELECT * FROM TABLE_A")],
+        vec![make_constant(
+            "QUERY_SHARED",
+            fqcn_a,
+            "SELECT * FROM TABLE_A",
+        )],
         vec![],
     );
     let file_b = make_parsed_file(
         "src/main/java/SqlConstantsB.java",
         fqcn_b,
-        vec![make_constant("QUERY_SHARED", fqcn_b, "SELECT * FROM TABLE_B")],
+        vec![make_constant(
+            "QUERY_SHARED",
+            fqcn_b,
+            "SELECT * FROM TABLE_B",
+        )],
         vec![],
     );
     let caller = make_parsed_file(
@@ -332,7 +352,10 @@ fn emit_db_access_marks_dynamic_when_const_name_ambiguous() {
 
     let (nodes, edges) = emit_db_access(&[file_a, file_b, caller]);
 
-    let table_nodes: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::DbTable).collect();
+    let table_nodes: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::DbTable)
+        .collect();
     assert!(
         table_nodes.is_empty(),
         "ambiguous const must not resolve to a DbTable: {table_nodes:?}"

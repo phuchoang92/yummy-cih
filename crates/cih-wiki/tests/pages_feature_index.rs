@@ -65,8 +65,14 @@ fn renders_with_correct_frontmatter() {
         "link must NOT include the feature prefix (would resolve to wrong path)"
     );
     // Provenance fields must appear in front matter.
-    assert!(md.contains("cih_enrichment: graph-only"), "must contain enrichment tier");
-    assert!(md.contains("cih_graph_version: test-v1"), "must contain graph version");
+    assert!(
+        md.contains("cih_enrichment: graph-only"),
+        "must contain enrichment tier"
+    );
+    assert!(
+        md.contains("cih_graph_version: test-v1"),
+        "must contain graph version"
+    );
 }
 
 #[test]
@@ -75,6 +81,12 @@ fn renders_empty_class_list_without_classes_section() {
     let ids = vec!["Community:0".to_string()];
     let meta = graph_only_meta();
     let md = render_feature_index("order", &ids, &[], &g, &meta);
-    assert!(!md.contains("## Classes"), "empty class list must omit the Classes section");
-    assert!(md.contains("Business Overview"), "role pages still rendered");
+    assert!(
+        !md.contains("## Classes"),
+        "empty class list must omit the Classes section"
+    );
+    assert!(
+        md.contains("Business Overview"),
+        "role pages still rendered"
+    );
 }

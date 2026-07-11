@@ -14,7 +14,10 @@ use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
 
-type FullEnrichResult = (Option<HashMap<String, CommunityLlmFull>>, Vec<(String, String, CommunityLlmFull)>);
+type FullEnrichResult = (
+    Option<HashMap<String, CommunityLlmFull>>,
+    Vec<(String, String, CommunityLlmFull)>,
+);
 
 /// Returns `(full_map, cache_updates)` where `cache_updates` contains only newly-enriched
 /// entries (cache hits are excluded since they don't need to be re-persisted).
@@ -113,7 +116,11 @@ pub(super) fn run_community_full_enrichment(
         map.insert(id, full);
     }
 
-    tracing::info!(enriched = map.len(), cached = map.len() - cache_updates.len(), "LLM full enrichment complete");
+    tracing::info!(
+        enriched = map.len(),
+        cached = map.len() - cache_updates.len(),
+        "LLM full enrichment complete"
+    );
     if map.is_empty() {
         (None, cache_updates)
     } else {

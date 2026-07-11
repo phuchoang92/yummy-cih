@@ -228,9 +228,7 @@ impl TextIndex {
                 }
                 let df = *self.doc_freq.get(token).unwrap_or(&0) as f32;
                 score += idf(indexed as f32, df) * (tf * (K1 + 1.0))
-                    / (tf
-                        + K1 * (1.0 - B
-                            + B * (tokens.len() as f32 / self.avg_doc_len.max(1.0))));
+                    / (tf + K1 * (1.0 - B + B * (tokens.len() as f32 / self.avg_doc_len.max(1.0))));
             }
 
             if score > 0.0 {

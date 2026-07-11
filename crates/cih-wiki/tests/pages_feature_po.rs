@@ -76,7 +76,18 @@ fn renders_overview_when_llm_present() {
             dev: String::new(),
         },
     );
-    let md = render_feature_po("payment", &ids, &g, Some(&sums), None, None, None, 0, 0, &TEST_META);
+    let md = render_feature_po(
+        "payment",
+        &ids,
+        &g,
+        Some(&sums),
+        None,
+        None,
+        None,
+        0,
+        0,
+        &TEST_META,
+    );
     assert!(md.contains("## Overview"));
     assert!(md.contains("Handles payment flows"));
 }
@@ -90,7 +101,18 @@ fn renders_feature_level_summary_when_present() {
         ba_process_overview: String::new(),
         ba_business_rules: String::new(),
     };
-    let md = render_feature_po("payment", &ids, &g, None, None, Some(&feature), None, 0, 0, &TEST_META);
+    let md = render_feature_po(
+        "payment",
+        &ids,
+        &g,
+        None,
+        None,
+        Some(&feature),
+        None,
+        0,
+        0,
+        &TEST_META,
+    );
     assert!(md.contains("Feature-wide payment overview"));
     assert!(md.contains("-> Submit payment"));
 }
@@ -98,13 +120,17 @@ fn renders_feature_level_summary_when_present() {
 #[test]
 fn omits_overview_when_no_llm() {
     let (g, ids) = simple_graph();
-    let md = render_feature_po("payment", &ids, &g, None, None, None, None, 0, 0, &TEST_META);
+    let md = render_feature_po(
+        "payment", &ids, &g, None, None, None, None, 0, 0, &TEST_META,
+    );
     assert!(!md.contains("## Overview"));
 }
 
 #[test]
 fn has_correct_frontmatter() {
     let (g, ids) = simple_graph();
-    let md = render_feature_po("payment", &ids, &g, None, None, None, None, 0, 0, &TEST_META);
+    let md = render_feature_po(
+        "payment", &ids, &g, None, None, None, None, 0, 0, &TEST_META,
+    );
     assert!(md.contains("---\ntitle: Payment — Business Overview"));
 }

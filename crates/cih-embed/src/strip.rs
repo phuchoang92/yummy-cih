@@ -49,12 +49,7 @@ fn is_log_call(t: &str) -> bool {
     // was unsound — any line calling .info() on a non-logger object that also
     // happened to mention the string "log." (e.g. in a string literal) was
     // incorrectly stripped.
-    let prefixes = [
-        "log.",
-        "logger.",
-        "LOG.",
-        "LOGGER.",
-    ];
+    let prefixes = ["log.", "logger.", "LOG.", "LOGGER."];
     prefixes.iter().any(|p| t.starts_with(p))
 }
 

@@ -32,7 +32,11 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
     };
     let resolved = settings::resolve_analyze(
         settings::AnalyzeFlagInputs {
-            languages: args.languages.into_iter().filter(|s| !s.is_empty()).collect(),
+            languages: args
+                .languages
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect(),
             skip_xml_integration,
             include_decompiled,
             cxf_base_path: args.cxf_base_path,

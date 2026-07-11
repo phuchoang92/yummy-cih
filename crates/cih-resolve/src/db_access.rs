@@ -28,7 +28,10 @@ pub fn emit_db_access(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
     for pf in parsed {
         for c in &pf.sql_constants {
             const_index.insert((&pf.file, &c.const_name), c);
-            const_by_name.entry(c.const_name.as_str()).or_default().push(c);
+            const_by_name
+                .entry(c.const_name.as_str())
+                .or_default()
+                .push(c);
         }
     }
 
@@ -72,7 +75,12 @@ fn process_site(
             let lookup_key = (&pf.file as &str, cref.as_str());
             if let Some(c) = const_index.get(&lookup_key) {
                 let qid = db_query_const_id(&c.owner_fqcn, &c.const_name);
-                (qid, c.sql_text.clone(), c.dynamic, Some(c.const_name.clone()))
+                (
+                    qid,
+                    c.sql_text.clone(),
+                    c.dynamic,
+                    Some(c.const_name.clone()),
+                )
             } else {
                 // Tier 2: workspace-unique cross-file fallback.
                 // If exactly one constant with this name exists across all parsed files,
@@ -82,7 +90,12 @@ fn process_site(
                 match const_by_name.get(cref.as_str()).map(Vec::as_slice) {
                     Some([c]) => {
                         let qid = db_query_const_id(&c.owner_fqcn, &c.const_name);
-                        (qid, c.sql_text.clone(), c.dynamic, Some(c.const_name.clone()))
+                        (
+                            qid,
+                            c.sql_text.clone(),
+                            c.dynamic,
+                            Some(c.const_name.clone()),
+                        )
                     }
                     _ => {
                         let qid = db_query_const_id(owner_fqcn, cref);

@@ -456,7 +456,10 @@ fn refresh_command_runs_analyze_and_writes_fingerprint_state() {
     .unwrap();
 
     let state_path = root.join(".cih/refresh-state.json");
-    assert!(state_path.exists(), "refresh-state.json must be written after analyze");
+    assert!(
+        state_path.exists(),
+        "refresh-state.json must be written after analyze"
+    );
     let state: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
     // analyze_head is None when repo has no git (safe conservative default)
@@ -522,9 +525,18 @@ fn wiki_command_stage_and_swap_installs_output_atomically() {
 
     // Final output exists at out_dir; staging and backup dirs are cleaned up.
     assert!(out_dir.exists(), "out_dir must exist after stage-and-swap");
-    assert!(!stage_dir.exists(), "staging dir must be removed after successful swap");
-    assert!(!bak_dir.exists(), "backup dir must be removed after successful swap");
-    assert!(out_dir.join("manifest.json").exists(), "manifest.json must be in out_dir");
+    assert!(
+        !stage_dir.exists(),
+        "staging dir must be removed after successful swap"
+    );
+    assert!(
+        !bak_dir.exists(),
+        "backup dir must be removed after successful swap"
+    );
+    assert!(
+        out_dir.join("manifest.json").exists(),
+        "manifest.json must be in out_dir"
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -578,8 +590,14 @@ fn wiki_pages_contain_provenance_front_matter() {
         .expect("at least one po.md must be generated");
 
     let po_content = fs::read_to_string(&po_path).unwrap();
-    assert!(po_content.contains("cih_enrichment: graph-only"), "po.md must contain cih_enrichment tier");
-    assert!(po_content.contains("cih_graph_version:"), "po.md must contain cih_graph_version");
+    assert!(
+        po_content.contains("cih_enrichment: graph-only"),
+        "po.md must contain cih_enrichment tier"
+    );
+    assert!(
+        po_content.contains("cih_graph_version:"),
+        "po.md must contain cih_graph_version"
+    );
 
     // Graph-only mode must emit the no-LLM admonition.
     assert!(
@@ -922,7 +940,10 @@ fn wiki_command_update_agents_md_writes_pointer_block() {
     .unwrap();
 
     let agents_md = root.join("AGENTS.md");
-    assert!(agents_md.exists(), "AGENTS.md must be created by --update-agents-md");
+    assert!(
+        agents_md.exists(),
+        "AGENTS.md must be created by --update-agents-md"
+    );
     let content = fs::read_to_string(&agents_md).unwrap();
     assert!(
         content.contains("<!-- cih-wiki:start -->"),
@@ -966,12 +987,21 @@ fn wiki_command_writes_agent_index_json() {
     .unwrap();
 
     let index_path = root.join(".cih/wiki/agent-index.json");
-    assert!(index_path.exists(), "agent-index.json must be written by wiki run");
+    assert!(
+        index_path.exists(),
+        "agent-index.json must be written by wiki run"
+    );
     let raw = fs::read_to_string(&index_path).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(v["schema_version"], 1, "schema_version must be 1");
-    assert!(v["fqn_to_page"].is_object(), "fqn_to_page must be an object");
-    assert!(v["file_to_pages"].is_object(), "file_to_pages must be an object");
+    assert!(
+        v["fqn_to_page"].is_object(),
+        "fqn_to_page must be an object"
+    );
+    assert!(
+        v["file_to_pages"].is_object(),
+        "file_to_pages must be an object"
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -1003,7 +1033,9 @@ fn wiki_feature_index_links_resolve_to_existing_files() {
 
 /// Recursively walk `dir`, check every relative *.md link in each .md file.
 fn collect_broken_links(dir: &Path, wiki_dir: &Path, broken: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

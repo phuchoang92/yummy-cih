@@ -134,9 +134,15 @@ pub fn redact_secrets(src: &str) -> String {
         if let Some(end) = out[start..].find("-----END ") {
             if let Some(end2) = out[start + end..].find("-----") {
                 let full_end = start + end + end2 + 5;
-                let header_end = out[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
+                let header_end = out[start..]
+                    .find('\n')
+                    .map(|i| start + i + 1)
+                    .unwrap_or(start);
                 let label = out[start..header_end.min(start + 40)].trim_end();
-                let tag = format!("[REDACTED:pem:{}]", label.trim_start_matches('-').trim_end_matches('-').trim());
+                let tag = format!(
+                    "[REDACTED:pem:{}]",
+                    label.trim_start_matches('-').trim_end_matches('-').trim()
+                );
                 out.replace_range(start..full_end, &tag);
                 continue;
             }
@@ -155,8 +161,18 @@ pub fn redact_secrets(src: &str) -> String {
     // Generic assignment patterns: password = "...", apiKey: "...", secret = '...'
     out = redact_quoted_assignment(
         &out,
-        &["password", "passwd", "secret", "api_key", "apikey", "apiSecret",
-          "access_key", "access_token", "private_key", "client_secret"],
+        &[
+            "password",
+            "passwd",
+            "secret",
+            "api_key",
+            "apikey",
+            "apiSecret",
+            "access_key",
+            "access_token",
+            "private_key",
+            "client_secret",
+        ],
         "REDACTED:cred",
     );
 
@@ -174,10 +190,13 @@ fn redact_pattern_value(src: &str, patterns: &[&str], terminators: &str, tag: &s
         let mut pos = 0;
         while pos < out.len() {
             let haystack = out[pos..].to_lowercase();
-            let Some(idx) = haystack.find(pat_lower.as_str()) else { break };
+            let Some(idx) = haystack.find(pat_lower.as_str()) else {
+                break;
+            };
             let abs = pos + idx + pat.len();
             // find end of value (next terminator or end of string)
-            let end = out[abs..].find(|c: char| terminators.contains(c))
+            let end = out[abs..]
+                .find(|c: char| terminators.contains(c))
                 .map(|i| abs + i)
                 .unwrap_or(out.len());
             let value = out[abs..end].trim_matches(|c| c == '"' || c == '\'' || c == '`');
@@ -200,7 +219,9 @@ fn redact_quoted_assignment(src: &str, keywords: &[&str], tag: &str) -> String {
         let mut pos = 0;
         while pos < out.len() {
             let haystack = out[pos..].to_lowercase();
-            let Some(idx) = haystack.find(kw_lower.as_str()) else { break };
+            let Some(idx) = haystack.find(kw_lower.as_str()) else {
+                break;
+            };
             let after_kw = pos + idx + kw.len();
             // skip whitespace, :, =, spaces
             let rest = out[after_kw..].trim_start_matches([' ', '\t', ':', '=', ' ']);
@@ -236,7 +257,10 @@ fn redact_regex_like(src: &str, pattern_prefix: &str, replacement: &str) -> Stri
         if let Some(idx) = out[pos..].find(prefix) {
             let abs = pos + idx;
             let suffix = &out[abs + 4..abs + 4 + suffix_len];
-            if suffix.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+            if suffix
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            {
                 out.replace_range(abs..abs + 4 + suffix_len, replacement);
                 pos = abs + replacement.len();
             } else {

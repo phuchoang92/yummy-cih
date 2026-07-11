@@ -86,7 +86,16 @@ fn renders_feature_level_summary_when_present() {
         ba_process_overview: "Feature-wide order process.".to_string(),
         ba_business_rules: "-> Validate order status".to_string(),
     };
-    let md = render_feature_ba("order", &ids, &g, None, None, Some(&feature), None, &TEST_META);
+    let md = render_feature_ba(
+        "order",
+        &ids,
+        &g,
+        None,
+        None,
+        Some(&feature),
+        None,
+        &TEST_META,
+    );
     assert!(md.contains("Feature-wide order process"));
     assert!(md.contains("-> Validate order status"));
 }

@@ -160,10 +160,16 @@ impl WikiIndex {
             if !seen_slugs.insert(page.slug.as_str()) {
                 continue;
             }
-            if facets.role.is_some_and(|r| !page.role.eq_ignore_ascii_case(r)) {
+            if facets
+                .role
+                .is_some_and(|r| !page.role.eq_ignore_ascii_case(r))
+            {
                 continue;
             }
-            if facets.kind.is_some_and(|k| !page.kind.eq_ignore_ascii_case(k)) {
+            if facets
+                .kind
+                .is_some_and(|k| !page.kind.eq_ignore_ascii_case(k))
+            {
                 continue;
             }
             if facets
@@ -235,11 +241,7 @@ pub fn make_snippet(body: &str, query: &str, max_chars: usize) -> String {
             in_fence = !in_fence;
             continue;
         }
-        if in_fence
-            || trimmed.is_empty()
-            || trimmed.starts_with('#')
-            || trimmed.starts_with('|')
-        {
+        if in_fence || trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('|') {
             continue;
         }
         if fallback.is_none() {
@@ -296,8 +298,7 @@ impl WikiSearchState {
     /// to its cached wiki index. The single entry point shared by the axum
     /// handler and the MCP tools.
     pub(crate) async fn index_for(&self, repo: &str) -> Result<Arc<WikiIndex>, WikiError> {
-        let (repo_path, _) =
-            resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
+        let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
         let wiki_dir = Path::new(&repo_path).join(".cih").join("wiki");
         if !wiki_dir.join("manifest.json").is_file() {
             return Err(WikiError::NotFound(format!(
@@ -441,7 +442,10 @@ pub(crate) async fn get_wiki_page(
     })?;
     let markdown = index.page_raw(page).ok_or_else(|| {
         McpError::internal_error(
-            format!("wiki page '{}' exists in the manifest but its file is unreadable", args.slug),
+            format!(
+                "wiki page '{}' exists in the manifest but its file is unreadable",
+                args.slug
+            ),
             None,
         )
     })?;

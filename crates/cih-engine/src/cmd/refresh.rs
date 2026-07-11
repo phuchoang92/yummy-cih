@@ -53,10 +53,14 @@ enum StageOutcome {
 
 impl StageOutcome {
     fn ran(d: Duration) -> Self {
-        Self::Ran { elapsed_ms: d.as_millis() as u64 }
+        Self::Ran {
+            elapsed_ms: d.as_millis() as u64,
+        }
     }
     fn skipped(reason: impl Into<String>) -> Self {
-        Self::Skipped { reason: reason.into() }
+        Self::Skipped {
+            reason: reason.into(),
+        }
     }
 }
 
@@ -85,7 +89,11 @@ pub fn run(args: RefreshArgs) -> Result<()> {
 
     // ── Analyze stage ─────────────────────────────────────────────────────────
     let head_matches = repo_head.is_some() && state.analyze_head == repo_head;
-    let analyze_needed = if args.no_analyze { false } else { args.force || !head_matches || !artifacts_exist };
+    let analyze_needed = if args.no_analyze {
+        false
+    } else {
+        args.force || !head_matches || !artifacts_exist
+    };
 
     let analyze_out = if analyze_needed {
         let t = Instant::now();
@@ -209,7 +217,14 @@ pub fn run(args: RefreshArgs) -> Result<()> {
     } else if args.force {
         true
     } else {
-        wiki_needs_regen(&repo, &out_dir, wiki_mode, wiki_grouping, &wiki_language, &llm_model)
+        wiki_needs_regen(
+            &repo,
+            &out_dir,
+            wiki_mode,
+            wiki_grouping,
+            &wiki_language,
+            &llm_model,
+        )
     };
 
     let wiki_out = if !args.no_wiki && wiki_stale {

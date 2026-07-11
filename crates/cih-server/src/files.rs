@@ -46,9 +46,9 @@ pub async fn read_file(
     let canon_root = std::path::Path::new(&repo_root)
         .canonicalize()
         .map_err(|e| McpError::invalid_params(format!("cannot resolve repo root: {e}"), None))?;
-    let canon_path = full_path
-        .canonicalize()
-        .map_err(|e| McpError::invalid_params(format!("cannot resolve '{}': {e}", args.path), None))?;
+    let canon_path = full_path.canonicalize().map_err(|e| {
+        McpError::invalid_params(format!("cannot resolve '{}': {e}", args.path), None)
+    })?;
     if !canon_path.starts_with(&canon_root) {
         return Err(McpError::invalid_params("path escapes repo root", None));
     }

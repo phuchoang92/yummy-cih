@@ -150,5 +150,7 @@ fn text_index_scores_generic_documents() {
 
     assert!(index.search("", 10).is_empty());
     assert!(index.search("repayment", 0).is_empty());
-    assert!(TextIndex::build(std::iter::empty()).search("x", 5).is_empty());
+    assert!(TextIndex::build(std::iter::empty())
+        .search("x", 5)
+        .is_empty());
 }

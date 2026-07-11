@@ -139,7 +139,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         wiki_mode, grouping, wiki_language, llm_model, PROMPT_VERSION
     ));
     let existing_meta = load_wiki_meta(&out_dir);
-    let wiki_up_to_date = is_wiki_up_to_date(&existing_meta, &repo_commit, &graph_version, &flags_hash);
+    let wiki_up_to_date =
+        is_wiki_up_to_date(&existing_meta, &repo_commit, &graph_version, &flags_hash);
     if check_only {
         if wiki_up_to_date {
             if json {
@@ -160,7 +161,8 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             }
             return Ok(());
         } else {
-            let reason = wiki_stale_reason(&existing_meta, &repo_commit, &graph_version, &flags_hash);
+            let reason =
+                wiki_stale_reason(&existing_meta, &repo_commit, &graph_version, &flags_hash);
             if json {
                 eprintln!(
                     "{}",
@@ -661,8 +663,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     let effective_out = if stage_and_swap {
         // Wipe any leftover staging dir from a previous interrupted run.
         if stage_dir.exists() {
-            std::fs::remove_dir_all(&stage_dir)
-                .context("removing leftover staging dir")?;
+            std::fs::remove_dir_all(&stage_dir).context("removing leftover staging dir")?;
         }
         stage_dir.clone()
     } else {
@@ -689,7 +690,13 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         "wiki generation complete"
     );
 
-    persist_wiki_meta_caches(&effective_out, &[], &feature_cache_updates, &flow_cache_updates, &full_cache_updates)?;
+    persist_wiki_meta_caches(
+        &effective_out,
+        &[],
+        &feature_cache_updates,
+        &flow_cache_updates,
+        &full_cache_updates,
+    )?;
 
     if let Some(store) = &class_enrichment_store {
         let cih_dir = repo.join(".cih");
@@ -704,11 +711,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         // Rotate: old → .bak so we can restore on failure.
         if out_dir.exists() {
             if bak_dir.exists() {
-                std::fs::remove_dir_all(&bak_dir)
-                    .context("removing stale .bak dir")?;
+                std::fs::remove_dir_all(&bak_dir).context("removing stale .bak dir")?;
             }
-            std::fs::rename(&out_dir, &bak_dir)
-                .context("rotating out_dir to .bak")?;
+            std::fs::rename(&out_dir, &bak_dir).context("rotating out_dir to .bak")?;
         }
         if let Err(e) = std::fs::rename(&stage_dir, &out_dir) {
             // Restore the previous output so the site keeps serving.
@@ -759,7 +764,12 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             ) {
                 // Replace in-place: keep whatever surrounds the block as-is.
                 let end_pos = end + "<!-- cih-wiki:end -->".len();
-                format!("{}{}{}", &existing[..start], &block_core, &existing[end_pos..])
+                format!(
+                    "{}{}{}",
+                    &existing[..start],
+                    &block_core,
+                    &existing[end_pos..]
+                )
             } else {
                 // Append: add a blank-line separator then a trailing newline.
                 let prefix = existing.trim_end_matches('\n');
@@ -816,7 +826,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         }
         crate::ui::print_row("Output", &outcome.out_dir.display().to_string());
         crate::ui::print_row("Manifest", &outcome.manifest_path.display().to_string());
-        crate::ui::print_row("Agent index", &outcome.agent_index_path.display().to_string());
+        crate::ui::print_row(
+            "Agent index",
+            &outcome.agent_index_path.display().to_string(),
+        );
         eprintln!();
     }
 
@@ -841,7 +854,11 @@ pub(crate) fn wiki_needs_regen(
         .unwrap_or_default();
     let flags_hash = super::config::fnv64(&format!(
         "{}\x00{}\x00{}\x00{}\x00{}",
-        wiki_mode, grouping, wiki_language, llm_model, super::config::PROMPT_VERSION
+        wiki_mode,
+        grouping,
+        wiki_language,
+        llm_model,
+        super::config::PROMPT_VERSION
     ));
     let existing_meta = super::config::load_wiki_meta(out_dir);
     !is_wiki_up_to_date(&existing_meta, &repo_commit, &graph_version, &flags_hash)
@@ -916,30 +933,55 @@ mod tests {
     #[test]
     fn gate_fires_when_all_three_signals_match() {
         let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
-        assert!(is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv1", "fh1"));
+        assert!(is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv1",
+            "fh1"
+        ));
     }
 
     #[test]
     fn gate_misses_when_head_changes() {
         let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
-        assert!(!is_wiki_up_to_date(&meta, &Some("def456".into()), "gv1", "fh1"));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("def456".into()),
+            "gv1",
+            "fh1"
+        ));
     }
 
     #[test]
     fn gate_misses_when_graph_version_changes() {
         let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
-        assert!(!is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv2", "fh1"));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv2",
+            "fh1"
+        ));
     }
 
     #[test]
     fn gate_misses_when_flags_change() {
         let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
-        assert!(!is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv1", "fh2"));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv1",
+            "fh2"
+        ));
     }
 
     #[test]
     fn gate_misses_when_no_existing_meta() {
-        assert!(!is_wiki_up_to_date(&None, &Some("abc123".into()), "gv1", "fh1"));
+        assert!(!is_wiki_up_to_date(
+            &None,
+            &Some("abc123".into()),
+            "gv1",
+            "fh1"
+        ));
     }
 
     #[test]
@@ -952,6 +994,11 @@ mod tests {
     #[test]
     fn gate_misses_when_meta_has_no_commit() {
         let meta = Some(make_meta(None, "gv1", Some("fh1")));
-        assert!(!is_wiki_up_to_date(&meta, &Some("abc123".into()), "gv1", "fh1"));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv1",
+            "fh1"
+        ));
     }
 }

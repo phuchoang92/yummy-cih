@@ -284,9 +284,7 @@ fn is_control_dep_tainted(
         };
         let branch_reads: HashSet<&String> = branch_stmt.reads.iter().collect();
         for (var, defs) in branch_rd {
-            if branch_reads.contains(var)
-                && defs.iter().any(|d| tainted_defs.contains(d))
-            {
+            if branch_reads.contains(var) && defs.iter().any(|d| tainted_defs.contains(d)) {
                 return true;
             }
         }

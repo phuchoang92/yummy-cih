@@ -52,10 +52,7 @@ pub fn render_feature_index(
         for (class_name, dev_slug) in class_dev_links {
             // dev_slug is relative to the feature dir, e.g. "dev/payment-controller".
             // This page is at pages/{feature}/index.md, so dev/{slug}.md resolves correctly.
-            md.push_str(&format!(
-                "| {} | [dev]({}.md) |\n",
-                class_name, dev_slug
-            ));
+            md.push_str(&format!("| {} | [dev]({}.md) |\n", class_name, dev_slug));
         }
         md.push('\n');
     }

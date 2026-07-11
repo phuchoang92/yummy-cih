@@ -312,7 +312,10 @@ fn emit_global_pages(
     let routes_md = pages::shared::render_routes_page(graph);
     let routes_json = pages::shared::render_routes_json(graph);
     sink.push("pages/routes.md", routes_md);
-    sink.push("pages/routes.json", serde_json::to_string_pretty(&routes_json)?);
+    sink.push(
+        "pages/routes.json",
+        serde_json::to_string_pretty(&routes_json)?,
+    );
     batch.pages.push(PageEntry {
         slug: "routes".into(),
         role: "shared".into(),
@@ -445,8 +448,13 @@ fn emit_feature_section(
     };
 
     // D1 — Feature landing index
-    let idx_md =
-        pages::feature_index::render_feature_index(feature, cids, &class_dev_links, ctx.graph, &page_meta);
+    let idx_md = pages::feature_index::render_feature_index(
+        feature,
+        cids,
+        &class_dev_links,
+        ctx.graph,
+        &page_meta,
+    );
     sink.push(format!("pages/{}/index.md", feature), idx_md);
     batch
         .nav
@@ -584,8 +592,15 @@ fn emit_feature_section(
         );
         let json_val = pages::dev::render_dev_class_json(ctx.graph, cls_node);
         sink.push(format!("pages/{}.md", page_path), md);
-        sink.push(format!("pages/{}.json", page_path), serde_json::to_string_pretty(&json_val)?);
-        dev_entries.push((class_id.clone(), cls_node.file.clone(), format!("pages/{}.md", page_path)));
+        sink.push(
+            format!("pages/{}.json", page_path),
+            serde_json::to_string_pretty(&json_val)?,
+        );
+        dev_entries.push((
+            class_id.clone(),
+            cls_node.file.clone(),
+            format!("pages/{}.md", page_path),
+        ));
         let dev_title = cls_node.name.clone();
         batch
             .nav
@@ -684,7 +699,10 @@ fn emit_feature_section(
                 description,
                 method_descriptions,
             );
-            sink.push(format!("pages/{}/api/{}/index.md", feature, ctrl_slug), ctrl_md);
+            sink.push(
+                format!("pages/{}/api/{}/index.md", feature, ctrl_slug),
+                ctrl_md,
+            );
 
             for (route_pos, (handler, route)) in routes.iter().enumerate() {
                 let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
@@ -1337,10 +1355,10 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // Compute which features need re-rendering when --since is active.
     // Global and community pages are always re-rendered (fast, write-if-different handles mtimes).
-    let affected_features: Option<std::collections::HashSet<String>> =
-        input.changed_files.as_ref().map(|changed| {
-            features_affected_by_changed_files(&feature_groups, &graph, changed)
-        });
+    let affected_features: Option<std::collections::HashSet<String>> = input
+        .changed_files
+        .as_ref()
+        .map(|changed| features_affected_by_changed_files(&feature_groups, &graph, changed));
 
     // Per-feature pages
     for group in &feature_groups {
@@ -1349,7 +1367,13 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
                 continue;
             }
         }
-        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &mut sink, &mut dev_entries)?;
+        let batch = emit_feature_section(
+            group,
+            &ctx,
+            &mut class_dev_slugs,
+            &mut sink,
+            &mut dev_entries,
+        )?;
         page_count += batch.pages.len();
         all_pages.extend(batch.pages);
         nav.extend(batch.nav);
@@ -1425,11 +1449,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         }
         let dev_dir = out_dir.join(format!("pages/{}/dev", group.feature));
         if dev_dir.exists() {
-            for entry in std::fs::read_dir(&dev_dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
+            for entry in std::fs::read_dir(&dev_dir).into_iter().flatten().flatten() {
                 let path = entry.path();
                 let is_page = path
                     .extension()
@@ -1507,7 +1527,9 @@ pub(crate) fn capitalize(s: &str) -> String {
 /// Returns true iff `s` is safe to use as a single filesystem path segment in the wiki
 /// output directory. Only allows characters produced by `slugify` ([a-z0-9-]).
 fn is_safe_page_slug(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn count_unresolved_refs(report: Option<&str>) -> usize {

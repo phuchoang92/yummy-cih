@@ -144,7 +144,9 @@ fn page_by_slug_and_raw_content() {
     let index = load_wiki_index(tmp.path()).unwrap();
 
     // Slug lookup: hit and miss.
-    let page = index.page_by_slug("po/loan-repayment").expect("slug exists");
+    let page = index
+        .page_by_slug("po/loan-repayment")
+        .expect("slug exists");
     assert_eq!(page.kind, "po");
     assert!(index.page_by_slug("nope/nothing").is_none());
 
@@ -178,7 +180,10 @@ fn smoke_real_wiki() {
         index.page_count()
     );
     for hit in &hits {
-        println!("{:>8.3}  [{}/{}] {} — {}", hit.score, hit.role, hit.kind, hit.slug, hit.snippet);
+        println!(
+            "{:>8.3}  [{}/{}] {} — {}",
+            hit.score, hit.role, hit.kind, hit.slug, hit.snippet
+        );
     }
     assert!(!hits.is_empty());
 }
@@ -194,7 +199,10 @@ fn front_matter_and_snippets() {
     assert_eq!(make_snippet(body, "repayment", 240), "The repayment line.");
     // Fenced code (e.g. mermaid diagrams) never becomes a snippet.
     let fenced = "```mermaid\nNode_repayment[\"repayment\"]\n```\n\nProse about repayment.\n";
-    assert_eq!(make_snippet(fenced, "repayment", 240), "Prose about repayment.");
+    assert_eq!(
+        make_snippet(fenced, "repayment", 240),
+        "Prose about repayment."
+    );
     // No token match falls back to the first prose line.
     assert_eq!(make_snippet(body, "zzz", 240), "First prose line.");
     // Truncation is char-based (multibyte-safe) and marked with an ellipsis.

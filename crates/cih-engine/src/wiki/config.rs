@@ -91,7 +91,10 @@ pub(crate) fn fnv64(s: &str) -> String {
 /// Composite LLM cache key: combines evidence content with model, language, and
 /// prompt version so that switching provider/model/language/prompt invalidates cache.
 pub(super) fn llm_cache_key(evidence: &str, model: &str, language: &str) -> String {
-    fnv64(&format!("{}\x00{}\x00{}\x00{}", evidence, model, language, PROMPT_VERSION))
+    fnv64(&format!(
+        "{}\x00{}\x00{}\x00{}",
+        evidence, model, language, PROMPT_VERSION
+    ))
 }
 
 pub(crate) fn load_wiki_meta(out_dir: &Path) -> Option<WikiMeta> {

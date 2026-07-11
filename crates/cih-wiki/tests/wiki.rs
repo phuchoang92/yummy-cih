@@ -210,10 +210,15 @@ fn generate_wiki_second_run_writes_zero_pages() {
     assert!(first.pages_written > 0, "first run must write pages");
 
     // Second run — content is identical; sink should write nothing.
-    let second =
-        generate_wiki(minimal_input(&nodes, &[], &comm_nodes, &comm_edges), &out).unwrap();
-    assert_eq!(second.pages_written, 0, "second run should write 0 pages (determinism)");
-    assert!(second.pages_unchanged > 0, "second run should have unchanged pages");
+    let second = generate_wiki(minimal_input(&nodes, &[], &comm_nodes, &comm_edges), &out).unwrap();
+    assert_eq!(
+        second.pages_written, 0,
+        "second run should write 0 pages (determinism)"
+    );
+    assert!(
+        second.pages_unchanged > 0,
+        "second run should have unchanged pages"
+    );
 
     let _ = std::fs::remove_dir_all(&out);
 }
@@ -283,7 +288,10 @@ fn generate_wiki_since_skips_unchanged_features() {
         .map(|p| p.role.as_str())
         .collect();
     assert!(feature_roles.contains("alpha"), "alpha pages in manifest");
-    assert!(feature_roles.contains("beta"), "beta pages in manifest after merge");
+    assert!(
+        feature_roles.contains("beta"),
+        "beta pages in manifest after merge"
+    );
     assert!(outcome.page_count >= 2, "at least one page per feature");
 
     let _ = std::fs::remove_dir_all(&out);

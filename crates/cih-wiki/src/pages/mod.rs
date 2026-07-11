@@ -21,7 +21,11 @@ pub struct WikiPageMeta<'a> {
 /// `generated_at` is intentionally omitted from page content so that re-running
 /// the wiki with an unchanged graph produces byte-identical pages (write-if-different
 /// determinism). The timestamp lives in `wiki_meta.json` instead.
-pub fn provenance_front_matter(title: &str, sidebar_position: u32, meta: &WikiPageMeta<'_>) -> String {
+pub fn provenance_front_matter(
+    title: &str,
+    sidebar_position: u32,
+    meta: &WikiPageMeta<'_>,
+) -> String {
     format!(
         "---\ntitle: {title}\nsidebar_position: {sidebar_position}\ncih_enrichment: {tier}\ncih_graph_version: {ver}\n---\n\n",
         tier = meta.enrichment_tier,
