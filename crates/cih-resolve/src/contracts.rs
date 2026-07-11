@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::confidence::{CONTRACT_HTTP_CLIENT, CONTRACT_HTTP_CLIENT_DYNAMIC};
@@ -22,19 +23,53 @@ pub fn resolve_contract_edges(
 ) -> (Vec<Node>, Vec<Edge>) {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
+    let wrappers = WrapperIndex::build(parsed);
 
     for pf in parsed {
         for site in &pf.contract_sites {
             match &site.kind {
                 ContractKind::HttpCall | ContractKind::HttpClientProxy => {
-                    let (url_template, dynamic, env_default) = match site.url_template.as_deref() {
-                        Some(url) => (url.to_string(), false, false),
-                        None => {
-                            let Some((folded, env_default)) = fold_http_url(site, pf, resolver)
-                            else {
-                                continue;
-                            };
-                            (folded, true, env_default)
+                    // PROVISIONAL wrapper calls join against detected wrapper
+                    // defs; no match ⇒ the site silently vanishes.
+                    let mut wrapper_provenance = None;
+                    let (url_template, dynamic, env_default) = if let Some(callee) =
+                        site.via_wrapper.as_deref()
+                    {
+                        let Some((def, wrapper_pf)) = wrappers.lookup(callee, pf) else {
+                            continue;
+                        };
+                        // Two-context fold: the wrapper's prefix constants
+                        // (API_BASE_URL) live in the WRAPPER's module — the
+                        // caller may not import them at all.
+                        let wrapper_ctx = ResolutionContext {
+                            file: Path::new(&wrapper_pf.file),
+                            owner_fqcn: &def.module,
+                            imports: &wrapper_pf.imports,
+                            allow_unique_fallback: true,
+                        };
+                        let prefix = fold_url_parts(&def.prefix_parts, &wrapper_ctx, resolver);
+                        let suffix = fold_url_parts(
+                            site.url_parts.as_deref().unwrap_or(&[]),
+                            &site_ctx(site, pf),
+                            resolver,
+                        );
+                        let raw = format!("{}{}", prefix.raw, suffix.raw);
+                        let env = prefix.env_default || suffix.env_default;
+                        let Some((folded, env_default)) = wildcard_segments(&raw, env) else {
+                            continue;
+                        };
+                        wrapper_provenance = Some(format!("{}#{}", def.module, def.name));
+                        (folded, true, env_default)
+                    } else {
+                        match site.url_template.as_deref() {
+                            Some(url) => (url.to_string(), false, false),
+                            None => {
+                                let Some((folded, env_default)) = fold_http_url(site, pf, resolver)
+                                else {
+                                    continue;
+                                };
+                                (folded, true, env_default)
+                            }
                         }
                     };
                     let Some(http_method) = site.http_method.as_deref() else {
@@ -60,6 +95,9 @@ pub fn resolve_contract_edges(
                         // The URL base came from an env-override's literal
                         // default — the runtime value may differ.
                         props["base_source"] = serde_json::Value::String("env_default".into());
+                    }
+                    if let Some(wrapper) = &wrapper_provenance {
+                        props["via_wrapper"] = serde_json::Value::String(wrapper.clone());
                     }
                     nodes.push(Node {
                         id: id.clone(),
@@ -155,6 +193,64 @@ pub fn resolve_contract_edges(
     )
 }
 
+/// Repo-wide index of detected HTTP wrapper functions, keyed by
+/// (extensionless module path, name), plus a repo-unique-name fallback for
+/// alias/barrel imports (2+ same-named wrappers → None, never guess).
+struct WrapperIndex<'a> {
+    by_key: HashMap<(String, String), (&'a cih_core::HttpWrapperDef, &'a ParsedFile)>,
+    unique_by_name: HashMap<String, Option<(&'a cih_core::HttpWrapperDef, &'a ParsedFile)>>,
+}
+
+impl<'a> WrapperIndex<'a> {
+    fn build(parsed: &'a [ParsedFile]) -> Self {
+        let mut by_key = HashMap::new();
+        let mut unique_by_name: HashMap<String, Option<_>> = HashMap::new();
+        for pf in parsed {
+            for def in &pf.http_wrappers {
+                by_key.insert((def.module.clone(), def.name.clone()), (def, pf));
+                unique_by_name
+                    .entry(def.name.clone())
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some((def, pf)));
+            }
+        }
+        Self {
+            by_key,
+            unique_by_name,
+        }
+    }
+
+    /// Resolve a provisional site's callee: same module → import-scoped →
+    /// repo-wide unique name.
+    fn lookup(
+        &self,
+        callee: &str,
+        caller_pf: &'a ParsedFile,
+    ) -> Option<(&'a cih_core::HttpWrapperDef, &'a ParsedFile)> {
+        let caller_module =
+            cih_lang::strip_source_extension(&caller_pf.file).unwrap_or(caller_pf.file.as_str());
+        if let Some(hit) = self
+            .by_key
+            .get(&(caller_module.to_string(), callee.to_string()))
+        {
+            return Some(*hit);
+        }
+        for imp in &caller_pf.imports {
+            if imp.is_static {
+                continue;
+            }
+            if let Some(module) =
+                cih_lang::resolve_relative_module(Path::new(&caller_pf.file), &imp.raw)
+            {
+                if let Some(hit) = self.by_key.get(&(module, callee.to_string())) {
+                    return Some(*hit);
+                }
+            }
+        }
+        self.unique_by_name.get(callee).copied().flatten()
+    }
+}
+
 /// Fold a site's `url_parts` into a normalized path with `{*}` wildcards for
 /// unresolved segments. `None` when there are no parts or the result carries
 /// no information (`/` or all-wildcard).
@@ -164,7 +260,13 @@ fn fold_http_url(
     resolver: &dyn ConstantResolver,
 ) -> Option<(String, bool)> {
     let folded = fold_parts_raw(site, pf, resolver)?;
-    let normalized = cih_lang::normalize_external_url(&folded.raw);
+    wildcard_segments(&folded.raw, folded.env_default)
+}
+
+/// Normalize a folded raw URL and wildcard unresolved segments. `None` when
+/// the result carries no information (`/` or all-wildcard).
+fn wildcard_segments(raw: &str, env_default: bool) -> Option<(String, bool)> {
+    let normalized = cih_lang::normalize_external_url(raw);
     let segments: Vec<String> = normalized
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -179,7 +281,7 @@ fn fold_http_url(
     if segments.is_empty() || segments.iter().all(|segment| segment == "{*}") {
         return None;
     }
-    Some((format!("/{}", segments.join("/")), folded.env_default))
+    Some((format!("/{}", segments.join("/")), env_default))
 }
 
 /// Fold a dynamic topic; only a fully-resolved literal is usable.
@@ -205,21 +307,34 @@ fn fold_parts_raw(
     if parts.is_empty() {
         return None;
     }
-    let owner = owner_fqcn_of(site.in_callable.as_str());
-    let ctx = ResolutionContext {
+    Some(fold_url_parts(parts, &site_ctx(site, pf), resolver))
+}
+
+/// Resolution context for a site: owner from `in_callable`, the caller file's
+/// imports; script-language sites may resolve constants cross-file while
+/// Java/Kotlin keep strict class scoping.
+fn site_ctx<'a>(site: &'a ContractSite, pf: &'a ParsedFile) -> ResolutionContext<'a> {
+    ResolutionContext {
         file: Path::new(&pf.file),
-        owner_fqcn: owner,
+        owner_fqcn: owner_fqcn_of(site.in_callable.as_str()),
         imports: &pf.imports,
-        // Script-language sites may resolve constants cross-file; Java/Kotlin
-        // keep strict class scoping.
         allow_unique_fallback: matches!(pf.language.as_str(), "typescript" | "python"),
-    };
+    }
+}
+
+/// Concatenate parts in the given context. Unresolved refs and `Dynamic`
+/// parts become the `UNRESOLVED` marker.
+fn fold_url_parts(
+    parts: &[UrlPart],
+    ctx: &ResolutionContext<'_>,
+    resolver: &dyn ConstantResolver,
+) -> FoldedParts {
     let mut out = String::new();
     let mut env_default = false;
     for part in parts {
         match part {
             UrlPart::Lit(lit) => out.push_str(lit),
-            UrlPart::ConstRef(name) => match resolver.resolve(name, &ctx) {
+            UrlPart::ConstRef(name) => match resolver.resolve(name, ctx) {
                 Some(resolved) => {
                     env_default |= resolved.env_default;
                     out.push_str(&resolved.value);
@@ -229,10 +344,10 @@ fn fold_parts_raw(
             UrlPart::Dynamic => out.push(UNRESOLVED),
         }
     }
-    Some(FoldedParts {
+    FoldedParts {
         raw: out,
         env_default,
-    })
+    }
 }
 
 /// A concatenated `url_parts` string plus whether any resolved constant was an

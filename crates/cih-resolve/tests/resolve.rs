@@ -1778,3 +1778,182 @@ fn java_bare_name_never_uses_cross_file_fallback() {
     let out = resolve_with_constants(vec![constants, client]);
     assert_eq!(endpoint_paths(&out), vec!["/{*}/admin/x"]);
 }
+
+// ── TS HTTP wrapper following ────────────────────────────────────────────────
+
+fn wrapper_file(file: &str, module: &str, name: &str, prefix: Vec<UrlPart>) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    pf.http_wrappers = vec![cih_core::HttpWrapperDef {
+        name: name.into(),
+        module: module.into(),
+        prefix_parts: prefix,
+        options_arg_index: 1,
+        range: Range::default(),
+    }];
+    pf
+}
+
+fn wrapper_call_file(
+    file: &str,
+    in_callable: &str,
+    callee: &str,
+    method: &str,
+    parts: Vec<UrlPart>,
+) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    let mut site = http_parts_site(NodeId::new(in_callable), parts);
+    site.via_wrapper = Some(callee.into());
+    site.http_method = Some(method.into());
+    pf.contract_sites = vec![site];
+    pf
+}
+
+#[test]
+fn wrapper_call_joins_with_two_context_fold() {
+    // The wrapper file owns API_BASE_URL (env-default). A SECOND same-named
+    // constant elsewhere kills the unique fallback, and the caller imports
+    // NOTHING — resolution must go through the wrapper file's own context.
+    let mut wrapper = wrapper_file(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "apiFetch",
+        vec![UrlPart::ConstRef("API_BASE_URL".into())],
+    );
+    wrapper.string_constants = vec![StringConstant {
+        const_name: "API_BASE_URL".into(),
+        owner_fqcn: "src/services/apiClient".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: true,
+        range: Range::default(),
+    }];
+    let decoy = ts_const(
+        "src/legacy/old.ts",
+        "src/legacy/old",
+        "API_BASE_URL",
+        "/legacy",
+        false,
+    );
+    let mut caller = wrapper_call_file(
+        "src/components/admin.ts",
+        "Function:src/components/admin#create/1",
+        "apiFetch",
+        "POST",
+        vec![UrlPart::Lit("/admin/llm/providers".into())],
+    );
+    caller.imports = vec![import("../services/apiClient")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/admin/llm/providers");
+    assert_eq!(props["httpMethod"], "POST");
+    assert_eq!(props["base_source"], "env_default");
+    assert_eq!(props["via_wrapper"], "src/services/apiClient#apiFetch");
+    assert!(out.edges.iter().any(|e| e.kind == EdgeKind::ExternalCall
+        && e.src.as_str() == "Function:src/components/admin#create/1"));
+}
+
+#[test]
+fn wrapper_call_template_suffix_wildcards() {
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api/v1".into())],
+    );
+    let mut caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#logs/1",
+        "apiFetch",
+        "GET",
+        vec![
+            UrlPart::Lit("/admin/activity-logs/".into()),
+            UrlPart::Dynamic,
+        ],
+    );
+    caller.imports = vec![import("./api")];
+
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    assert_eq!(
+        endpoint_paths(&out),
+        vec!["/api/v1/admin/activity-logs/{*}"]
+    );
+}
+
+#[test]
+fn unmatched_provisional_site_vanishes() {
+    // navigate('/somewhere') looks URL-ish at parse; with no wrapper def it
+    // must produce NO node and NO edge.
+    let caller = wrapper_call_file(
+        "src/nav.ts",
+        "Function:src/nav#go/0",
+        "navigate",
+        "GET",
+        vec![UrlPart::Lit("/somewhere".into())],
+    );
+    let out = resolve_with_constants(vec![caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+    assert!(out.edges.iter().all(|e| e.kind != EdgeKind::ExternalCall));
+}
+
+#[test]
+fn ambiguous_wrapper_name_without_import_is_dropped() {
+    let w1 = wrapper_file(
+        "src/a.ts",
+        "src/a",
+        "apiFetch",
+        vec![UrlPart::Lit("/a".into())],
+    );
+    let w2 = wrapper_file(
+        "src/b.ts",
+        "src/b",
+        "apiFetch",
+        vec![UrlPart::Lit("/b".into())],
+    );
+    // No import connects the caller to either.
+    let caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#f/0",
+        "apiFetch",
+        "GET",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    let out = resolve_with_constants(vec![w1, w2, caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}
+
+#[test]
+fn unique_wrapper_resolves_without_import() {
+    // Barrel/alias import case: no direct relative import, but the name is
+    // repo-unique.
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api".into())],
+    );
+    let caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#f/0",
+        "apiFetch",
+        "GET",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/x"]);
+}
