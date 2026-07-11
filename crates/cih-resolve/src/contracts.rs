@@ -27,13 +27,14 @@ pub fn resolve_contract_edges(
         for site in &pf.contract_sites {
             match &site.kind {
                 ContractKind::HttpCall | ContractKind::HttpClientProxy => {
-                    let (url_template, dynamic) = match site.url_template.as_deref() {
-                        Some(url) => (url.to_string(), false),
+                    let (url_template, dynamic, env_default) = match site.url_template.as_deref() {
+                        Some(url) => (url.to_string(), false, false),
                         None => {
-                            let Some(folded) = fold_http_url(site, pf, resolver) else {
+                            let Some((folded, env_default)) = fold_http_url(site, pf, resolver)
+                            else {
                                 continue;
                             };
-                            (folded, true)
+                            (folded, true, env_default)
                         }
                     };
                     let Some(http_method) = site.http_method.as_deref() else {
@@ -54,6 +55,11 @@ pub fn resolve_contract_edges(
                     });
                     if dynamic {
                         props["dynamic"] = serde_json::Value::Bool(true);
+                    }
+                    if env_default {
+                        // The URL base came from an env-override's literal
+                        // default — the runtime value may differ.
+                        props["base_source"] = serde_json::Value::String("env_default".into());
                     }
                     nodes.push(Node {
                         id: id.clone(),
@@ -156,9 +162,9 @@ fn fold_http_url(
     site: &ContractSite,
     pf: &ParsedFile,
     resolver: &dyn ConstantResolver,
-) -> Option<String> {
-    let raw = fold_parts_raw(site, pf, resolver)?;
-    let normalized = cih_lang::normalize_external_url(&raw);
+) -> Option<(String, bool)> {
+    let folded = fold_parts_raw(site, pf, resolver)?;
+    let normalized = cih_lang::normalize_external_url(&folded.raw);
     let segments: Vec<String> = normalized
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -173,7 +179,7 @@ fn fold_http_url(
     if segments.is_empty() || segments.iter().all(|segment| segment == "{*}") {
         return None;
     }
-    Some(format!("/{}", segments.join("/")))
+    Some((format!("/{}", segments.join("/")), folded.env_default))
 }
 
 /// Fold a dynamic topic; only a fully-resolved literal is usable.
@@ -182,7 +188,8 @@ fn fold_literal_topic(
     pf: &ParsedFile,
     resolver: &dyn ConstantResolver,
 ) -> Option<String> {
-    let raw = fold_parts_raw(site, pf, resolver)?;
+    let folded = fold_parts_raw(site, pf, resolver)?;
+    let raw = folded.raw;
     (!raw.is_empty() && !raw.contains(UNRESOLVED)).then_some(raw)
 }
 
@@ -193,7 +200,7 @@ fn fold_parts_raw(
     site: &ContractSite,
     pf: &ParsedFile,
     resolver: &dyn ConstantResolver,
-) -> Option<String> {
+) -> Option<FoldedParts> {
     let parts = site.url_parts.as_ref()?;
     if parts.is_empty() {
         return None;
@@ -203,19 +210,36 @@ fn fold_parts_raw(
         file: Path::new(&pf.file),
         owner_fqcn: owner,
         imports: &pf.imports,
+        // Script-language sites may resolve constants cross-file; Java/Kotlin
+        // keep strict class scoping.
+        allow_unique_fallback: matches!(pf.language.as_str(), "typescript" | "python"),
     };
     let mut out = String::new();
+    let mut env_default = false;
     for part in parts {
         match part {
             UrlPart::Lit(lit) => out.push_str(lit),
             UrlPart::ConstRef(name) => match resolver.resolve(name, &ctx) {
-                Some(value) => out.push_str(&value),
+                Some(resolved) => {
+                    env_default |= resolved.env_default;
+                    out.push_str(&resolved.value);
+                }
                 None => out.push(UNRESOLVED),
             },
             UrlPart::Dynamic => out.push(UNRESOLVED),
         }
     }
-    Some(out)
+    Some(FoldedParts {
+        raw: out,
+        env_default,
+    })
+}
+
+/// A concatenated `url_parts` string plus whether any resolved constant was an
+/// env-override default (provenance surfaced on the emitted endpoint).
+struct FoldedParts {
+    raw: String,
+    env_default: bool,
 }
 
 /// `Method:pkg.Cls#m/2` → `pkg.Cls`; `Function:module#f/1` → `module`.

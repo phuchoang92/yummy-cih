@@ -116,3 +116,14 @@ fn collapse_slashes(path: &str) -> String {
         out
     }
 }
+
+/// `SCREAMING_SNAKE_CASE` check — the convention gate for treating a script
+/// -language identifier as a module constant reference. Params and locals are
+/// lowercase by convention, so this keeps them out of cross-file resolution.
+pub(crate) fn is_screaming_snake(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && name.chars().any(|c| c.is_ascii_uppercase())
+}

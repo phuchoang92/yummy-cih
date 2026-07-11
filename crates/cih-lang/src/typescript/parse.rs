@@ -1,7 +1,7 @@
 use cih_core::{
     file_id, function_id, type_id, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId,
     NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource,
-    SymbolDef, UrlPart,
+    StringConstant, SymbolDef, UrlPart,
 };
 use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_typescript};
@@ -166,6 +166,7 @@ struct Builder {
     imports: Vec<RawImport>,
     reference_sites: Vec<ReferenceSite>,
     contract_sites: Vec<ContractSite>,
+    string_constants: Vec<StringConstant>,
 }
 
 impl Builder {
@@ -586,9 +587,10 @@ fn literal_ts_string(node: TsNode<'_>, src: &str) -> Option<String> {
 }
 
 /// Phase B parts for a non-literal URL argument: template-string fragments →
-/// `Lit`, each `${…}` substitution → `Dynamic`, `+`-concat folds recursively,
-/// identifiers → `ConstRef` (resolution is a no-op for TypeScript today, which
-/// degrades them to `{*}` — never a wrong match).
+/// `Lit`, a `${IDENT}` substitution → `ConstRef` (resolved cross-file via
+/// module constants and the gated unique-name fallback), any other `${…}` →
+/// `Dynamic`, `+`-concat folds recursively. Unresolved refs degrade to `{*}`
+/// — never a wrong match.
 fn ts_url_parts(node: TsNode<'_>, src: &str) -> Option<Vec<UrlPart>> {
     let mut parts = Vec::new();
     fold_ts_url_expr(node, src, &mut parts);
@@ -608,7 +610,21 @@ fn fold_ts_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
                     "string_fragment" | "escape_sequence" => out.push(UrlPart::Lit(
                         child.utf8_text(src.as_bytes()).unwrap_or_default().to_string(),
                     )),
-                    "template_substitution" => out.push(UrlPart::Dynamic),
+                    // `${API_BASE_URL}` → ConstRef; SCREAMING_SNAKE identifiers
+                    // only — params/locals (`${id}`) and property chains
+                    // (`${cfg.base}`) stay Dynamic so they can never feed the
+                    // cross-file unique-name fallback.
+                    "template_substitution" => match child.named_child(0) {
+                        Some(inner)
+                            if inner.kind() == "identifier"
+                                && crate::contracts_common::is_screaming_snake(&text(
+                                    inner, src,
+                                )) =>
+                        {
+                            out.push(UrlPart::ConstRef(text(inner, src)))
+                        }
+                        _ => out.push(UrlPart::Dynamic),
+                    },
                     _ => {}
                 }
             }
@@ -637,6 +653,62 @@ fn fold_ts_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
     }
 }
 
+/// Module-level `const X = <init>` → `StringConstant` when the initializer is
+/// a plain string literal, or an env-override with a literal default
+/// (`import.meta.env.X ?? '/api/v1'`, `x || '/api'`) — the default becomes the
+/// value with `env_default: true`. Anything else emits nothing (the resolver
+/// then degrades references to `{*}`, never a guess). `let`/`var` are skipped:
+/// only `const` is reliably constant.
+fn collect_module_string_constants(node: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let is_const = node
+        .child_by_field_name("kind")
+        .or_else(|| node.child(0))
+        .map(|kind| text(kind, src) == "const")
+        .unwrap_or(false);
+    if !is_const {
+        return;
+    }
+    let mut cursor = node.walk();
+    for declarator in node.named_children(&mut cursor) {
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let Some(name_node) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if name_node.kind() != "identifier" {
+            continue;
+        }
+        let Some(value_node) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        let (value, env_default) = match value_node.kind() {
+            "string" => (unquote(&text(value_node, src)), false),
+            "binary_expression" => {
+                let op = value_node
+                    .child_by_field_name("operator")
+                    .map(|op| text(op, src));
+                let right = value_node.child_by_field_name("right");
+                match (op.as_deref(), right) {
+                    (Some("??") | Some("||"), Some(right)) if right.kind() == "string" => {
+                        (unquote(&text(right, src)), true)
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+        builder.string_constants.push(StringConstant {
+            const_name: text(name_node, src),
+            owner_fqcn: builder.module.clone(),
+            value,
+            dynamic: false,
+            env_default,
+            range: range_of(declarator),
+        });
+    }
+}
+
 // ── Recursive AST walker ──────────────────────────────────────────────────────
 
 /// `enclosing_fn` is the function/method that lexically contains `node`, or
@@ -660,6 +732,18 @@ fn walk(
         }
         "export_statement" => {
             // export default class / export function / export const ...
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
+            }
+        }
+        "lexical_declaration" => {
+            // Module-level `const X = '…'` (incl. env-default initializers)
+            // becomes a StringConstant for cross-file URL folding. Recurse
+            // regardless — initializers can contain contract calls.
+            if class_fqn.is_none() && enclosing_fn.is_none() {
+                collect_module_string_constants(node, src, builder);
+            }
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
@@ -886,7 +970,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
             contract_sites: builder.contract_sites,
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
-            string_constants: Vec::new(),
+            string_constants: builder.string_constants,
         },
     })
 }

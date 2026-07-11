@@ -654,6 +654,8 @@ impl<'a> EdgeEmitter<'a> {
                 file: Path::new(&pf.file),
                 owner_fqcn: &site.in_fqcn,
                 imports: &pf.imports,
+                // Java/Kotlin arg folding never widens beyond class scoping.
+                allow_unique_fallback: false,
             };
             let resolved_args: Vec<String> = site
                 .arg_texts
@@ -661,6 +663,7 @@ impl<'a> EdgeEmitter<'a> {
                 .map(|arg| {
                     self.constant_resolver
                         .resolve(arg, &ctx)
+                        .map(|resolved| resolved.value)
                         .unwrap_or_else(|| arg.clone())
                 })
                 .collect();

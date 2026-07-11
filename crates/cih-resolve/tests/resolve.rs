@@ -1408,6 +1408,7 @@ fn dynamic_url_parts_fold_constants_and_wildcards() {
         const_name: "BASE".into(),
         owner_fqcn: "com.acme.Constants".into(),
         value: "/api/orders".into(),
+        env_default: false,
         dynamic: false,
         range: Range::default(),
     }];
@@ -1456,6 +1457,7 @@ fn same_class_constant_resolves_without_qualifier() {
         const_name: "BASE".into(),
         owner_fqcn: "com.acme.Client".into(),
         value: "/api/items".into(),
+        env_default: false,
         dynamic: false,
         range: Range::default(),
     }];
@@ -1502,6 +1504,7 @@ fn dynamic_topic_folds_only_to_full_literal() {
         const_name: "TOPIC".into(),
         owner_fqcn: "com.acme.Producer".into(),
         value: "orders.created".into(),
+        env_default: false,
         dynamic: false,
         range: Range::default(),
     }];
@@ -1536,4 +1539,207 @@ fn dynamic_topic_folds_only_to_full_literal() {
         .map(|node| node.name.as_str())
         .collect();
     assert_eq!(topics, vec!["orders.created"]);
+}
+
+// ── Script-language constant folding (review-finding F2) ────────────────────
+
+fn ts_const(file: &str, owner: &str, name: &str, value: &str, env_default: bool) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    pf.string_constants = vec![StringConstant {
+        const_name: name.into(),
+        owner_fqcn: owner.into(),
+        value: value.into(),
+        dynamic: false,
+        env_default,
+        range: Range::default(),
+    }];
+    pf
+}
+
+fn ts_site_file(file: &str, in_callable: &str, parts: Vec<UrlPart>) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    pf.contract_sites = vec![http_parts_site(NodeId::new(in_callable), parts)];
+    pf
+}
+
+fn endpoint_paths(out: &cih_resolve::ResolveOutput) -> Vec<String> {
+    out.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ExternalEndpoint)
+        .filter_map(|n| {
+            n.props
+                .as_ref()?
+                .get("path")
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+#[test]
+fn ts_import_scoped_constant_resolves_across_files() {
+    let constants = ts_const(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "API_BASE_URL",
+        "/api/v1",
+        true,
+    );
+    let mut site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+    site.imports = vec![import("./apiClient")];
+
+    let out = resolve_with_constants(vec![constants, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/admin/x"]);
+    // env-default provenance surfaces on the endpoint.
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .unwrap();
+    assert_eq!(
+        endpoint
+            .props
+            .as_ref()
+            .and_then(|p| p.get("base_source"))
+            .and_then(|v| v.as_str()),
+        Some("env_default")
+    );
+}
+
+#[test]
+fn ts_import_scoped_beats_repo_wide_ambiguity() {
+    // Two same-named constants with different values; the site's file imports
+    // exactly one of them — THAT one resolves, no wildcard, no guess.
+    let imported = ts_const(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "API_BASE_URL",
+        "/api/v1",
+        false,
+    );
+    let unrelated = ts_const(
+        "src/legacy/oldClient.ts",
+        "src/legacy/oldClient",
+        "API_BASE_URL",
+        "/legacy",
+        false,
+    );
+    let mut site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+    site.imports = vec![import("./apiClient")];
+
+    let out = resolve_with_constants(vec![imported, unrelated, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/admin/x"]);
+}
+
+#[test]
+fn ts_unscoped_ambiguity_degrades_to_wildcard() {
+    let a = ts_const("src/a.ts", "src/a", "API_BASE_URL", "/api/v1", false);
+    let b = ts_const("src/b.ts", "src/b", "API_BASE_URL", "/legacy", false);
+    // No import connects the site to either constant.
+    let site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+
+    let out = resolve_with_constants(vec![a, b, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/{*}/admin/x"]);
+}
+
+#[test]
+fn ts_unique_repo_wide_constant_resolves_without_import() {
+    // Barrel re-export case: no direct import path, but the name is unique.
+    let constant = ts_const(
+        "src/config/constants.ts",
+        "src/config/constants",
+        "API_BASE_URL",
+        "/api/v1",
+        false,
+    );
+    let site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+
+    let out = resolve_with_constants(vec![constant, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/admin/x"]);
+}
+
+#[test]
+fn ts_module_scope_site_resolves_same_file_constant() {
+    // Module-scope sites carry `File:`-derived owners with the extension;
+    // the resolver strips it to reach the module owner scheme.
+    let mut pf = ts_const(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "API_BASE_URL",
+        "/api/v1",
+        false,
+    );
+    pf.contract_sites = vec![http_parts_site(
+        NodeId::new("File:src/services/apiClient.ts"),
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/ping".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![pf]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/ping"]);
+}
+
+#[test]
+fn java_bare_name_never_uses_cross_file_fallback() {
+    // Isolation pin: a java-language site with a bare ConstRef that misses
+    // class scoping must NOT pick up a unique repo-wide constant — behavior
+    // identical to before the fallback existed.
+    let mut constants = empty_file("com/acme/Other.java");
+    constants.defs = vec![type_def(NodeKind::Class, "com.acme.Other")];
+    constants.string_constants = vec![StringConstant {
+        const_name: "API_BASE_URL".into(),
+        owner_fqcn: "com.acme.Other".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: false,
+        range: Range::default(),
+    }];
+
+    let caller = method_id("com.acme.Client", "call", 1);
+    let mut client = empty_file("com/acme/Client.java");
+    client.language = "java".into();
+    client.contract_sites = vec![http_parts_site(
+        caller,
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![constants, client]);
+    assert_eq!(endpoint_paths(&out), vec!["/{*}/admin/x"]);
 }

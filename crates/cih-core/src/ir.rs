@@ -42,17 +42,24 @@ pub struct ParsedFile {
     pub string_constants: Vec<StringConstant>,
 }
 
-/// A `static final String` field with its folded literal value.
+/// A `static final String` field (or script-language module constant) with its
+/// folded literal value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StringConstant {
     /// Field name, e.g. `"BASE_URL"`.
     pub const_name: String,
-    /// FQCN of the declaring class.
+    /// FQCN of the declaring class, or the module path for script-language
+    /// module-level constants (`src/services/apiClient` / `src.app.client`).
     pub owner_fqcn: String,
     /// Folded literal value (adjacent string literals concatenated).
     pub value: String,
     /// True when concat included non-literals.
     pub dynamic: bool,
+    /// True when the value is the literal DEFAULT of an env override
+    /// (`x ?? '/api/v1'`, `os.environ.get(k, "/api/v1")`) — the effective
+    /// runtime value may differ; consumers surface this as provenance.
+    #[serde(default)]
+    pub env_default: bool,
     pub range: Range,
 }
 

@@ -142,6 +142,22 @@ companion-object/`object` `val`s with literal initializers):
   interface→implementor `CALLS` edges as Blueprint `<reference>` (reason string
   `di-xml-blueprint-reference` is kept for compatibility and covers both).
 
+## Script-language URL constants (`cih-lang` ts/py parse, `java/constant_resolver.rs`)
+
+- **What resolves**: `${IDENT}` / f-string `{IDENT}` interpolations become
+  `ConstRef`s only for `SCREAMING_SNAKE` identifiers — params, locals, and
+  property chains stay `Dynamic` (`{*}`), so they can never mis-resolve.
+- **Constant sources**: module-level `const X = 'lit'` (TS) / `X = "lit"` (Py)
+  only, plus env-override defaults: `x ?? 'lit'`, `x || 'lit'`, `x or "lit"`,
+  `os.environ.get(k, "lit")`, `os.getenv(k, "lit")` emit the literal default
+  with `env_default` provenance — endpoints folded from one carry
+  `base_source: "env_default"` (the runtime value may differ; the folded path
+  reflects the code default).
+- **Cross-file resolution order** (script-language sites only; Java/Kotlin
+  scoping is unchanged and structurally ungated): same-module owner →
+  import-scoped (the site's file must import the constant's module) →
+  repo-wide unique name (exactly one candidate; 2+ → `{*}`, never a guess).
+
 ## SQL / DB access (`cih-parse/src/sql.rs`, `cih-resolve/src/db_access.rs`)
 
 - **Table extraction is textual** over the SQL string: it handles SELECT/INSERT/

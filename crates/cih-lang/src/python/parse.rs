@@ -1,7 +1,7 @@
 use cih_core::{
     file_id, function_id, type_id, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId,
     NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource,
-    SymbolDef, UrlPart,
+    StringConstant, SymbolDef, UrlPart,
 };
 use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_python};
@@ -253,6 +253,7 @@ struct Builder {
     /// are valid in both frameworks (mirrors `python/mod.rs` `detect_frameworks`).
     has_fastapi: bool,
     has_flask: bool,
+    string_constants: Vec<StringConstant>,
 }
 
 impl Builder {
@@ -745,6 +746,11 @@ fn walk(
         }
         "assignment" => {
             detect_and_store_router_prefix(node, src, builder);
+            // Module-level `X = "…"` (incl. env-default forms) becomes a
+            // StringConstant for cross-file URL folding.
+            if class_fqn.is_none() && enclosing.is_none() {
+                collect_module_string_constant(node, src, builder);
+            }
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 walk(child, src, builder, class_fqn, enclosing);
@@ -877,6 +883,65 @@ fn positional_argument(call: TsNode<'_>, n: usize) -> Option<TsNode<'_>> {
 }
 
 /// Text of a plain (non-f-string, no-interpolation) string literal.
+/// Module-level `X = <init>` → `StringConstant` when the initializer is a
+/// plain string literal, or an env-override with a literal default
+/// (`x or "/api"`, `os.environ.get("K", "/api")`, `os.getenv("K", "/api")`) —
+/// the default becomes the value with `env_default: true`. Anything else
+/// emits nothing (references degrade to `{*}`, never a guess).
+fn collect_module_string_constant(node: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    if left.kind() != "identifier" {
+        return;
+    }
+    let Some(right) = node.child_by_field_name("right") else {
+        return;
+    };
+    let (value, env_default) = match right.kind() {
+        "string" => match literal_py_string(right, src) {
+            Some(value) => (value, false),
+            None => return,
+        },
+        "boolean_operator" => {
+            let op = right.child_by_field_name("operator").map(|op| text(op, src));
+            let default = right
+                .child_by_field_name("right")
+                .and_then(|r| literal_py_string(r, src));
+            match (op.as_deref(), default) {
+                (Some("or"), Some(value)) => (value, true),
+                _ => return,
+            }
+        }
+        "call" => {
+            let callee = right
+                .child_by_field_name("function")
+                .map(|f| text(f, src))
+                .unwrap_or_default();
+            if callee != "os.environ.get" && callee != "os.getenv" {
+                return;
+            }
+            let default = right
+                .child_by_field_name("arguments")
+                .and_then(|args| args.named_child(1))
+                .and_then(|arg| literal_py_string(arg, src));
+            match default {
+                Some(value) => (value, true),
+                None => return,
+            }
+        }
+        _ => return,
+    };
+    builder.string_constants.push(StringConstant {
+        const_name: text(left, src),
+        owner_fqcn: builder.module.clone(),
+        value,
+        dynamic: false,
+        env_default,
+        range: range_of(node),
+    });
+}
+
 fn literal_py_string(node: TsNode<'_>, src: &str) -> Option<String> {
     if node.kind() != "string" {
         return None;
@@ -896,8 +961,9 @@ fn literal_py_string(node: TsNode<'_>, src: &str) -> Option<String> {
 }
 
 /// Phase B parts for a non-literal URL argument: f-string content → `Lit`,
-/// each `{...}` interpolation → `Dynamic`, `+`-concat folds recursively,
-/// identifiers → `ConstRef` (resolution is a no-op for Python today, which
+/// a `{IDENT}` interpolation → `ConstRef` (resolved via module constants and
+/// the gated unique-name fallback), other interpolations → `Dynamic`,
+/// `+`-concat folds recursively, identifiers → `ConstRef` (unresolved refs
 /// degrades them to `{*}` — never a wrong match).
 fn py_url_parts(node: TsNode<'_>, src: &str) -> Option<Vec<UrlPart>> {
     let mut parts = Vec::new();
@@ -917,7 +983,21 @@ fn fold_py_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
                     "string_content" | "escape_sequence" => out.push(UrlPart::Lit(
                         child.utf8_text(src.as_bytes()).unwrap_or_default().to_string(),
                     )),
-                    "interpolation" => out.push(UrlPart::Dynamic),
+                    // `{API_BASE}` → ConstRef; SCREAMING_SNAKE identifiers
+                    // only — locals (`{item_id}`) and attribute chains
+                    // (`{settings.base}`) stay Dynamic so they can never feed
+                    // the cross-file unique-name fallback.
+                    "interpolation" => match child.named_child(0) {
+                        Some(inner)
+                            if inner.kind() == "identifier"
+                                && crate::contracts_common::is_screaming_snake(&text(
+                                    inner, src,
+                                )) =>
+                        {
+                            out.push(UrlPart::ConstRef(text(inner, src)))
+                        }
+                        _ => out.push(UrlPart::Dynamic),
+                    },
                     // string_start / string_end delimiters
                     _ => {}
                 }
@@ -1024,7 +1104,7 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
             contract_sites: builder.contract_sites,
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
-            string_constants: Vec::new(),
+            string_constants: builder.string_constants,
         },
     })
 }

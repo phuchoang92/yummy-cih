@@ -220,3 +220,81 @@ export function load(myobj: any, http: any) {
 "#;
     assert!(ts_contract_sites(src).is_empty());
 }
+
+// ── URL constants + template-substitution ConstRefs (review-finding F2) ─────
+
+fn ts_string_constants(src: &str) -> Vec<cih_core::StringConstant> {
+    TypescriptProvider::new()
+        .parse_file("src/services/apiClient.ts", src)
+        .expect("should parse")
+        .parsed_file
+        .string_constants
+}
+
+#[test]
+fn template_substitution_identifier_becomes_const_ref() {
+    let src = r#"
+const API_BASE_URL = '/api';
+export async function load(id: string) {
+    return fetch(`${API_BASE_URL}/admin/x`);
+}
+"#;
+    let sites = ts_contract_sites(src);
+    assert_eq!(sites.len(), 1);
+    let parts = sites[0].url_parts.as_ref().expect("parts");
+    assert_eq!(
+        parts,
+        &vec![
+            cih_core::UrlPart::ConstRef("API_BASE_URL".into()),
+            cih_core::UrlPart::Lit("/admin/x".into()),
+        ]
+    );
+}
+
+#[test]
+fn template_substitution_member_expression_stays_dynamic() {
+    let src = r#"
+export async function load(cfg: any) {
+    return fetch(`${cfg.base}/x`);
+}
+"#;
+    let sites = ts_contract_sites(src);
+    let parts = sites[0].url_parts.as_ref().expect("parts");
+    assert!(matches!(parts[0], cih_core::UrlPart::Dynamic));
+}
+
+#[test]
+fn module_const_string_emits_constant() {
+    let constants = ts_string_constants("export const API_BASE_URL = '/api/v1';\n");
+    assert_eq!(constants.len(), 1);
+    assert_eq!(constants[0].const_name, "API_BASE_URL");
+    assert_eq!(constants[0].owner_fqcn, "src/services/apiClient");
+    assert_eq!(constants[0].value, "/api/v1");
+    assert!(!constants[0].dynamic);
+    assert!(!constants[0].env_default);
+}
+
+#[test]
+fn env_default_initializers_emit_default_literal() {
+    // The real-world shape: env override with a literal default.
+    let nullish = ts_string_constants(
+        "export const API_BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1';\n",
+    );
+    assert_eq!(nullish.len(), 1);
+    assert_eq!(nullish[0].value, "/api/v1");
+    assert!(nullish[0].env_default);
+
+    let logical_or = ts_string_constants("const BASE = process.env.BASE || '/api';\n");
+    assert_eq!(logical_or.len(), 1);
+    assert_eq!(logical_or[0].value, "/api");
+    assert!(logical_or[0].env_default);
+}
+
+#[test]
+fn non_literal_and_non_const_declarations_emit_nothing() {
+    assert!(ts_string_constants("export const X = getBase();\n").is_empty());
+    assert!(ts_string_constants("let X = '/x';\n").is_empty());
+    assert!(
+        ts_string_constants("export function f() { const X = '/inner'; return X; }\n").is_empty()
+    );
+}

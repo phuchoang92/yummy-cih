@@ -256,3 +256,72 @@ def load(session, myobj):
 "#;
     assert!(py_contract_sites(src).is_empty());
 }
+
+// ── URL constants + f-string ConstRefs (review-finding F2) ──────────────────
+
+fn py_string_constants(src: &str) -> Vec<cih_core::StringConstant> {
+    parse_python_file("src/app/client.py", src)
+        .expect("should parse")
+        .parsed_file
+        .string_constants
+}
+
+fn py_sites(src: &str) -> Vec<cih_core::ContractSite> {
+    parse_python_file("src/app/client.py", src)
+        .expect("should parse")
+        .parsed_file
+        .contract_sites
+}
+
+#[test]
+fn fstring_screaming_snake_becomes_const_ref() {
+    let sites = py_sites("import requests\n\ndef load(item_id):\n    return requests.get(f\"{API_BASE}/items/{item_id}\")\n");
+    assert_eq!(sites.len(), 1);
+    let parts = sites[0].url_parts.as_ref().expect("parts");
+    assert_eq!(parts[0], cih_core::UrlPart::ConstRef("API_BASE".into()));
+    // the lowercase local stays Dynamic
+    assert!(parts
+        .iter()
+        .any(|p| matches!(p, cih_core::UrlPart::Dynamic)));
+}
+
+#[test]
+fn fstring_attribute_stays_dynamic() {
+    let sites = py_sites(
+        "import requests\n\ndef load(settings):\n    return requests.get(f\"{settings.base}/x\")\n",
+    );
+    let parts = sites[0].url_parts.as_ref().expect("parts");
+    assert!(matches!(parts[0], cih_core::UrlPart::Dynamic));
+}
+
+#[test]
+fn module_constants_plain_and_env_default_forms() {
+    let plain = py_string_constants("API_BASE = \"/api/v1\"\n");
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0].owner_fqcn, "src.app.client");
+    assert_eq!(plain[0].value, "/api/v1");
+    assert!(!plain[0].env_default);
+
+    let or_form = py_string_constants("API_BASE = base or \"/api/v1\"\n");
+    assert_eq!(or_form.len(), 1);
+    assert_eq!(or_form[0].value, "/api/v1");
+    assert!(or_form[0].env_default);
+
+    let environ =
+        py_string_constants("import os\nAPI_BASE = os.environ.get(\"API_URL\", \"/api/v1\")\n");
+    assert_eq!(environ.len(), 1);
+    assert_eq!(environ[0].value, "/api/v1");
+    assert!(environ[0].env_default);
+
+    let getenv = py_string_constants("import os\nAPI_BASE = os.getenv(\"API_URL\", \"/api/v1\")\n");
+    assert_eq!(getenv.len(), 1);
+    assert!(getenv[0].env_default);
+}
+
+#[test]
+fn computed_and_function_scoped_assignments_emit_nothing() {
+    assert!(py_string_constants("API_BASE = compute()\n").is_empty());
+    assert!(
+        py_string_constants("def f():\n    API_BASE = \"/x\"\n    return API_BASE\n").is_empty()
+    );
+}

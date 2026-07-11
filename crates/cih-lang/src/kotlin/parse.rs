@@ -652,6 +652,7 @@ fn collect_object_string_constants(
             owner_fqcn: owner_fqcn.to_string(),
             value,
             dynamic: false,
+            env_default: false,
             range: range_of(child),
         });
     }

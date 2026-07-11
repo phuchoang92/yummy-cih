@@ -88,6 +88,7 @@ fn try_extract_string_constant(
             owner_fqcn: owner_fqcn.to_string(),
             value,
             dynamic,
+            env_default: false,
             range: range_of(node),
         });
     }
