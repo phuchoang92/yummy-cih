@@ -103,6 +103,14 @@ when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgr
 **Lint gate** (`.github/workflows/ci.yml`). Blocking: `cargo clippy --workspace
 --all-targets -- -D warnings` plus `cargo test --workspace` — keep the whole tree
 warning-clean, and `cargo fmt --all --check` (the tree is fmt-normalized).
+
+**Parse-cache schema.** Bump `cih_lang::PARSE_CACHE_SCHEMA` whenever any
+parser/extractor changes the shape or content of `ParsedUnit` output — the
+per-file parse cache (`.cih/parse-cache/v<N>/`) and the analyze no-op gate both
+key off it; without a bump, unchanged files silently keep stale cached output
+after an upgrade. The `parse_schema_guard` test (cih-engine) fails on any
+parser-output drift until the schema and its paired `GOLDEN` hash are updated
+together.
 Note: `browser.rs`/`layout.rs` in cih-server are the live graph-browser UI served at
 `/graph` (tested by `tests/browser.rs`) — not dead code. Both binaries are thin
 shims: server logic lives in `cih_server` (`src/app.rs`), engine modules in

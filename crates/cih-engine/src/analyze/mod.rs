@@ -605,11 +605,22 @@ pub struct AnalyzeCacheOptions {
 /// resolve/post-process/emit path instead of silently reusing stale artifacts. Cache-control
 /// fields (`use_cache`/`allow_noop`) are intentionally excluded — they don't change output.
 pub(super) fn analyze_config_fingerprint(repo_root: &Path, cache: &AnalyzeCacheOptions) -> String {
+    analyze_config_fingerprint_with(repo_root, cache, cih_lang::PARSE_CACHE_SCHEMA)
+}
+
+/// Schema-parameterized inner so tests can prove a bump changes the fingerprint
+/// without bumping the real const.
+fn analyze_config_fingerprint_with(
+    repo_root: &Path,
+    cache: &AnalyzeCacheOptions,
+    parse_schema: u32,
+) -> String {
     let patterns = cih_patterns::load_patterns(repo_root);
     let material = format!(
-        "cxf_base_path={:?}\nskip_xml_integration={}\npatterns=\n{}",
+        "cxf_base_path={:?}\nskip_xml_integration={}\nparse_cache_schema={}\npatterns=\n{}",
         cache.cxf_base_path,
         cache.skip_xml_integration,
+        parse_schema,
         cih_patterns::to_toml(&patterns),
     );
     blake3::hash(material.as_bytes()).to_hex()[..16].to_string()
@@ -788,4 +799,28 @@ pub struct AnalyzeSummary<'a> {
     pub falkor_edges: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub falkor_error: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_varies_with_parse_schema() {
+        let dir = std::env::temp_dir().join(format!("cih-fp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: true,
+            skip_xml_integration: false,
+            cxf_base_path: None,
+        };
+
+        let v1 = analyze_config_fingerprint_with(&dir, &cache, 1);
+        let v2 = analyze_config_fingerprint_with(&dir, &cache, 2);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_ne!(v1, v2, "a schema bump must invalidate the no-op gate");
+        assert_eq!(v1, analyze_config_fingerprint_with(&dir, &cache, 1));
+    }
 }

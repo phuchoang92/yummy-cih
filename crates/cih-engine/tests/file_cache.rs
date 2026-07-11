@@ -126,11 +126,61 @@ fn parse_cache_round_trips() {
     let parsed_file = parsed("A.java", "com.acme", "A", vec![]);
     let unit = unit(parsed_file.clone());
 
-    save_cached_parsed(&tmp.path, "abc123", &unit).unwrap();
-    let loaded = load_cached_parsed(&tmp.path, "abc123").unwrap();
+    save_cached_parsed(&tmp.path, 1, "abc123", &unit).unwrap();
+    let loaded = load_cached_parsed(&tmp.path, 1, "abc123").unwrap();
 
     assert_eq!(loaded.rel, "A.java");
     assert_eq!(loaded.parsed_file, parsed_file);
+}
+
+#[test]
+fn cache_path_is_versioned() {
+    let tmp = TempDir::new();
+    let unit = unit(parsed("A.java", "com.acme", "A", vec![]));
+
+    save_cached_parsed(&tmp.path, 1, "abc123", &unit).unwrap();
+
+    assert!(tmp.path.join("parse-cache/v1/abc123.json").is_file());
+}
+
+#[test]
+fn load_misses_other_schema() {
+    // A schema bump must force a reparse: entries written under one schema are
+    // invisible to another.
+    let tmp = TempDir::new();
+    let unit = unit(parsed("A.java", "com.acme", "A", vec![]));
+
+    save_cached_parsed(&tmp.path, 1, "abc123", &unit).unwrap();
+
+    assert!(load_cached_parsed(&tmp.path, 2, "abc123").is_none());
+    assert!(load_cached_parsed(&tmp.path, 1, "abc123").is_some());
+}
+
+#[test]
+fn prepare_prunes_stale_versions_and_flat_legacy() {
+    let tmp = TempDir::new();
+    let unit = unit(parsed("A.java", "com.acme", "A", vec![]));
+    // Old schema dir + a legacy flat (pre-versioning) entry.
+    save_cached_parsed(&tmp.path, 1, "old11", &unit).unwrap();
+    let flat = tmp.path.join("parse-cache/deadbeef.json");
+    std::fs::write(&flat, "{}").unwrap();
+
+    prepare_parse_cache(&tmp.path, 2).unwrap();
+
+    assert!(
+        !tmp.path.join("parse-cache/v1").exists(),
+        "old schema dir pruned"
+    );
+    assert!(!flat.exists(), "legacy flat file pruned");
+    assert!(
+        tmp.path.join("parse-cache/v2").is_dir(),
+        "current dir created"
+    );
+
+    // Entries in the current dir survive a repeated prepare.
+    save_cached_parsed(&tmp.path, 2, "keep22", &unit).unwrap();
+    prepare_parse_cache(&tmp.path, 2).unwrap();
+    assert!(load_cached_parsed(&tmp.path, 2, "keep22").is_some());
 }
 
 #[test]

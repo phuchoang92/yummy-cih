@@ -6,7 +6,8 @@ use cih_core::{GraphArtifacts, ParsedUnit};
 use cih_parse::ParseOutput;
 
 use crate::file_cache::{
-    hash_all, load_cached_parsed, save_cached_parsed, FileHashIndex, ImporterIndex,
+    hash_all, load_cached_parsed, prepare_parse_cache, save_cached_parsed, FileHashIndex,
+    ImporterIndex,
 };
 use crate::versioning::latest_graph_artifacts;
 
@@ -54,12 +55,17 @@ pub(super) fn parse_scope(
     let current_hashes = hash_all(repo_root, files);
     tracing::debug!(hashed = current_hashes.len(), "file hashing complete");
 
+    // Versioned cache dir: prune other schemas' entries and legacy flat files
+    // BEFORE either branch — the no-cache branch also writes cache entries.
+    let schema = cih_lang::PARSE_CACHE_SCHEMA;
+    prepare_parse_cache(cih_dir, schema)?;
+
     if !cache.use_cache {
         tracing::info!(files = files.len(), "cache disabled — parsing all files");
         let unit_output = cih_parse::parse_file_units(repo_root, files, &default_registry())?;
         for unit in &unit_output.units {
             if let Some(hash) = current_hashes.get(&unit.rel) {
-                save_cached_parsed(cih_dir, hash, unit)?;
+                save_cached_parsed(cih_dir, schema, hash, unit)?;
             }
         }
         let reparsed_files = unit_output.units.len();
@@ -137,11 +143,11 @@ pub(super) fn parse_scope(
     for rel in files {
         let unit = current_hashes
             .get(rel)
-            .and_then(|hash| load_cached_parsed(cih_dir, hash))
+            .and_then(|hash| load_cached_parsed(cih_dir, schema, hash))
             .or_else(|| {
                 previous
                     .get(rel)
-                    .and_then(|hash| load_cached_parsed(cih_dir, hash))
+                    .and_then(|hash| load_cached_parsed(cih_dir, schema, hash))
             });
         if let Some(unit) = unit {
             cached_by_file.insert(rel.clone(), unit);
@@ -192,7 +198,7 @@ pub(super) fn parse_scope(
     let mut parsed_by_file: HashMap<String, ParsedUnit> = HashMap::new();
     for unit in unit_output.units {
         if let Some(hash) = current_hashes.get(&unit.rel) {
-            save_cached_parsed(cih_dir, hash, &unit)?;
+            save_cached_parsed(cih_dir, schema, hash, &unit)?;
         }
         parsed_by_file.insert(unit.rel.clone(), unit);
     }

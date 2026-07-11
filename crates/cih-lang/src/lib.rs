@@ -18,6 +18,18 @@ pub mod generic_parse;
 pub use constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 pub use contracts_common::normalize_external_url;
 
+/// Version of the on-disk parse cache (`.cih/parse-cache/v<N>/`).
+///
+/// **BUMP THIS whenever any parser/extractor changes the shape OR content of
+/// `ParsedUnit` output** — new node/edge kinds, new extraction passes (routes,
+/// contract sites, constants), changed folding or normalization. Cached units
+/// from an older schema must never be served to a newer engine: that silently
+/// suppresses the new extraction on every unchanged file. The
+/// `parse_schema_guard` test in cih-engine fails when parser output changes
+/// without a bump. Starts at 2: the flat pre-versioning cache layout is
+/// implicitly v1 and is pruned on first contact.
+pub const PARSE_CACHE_SCHEMA: u32 = 2;
+
 /// Declares all language modules and generates `all_providers()`.
 /// To add a new language: add one line here (plus the implementation files).
 macro_rules! languages {

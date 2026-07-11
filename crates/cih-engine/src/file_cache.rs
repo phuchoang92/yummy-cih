@@ -87,25 +87,79 @@ pub fn hash_all(repo_root: &Path, files: &[String]) -> HashMap<String, String> {
     out
 }
 
-pub fn load_cached_parsed(cih_dir: &Path, file_hash: &str) -> Option<ParsedUnit> {
-    let path = cache_path(cih_dir, file_hash);
+pub fn load_cached_parsed(cih_dir: &Path, schema: u32, file_hash: &str) -> Option<ParsedUnit> {
+    let path = cache_path(cih_dir, schema, file_hash);
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
-pub fn save_cached_parsed(cih_dir: &Path, file_hash: &str, parsed: &ParsedUnit) -> Result<()> {
-    let dir = cih_dir.join(PARSE_CACHE_DIR);
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    let path = cache_path(cih_dir, file_hash);
+pub fn save_cached_parsed(
+    cih_dir: &Path,
+    schema: u32,
+    file_hash: &str,
+    parsed: &ParsedUnit,
+) -> Result<()> {
+    let path = cache_path(cih_dir, schema, file_hash);
+    let dir = path.parent().expect("cache path always has a parent");
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let encoded = serde_json::to_string(parsed)?;
     fs::write(&path, encoded.as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
-fn cache_path(cih_dir: &Path, file_hash: &str) -> std::path::PathBuf {
+/// Prepare the versioned parse-cache dir: create `parse-cache/v<schema>/` and
+/// prune every OTHER schema's dir plus legacy flat (pre-versioning) entries.
+/// Cached units are only valid for the parser schema that wrote them — a
+/// schema bump means every parser output may differ, so stale entries must
+/// never be readable again.
+pub fn prepare_parse_cache(cih_dir: &Path, schema: u32) -> Result<()> {
+    let root = cih_dir.join(PARSE_CACHE_DIR);
+    let keep = format!("v{schema}");
+    let mut pruned = false;
+    if root.exists() {
+        // Other schema dirs.
+        let had_others = fs::read_dir(&root)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    entry.path().is_dir() && entry.file_name().to_str() != Some(keep.as_str())
+                })
+            })
+            .unwrap_or(false);
+        if had_others {
+            crate::versioning::prune_other_versions(&root, &keep)?;
+            pruned = true;
+        }
+        // Legacy flat `<hash>.json` files from before versioning (implicit v1).
+        for entry in fs::read_dir(&root)
+            .with_context(|| format!("failed to read {}", root.display()))?
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_file() {
+                if let Err(err) = fs::remove_file(&path) {
+                    tracing::warn!(path = %path.display(), error = %err, "failed to prune legacy parse-cache file");
+                } else {
+                    pruned = true;
+                }
+            }
+        }
+    }
+    fs::create_dir_all(root.join(&keep))
+        .with_context(|| format!("failed to create {}", root.join(&keep).display()))?;
+    if pruned {
+        tracing::info!(
+            schema,
+            "parse cache schema v{schema} — stale cache cleared, this run re-parses all files"
+        );
+    }
+    Ok(())
+}
+
+fn cache_path(cih_dir: &Path, schema: u32, file_hash: &str) -> std::path::PathBuf {
     cih_dir
         .join(PARSE_CACHE_DIR)
+        .join(format!("v{schema}"))
         .join(format!("{file_hash}.json"))
 }
 

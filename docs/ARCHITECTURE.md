@@ -163,6 +163,19 @@ companion-object/`object` `val`s with literal initializers):
   implementors found in the indexed scope; implementors outside the indexed
   modules are not linked.
 
+## Parse cache (`cih-engine/src/file_cache.rs`)
+
+- **Layout**: `.cih/parse-cache/v<N>/<blake3-16-of-file-bytes>.json`, one cached
+  `ParsedUnit` per source-file content hash, scoped by
+  `cih_lang::PARSE_CACHE_SCHEMA`.
+- **Invalidation** = file-bytes hash × schema version. A schema bump makes every
+  older entry invisible and prunes it on the next analyze (legacy pre-versioning
+  flat files included); the analyze no-op gate's config fingerprint also folds
+  the schema in, so a bump forces one full re-resolve per repo.
+- **Bump rule**: any change to parser/extractor output requires a
+  `PARSE_CACHE_SCHEMA` bump — enforced by the `parse_schema_guard` golden test,
+  which fails until the schema and its paired corpus hash are updated together.
+
 ## Performance notes
 
 - **Symbol-ID interning: measured, not needed (2026-07).** NodeId-keyed maps in

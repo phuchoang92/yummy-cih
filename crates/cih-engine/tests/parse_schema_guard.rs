@@ -1,0 +1,140 @@
+//! Golden-corpus guard for `cih_lang::PARSE_CACHE_SCHEMA`.
+//!
+//! The parse cache serves `ParsedUnit`s keyed on (file bytes × schema). If a
+//! parser/extractor changes its output without a schema bump, every unchanged
+//! file silently keeps its stale cached unit after an upgrade — the exact bug
+//! this guard exists to prevent. The fixture corpus below exercises one
+//! extraction family per language; its serialized output hash is pinned
+//! TOGETHER with the schema number.
+//!
+//! When this test fails you MUST do both:
+//!   1. bump `cih_lang::PARSE_CACHE_SCHEMA` (crates/cih-lang/src/lib.rs), and
+//!   2. update `GOLDEN` below to `(new_schema, new_hash)` — the failure
+//!      message prints the new hash.
+
+use std::fs;
+use std::path::PathBuf;
+
+/// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
+const GOLDEN: (u32, &str) = (2, "b34a1eca0ec3c6ba");
+
+const FIXTURES: &[(&str, &str)] = &[
+    (
+        "src/main/java/com/acme/OrderController.java",
+        r#"package com.acme;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    private final RestTemplate rest = new RestTemplate();
+
+    @GetMapping("/{id}")
+    public String get(@PathVariable String id) {
+        return rest.getForObject("https://inventory/api/stock/" + id, String.class);
+    }
+}
+"#,
+    ),
+    (
+        "src/main/kotlin/com/acme/PingController.kt",
+        r#"package com.acme
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+@RequestMapping("/api/ping")
+class PingController {
+    @GetMapping("/{id}")
+    fun ping(@PathVariable id: String): String = "pong"
+}
+"#,
+    ),
+    (
+        "src/services/client.ts",
+        r#"const API_BASE_URL = 'http://localhost:8080/api';
+export async function load(id: string) {
+  const r = await fetch(`${API_BASE_URL}/items/${id}`);
+  return r.json();
+}
+"#,
+    ),
+    (
+        "src/app/client.py",
+        r#"import requests
+
+API_BASE = "/api/v1"
+
+def load(item_id):
+    return requests.get(f"{API_BASE}/items/{item_id}").json()
+"#,
+    ),
+    (
+        "cmd/server/main.go",
+        r#"package main
+
+import "net/http"
+
+func main() {
+    http.HandleFunc("GET /orders/{id}", handleOrder)
+    http.ListenAndServe(":8080", nil)
+}
+
+func handleOrder(w http.ResponseWriter, r *http.Request) {
+    http.Get("http://inventory/api/stock")
+}
+"#,
+    ),
+];
+
+#[test]
+fn parser_output_changes_require_schema_bump() {
+    let dir = std::env::temp_dir().join(format!(
+        "cih-schema-guard-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut rels: Vec<String> = Vec::new();
+    for (rel, source) in FIXTURES {
+        let path: PathBuf = dir.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, source).unwrap();
+        rels.push((*rel).to_string());
+    }
+
+    let mut registry = cih_parse::LanguageRegistry::new();
+    for provider in cih_lang::all_providers() {
+        registry.register_boxed(provider);
+    }
+    let output = cih_parse::parse_file_units(&dir, &rels, &registry).unwrap();
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        output.skipped.is_empty(),
+        "guard corpus must parse cleanly: {:?}",
+        output.skipped
+    );
+
+    // serde_json's default map is sorted and unit order follows `rels` order,
+    // so the serialization is deterministic.
+    let serialized = serde_json::to_string(&output.units).unwrap();
+    let hash = blake3::hash(serialized.as_bytes()).to_hex()[..16].to_string();
+
+    assert_eq!(
+        GOLDEN.0,
+        cih_lang::PARSE_CACHE_SCHEMA,
+        "GOLDEN schema is out of sync with cih_lang::PARSE_CACHE_SCHEMA — \
+         update GOLDEN to (PARSE_CACHE_SCHEMA, corpus hash) as a pair"
+    );
+    assert_eq!(
+        GOLDEN.1,
+        hash,
+        "parser output changed for the guard corpus — bump \
+         cih_lang::PARSE_CACHE_SCHEMA (crates/cih-lang/src/lib.rs) and update \
+         GOLDEN to ({}, \"{hash}\")",
+        cih_lang::PARSE_CACHE_SCHEMA + 1
+    );
+}
