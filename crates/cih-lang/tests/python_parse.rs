@@ -166,3 +166,93 @@ pass
     let names = route_names_for(src);
     assert_eq!(names, vec!["GET /health"]);
 }
+
+// ── Outbound HTTP contract sites (Phase C: requests / httpx) ────────────────
+
+fn py_contract_sites(src: &str) -> Vec<cih_core::ContractSite> {
+    parse_python_file("app/client.py", src)
+        .unwrap()
+        .parsed_file
+        .contract_sites
+}
+
+#[test]
+fn requests_verb_call_is_http_call() {
+    let src = r#"
+import requests
+
+def load_orders():
+    return requests.get("/api/orders")
+"#;
+    let sites = py_contract_sites(src);
+    assert_eq!(sites.len(), 1, "expected one site, got {sites:?}");
+    let site = &sites[0];
+    assert_eq!(site.kind, cih_core::ContractKind::HttpCall);
+    assert_eq!(site.http_method.as_deref(), Some("GET"));
+    assert_eq!(site.url_template.as_deref(), Some("/api/orders"));
+    assert_eq!(
+        site.in_callable.as_str(),
+        "Function:app.client#load_orders/0"
+    );
+}
+
+#[test]
+fn httpx_post_and_requests_request() {
+    let src = r#"
+import httpx
+import requests
+
+def create():
+    httpx.post("https://orders.internal/api/orders")
+    requests.request("PUT", "/api/orders/1")
+"#;
+    let sites = py_contract_sites(src);
+    assert_eq!(sites.len(), 2);
+    assert_eq!(sites[0].http_method.as_deref(), Some("POST"));
+    assert_eq!(sites[0].url_template.as_deref(), Some("/api/orders"));
+    assert_eq!(sites[1].http_method.as_deref(), Some("PUT"));
+    assert_eq!(sites[1].url_template.as_deref(), Some("/api/orders/1"));
+}
+
+#[test]
+fn fstring_url_yields_dynamic_parts() {
+    use cih_core::UrlPart;
+    let src = r#"
+import requests
+
+def load(order_id):
+    return requests.get(f"/api/orders/{order_id}")
+"#;
+    let sites = py_contract_sites(src);
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].url_template, None);
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(&[UrlPart::Lit("/api/orders/".into()), UrlPart::Dynamic][..])
+    );
+}
+
+#[test]
+fn module_level_call_falls_back_to_file_caller() {
+    // Pinned: a file-id in_callable degrades trace_flow_x entry resolution
+    // (the first leg), not just display granularity.
+    let src = r#"
+import requests
+
+CONFIG = requests.get("/api/config")
+"#;
+    let sites = py_contract_sites(src);
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].in_callable.as_str(), "File:app/client.py");
+}
+
+#[test]
+fn non_module_receivers_are_not_emitted() {
+    let src = r#"
+def load(session, myobj):
+    session.get("/api/orders")
+    myobj.get("/api/orders")
+    client.requests.get("/api/orders")
+"#;
+    assert!(py_contract_sites(src).is_empty());
+}

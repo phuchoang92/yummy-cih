@@ -1,7 +1,9 @@
 use cih_core::{
-    file_id, function_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
-    Range, RawImport, RefKind, ReferenceSite, RouteSource, SymbolDef,
+    file_id, function_id, type_id, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId,
+    NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource,
+    SymbolDef, UrlPart,
 };
+use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_python};
 use std::collections::HashMap;
 use tree_sitter::Node as TsNode;
@@ -242,6 +244,7 @@ struct Builder {
     defs: Vec<SymbolDef>,
     imports: Vec<RawImport>,
     reference_sites: Vec<ReferenceSite>,
+    contract_sites: Vec<ContractSite>,
     /// variable_name → url_prefix for FastAPI APIRouter instances
     fastapi_prefixes: HashMap<String, String>,
     /// variable_name → url_prefix for Flask Blueprint instances
@@ -751,6 +754,7 @@ fn walk(
             builder.emit_import(node, src);
         }
         "call" => {
+            try_emit_http_contract(node, src, builder, enclosing);
             builder.emit_call_reference(node, src, enclosing);
             // recurse into arguments — still within the same enclosing function.
             let mut cursor = node.walk();
@@ -764,6 +768,182 @@ fn walk(
                 walk(child, src, builder, class_fqn, enclosing);
             }
         }
+    }
+}
+
+// ── Outbound HTTP contract sites (requests / httpx module-receiver calls) ────
+//
+// Tight recognizer to avoid false positives: the receiver must be the literal
+// module name `requests` or `httpx` — instance clients (`session.get`,
+// `client.get(...)`) are out of scope v1. URLs reuse the Phase B parts model:
+// f-string interpolations become `Dynamic` parts and fold to `{*}` at resolve.
+
+fn python_http_verb(attr: &str) -> Option<&'static str> {
+    match attr {
+        "get" => Some("GET"),
+        "post" => Some("POST"),
+        "put" => Some("PUT"),
+        "delete" => Some("DELETE"),
+        "patch" => Some("PATCH"),
+        "head" => Some("HEAD"),
+        _ => None,
+    }
+}
+
+fn try_emit_http_contract(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    enclosing: Option<(&NodeId, &str)>,
+) {
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "attribute" {
+        return;
+    }
+    let Some(obj) = func.child_by_field_name("object") else {
+        return;
+    };
+    if obj.kind() != "identifier" || !matches!(text(obj, src).as_str(), "requests" | "httpx") {
+        return;
+    }
+    let attr = func
+        .child_by_field_name("attribute")
+        .map(|n| text(n, src))
+        .unwrap_or_default();
+
+    let (http_method, url_node) = if let Some(verb) = python_http_verb(&attr) {
+        let Some(url) = positional_argument(node, 0) else {
+            return;
+        };
+        (verb.to_string(), url)
+    } else if attr == "request" {
+        // requests.request("POST", url)
+        let Some(method) = positional_argument(node, 0)
+            .filter(|arg| arg.kind() == "string")
+            .and_then(|arg| literal_py_string(arg, src))
+        else {
+            return;
+        };
+        let Some(url) = positional_argument(node, 1) else {
+            return;
+        };
+        (method.to_ascii_uppercase(), url)
+    } else {
+        return;
+    };
+
+    let (in_callable, _) = match enclosing {
+        Some((id, fqcn)) => (id.clone(), fqcn.to_string()),
+        None => (file_id(&builder.rel), builder.module.clone()),
+    };
+    let url_template = literal_py_string(url_node, src).map(|url| normalize_external_url(&url));
+    let url_parts = if url_template.is_none() {
+        py_url_parts(url_node, src)
+    } else {
+        None
+    };
+    if url_template.is_none() && url_parts.is_none() {
+        return;
+    }
+    builder.contract_sites.push(ContractSite {
+        kind: ContractKind::HttpCall,
+        url_template,
+        topic: None,
+        http_method: Some(http_method),
+        messaging_framework: None,
+        url_parts,
+        in_callable,
+        range: range_of(node),
+    });
+}
+
+/// Nth positional (non-keyword) argument of a call.
+fn positional_argument(call: TsNode<'_>, n: usize) -> Option<TsNode<'_>> {
+    let args = call.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let mut index = 0;
+    for child in args.named_children(&mut cursor) {
+        if matches!(child.kind(), "keyword_argument" | "comment") {
+            continue;
+        }
+        if index == n {
+            return Some(child);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Text of a plain (non-f-string, no-interpolation) string literal.
+fn literal_py_string(node: TsNode<'_>, src: &str) -> Option<String> {
+    if node.kind() != "string" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    if node
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "interpolation")
+    {
+        return None;
+    }
+    let raw = text(node, src);
+    let stripped = raw
+        .strip_prefix(|c: char| matches!(c, 'f' | 'F' | 'r' | 'R' | 'b' | 'B' | 'u' | 'U'))
+        .unwrap_or(&raw);
+    Some(unquote(stripped))
+}
+
+/// Phase B parts for a non-literal URL argument: f-string content → `Lit`,
+/// each `{...}` interpolation → `Dynamic`, `+`-concat folds recursively,
+/// identifiers → `ConstRef` (resolution is a no-op for Python today, which
+/// degrades them to `{*}` — never a wrong match).
+fn py_url_parts(node: TsNode<'_>, src: &str) -> Option<Vec<UrlPart>> {
+    let mut parts = Vec::new();
+    fold_py_url_expr(node, src, &mut parts);
+    parts
+        .iter()
+        .any(|part| !matches!(part, UrlPart::Lit(_)))
+        .then_some(parts)
+}
+
+fn fold_py_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
+    match node.kind() {
+        "string" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_content" | "escape_sequence" => out.push(UrlPart::Lit(
+                        child.utf8_text(src.as_bytes()).unwrap_or_default().to_string(),
+                    )),
+                    "interpolation" => out.push(UrlPart::Dynamic),
+                    // string_start / string_end delimiters
+                    _ => {}
+                }
+            }
+        }
+        "binary_operator" => {
+            let op = node.child_by_field_name("operator").map(|op| text(op, src));
+            if op.as_deref() != Some("+") {
+                out.push(UrlPart::Dynamic);
+                return;
+            }
+            match node.child_by_field_name("left") {
+                Some(left) => fold_py_url_expr(left, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+            match node.child_by_field_name("right") {
+                Some(right) => fold_py_url_expr(right, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+        }
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => fold_py_url_expr(inner, src, out),
+            None => out.push(UrlPart::Dynamic),
+        },
+        "identifier" | "attribute" => out.push(UrlPart::ConstRef(text(node, src))),
+        _ => out.push(UrlPart::Dynamic),
     }
 }
 
@@ -841,7 +1021,7 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
             imports: builder.imports,
             reference_sites: builder.reference_sites,
             type_bindings: Vec::new(),
-            contract_sites: Vec::new(),
+            contract_sites: builder.contract_sites,
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
             string_constants: Vec::new(),

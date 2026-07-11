@@ -44,6 +44,27 @@ Same verb-shortcut and path-composition rules as Java above, plus:
   `init {}` blocks and property initializers have no callable context and are
   skipped, mirroring Java.
 
+## TypeScript / Python outbound HTTP (`typescript/parse.rs`, `python/parse.rs`)
+
+Deliberately tight recognizers — false positives poison cross-repo matching:
+
+- **TypeScript**: bare `fetch(url[, {method}])` (default GET; `method` read from
+  a literal options object), `axios.get|post|put|delete|patch|head(url, …)`,
+  and `axios(url, {method})`. The receiver must be the literal identifier
+  `axios` — instance clients (`this.http.get`, injected wrappers) are out of
+  scope v1.
+- **Python**: module-receiver `requests.*` / `httpx.*` verb calls plus
+  `requests.request("POST", url)`. Session/client instances (`session.get`)
+  are out of scope v1.
+- **URLs reuse the dynamic-parts model** (below): template-string / f-string
+  interpolations become `Dynamic` parts and fold to `{*}`; constant references
+  currently never resolve for TS/Py (no constant index) and also degrade to
+  `{*}`.
+- **`in_callable` fallback**: calls inside tracked functions attribute to the
+  function; module-level calls (and TS arrow functions, untracked v1) fall back
+  to the **file id**. This degrades the *first leg* of cross-repo tracing
+  (entry resolution), not just display granularity — pinned by test.
+
 ## Dynamic-URL folding (`ContractSite.url_parts`, `cih-resolve/src/contracts.rs`)
 
 Outbound URLs/topics that are not plain literals are captured as structured

@@ -1,7 +1,9 @@
 use cih_core::{
-    file_id, function_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit,
-    Range, RawImport, RefKind, ReferenceSite, RouteSource, SymbolDef,
+    file_id, function_id, type_id, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId,
+    NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource,
+    SymbolDef, UrlPart,
 };
+use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_typescript};
 use tree_sitter::Node as TsNode;
 
@@ -163,6 +165,7 @@ struct Builder {
     defs: Vec<SymbolDef>,
     imports: Vec<RawImport>,
     reference_sites: Vec<ReferenceSite>,
+    contract_sites: Vec<ContractSite>,
 }
 
 impl Builder {
@@ -455,21 +458,211 @@ fn call_arity(node: TsNode<'_>) -> Option<u16> {
     Some(count)
 }
 
+// ── Outbound HTTP contract sites (fetch / axios) ──────────────────────────────
+//
+// Tight recognizers to avoid false positives: bare `fetch(url[, {method}])`
+// (default GET), `axios.<verb>(url, …)`, and `axios(url, {method})`. Instance
+// clients (`this.http.get(...)`) are out of scope v1. URLs reuse the Phase B
+// parts model: template-string substitutions become `Dynamic` parts and fold
+// to `{*}` at resolve.
+
+fn axios_http_verb(prop: &str) -> Option<&'static str> {
+    match prop {
+        "get" => Some("GET"),
+        "post" => Some("POST"),
+        "put" => Some("PUT"),
+        "delete" => Some("DELETE"),
+        "patch" => Some("PATCH"),
+        "head" => Some("HEAD"),
+        _ => None,
+    }
+}
+
+fn try_emit_http_contract(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    enclosing_fn: Option<&NodeId>,
+) {
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    let http_method = match func.kind() {
+        "identifier" => match text(func, src).as_str() {
+            // Method comes from the second-arg options object, default GET.
+            "fetch" | "axios" => call_options_method(node, src).unwrap_or_else(|| "GET".into()),
+            _ => return,
+        },
+        "member_expression" => {
+            let object = func.child_by_field_name("object").map(|n| text(n, src));
+            if object.as_deref() != Some("axios") {
+                return;
+            }
+            let Some(verb) = func
+                .child_by_field_name("property")
+                .and_then(|prop| axios_http_verb(&text(prop, src)))
+            else {
+                return;
+            };
+            verb.to_string()
+        }
+        _ => return,
+    };
+    let Some(url_node) = ts_positional_argument(node, 0) else {
+        return;
+    };
+
+    let url_template = literal_ts_string(url_node, src).map(|url| normalize_external_url(&url));
+    let url_parts = if url_template.is_none() {
+        ts_url_parts(url_node, src)
+    } else {
+        None
+    };
+    if url_template.is_none() && url_parts.is_none() {
+        return;
+    }
+    let in_callable = enclosing_fn
+        .cloned()
+        .unwrap_or_else(|| file_id(&builder.rel));
+    builder.contract_sites.push(ContractSite {
+        kind: ContractKind::HttpCall,
+        url_template,
+        topic: None,
+        http_method: Some(http_method),
+        messaging_framework: None,
+        url_parts,
+        in_callable,
+        range: range_of(node),
+    });
+}
+
+fn ts_positional_argument(call: TsNode<'_>, n: usize) -> Option<TsNode<'_>> {
+    let args = call.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let mut index = 0;
+    for child in args.named_children(&mut cursor) {
+        if child.kind() == "comment" {
+            continue;
+        }
+        if index == n {
+            return Some(child);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// `method: 'POST'` from a call's second-argument options object literal.
+fn call_options_method(call: TsNode<'_>, src: &str) -> Option<String> {
+    let options = ts_positional_argument(call, 1)?;
+    if options.kind() != "object" {
+        return None;
+    }
+    let mut cursor = options.walk();
+    for entry in options.named_children(&mut cursor) {
+        if entry.kind() != "pair" {
+            continue;
+        }
+        let key = entry
+            .child_by_field_name("key")
+            .map(|key| unquote(&text(key, src)))
+            .unwrap_or_default();
+        if key != "method" {
+            continue;
+        }
+        let value = entry.child_by_field_name("value")?;
+        if value.kind() == "string" {
+            return Some(unquote(&text(value, src)).to_ascii_uppercase());
+        }
+        return None;
+    }
+    None
+}
+
+/// Text of a plain string literal (`'…'` / `"…"`) — template strings and
+/// expressions are not literals.
+fn literal_ts_string(node: TsNode<'_>, src: &str) -> Option<String> {
+    (node.kind() == "string").then(|| unquote(&text(node, src)))
+}
+
+/// Phase B parts for a non-literal URL argument: template-string fragments →
+/// `Lit`, each `${…}` substitution → `Dynamic`, `+`-concat folds recursively,
+/// identifiers → `ConstRef` (resolution is a no-op for TypeScript today, which
+/// degrades them to `{*}` — never a wrong match).
+fn ts_url_parts(node: TsNode<'_>, src: &str) -> Option<Vec<UrlPart>> {
+    let mut parts = Vec::new();
+    fold_ts_url_expr(node, src, &mut parts);
+    parts
+        .iter()
+        .any(|part| !matches!(part, UrlPart::Lit(_)))
+        .then_some(parts)
+}
+
+fn fold_ts_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
+    match node.kind() {
+        "string" => out.push(UrlPart::Lit(unquote(&text(node, src)))),
+        "template_string" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_fragment" | "escape_sequence" => out.push(UrlPart::Lit(
+                        child.utf8_text(src.as_bytes()).unwrap_or_default().to_string(),
+                    )),
+                    "template_substitution" => out.push(UrlPart::Dynamic),
+                    _ => {}
+                }
+            }
+        }
+        "binary_expression" => {
+            let op = node.child_by_field_name("operator").map(|op| text(op, src));
+            if op.as_deref() != Some("+") {
+                out.push(UrlPart::Dynamic);
+                return;
+            }
+            match node.child_by_field_name("left") {
+                Some(left) => fold_ts_url_expr(left, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+            match node.child_by_field_name("right") {
+                Some(right) => fold_ts_url_expr(right, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+        }
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => fold_ts_url_expr(inner, src, out),
+            None => out.push(UrlPart::Dynamic),
+        },
+        "identifier" | "member_expression" => out.push(UrlPart::ConstRef(text(node, src))),
+        _ => out.push(UrlPart::Dynamic),
+    }
+}
+
 // ── Recursive AST walker ──────────────────────────────────────────────────────
 
-fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&str>, controller_prefix: Option<&str>) {
+/// `enclosing_fn` is the function/method that lexically contains `node`, or
+/// `None` at module / class-body scope — contract sites are attributed to it
+/// and fall back to the file id (which degrades cross-repo trace entry
+/// resolution; pinned by test).
+fn walk(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    class_fqn: Option<&str>,
+    controller_prefix: Option<&str>,
+    enclosing_fn: Option<&NodeId>,
+) {
     match node.kind() {
         "program" => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, None, None);
+                walk(child, src, builder, None, None, None);
             }
         }
         "export_statement" => {
             // export default class / export function / export const ...
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, class_fqn, controller_prefix);
+                walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
             }
         }
         "class_declaration" | "abstract_class_declaration" => {
@@ -494,7 +687,7 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, Some(&fqn), Some(&ctrl_prefix));
+                    walk(child, src, builder, Some(&fqn), Some(&ctrl_prefix), None);
                 }
             }
         }
@@ -532,7 +725,7 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, class_fqn, controller_prefix);
+                    walk(child, src, builder, class_fqn, controller_prefix, Some(&fn_id));
                 }
             }
         }
@@ -562,7 +755,7 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, class_fqn, controller_prefix);
+                    walk(child, src, builder, class_fqn, controller_prefix, Some(&fn_id));
                 }
             }
         }
@@ -596,17 +789,18 @@ fn walk(node: TsNode<'_>, src: &str, builder: &mut Builder, class_fqn: Option<&s
                     }
                 }
             }
+            try_emit_http_contract(node, src, builder, enclosing_fn);
             builder.emit_call_reference(node, src);
             // recurse into arguments
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, class_fqn, controller_prefix);
+                walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
             }
         }
         _ => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, class_fqn, controller_prefix);
+                walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
             }
         }
     }
@@ -662,7 +856,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
         ..Builder::default()
     };
 
-    walk(tree.root_node(), src, &mut builder, None, None);
+    walk(tree.root_node(), src, &mut builder, None, None, None);
 
     // Convert RawImports to ImportBindings (best-effort for TypeScript)
     let import_bindings = builder.imports.iter().map(|imp| {
@@ -689,7 +883,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
             imports: builder.imports,
             reference_sites: builder.reference_sites,
             type_bindings: Vec::new(),
-            contract_sites: Vec::new(),
+            contract_sites: builder.contract_sites,
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
             string_constants: Vec::new(),
