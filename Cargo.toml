@@ -115,6 +115,11 @@ cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }
 cih-wiki = { path = "crates/cih-wiki" }
 
+# Full debuginfo balloons target/ into tens of GB across builds; line tables
+# keep backtraces usable. Set debug = true locally if you need to step in a debugger.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
