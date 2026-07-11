@@ -24,6 +24,30 @@ graph can be incomplete" list.
 - **Feign clients**: `@FeignClient` URL/path is read from the annotation literally;
   dynamic URL interpolation (`${...}`, concatenation) is not followed.
 
+## CXF / OSGi route stitching (`cih-resolve/src/lang/java/cxf.rs`)
+
+- **Base paths come from XML, per bundle.** Each JAX-RS route gets
+  `servlet_prefix + <jaxrs:server address> + method_path`. The servlet prefix is
+  resolved per server file: the OSGi whiteboard pattern
+  (`osgi.http.whiteboard.servlet.pattern`) whose declaring XML shares the most
+  leading directory components wins; a lone repo-wide pattern applies everywhere;
+  multiple unrelated patterns are never guessed across bundles
+  (`servlet_prefix_source: "none"`; `cxf_base_path` in `cih.toml` overrides all).
+- **Interface-annotated endpoints stitch via heritage.** When the `jaxrs:server`
+  bean is an impl class but the route handler is the annotated interface (JAX-RS
+  annotation inheritance, common on OSGi platforms with `-api` bundles), the
+  target matches any interface the bean class transitively implements. Exact
+  impl-class matches always take priority.
+- **One route per server address.** A handler matched by several servers with
+  distinct addresses (secured `/v1` + non-secured `/ns/v1` impls of one
+  interface) yields one Route node per resulting path — the first rewrites in
+  place, further addresses are cloned with duplicated incoming edges. Route
+  counts on such platforms intentionally reflect every real URL.
+- **Spring-DM OSGi wiring is DI input.** `META-INF/spring/*.xml` files (any
+  name) are DI-XML candidates; `<osgi:reference interface=…>` produces the same
+  interface→implementor `CALLS` edges as Blueprint `<reference>` (reason string
+  `di-xml-blueprint-reference` is kept for compatibility and covers both).
+
 ## SQL / DB access (`cih-parse/src/sql.rs`, `cih-resolve/src/db_access.rs`)
 
 - **Table extraction is textual** over the SQL string: it handles SELECT/INSERT/

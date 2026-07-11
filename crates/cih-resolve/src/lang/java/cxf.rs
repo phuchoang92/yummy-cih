@@ -16,10 +16,15 @@ use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
 ///
 /// For each `<jaxrs:server address>` node we resolve its referenced bean id to a class
 /// FQCN (via the `spring_xml` / `blueprint_xml` bean nodes), then rewrite every Java
-/// `Route` whose `handler` belongs to that class: `path` becomes
-/// `servlet_prefix + address + method_path`, the node `id`/`name` are recomputed, and the
-/// `HANDLES_ROUTE` edge targeting it is repointed. The original method path is kept in
-/// `local_path`, and a non-destructive `IntegrationLink` edge records provenance.
+/// `Route` whose `handler` belongs to that class — or to an interface the class
+/// (transitively) implements, since JAX-RS annotations often live on the interface:
+/// `path` becomes `servlet_prefix + address + method_path`, the node `id`/`name` are
+/// recomputed, and edges targeting it (notably `HANDLES_ROUTE`) are repointed. When a
+/// route matches SEVERAL servers with distinct addresses (secured `/v1` + non-secured
+/// `/ns/v1` impls of one interface), the first rewrites in place and each further
+/// address becomes a cloned Route node with duplicated incoming edges. The original
+/// method path is kept in `local_path`, and a non-destructive `IntegrationLink` edge
+/// records provenance per server.
 ///
 /// Returns early (before any filesystem scan) when there are no `<jaxrs:server>` targets.
 /// Resolve a bean `class` string to a class FQCN: a fully-qualified name is kept as-is; a bare
@@ -36,7 +41,7 @@ fn resolve_class_fqcn(raw: &str, simple_to_fqcns: &HashMap<&str, Vec<&str>>) -> 
 
 pub(crate) fn stitch_route_prefixes(
     repo_root: &Path,
-    nodes: &mut [Node],
+    nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
     route_base_path: Option<&str>,
 ) {
@@ -223,12 +228,22 @@ pub(crate) fn stitch_route_prefixes(
     let mut prefix_memo: FxHashMap<String, (String, &'static str)> = FxHashMap::default();
 
     let mut id_remap: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+    // Additional matches beyond the first clone the route: a secured and a
+    // non-secured jaxrs:server exposing the same annotated interface are two
+    // real URLs (`/v1/…` and `/ns/v1/…`), each needing its own Route node.
+    let mut clones: Vec<Node> = Vec::new();
+    let mut clone_map: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut route_ids_taken: HashSet<NodeId> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Route)
+        .map(|n| n.id.clone())
+        .collect();
 
     for n in nodes.iter_mut() {
         if n.kind != NodeKind::Route {
             continue;
         }
-        let Some(props) = n.props.as_mut() else {
+        let Some(props) = n.props.as_ref() else {
             continue;
         };
         let handler = props
@@ -251,18 +266,9 @@ pub(crate) fn stitch_route_prefixes(
                 .filter(|t| t.interfaces.contains(handler_class))
                 .collect();
         }
-        let Some(target) = matched.first().copied() else {
+        if matched.is_empty() {
             continue;
-        };
-
-        let (servlet_prefix, servlet_source) = prefix_memo
-            .entry(target.server_file.clone())
-            .or_insert_with(|| {
-                resolver
-                    .prefix_for(repo_root, &target.server_file)
-                    .unwrap_or((String::new(), "none"))
-            })
-            .clone();
+        }
 
         let method = props
             .get("httpMethod")
@@ -274,45 +280,112 @@ pub(crate) fn stitch_route_prefixes(
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string();
-        let new_path = join_url(&[&servlet_prefix, &target.address, &local_path]);
-        if new_path == local_path {
-            continue;
+
+        // Only distinct resulting paths produce routes: identical addresses
+        // across matching servers (or a no-op prefix) collapse to one.
+        let mut seen_paths: HashSet<String> = HashSet::new();
+        seen_paths.insert(local_path.clone());
+        // Set once the route is rewritten in place — the ORIGINAL id, which
+        // clones copy their incoming edges from.
+        let mut original_id: Option<NodeId> = None;
+
+        for target in matched {
+            let (servlet_prefix, servlet_source) = prefix_memo
+                .entry(target.server_file.clone())
+                .or_insert_with(|| {
+                    resolver
+                        .prefix_for(repo_root, &target.server_file)
+                        .unwrap_or((String::new(), "none"))
+                })
+                .clone();
+
+            let new_path = join_url(&[&servlet_prefix, &target.address, &local_path]);
+            if !seen_paths.insert(new_path.clone()) {
+                continue;
+            }
+            let new_name = format!("{method} {new_path}");
+            let new_id = NodeId::new(format!("Route:{new_name}"));
+            let provenance = Edge {
+                src: target.server_id.clone(),
+                dst: new_id.clone(),
+                kind: EdgeKind::IntegrationLink,
+                confidence: 0.9,
+                reason: "cxf-jaxrs-prefix".to_string(),
+                props: Some(serde_json::json!({
+                    "source": "cxf_jaxrs_server",
+                    "prefix": join_url(&[&servlet_prefix, &target.address]),
+                })),
+            };
+
+            match &original_id {
+                // First changed path: rewrite the node in place, as always.
+                None => {
+                    if let Some(props) = n.props.as_mut() {
+                        props["path"] = serde_json::Value::String(new_path.clone());
+                        props["local_path"] = serde_json::Value::String(local_path.clone());
+                        props["servlet_prefix_source"] =
+                            serde_json::Value::String(servlet_source.to_string());
+                    }
+                    let old_id = std::mem::replace(&mut n.id, new_id.clone());
+                    n.name = new_name.clone();
+                    n.qualified_name = Some(new_name);
+                    route_ids_taken.insert(new_id.clone());
+                    new_edges.push(provenance);
+                    id_remap.insert(old_id.clone(), new_id);
+                    original_id = Some(old_id);
+                }
+                // Every further changed path: clone the (already rewritten)
+                // node with its own path props. The handler stays — the same
+                // annotated method genuinely serves both variants.
+                Some(old_id) => {
+                    if !route_ids_taken.insert(new_id.clone()) {
+                        continue; // a pre-existing route already owns this id
+                    }
+                    let mut clone = n.clone();
+                    clone.id = new_id.clone();
+                    clone.name = new_name.clone();
+                    clone.qualified_name = Some(new_name);
+                    if let Some(cp) = clone.props.as_mut() {
+                        cp["path"] = serde_json::Value::String(new_path.clone());
+                        cp["local_path"] = serde_json::Value::String(local_path.clone());
+                        cp["servlet_prefix_source"] =
+                            serde_json::Value::String(servlet_source.to_string());
+                    }
+                    new_edges.push(provenance);
+                    clone_map.push((old_id.clone(), new_id));
+                    clones.push(clone);
+                }
+            }
         }
-
-        props["path"] = serde_json::Value::String(new_path.clone());
-        props["local_path"] = serde_json::Value::String(local_path);
-        props["servlet_prefix_source"] = serde_json::Value::String(servlet_source.to_string());
-
-        let new_name = format!("{method} {new_path}");
-        let new_id = NodeId::new(format!("Route:{new_name}"));
-        let old_id = std::mem::replace(&mut n.id, new_id.clone());
-        n.name = new_name.clone();
-        n.qualified_name = Some(new_name);
-
-        new_edges.push(Edge {
-            src: target.server_id.clone(),
-            dst: new_id.clone(),
-            kind: EdgeKind::IntegrationLink,
-            confidence: 0.9,
-            reason: "cxf-jaxrs-prefix".to_string(),
-            props: Some(serde_json::json!({
-                "source": "cxf_jaxrs_server",
-                "prefix": join_url(&[&servlet_prefix, &target.address]),
-            })),
-        });
-        id_remap.insert(old_id, new_id);
     }
 
     if id_remap.is_empty() {
         return;
     }
-    // Repoint edges (notably HANDLES_ROUTE) that targeted the rewritten Route ids.
+    // FIRST duplicate edges (notably HANDLES_ROUTE) onto the clones, keyed on
+    // the routes' ORIGINAL ids — the in-place repoint below rewrites those same
+    // ids, so order matters.
+    if !clone_map.is_empty() {
+        let mut dup_edges: Vec<Edge> = Vec::new();
+        for (old_id, clone_id) in &clone_map {
+            for e in edges.iter() {
+                if &e.dst == old_id {
+                    let mut dup = e.clone();
+                    dup.dst = clone_id.clone();
+                    dup_edges.push(dup);
+                }
+            }
+        }
+        edges.extend(dup_edges);
+    }
+    // Then repoint edges that targeted the rewritten Route ids.
     for e in edges.iter_mut() {
         if let Some(new_id) = id_remap.get(&e.dst) {
             e.dst = new_id.clone();
         }
     }
     edges.extend(new_edges);
+    nodes.extend(clones);
 }
 
 struct Target {
@@ -912,6 +985,205 @@ mod tests {
         assert!(!edges
             .iter()
             .any(|e| e.kind == EdgeKind::IntegrationLink && e.reason == "cxf-jaxrs-prefix"));
+    }
+
+
+    #[test]
+    fn stitch_dual_servers_clone_route_per_address() {
+        // Secured /v1 and non-secured /ns/v1 servers, two impl beans, one
+        // annotated interface: one handler must yield TWO routes.
+        let dir = temp_dir("dual");
+        let mut nodes = server_and_bean("/v1", "securedImpl", "com.acme.SecuredImpl");
+        nodes.extend(server_and_bean("/ns/v1", "nonSecuredImpl", "com.acme.NonSecuredImpl"));
+        nodes.push(class_node("com.acme.SecuredImpl"));
+        nodes.push(class_node("com.acme.NonSecuredImpl"));
+        nodes.push(interface_node("com.acme.api.RemitService"));
+        let handler = "com.acme.api.RemitService#send/1";
+        nodes.push(route_node("POST", "/send", handler));
+        let mut edges = vec![
+            handles_route_edge(handler, "POST", "/send"),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.SecuredImpl",
+                "Interface:com.acme.api.RemitService",
+            ),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.NonSecuredImpl",
+                "Interface:com.acme.api.RemitService",
+            ),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let routes: Vec<&Node> = nodes.iter().filter(|n| n.kind == NodeKind::Route).collect();
+        assert_eq!(routes.len(), 2, "one route per server address");
+        let mut paths: Vec<&str> = routes.iter().filter_map(|n| prop(n, "path")).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/ns/v1/send", "/v1/send"]);
+        for r in &routes {
+            assert_eq!(prop(r, "local_path"), Some("/send"));
+            assert_eq!(prop(r, "handler"), Some(handler));
+        }
+
+        let hr: Vec<&Edge> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::HandlesRoute)
+            .collect();
+        assert_eq!(hr.len(), 2, "HANDLES_ROUTE duplicated onto the clone");
+        assert_eq!(hr[0].src, hr[1].src, "same handler method");
+        let mut hr_dsts: Vec<&str> = hr.iter().map(|e| e.dst.as_str()).collect();
+        hr_dsts.sort();
+        assert_eq!(hr_dsts, vec!["Route:POST /ns/v1/send", "Route:POST /v1/send"]);
+
+        // Each route has a provenance link from its own server.
+        let links: Vec<&Edge> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::IntegrationLink && e.reason == "cxf-jaxrs-prefix")
+            .collect();
+        assert_eq!(links.len(), 2);
+        assert_ne!(links[0].src, links[1].src, "distinct server nodes");
+    }
+
+    #[test]
+    fn stitch_dual_servers_same_resulting_path_dedups() {
+        // Two servers with the SAME address referencing the two impls: paths
+        // collide, so no clone is made.
+        let dir = temp_dir("dual-same");
+        let mut nodes = server_and_bean("/v1", "securedImpl", "com.acme.SecuredImpl");
+        nodes.extend(server_and_bean("/v1", "nonSecuredImpl", "com.acme.NonSecuredImpl"));
+        nodes.push(class_node("com.acme.SecuredImpl"));
+        nodes.push(class_node("com.acme.NonSecuredImpl"));
+        nodes.push(interface_node("com.acme.api.RemitService"));
+        let handler = "com.acme.api.RemitService#send/1";
+        nodes.push(route_node("POST", "/send", handler));
+        let mut edges = vec![
+            handles_route_edge(handler, "POST", "/send"),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.SecuredImpl",
+                "Interface:com.acme.api.RemitService",
+            ),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.NonSecuredImpl",
+                "Interface:com.acme.api.RemitService",
+            ),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let routes: Vec<&Node> = nodes.iter().filter(|n| n.kind == NodeKind::Route).collect();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(prop(routes[0], "path"), Some("/v1/send"));
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|e| e.kind == EdgeKind::HandlesRoute)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn stitch_clone_skipped_when_id_already_exists() {
+        // A pre-existing route already owns the would-be clone id: no duplicate node.
+        let dir = temp_dir("dual-collide");
+        let mut nodes = server_and_bean("/v1", "securedImpl", "com.acme.SecuredImpl");
+        nodes.extend(server_and_bean("/ns/v1", "nonSecuredImpl", "com.acme.NonSecuredImpl"));
+        nodes.push(class_node("com.acme.SecuredImpl"));
+        nodes.push(class_node("com.acme.NonSecuredImpl"));
+        nodes.push(interface_node("com.acme.api.RemitService"));
+        let handler = "com.acme.api.RemitService#send/1";
+        nodes.push(route_node("POST", "/send", handler));
+        // Unrelated pre-existing route occupying the clone's id.
+        nodes.push(route_node("POST", "/ns/v1/send", "com.acme.Other#send/1"));
+        let mut edges = vec![
+            handles_route_edge(handler, "POST", "/send"),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.SecuredImpl",
+                "Interface:com.acme.api.RemitService",
+            ),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.NonSecuredImpl",
+                "Interface:com.acme.api.RemitService",
+            ),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let ids: Vec<&str> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Route)
+            .map(|n| n.id.as_str())
+            .collect();
+        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        assert_eq!(ids.len(), unique.len(), "no duplicate route ids: {ids:?}");
+    }
+
+    #[test]
+    fn dual_server_bundle_full_ocb_shape() {
+        // The full OCB remittance shape: whiteboard /rest/remittance/* + a
+        // secured and a non-secured server in one bundle, interface handler.
+        let dir = temp_dir("ocb");
+        let spring = "custom-remittance/resources/META-INF/spring";
+        let mut nodes: Vec<Node> = server_and_bean("/v1", "securedImpl", "com.vpb.RemitImpl")
+            .into_iter()
+            .map(|n| at_file(n, &format!("{spring}/beans_rest.xml")))
+            .collect();
+        nodes.extend(
+            server_and_bean("/ns/v1", "nsImpl", "com.vpb.NsRemitImpl")
+                .into_iter()
+                .map(|n| at_file(n, &format!("{spring}/beans_rest.xml"))),
+        );
+        nodes.push(at_file(
+            integration_route(
+                "/rest/remittance/*",
+                "osgi_servlet",
+                serde_json::json!({ "servlet_pattern": "/rest/remittance/*" }),
+            ),
+            &format!("{spring}/beans_rest_web_servlets.xml"),
+        ));
+        nodes.push(class_node("com.vpb.RemitImpl"));
+        nodes.push(class_node("com.vpb.NsRemitImpl"));
+        nodes.push(interface_node("com.vpb.api.RemittanceService"));
+        let handler = "com.vpb.api.RemittanceService#getBeneficiaries/0";
+        nodes.push(route_node("GET", "/beneficiaries", handler));
+        let mut edges = vec![
+            handles_route_edge(handler, "GET", "/beneficiaries"),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.vpb.RemitImpl",
+                "Interface:com.vpb.api.RemittanceService",
+            ),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.vpb.NsRemitImpl",
+                "Interface:com.vpb.api.RemittanceService",
+            ),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let routes: Vec<&Node> = nodes.iter().filter(|n| n.kind == NodeKind::Route).collect();
+        let mut paths: Vec<&str> = routes.iter().filter_map(|n| prop(n, "path")).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "/rest/remittance/ns/v1/beneficiaries",
+                "/rest/remittance/v1/beneficiaries"
+            ]
+        );
+        assert!(routes
+            .iter()
+            .all(|n| prop(n, "servlet_prefix_source") == Some("osgi_whiteboard")));
     }
 
     #[test]
