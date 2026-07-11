@@ -1,5 +1,22 @@
 # OCB-style OSGi/CXF gaps: interface-route stitching, DI XML filters, per-bundle servlet prefix
 
+> **STATUS: COMPLETED 2026-07-11** — all steps landed on `dev` and pushed (tip `5c7b1f3`).
+>
+> | Step | Commit | Result |
+> |---|---|---|
+> | 1 — DI XML filters + Spring-DM osgi | `906bc53` | 5 new tests; META-INF/spring + `<osgi:reference>`/`<osgi:service>` recognized |
+> | 2 — per-bundle servlet prefix | `ba80963` | `ServletPrefixResolver`, 5 new tests; no cross-bundle guessing |
+> | 3 — interface heritage fallback | `f008cfe` | transitive interface closure, exact-match priority, 4 new tests |
+> | 4 — dual-server route cloning + docs | `5c7b1f3` | one Route per server address, edge duplication, 4 new tests incl. full OCB shape; ARCHITECTURE.md updated |
+>
+> **Verification (all pass):** cih-resolve 49/49 unit tests; full workspace 102 suites green, clippy clean;
+> eval harness PASS (fineract 926 jax_rs routes, servicemix 75 integration routes); before/after artifact
+> diff on servicemix + fineract **byte-identical** (routes, edge reasons, node counts) — zero regression.
+>
+> **Remaining (Windows/OCB side):** rebuild Docker image from `dev ≥ 5c7b1f3`, `analyze --all --no-cache`,
+> expect ~2× routes (`/rest/<bundle>/v1/…` + `/ns/v1/…`, `servlet_prefix_source: osgi_whiteboard`) and
+> `di-xml-*` edges > 0; then regenerate wiki/embeddings (route ids changed).
+
 ## Context
 
 The user's banking platform (OCB-SP05) is a multi-bundle OSGi codebase: each `custom-<x>` bundle has `META-INF/spring/` XML (whiteboard servlet pattern `/rest/<x>/*`, secured `/v1` + non-secured `/ns/v1` `<jaxrs:server>`s, Spring `<bean>` defs, Spring-DM `<osgi:reference>`/`<osgi:service>` wiring), and JAX-RS annotations live on the **interface** in the `-api` bundle while the impl beans (two per bundle!) implement it. Tracing this through yummy-cih found three gaps:
@@ -21,7 +38,7 @@ OCB itself lives on the user's Windows laptop (Docker analyze workflow); verific
 
 Branch: `dev`. At implementation start, copy this plan to `/Users/phuc/BigMoves/AI/ocb-osgi-cxf-gaps-plan.md` AND (per repo convention) `docs/plans/ocb-osgi-cxf-stitching.md` in yummy-cih (committed with Step 1).
 
-## Step 1 — Gap 2: DI XML filters + Spring-DM OSGi (independent; land first)
+## ✅ Step 1 — Gap 2: DI XML filters + Spring-DM OSGi (landed: `906bc53`)
 
 Files: `crates/cih-resolve/src/di_xml.rs`, `crates/cih-resolve/src/integration_xml.rs`, `crates/cih-resolve/tests/{di_xml,integration_xml}.rs`.
 
@@ -40,7 +57,7 @@ Tests (mirror existing styles):
 
 **Commit A:** `fix(resolve): recognize META-INF/spring DI XML and Spring-DM osgi wiring`
 
-## Step 2 — Gap 3: per-server servlet prefix (before Gap 1 — the clone loop consumes it)
+## ✅ Step 2 — Gap 3: per-server servlet prefix (landed: `ba80963`)
 
 File: `crates/cih-resolve/src/lang/java/cxf.rs`.
 
@@ -68,7 +85,7 @@ Tests (new helper for node file paths, since existing helpers hardcode `file:"be
 
 **Commit B:** `fix(resolve): resolve CXF servlet prefix per jaxrs:server bundle`
 
-## Step 3 — Gap 1a: interface-fallback matching (single match, in-place rewrite)
+## ✅ Step 3 — Gap 1a: interface-fallback matching (landed: `f008cfe`)
 
 File: `crates/cih-resolve/src/lang/java/cxf.rs` (heritage edges are already in `edges` at post_process time).
 
@@ -80,7 +97,7 @@ Tests (new helpers `interface_node(fqcn)`, `implements_edge(...)`, `extends_edge
 
 **Commit C:** `feat(resolve): stitch interface-annotated JAX-RS routes via heritage fallback`
 
-## Step 4 — Gap 1b: dual-server route cloning
+## ✅ Step 4 — Gap 1b: dual-server route cloning (landed: `5c7b1f3`)
 
 Files: `cxf.rs` + `lang/java/mod.rs` (signature: `stitch_route_prefixes` takes `&mut Vec<Node>` instead of `&mut [Node]`).
 
@@ -93,7 +110,7 @@ Tests: `stitch_dual_servers_clone_route_per_address` (the OCB remittance shape: 
 
 **Commit D:** `feat(resolve): clone JAX-RS routes for secured + non-secured jaxrs servers`
 
-## Step 5 — docs
+## ✅ Step 5 — docs (folded into `5c7b1f3`)
 
 `docs/ARCHITECTURE.md`: interface-fallback semantics, per-bundle prefix chain, route cloning, widened `di-xml-blueprint-reference` meaning. Fold into Commit D or a small `docs:` commit.
 
