@@ -1,5 +1,9 @@
 # TS HTTP wrapper following: apiFetch-style call sites become contract endpoints
 
+> **STATUS: COMPLETED 2026-07-11** — commits `01141ec` (IR plumbing, output-neutral), `ef0367e` (TS detection + provisional sites, schema→4), `46b44a4` (two-context resolve join), docs in the same push.
+> **Live results (212ecom):** ExternalEndpoints **1 → 163** (162 via wrapper, all `/api/v1` bases with `via_wrapper` + `base_source: env_default` provenance); cross-repo HTTP matches **1 → 140**. servicemix/fineract byte-identical (TS-only feature). 104 workspace suites green, clippy clean.
+
+
 ## Context
 
 The motivating gap is quantified on the user's own stack: `212ecom-fe` routes HTTP through a wrapper — **156 `apiFetch(...)` call sites vs 1 bare `fetch`** — so today exactly one `ExternalEndpoint` is extracted and cross-repo matching sees ~0.6% of the real API surface. The wrapper (`src/services/apiClient.ts:28-41`) is the canonical shape: `apiFetch(endpoint, options?, token?)` builds `const url = \`${API_BASE_URL}${endpoint}\`` (local-var indirection; the `fetch(url,…)` sits inside a `try`) and callers pass relative literals/templates plus an options object with optional `method`. Combined with the already-landed constant folding (`API_BASE_URL → '/api/v1'` env-default), following the wrapper turns those 156 sites into matchable `/api/v1/...` endpoints.

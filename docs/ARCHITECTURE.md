@@ -158,6 +158,26 @@ companion-object/`object` `val`s with literal initializers):
   import-scoped (the site's file must import the constant's module) →
   repo-wide unique name (exactly one candidate; 2+ → `{*}`, never a guess).
 
+## Same-repo HTTP wrappers (TypeScript, `cih-lang` ts parse + `cih-resolve/src/contracts.rs`)
+
+- **Detection** (parse time): a module-scope function/arrow whose FIRST param
+  is a plain identifier and whose body calls fetch/axios with a URL of shape
+  `<Lit/ConstRef prefix…><param>` — the param must be the FINAL piece; one
+  level of `const url = …` same-body indirection is followed; closures,
+  destructured params, mid-URL params, and ambiguous locals all bail.
+- **Call sites**: calls to plain identifiers with a URL-ish first arg (leading
+  `/`) become PROVISIONAL sites; at resolve they join the wrapper index
+  (same module → import-scoped → repo-unique name; ambiguity or no match →
+  the site silently vanishes — no fabricated endpoints).
+- **Two-context fold**: the wrapper's prefix constants resolve in the
+  wrapper's own module; the caller's suffix in the caller's context. Endpoints
+  carry `via_wrapper: "<module>#<name>"` (plus `base_source`/`dynamic` as
+  usual).
+- **v1 limits**: barrel re-exports (rescued only when the name is repo-unique),
+  `new URL()` construction, axios.create instances, options objects not at
+  arg 1, and the Python analog are out of scope (IR is language-neutral for
+  later).
+
 ## SQL / DB access (`cih-parse/src/sql.rs`, `cih-resolve/src/db_access.rs`)
 
 - **Table extraction is textual** over the SQL string: it handles SELECT/INSERT/
