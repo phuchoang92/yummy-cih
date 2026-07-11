@@ -58,6 +58,8 @@ pub(crate) fn stitch_route_prefixes(
     // the workspace-unique-name fallback, mirroring ResolveIndex).
     let mut class_node_by_fqcn: HashMap<&str, &NodeId> = HashMap::new();
     let mut simple_to_fqcns: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut kind_by_fqcn: HashMap<&str, NodeKind> = HashMap::new();
+    let mut fqcn_by_node_id: HashMap<&NodeId, &str> = HashMap::new();
     for n in nodes.iter() {
         if matches!(
             n.kind,
@@ -65,11 +67,28 @@ pub(crate) fn stitch_route_prefixes(
         ) {
             if let Some(fqcn) = n.qualified_name.as_deref() {
                 class_node_by_fqcn.insert(fqcn, &n.id);
+                kind_by_fqcn.insert(fqcn, n.kind);
+                fqcn_by_node_id.insert(&n.id, fqcn);
                 simple_to_fqcns
                     .entry(crate::di_xml::simple_name(fqcn))
                     .or_default()
                     .push(fqcn);
             }
+        }
+    }
+
+    // Type → supertypes adjacency from heritage edges (src = subtype, dst =
+    // supertype). Feeds the interface-fallback: JAX-RS annotations often live
+    // on the interface in a separate `-api` bundle while the jaxrs:server bean
+    // is the impl class, so routes carry the interface FQCN as handler.
+    let mut supers: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in edges.iter() {
+        if !matches!(e.kind, EdgeKind::Implements | EdgeKind::Extends) {
+            continue;
+        }
+        if let (Some(sub), Some(sup)) = (fqcn_by_node_id.get(&e.src), fqcn_by_node_id.get(&e.dst))
+        {
+            supers.entry(sub).or_default().push(sup);
         }
     }
 
@@ -129,6 +148,7 @@ pub(crate) fn stitch_route_prefixes(
                 server_file: n.file.clone(),
                 address: address.to_string(),
                 fqcn: fqcn.clone(),
+                interfaces: HashSet::new(),
             });
             // Make the bean → impl-class registration an explicit, queryable edge (previously the
             // linkage was only an implicit FQCN prefix-match on Route.handler).
@@ -164,6 +184,7 @@ pub(crate) fn stitch_route_prefixes(
                 server_file: n.file.clone(),
                 address: address.to_string(),
                 fqcn: fqcn.clone(),
+                interfaces: HashSet::new(),
             });
             if let Some(class_id) = class_node_by_fqcn.get(fqcn.as_str()) {
                 if bean_class_seen.insert((n.id.clone(), (*class_id).clone())) {
@@ -182,6 +203,18 @@ pub(crate) fn stitch_route_prefixes(
     // No CXF servers wired to a known bean ⇒ nothing to do (and skip the fs scan below).
     if targets.is_empty() {
         return;
+    }
+
+    // Attach each target's interface closure (memoized per FQCN) for the
+    // handler fallback match.
+    {
+        let mut closure_memo: HashMap<String, HashSet<String>> = HashMap::new();
+        for t in &mut targets {
+            t.interfaces = closure_memo
+                .entry(t.fqcn.clone())
+                .or_insert_with(|| supertype_interfaces(&t.fqcn, &supers, &kind_by_fqcn))
+                .clone();
+        }
     }
 
     // Servlet base paths are per-bundle on OSGi platforms (each bundle declares
@@ -206,10 +239,19 @@ pub(crate) fn stitch_route_prefixes(
         if handler.is_empty() {
             continue;
         }
-        let Some(target) = targets
-            .iter()
-            .find(|t| handler == t.fqcn || handler.starts_with(&format!("{}#", t.fqcn)))
-        else {
+        // Exact impl-class matches keep absolute priority; the interface
+        // fallback (handler = annotated interface, bean = impl) only applies
+        // when no target names the handler's class directly.
+        let handler_class = handler.split('#').next().unwrap_or(handler.as_str());
+        let mut matched: Vec<&Target> =
+            targets.iter().filter(|t| t.fqcn == handler_class).collect();
+        if matched.is_empty() {
+            matched = targets
+                .iter()
+                .filter(|t| t.interfaces.contains(handler_class))
+                .collect();
+        }
+        let Some(target) = matched.first().copied() else {
             continue;
         };
 
@@ -280,6 +322,41 @@ struct Target {
     server_file: String,
     address: String,
     fqcn: String,
+    /// Interfaces the bean class (transitively) implements — fallback match
+    /// set for routes whose handler is the annotated interface, not the impl.
+    interfaces: HashSet<String>,
+}
+
+/// All interfaces reachable from `fqcn` via heritage edges (`impl implements I`,
+/// `I extends J`, through superclasses too). BFS with a defensive depth cap;
+/// non-interface supertypes are traversed but not returned.
+fn supertype_interfaces(
+    fqcn: &str,
+    supers: &HashMap<&str, Vec<&str>>,
+    kind_by_fqcn: &HashMap<&str, NodeKind>,
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut queue: Vec<&str> = vec![fqcn];
+    for _depth in 0..64 {
+        if queue.is_empty() {
+            break;
+        }
+        let mut next = Vec::new();
+        for cur in queue.drain(..) {
+            if !visited.insert(cur) {
+                continue;
+            }
+            for sup in supers.get(cur).into_iter().flatten() {
+                if kind_by_fqcn.get(sup) == Some(&NodeKind::Interface) {
+                    out.insert((*sup).to_string());
+                }
+                next.push(*sup);
+            }
+        }
+        queue = next;
+    }
+    out
 }
 
 /// Per-bundle servlet base-path resolution (the outermost URL layer above a
@@ -667,6 +744,30 @@ mod tests {
         node
     }
 
+    fn interface_node(fqcn: &str) -> Node {
+        Node {
+            id: NodeId::new(format!("Interface:{fqcn}")),
+            kind: NodeKind::Interface,
+            name: crate::di_xml::simple_name(fqcn).to_string(),
+            qualified_name: Some(fqcn.to_string()),
+            file: "com/acme/Api.java".to_string(),
+            range: Range::default(),
+            props: None,
+        }
+    }
+
+    /// A heritage edge as `emit_heritage_edges` produces it: subtype → supertype.
+    fn heritage_edge(kind: EdgeKind, sub_id: &str, super_id: &str) -> Edge {
+        Edge {
+            src: NodeId::new(sub_id),
+            dst: NodeId::new(super_id),
+            kind,
+            confidence: 1.0,
+            reason: "heritage".to_string(),
+            props: None,
+        }
+    }
+
     /// One OCB-style bundle: a `<jaxrs:server>` + bean in `beans_rest.xml` and a
     /// whiteboard servlet pattern in `beans_rest_web_servlets.xml`, all under
     /// `<bundle_dir>/resources/META-INF/spring/`.
@@ -688,6 +789,129 @@ mod tests {
             &format!("{spring_dir}/beans_rest_web_servlets.xml"),
         ));
         nodes
+    }
+
+
+    #[test]
+    fn stitch_interface_handler_via_impl_class() {
+        // OCB shape: @Path lives on the interface in the -api bundle; the
+        // jaxrs:server bean is the impl. The route's handler is the interface.
+        let dir = temp_dir("iface");
+        let mut nodes = server_and_bean("/v1", "restImpl", "com.acme.RestImpl");
+        nodes.push(class_node("com.acme.RestImpl"));
+        nodes.push(interface_node("com.acme.api.RestService"));
+        let handler = "com.acme.api.RestService#op/1";
+        nodes.push(route_node("GET", "/op", handler));
+        let mut edges = vec![
+            handles_route_edge(handler, "GET", "/op"),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.RestImpl",
+                "Interface:com.acme.api.RestService",
+            ),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/v1/op"));
+        assert_eq!(prop(route, "local_path"), Some("/op"));
+        let hr = edges
+            .iter()
+            .find(|e| e.kind == EdgeKind::HandlesRoute)
+            .unwrap();
+        assert_eq!(hr.dst.as_str(), "Route:GET /v1/op");
+        assert!(edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::IntegrationLink && e.reason == "cxf-jaxrs-prefix"));
+    }
+
+    #[test]
+    fn stitch_interface_fallback_transitive_extends() {
+        // Impl implements A, interface A extends B, annotations on B.
+        let dir = temp_dir("iface-trans");
+        let mut nodes = server_and_bean("/v1", "restImpl", "com.acme.RestImpl");
+        nodes.push(class_node("com.acme.RestImpl"));
+        nodes.push(interface_node("com.acme.api.A"));
+        nodes.push(interface_node("com.acme.api.B"));
+        let handler = "com.acme.api.B#op/0";
+        nodes.push(route_node("GET", "/op", handler));
+        let mut edges = vec![
+            handles_route_edge(handler, "GET", "/op"),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.RestImpl",
+                "Interface:com.acme.api.A",
+            ),
+            heritage_edge(
+                EdgeKind::Extends,
+                "Interface:com.acme.api.A",
+                "Interface:com.acme.api.B",
+            ),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/v1/op"));
+    }
+
+    #[test]
+    fn stitch_exact_impl_match_beats_interface_fallback() {
+        // Two servers: one names the handler's class exactly, the other only
+        // reaches it via the interface set. The exact one must win.
+        let dir = temp_dir("exact-wins");
+        let mut nodes = server_and_bean("/direct", "implBean", "com.acme.RestImpl");
+        nodes.extend(server_and_bean("/other", "otherBean", "com.acme.OtherImpl"));
+        nodes.push(class_node("com.acme.RestImpl"));
+        nodes.push(class_node("com.acme.OtherImpl"));
+        nodes.push(interface_node("com.acme.api.RestService"));
+        // OtherImpl implements the interface; the route handler is the IMPL
+        // class RestImpl, so the /direct server matches exactly.
+        let handler = "com.acme.RestImpl#op/0";
+        nodes.push(route_node("GET", "/op", handler));
+        let mut edges = vec![
+            handles_route_edge(handler, "GET", "/op"),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.RestImpl",
+                "Interface:com.acme.api.RestService",
+            ),
+            heritage_edge(
+                EdgeKind::Implements,
+                "Class:com.acme.OtherImpl",
+                "Interface:com.acme.api.RestService",
+            ),
+        ];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/direct/op"));
+    }
+
+    #[test]
+    fn stitch_interface_handler_without_heritage_is_noop() {
+        let dir = temp_dir("iface-none");
+        let mut nodes = server_and_bean("/v1", "restImpl", "com.acme.RestImpl");
+        nodes.push(class_node("com.acme.RestImpl"));
+        nodes.push(interface_node("com.acme.api.Unrelated"));
+        let handler = "com.acme.api.Unrelated#op/0";
+        nodes.push(route_node("GET", "/op", handler));
+        let mut edges = vec![handles_route_edge(handler, "GET", "/op")];
+
+        stitch_route_prefixes(&dir, &mut nodes, &mut edges, None);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let route = nodes.iter().find(|n| n.kind == NodeKind::Route).unwrap();
+        assert_eq!(prop(route, "path"), Some("/op"));
+        assert!(prop(route, "local_path").is_none());
+        assert!(!edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::IntegrationLink && e.reason == "cxf-jaxrs-prefix"));
     }
 
     #[test]
