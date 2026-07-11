@@ -1,4 +1,32 @@
-# Resolve CIH multi-repo / microservice limitations
+# Resolve CIH multi-repo / microservice limitations — ✅ COMPLETED
+
+> **Status: all six phases implemented and verified** (2026-07-11, branch
+> `feat/cross-repo-microservice` off dev@865f946). Landed in recommended order
+> F → A → B → C → D → E, one commit per phase:
+>
+> | Phase | Commit | Notes |
+> |---|---|---|
+> | F — auto group sync + freshness stamps | `feat(group)` | measured: 3-repo sync (fineract 87k nodes + fineract-loan + 212ecom-be, ~65 MB artifacts) ≈ 0.32 s wall per sync (release) — O(fleet) cost acceptable |
+> | A — Kotlin contract sites + routes | `feat(kotlin)` | string helpers hoisted to `contracts_common.rs`; tree walking per-language as planned |
+> | B — dynamic-URL folding | `feat(contracts)` | plus bugfix: Kafka `send` topic now positional arg 0 (payload was misattributed as topic) |
+> | C — TS/Python outbound | `feat(ts,py)` | file-id `in_callable` fallback pinned by test in both languages |
+> | D — Go routes + outbound | `feat(go)` | plus bugfix: tree-sitter-go pinned to 0.23 line — 0.25 (ABI 15) made every Go parse panic under the 0.24 runtime |
+> | E — trace_flow_x + api_impact callers | `feat(server)` | includes doubled-provider-row test (CXF dual-server cloning) |
+>
+> A `style:` pre-commit re-normalized the tree under current stable rustfmt
+> (CI pins `channel = "stable"`, which had moved past the tree's formatting).
+>
+> **End-to-end verified** on Kotlin-Spring provider + TS `fetch` consumer
+> fixtures (isolated HOME): auto-sync fires on re-analyze;
+> `contracts.jsonl` + `sync-state.json` written (generation increments);
+> template-string URL folds to `/api/orders/{*}` and matches the provider's
+> `{id}` route; `group status` flips STALE ↔ fresh with
+> `CIH_NO_AUTO_GROUP_SYNC=1`; `trace_flow_x` (driver level) crosses
+> consumer → CONTRACT → provider Route → inverse-HandlesRoute handler;
+> `api_impact(include_callers=true)` lists the TS caller. Full MCP-transport
+> pass over FalkorDB was not run (docker/FalkorDB down on the dev machine at
+> verification time) — the drivers sit one thin layer below the transport,
+> which is rmcp-generated and shared with every other tool.
 
 ## Context
 
