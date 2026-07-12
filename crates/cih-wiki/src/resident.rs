@@ -27,8 +27,9 @@ use cih_core::{Edge, GraphArtifacts, Node, RepoMap};
 
 use crate::render::{build_page_index, render_page, PageIndex, RenderContext, RenderedPage};
 use crate::{
-    resolve_feature_groups, source_bodies, BodyEntry, EntrypointRecord, WikiGenerationInfo,
-    WikiGraph, WikiInput,
+    build_class_maps, class_method_chains, resolve_feature_groups, source_bodies, BodyEntry,
+    ClassEnrichmentStore, CommunityLlmSummary, ControllerLlmSummary, EntrypointRecord,
+    FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo, WikiGraph, WikiInput, WikiMeta,
 };
 
 /// Self-referential resident render state: owns the graph data, and the
@@ -66,6 +67,12 @@ struct InputParts {
     repo_name: String,
     graph_version: String,
     community_version: String,
+    /// Read-only enrichment spliced from `.cih/class-enrichment.json` +
+    /// `.cih/wiki/wiki_meta.json` (P3.8 C3); `None` = graph-only tier.
+    llm_summaries: Option<HashMap<String, CommunityLlmSummary>>,
+    controller_summaries: Option<HashMap<String, ControllerLlmSummary>>,
+    feature_llm_summaries: Option<HashMap<String, FeatureLlmSummary>>,
+    flow_llm_summaries: Option<HashMap<String, FlowLlmSummary>>,
 }
 
 impl OwnedWiki {
@@ -177,6 +184,10 @@ impl OwnedWiki {
             .and_then(|p| std::fs::read_to_string(p).ok());
         let entrypoints = read_entrypoints(repo);
 
+        // Read-only enrichment splice: load persisted summaries if present.
+        let (llm_summaries, controller_summaries) = load_class_enrichment(repo, &graph);
+        let (feature_llm_summaries, flow_llm_summaries) = load_meta_enrichment(repo);
+
         let parts = InputParts {
             bodies,
             repo_map,
@@ -185,6 +196,10 @@ impl OwnedWiki {
             repo_name: repo_name.clone(),
             graph_version: graph_version.clone(),
             community_version,
+            llm_summaries,
+            controller_summaries,
+            feature_llm_summaries,
+            flow_llm_summaries,
         };
 
         // Build the resident WikiInput + RenderContext once (self-referential).
@@ -259,7 +274,7 @@ fn graph_only_input<'a>(
         community_version: parts.community_version,
         unresolved_report: parts.unresolved_report,
         repo_map: parts.repo_map,
-        llm_summaries: None,
+        llm_summaries: parts.llm_summaries,
         llm_full: None,
         llm_info: None,
         module_tree: None,
@@ -272,9 +287,9 @@ fn graph_only_input<'a>(
         },
         first_module_tree: None,
         save_evidence: None,
-        controller_summaries: None,
-        feature_llm_summaries: None,
-        flow_llm_summaries: None,
+        controller_summaries: parts.controller_summaries,
+        feature_llm_summaries: parts.feature_llm_summaries,
+        flow_llm_summaries: parts.flow_llm_summaries,
         grouping: "package".to_string(),
         filter_feature: Vec::new(),
         bodies: parts.bodies,
@@ -286,6 +301,78 @@ fn graph_only_input<'a>(
         flags_hash: None,
         changed_files: None,
     }
+}
+
+/// Read-only enrichment splice: load `.cih/class-enrichment.json` (written by a
+/// prior `cih-engine wiki --llm` run) and build the community + controller
+/// summary maps from it — no LLM call. `(None, None)` when the cache is absent
+/// or empty, so the page renders graph-only.
+#[allow(clippy::type_complexity)]
+fn load_class_enrichment(
+    repo: &Path,
+    graph: &WikiGraph,
+) -> (
+    Option<HashMap<String, CommunityLlmSummary>>,
+    Option<HashMap<String, ControllerLlmSummary>>,
+) {
+    let path = repo.join(".cih").join("class-enrichment.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(store) = serde_json::from_str::<ClassEnrichmentStore>(&text) else {
+        return (None, None);
+    };
+    if store.entries.is_empty() {
+        return (None, None);
+    }
+    let class_methods = class_method_chains(graph, &[]);
+    let (ctrl_map, comm_map) = build_class_maps(graph, &class_methods, &store);
+    (Some(comm_map), Some(ctrl_map))
+}
+
+/// Read-only enrichment splice (feature + flow): load `.cih/wiki/wiki_meta.json`
+/// (written by a prior `cih-engine wiki --llm` run) and lift its per-feature and
+/// per-flow caches into the `WikiInput` maps — no LLM call, no evidence
+/// re-hashing (the cache is served as-is). `(None, None)` when absent/empty.
+#[allow(clippy::type_complexity)]
+fn load_meta_enrichment(
+    repo: &Path,
+) -> (
+    Option<HashMap<String, FeatureLlmSummary>>,
+    Option<HashMap<String, FlowLlmSummary>>,
+) {
+    let path = repo.join(".cih").join("wiki").join("wiki_meta.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(meta) = serde_json::from_str::<WikiMeta>(&text) else {
+        return (None, None);
+    };
+    let feature_map: HashMap<String, FeatureLlmSummary> = meta
+        .feature_cache
+        .into_iter()
+        .map(|(feature, e)| {
+            (
+                feature,
+                FeatureLlmSummary {
+                    po_overview: e.po_overview,
+                    po_capabilities: e.po_capabilities,
+                    ba_process_overview: e.ba_process_overview,
+                    ba_business_rules: e.ba_business_rules,
+                },
+            )
+        })
+        .collect();
+    let flow_map: HashMap<String, FlowLlmSummary> = meta
+        .flow_cache
+        .into_iter()
+        .map(|(id, e)| (id, e.summary))
+        .collect();
+
+    (
+        (!feature_map.is_empty()).then_some(feature_map),
+        (!flow_map.is_empty()).then_some(flow_map),
+    )
 }
 
 fn read_repo_map(repo: &Path) -> Option<RepoMap> {

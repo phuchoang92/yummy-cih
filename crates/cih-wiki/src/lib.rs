@@ -7,6 +7,7 @@
 //! `anyhow::Result` by design (context strings over structured variants).
 
 pub mod bodies;
+pub mod enrich_maps;
 pub mod features;
 pub mod graph;
 pub mod html;
@@ -21,6 +22,7 @@ pub mod slugify;
 
 pub use bodies::{source_bodies, BodyEntry};
 pub use cih_core::RepoMap;
+pub use enrich_maps::{build_class_maps, class_method_chains};
 pub use features::{assign_class_slugs, FeatureGroup};
 pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
