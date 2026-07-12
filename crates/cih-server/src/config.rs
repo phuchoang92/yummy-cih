@@ -16,6 +16,10 @@ pub struct Config {
     pub bind: String,
     pub falkor_url: String,
     pub graph_key: String,
+    /// Optional home group (`CIH_GROUP`). When set, `list_repos` scopes to the
+    /// group's members — the multi-repo serving mode where one server fronts a
+    /// whole microservice and per-tool `repo` selects the member.
+    pub group: Option<String>,
     pub artifacts_dir: Option<PathBuf>,
     pub pg_url: Option<String>,
     /// Agent LLM: OpenAI-compatible base URL (default: Gemini compat endpoint).
@@ -55,6 +59,7 @@ impl std::fmt::Debug for Config {
             .field("bind", &self.bind)
             .field("falkor_url", &self.falkor_url)
             .field("graph_key", &self.graph_key)
+            .field("group", &self.group)
             .field("artifacts_dir", &self.artifacts_dir)
             .field("pg_url", &self.pg_url.as_deref().map(|_| "[set]"))
             .field("agent_llm_base_url", &self.agent_llm_base_url)
@@ -81,6 +86,7 @@ impl Config {
             bind: env("CIH_BIND", "127.0.0.1:8080"),
             falkor_url: env("FALKOR_URL", "redis://127.0.0.1:6379"),
             graph_key: env("CIH_GRAPH_KEY", "cih"),
+            group: std::env::var("CIH_GROUP").ok().filter(|s| !s.is_empty()),
             artifacts_dir: std::env::var("CIH_ARTIFACTS_DIR").ok().map(PathBuf::from),
             pg_url: std::env::var("CIH_PG_URL").ok(),
             agent_llm_base_url: env(

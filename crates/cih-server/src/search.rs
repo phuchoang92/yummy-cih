@@ -19,6 +19,9 @@ pub(crate) struct QueryArgs {
     /// Include a one-hop subgraph around the top results.
     #[serde(default)]
     pub(crate) expand: bool,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub(crate) repo: String,
 }
 
 #[derive(Debug, Serialize)]

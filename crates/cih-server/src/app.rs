@@ -11,8 +11,12 @@
 //! docs.rs for the version you resolve — the tool BODIES (the `self.store.*`
 //! calls) are SDK-agnostic and stay as-is.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::RwLock;
 
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 use anyhow::Result;
@@ -47,12 +51,42 @@ use crate::{
 use crate::config::{build_store, Config};
 use crate::search::{QueryArgs, QueryResult, SearchState};
 
+/// Map a registry `artifacts_dir` (the versioned `.cih/artifacts/<hash>` dir,
+/// which cross-repo readers use directly) to the unversioned parent that
+/// `SearchState`/`GraphArtifacts::latest_in_dir` expect for BM25.
+fn unversioned_artifacts_dir(versioned: &str) -> PathBuf {
+    Path::new(versioned)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(versioned))
+}
+
+/// The graph store + BM25 search resolved for one target repo (the primary, or
+/// a group member named via a tool's `repo` arg).
+struct RepoCtx {
+    store: Arc<dyn GraphStore>,
+    graph_key: String,
+    search: SearchState,
+}
+
 #[derive(Clone)]
 struct CihServer {
+    /// The primary repo's store (also seeded into `stores` under `graph_key`).
     store: Arc<dyn GraphStore>,
     search: SearchState,
+    /// Default graph key — the repo served when a tool's `repo` arg is empty.
     graph_key: String,
+    /// Home group (`CIH_GROUP`): when set, `list_repos` scopes to its members.
+    group: Option<String>,
     falkor_url: String,
+    /// (max_concurrent_queries, acquire_timeout) for lazily-connected member stores.
+    store_limits: (usize, Duration),
+    /// Shared pgvector handle, cloned into each member repo's `SearchState`.
+    embed_store: Option<Arc<EmbedStore>>,
+    /// Lazily-connected `FalkorStore` per graph key — one server, many graphs.
+    stores: Arc<RwLock<HashMap<String, Arc<dyn GraphStore>>>>,
+    /// Per-repo BM25 search state, keyed by the unversioned artifacts dir.
+    searches: Arc<RwLock<HashMap<String, SearchState>>>,
     jobs: Jobs,
     read_file_limits: files::ReadFileLimits,
     wiki: wiki::WikiSearchState,
@@ -71,16 +105,32 @@ impl CihServer {
         artifacts_dir: Option<PathBuf>,
         embed_store: Option<Arc<EmbedStore>>,
         graph_key: String,
+        group: Option<String>,
         falkor_url: String,
+        store_limits: (usize, Duration),
         read_file_limits: files::ReadFileLimits,
         wiki: wiki::WikiSearchState,
         agent: Option<agent::AgentRunner>,
     ) -> Self {
+        let search = SearchState::new(artifacts_dir.clone(), embed_store.clone());
+        // Seed the caches with the primary so the default (empty-repo) path
+        // reuses the already schema-initialised connection + BM25 state.
+        let mut stores = HashMap::new();
+        stores.insert(graph_key.clone(), store.clone());
+        let mut searches = HashMap::new();
+        if let Some(dir) = &artifacts_dir {
+            searches.insert(dir.to_string_lossy().into_owned(), search.clone());
+        }
         Self {
             store,
-            search: SearchState::new(artifacts_dir, embed_store),
+            search,
             graph_key,
+            group,
             falkor_url,
+            store_limits,
+            embed_store,
+            stores: Arc::new(RwLock::new(stores)),
+            searches: Arc::new(RwLock::new(searches)),
             jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             read_file_limits,
             wiki,
@@ -90,8 +140,64 @@ impl CihServer {
         }
     }
 
-    async fn resolve_symbol(&self, name: &str) -> Result<SymbolResolution, McpError> {
-        symbol::resolve_symbol(&self.store, name).await
+    /// Resolve a tool's `repo` arg (empty = the server's primary graph key) to
+    /// its graph store + BM25 search, connecting/loading lazily and caching by
+    /// graph key / artifacts dir. This is what turns one server into a
+    /// whole-group server: every member's graph lives in the same FalkorDB, so
+    /// a `FalkorStore` per key reaches them all.
+    async fn resolve(&self, repo: &str) -> Result<RepoCtx, McpError> {
+        let entry = crate::utils::resolve_repo_entry(repo, &self.graph_key)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let store = self.store_for(&entry.graph_key).await?;
+        let search = self.search_for(&entry.artifacts_dir).await;
+        Ok(RepoCtx {
+            store,
+            graph_key: entry.graph_key,
+            search,
+        })
+    }
+
+    /// Get-or-connect a `FalkorStore` for `graph_key` (cached across calls).
+    async fn store_for(&self, graph_key: &str) -> Result<Arc<dyn GraphStore>, McpError> {
+        if let Some(store) = self.stores.read().await.get(graph_key) {
+            return Ok(store.clone());
+        }
+        let store = cih_falkor::FalkorStore::connect(&self.falkor_url, graph_key)
+            .map_err(|e| {
+                McpError::internal_error(format!("connect graph '{graph_key}': {e}"), None)
+            })?
+            .with_query_limit(self.store_limits.0, self.store_limits.1);
+        store.ensure_schema().await.map_err(|e| {
+            McpError::internal_error(format!("schema init for graph '{graph_key}': {e}"), None)
+        })?;
+        let store: Arc<dyn GraphStore> = Arc::new(store);
+        self.stores
+            .write()
+            .await
+            .insert(graph_key.to_string(), store.clone());
+        Ok(store)
+    }
+
+    /// Get-or-build a `SearchState` for a repo. The registry's `artifacts_dir`
+    /// is the *versioned* dir (`.cih/artifacts/<hash>`); BM25 wants the
+    /// unversioned parent, which `SearchState`/`latest_in_dir` resolve.
+    async fn search_for(&self, versioned_artifacts_dir: &str) -> SearchState {
+        let dir = unversioned_artifacts_dir(versioned_artifacts_dir);
+        let key = dir.to_string_lossy().into_owned();
+        if let Some(search) = self.searches.read().await.get(&key) {
+            return search.clone();
+        }
+        let search = SearchState::new(Some(dir), self.embed_store.clone());
+        self.searches.write().await.insert(key, search.clone());
+        search
+    }
+
+    async fn resolve_symbol(
+        &self,
+        store: &Arc<dyn GraphStore>,
+        name: &str,
+    ) -> Result<SymbolResolution, McpError> {
+        symbol::resolve_symbol(store, name).await
     }
 
     #[tool(
@@ -103,7 +209,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ContextArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let id = match self.resolve_symbol(&args.name).await? {
+        let rc = self.resolve(&args.repo).await?;
+        let id = match self.resolve_symbol(&rc.store, &args.name).await? {
             SymbolResolution::Id(id) => id,
             SymbolResolution::Ambiguous(candidates) => {
                 return json_result(&AmbiguousResult::from_nodes(candidates));
@@ -115,7 +222,7 @@ impl CihServer {
                 ));
             }
         };
-        let ctx = self.store.context(&id).await.map_err(to_mcp)?;
+        let ctx = rc.store.context(&id).await.map_err(to_mcp)?;
         json_result(&ctx)
     }
 
@@ -128,7 +235,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ImpactArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let id = match self.resolve_symbol(&args.name).await? {
+        let rc = self.resolve(&args.repo).await?;
+        let id = match self.resolve_symbol(&rc.store, &args.name).await? {
             SymbolResolution::Id(id) => id,
             SymbolResolution::Ambiguous(candidates) => {
                 return json_result(&AmbiguousResult::from_nodes(candidates));
@@ -145,7 +253,7 @@ impl CihServer {
         } else {
             Some(args.direction.as_str())
         });
-        let res = self
+        let res = rc
             .store
             .impact(
                 &id,
@@ -169,12 +277,13 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<CommunitiesArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let mut communities = self.store.communities().await.map_err(to_mcp)?;
+        let rc = self.resolve(&args.repo).await?;
+        let mut communities = rc.store.communities().await.map_err(to_mcp)?;
         if args.limit > 0 {
             communities.truncate(args.limit);
         }
         if args.format == "diagram" {
-            let edges = self.store.community_graph().await.map_err(to_mcp)?;
+            let edges = rc.store.community_graph().await.map_err(to_mcp)?;
             return json_result(&render_community_diagram(&communities, &edges));
         }
         json_result(&communities)
@@ -187,8 +296,9 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<QueryArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let rc = self.resolve(&args.repo).await?;
         let limit = search::query_limit(args.limit);
-        let hits = self
+        let hits = rc
             .search
             .query_hits(&args.q, limit)
             .await
@@ -196,7 +306,7 @@ impl CihServer {
         let subgraph = if args.expand && !hits.is_empty() {
             let seeds: Vec<cih_core::NodeId> =
                 hits.iter().take(5).map(|hit| hit.node_id.clone()).collect();
-            Some(self.store.subgraph(&seeds, 1).await.map_err(to_mcp)?)
+            Some(rc.store.subgraph(&seeds, 1).await.map_err(to_mcp)?)
         } else {
             None
         };
@@ -213,8 +323,9 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<SearchCodeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let rc = self.resolve(&args.repo).await?;
         let limit = (if args.limit == 0 { 10 } else { args.limit }).clamp(1, 50);
-        let hits = self
+        let hits = rc
             .search
             .query_hits(&args.query, limit)
             .await
@@ -282,8 +393,9 @@ impl CihServer {
             Some(args.prefix.as_str())
         };
         let limit = (if args.limit == 0 { 200 } else { args.limit }).clamp(1, 1000);
+        let rc = self.resolve(&args.repo).await?;
         let routes: Vec<cih_graph_store::RouteInfo> =
-            self.store.route_map(prefix, limit).await.map_err(to_mcp)?;
+            rc.store.route_map(prefix, limit).await.map_err(to_mcp)?;
         if args.format == "openapi" {
             return json_result(&render_openapi(&routes));
         }
@@ -293,6 +405,24 @@ impl CihServer {
     #[tool(description = "List all repos indexed in the CIH registry with their stats.")]
     async fn list_repos(&self, _: Parameters<ListReposArgs>) -> Result<CallToolResult, McpError> {
         let reg = cih_core::Registry::load();
+        // Multi-repo serving: when the server fronts a group, scope the listing
+        // to its members and flag the primary (the repo used when a tool's
+        // `repo` arg is empty). Pass `repo` to any deep tool to target another.
+        if let Some(group) = &self.group {
+            let groups = cih_core::GroupRegistry::load();
+            if let Some(g) = groups.find(group) {
+                let members: Vec<&cih_core::RegistryEntry> = reg
+                    .entries
+                    .iter()
+                    .filter(|e| g.repos.iter().any(|r| r == &e.name))
+                    .collect();
+                return json_result(&serde_json::json!({
+                    "group": group,
+                    "primary_graph_key": self.graph_key,
+                    "repos": members,
+                }));
+            }
+        }
         json_result(&reg.entries)
     }
 
@@ -357,7 +487,10 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<DetectChangesArgs>,
     ) -> Result<CallToolResult, McpError> {
-        changes::detect_changes(&self.store, &self.graph_key, args).await
+        // Resolve so the graph queried matches the repo being diffed (a
+        // non-primary `repo` must hit its own graph, not the primary's).
+        let rc = self.resolve(&args.repo).await?;
+        changes::detect_changes(&rc.store, &rc.graph_key, args).await
     }
 
     #[tool(
@@ -422,7 +555,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TraceFlowArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let id = match self.resolve_symbol(&args.entry_point).await? {
+        let rc = self.resolve(&args.repo).await?;
+        let id = match self.resolve_symbol(&rc.store, &args.entry_point).await? {
             SymbolResolution::Id(id) => id,
             SymbolResolution::Ambiguous(candidates) => {
                 return json_result(&AmbiguousResult::from_nodes(candidates));
@@ -440,11 +574,7 @@ impl CihServer {
             args.max_depth
         })
         .clamp(1, 10);
-        let steps = self
-            .store
-            .flow_downstream(&id, depth)
-            .await
-            .map_err(to_mcp)?;
+        let steps = rc.store.flow_downstream(&id, depth).await.map_err(to_mcp)?;
         if args.format == "mermaid" {
             return text_result(render_mermaid_flow(&id, &steps));
         }
@@ -467,7 +597,8 @@ impl CihServer {
         Parameters(args): Parameters<ComplexityHotspotsArgs>,
     ) -> Result<CallToolResult, McpError> {
         let limit = if args.limit == 0 { 20 } else { args.limit };
-        let hotspots = self
+        let rc = self.resolve(&args.repo).await?;
+        let hotspots = rc
             .store
             .complexity_hotspots(
                 if args.min_cyclomatic == 0 {
@@ -504,7 +635,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<FindDuplicatesArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let id = match self.resolve_symbol(&args.name).await? {
+        let rc = self.resolve(&args.repo).await?;
+        let id = match self.resolve_symbol(&rc.store, &args.name).await? {
             SymbolResolution::Id(id) => id,
             SymbolResolution::Ambiguous(candidates) => {
                 return json_result(&AmbiguousResult::from_nodes(candidates));
@@ -522,7 +654,7 @@ impl CihServer {
             args.min_jaccard
         };
         let limit = if args.limit == 0 { 10 } else { args.limit };
-        let similar = self
+        let similar = rc
             .store
             .similar_methods(&id, min_jaccard, limit)
             .await
@@ -544,7 +676,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<FeatureMapArgs>,
     ) -> Result<CallToolResult, McpError> {
-        feature::feature_map(&self.store, &self.search, args).await
+        let rc = self.resolve(&args.repo).await?;
+        feature::feature_map(&rc.store, &rc.search, args).await
     }
 
     #[tool(
@@ -555,7 +688,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TestCoverageArgs>,
     ) -> Result<CallToolResult, McpError> {
-        coverage::test_coverage(&self.store, args).await
+        let rc = self.resolve(&args.repo).await?;
+        coverage::test_coverage(&rc.store, args).await
     }
 
     #[tool(
@@ -567,7 +701,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<RegressionScopeArgs>,
     ) -> Result<CallToolResult, McpError> {
-        coverage::regression_scope(&self.store, args).await
+        let rc = self.resolve(&args.repo).await?;
+        coverage::regression_scope(&rc.store, args).await
     }
 
     #[tool(
@@ -578,7 +713,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<UntestedPathsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        coverage::untested_paths(&self.store, args).await
+        let rc = self.resolve(&args.repo).await?;
+        coverage::untested_paths(&rc.store, args).await
     }
 
     #[tool(
@@ -849,7 +985,12 @@ pub async fn run() -> Result<()> {
         cfg.artifacts_dir.clone(),
         embed_store,
         graph_key,
+        cfg.group.clone(),
         cfg.falkor_url.clone(),
+        (
+            cfg.max_concurrent_queries,
+            Duration::from_millis(cfg.query_queue_timeout_ms),
+        ),
         files::ReadFileLimits {
             max_bytes: cfg.read_file_max_bytes,
             max_lines: cfg.read_file_max_lines,
@@ -917,4 +1058,26 @@ pub async fn run() -> Result<()> {
         .await?;
     tracing::info!("server shut down cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unversioned_artifacts_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn versioned_artifacts_dir_maps_to_unversioned_parent() {
+        // Registry stores the versioned dir; BM25 search needs the parent.
+        assert_eq!(
+            unversioned_artifacts_dir("/repo/.cih/artifacts/b5bb9fb09e9b7a16"),
+            PathBuf::from("/repo/.cih/artifacts")
+        );
+        // Distinct repos collapse to distinct search dirs (cache keys).
+        assert_ne!(
+            unversioned_artifacts_dir("/a/.cih/artifacts/deadbeef"),
+            unversioned_artifacts_dir("/b/.cih/artifacts/deadbeef")
+        );
+        // Degenerate input (no parent) falls back to itself rather than panicking.
+        assert_eq!(unversioned_artifacts_dir("/"), PathBuf::from("/"));
+    }
 }

@@ -6,6 +6,10 @@ pub struct ContextArgs {
     /// Symbol id (e.g. `Method:com.acme.UserService#save`) or short name
     /// (e.g. `UserService`). Short names trigger disambiguation.
     pub name: String,
+    /// Target service: a group member's registry name (e.g. "212ecom-ai");
+    /// empty = the server's primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -21,6 +25,9 @@ pub struct ImpactArgs {
     /// Output format. Omit or pass empty for default JSON. Pass `"diagram"` for D3 force-directed JSON.
     #[serde(default)]
     pub format: String,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -31,6 +38,9 @@ pub struct CommunitiesArgs {
     /// Output format. Omit or pass empty for default JSON. Pass `"diagram"` for D3 service-map JSON.
     #[serde(default)]
     pub format: String,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -44,6 +54,9 @@ pub struct RouteMapArgs {
     /// Output format. Omit or pass empty for default JSON. Pass `"openapi"` for OpenAPI 3.0.3 JSON.
     #[serde(default)]
     pub format: String,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -114,6 +127,9 @@ pub struct TraceFlowArgs {
     /// Output format. Omit or pass empty for default JSON. Pass `"mermaid"` for a Mermaid flowchart string.
     #[serde(default)]
     pub format: String,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -144,6 +160,9 @@ pub struct FeatureMapArgs {
     /// Max symbols to search for before clustering (default 50, max 200, pass 0 for default).
     #[serde(default)]
     pub limit: usize,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -153,6 +172,9 @@ pub struct SearchCodeArgs {
     /// Maximum number of results to return (default 10, max 50, pass 0 for default).
     #[serde(default)]
     pub limit: usize,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,12 +202,18 @@ pub struct AskCodebaseArgs {
 pub struct TestCoverageArgs {
     /// Symbol to look up test coverage for — full NodeId or short name.
     pub name: String,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RegressionScopeArgs {
     /// Repo-relative file paths that changed (e.g. ["src/main/java/com/acme/OrderService.java"]).
     pub changed_files: Vec<String>,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -195,6 +223,9 @@ pub struct UntestedPathsArgs {
     /// Max symbols to return (default 50, max 500, pass 0 for default).
     #[serde(default)]
     pub limit: usize,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -304,6 +335,9 @@ pub struct ComplexityHotspotsArgs {
     /// Maximum number of results (default: 20, max 200, pass 0 for default).
     #[serde(default)]
     pub limit: usize,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -343,6 +377,9 @@ pub struct FindDuplicatesArgs {
     /// Maximum number of results (default: 10, pass 0 for default).
     #[serde(default)]
     pub limit: usize,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
