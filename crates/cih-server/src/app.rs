@@ -44,8 +44,8 @@ use crate::jobs::Jobs;
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, parse_direction, text_result, to_mcp};
 use crate::{
-    agent, browser, changes, contracts, coverage, feature, files, indexing, patterns, resources,
-    search, server, symbol, taint, wiki, xflow,
+    browser, changes, contracts, coverage, feature, files, indexing, patterns, resources, search,
+    server, symbol, taint, wiki, xflow,
 };
 
 use crate::config::{build_store, Config};
@@ -94,7 +94,6 @@ struct CihServer {
     /// api_impact caller walks).
     xflow: xflow::XflowState,
     tool_router: ToolRouter<CihServer>,
-    agent: Option<agent::AgentRunner>,
 }
 
 #[tool_router]
@@ -110,7 +109,6 @@ impl CihServer {
         store_limits: (usize, Duration),
         read_file_limits: files::ReadFileLimits,
         wiki: wiki::WikiSearchState,
-        agent: Option<agent::AgentRunner>,
     ) -> Self {
         let search = SearchState::new(artifacts_dir.clone(), embed_store.clone());
         // Seed the caches with the primary so the default (empty-repo) path
@@ -136,7 +134,6 @@ impl CihServer {
             wiki,
             xflow: xflow::XflowState::new(),
             tool_router: Self::tool_router(),
-            agent,
         }
     }
 
@@ -344,34 +341,6 @@ impl CihServer {
             })
             .collect();
         json_result(&matches)
-    }
-
-    #[tool(
-        description = "Ask a natural language question about the codebase and get a grounded answer. \
-            The agent calls search_code, get_context, and trace_impact autonomously to build its answer. \
-            Requires CIH_AGENT_API_KEY or a supported LLM API key env var (GEMINI_API_KEY, OPENAI_API_KEY). \
-            Example: ask_codebase(question='What does POST /orders do end-to-end?')"
-    )]
-    async fn ask_codebase(
-        &self,
-        Parameters(args): Parameters<AskCodebaseArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let runner = self.agent.as_ref().ok_or_else(|| {
-            McpError::internal_error(
-                "agent not configured — set CIH_AGENT_API_KEY (or GEMINI_API_KEY / OPENAI_API_KEY)",
-                None,
-            )
-        })?;
-        let description = if args.codebase_description.is_empty() {
-            "a backend codebase"
-        } else {
-            args.codebase_description.as_str()
-        };
-        let answer = runner
-            .ask(&args.question, description)
-            .await
-            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
-        json_result(&answer)
     }
 
     #[tool(
@@ -898,7 +867,7 @@ impl ServerHandler for CihServer {
                  Pages are also readable as `cih://repo/{name}/wiki/{slug}` resources.\n\
                  \n\
                  ## Other tools\n\
-                 `feature_map`, `query`, `ask_codebase`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
+                 `feature_map`, `query`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
                  `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`, `grep_files`.\n\
                  \n\
                  ## Security\n\
@@ -951,10 +920,6 @@ pub async fn run() -> Result<()> {
     if cfg.api_token.is_none() {
         tracing::warn!("CIH_API_TOKEN is not set — server is open to unauthenticated requests");
     }
-    if cfg.agent_api_key.is_none() {
-        tracing::info!("no agent API key set — ask_codebase tool will be disabled");
-    }
-
     let store = build_store(&cfg).await?;
     let embed_store = if let Some(pg_url) = &cfg.pg_url {
         let store = EmbedStore::connect(pg_url, EmbedModelKind::MiniLm).await?;
@@ -964,19 +929,6 @@ pub async fn run() -> Result<()> {
         None
     };
     let graph_key = cfg.graph_key.clone();
-    let agent = cfg
-        .agent_api_key
-        .as_deref()
-        .map(|key| {
-            agent::AgentRunner::new(
-                SearchState::new(cfg.artifacts_dir.clone(), None),
-                store.clone(),
-                cfg.agent_llm_base_url.clone(),
-                key.to_string(),
-                cfg.agent_llm_model.clone(),
-            )
-        })
-        .transpose()?;
     // One shared state: the axum /wiki/search route and the MCP wiki tools use
     // the same mtime-invalidated index cache.
     let wiki_state = wiki::WikiSearchState::new(cfg.graph_key.clone());
@@ -996,7 +948,6 @@ pub async fn run() -> Result<()> {
             max_lines: cfg.read_file_max_lines,
         },
         wiki_state.clone(),
-        agent,
     );
     let browser_state = browser::BrowserState::new(
         cih.store.clone(),

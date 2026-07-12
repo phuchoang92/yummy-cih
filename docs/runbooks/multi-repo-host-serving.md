@@ -62,7 +62,7 @@ All env-driven (`crates/cih-server/src/config.rs`):
 | `CIH_GROUP` | the home group name — scopes `list_repos` to its members |
 | `CIH_ARTIFACTS_DIR` | the **primary** repo's **unversioned** `<repo>/.cih/artifacts` parent (BM25 resolves the latest versioned subdir) |
 | `FALKOR_URL` | `redis://127.0.0.1:6380` |
-| `CIH_PG_URL` | `postgres://<user>:<pass>@127.0.0.1:5433/<db>` — optional; enables semantic `query`/`ask_codebase`. BM25 `search_code` works without it |
+| `CIH_PG_URL` | `postgres://<user>:<pass>@127.0.0.1:5433/<db>` — optional; enables semantic `query`. BM25 `search_code` works without it |
 
 Member repos other than the primary need no extra config: the server resolves
 each member's graph key + `artifacts_dir` from the `Registry` when a tool's

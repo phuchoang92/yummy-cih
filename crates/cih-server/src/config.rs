@@ -22,12 +22,6 @@ pub struct Config {
     pub group: Option<String>,
     pub artifacts_dir: Option<PathBuf>,
     pub pg_url: Option<String>,
-    /// Agent LLM: OpenAI-compatible base URL (default: Gemini compat endpoint).
-    pub agent_llm_base_url: String,
-    /// Agent LLM: model name.
-    pub agent_llm_model: String,
-    /// Agent LLM: API key env var (default: auto-resolved from GEMINI/OPENAI/ANTHROPIC_API_KEY).
-    pub agent_api_key: Option<String>,
     /// Optional static bearer token to protect /mcp and /graph. Unset = open (dev mode).
     pub api_token: Option<String>,
     /// Escape hatch: allow a non-loopback bind without an API token (trusted network).
@@ -62,12 +56,6 @@ impl std::fmt::Debug for Config {
             .field("group", &self.group)
             .field("artifacts_dir", &self.artifacts_dir)
             .field("pg_url", &self.pg_url.as_deref().map(|_| "[set]"))
-            .field("agent_llm_base_url", &self.agent_llm_base_url)
-            .field("agent_llm_model", &self.agent_llm_model)
-            .field(
-                "agent_api_key",
-                &self.agent_api_key.as_deref().map(|_| "[REDACTED]"),
-            )
             .field(
                 "api_token",
                 &self.api_token.as_deref().map(|_| "[REDACTED]"),
@@ -89,16 +77,6 @@ impl Config {
             group: std::env::var("CIH_GROUP").ok().filter(|s| !s.is_empty()),
             artifacts_dir: std::env::var("CIH_ARTIFACTS_DIR").ok().map(PathBuf::from),
             pg_url: std::env::var("CIH_PG_URL").ok(),
-            agent_llm_base_url: env(
-                "CIH_AGENT_LLM_BASE_URL",
-                "https://generativelanguage.googleapis.com/v1beta/openai",
-            ),
-            agent_llm_model: env("CIH_AGENT_LLM_MODEL", "gemini-2.0-flash"),
-            agent_api_key: std::env::var("CIH_AGENT_API_KEY")
-                .or_else(|_| std::env::var("GEMINI_API_KEY"))
-                .or_else(|_| std::env::var("OPENAI_API_KEY"))
-                .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-                .ok(),
             api_token: std::env::var("CIH_API_TOKEN").ok(),
             allow_insecure: std::env::var("CIH_ALLOW_INSECURE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

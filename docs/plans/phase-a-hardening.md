@@ -64,11 +64,10 @@ loopback-detection helper.
 adding `CIH_API_TOKEN=x` or `CIH_ALLOW_INSECURE=1` lets it start; `127.0.0.1` bind still
 starts with only a warning.
 
-Also add **SECURITY.md** at repo root: document the `ask_codebase` data-egress (sends
-symbol names, file paths, and search snippets to the configured LLM — default Gemini —
-when `CIH_AGENT_API_KEY` is set; off by default), the `CIH_API_TOKEN` requirement, and the
-recommendation to leave `ask_codebase` disabled for the banking deployment and do LLM
-reasoning in the downstream agent.
+Also add **SECURITY.md** at repo root: document the `CIH_API_TOKEN` requirement and
+data-egress posture. _(Superseded: `ask_codebase` and its LLM egress were later removed
+— the server no longer sends code off-box. `docs/SECURITY.md §2` now documents the
+egress-free posture + the embedding-model download as the only remaining outbound path.)_
 
 ### A3 — `read_file` size cap
 

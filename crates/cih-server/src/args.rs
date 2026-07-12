@@ -190,15 +190,6 @@ pub struct CodeMatch {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct AskCodebaseArgs {
-    /// Natural language question about the codebase (e.g. "What does POST /orders do end-to-end?").
-    pub question: String,
-    /// One-sentence description of the codebase to prime the agent (e.g. "Java/Spring e-commerce backend"). Leave empty for generic description.
-    #[serde(default)]
-    pub codebase_description: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TestCoverageArgs {
     /// Symbol to look up test coverage for — full NodeId or short name.
     pub name: String,

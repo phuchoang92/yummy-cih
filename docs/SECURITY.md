@@ -28,31 +28,37 @@ Escape hatches:
 Put the server behind TLS (reverse proxy) for any non-local deployment; the bearer
 token is sent in a header and must not travel in cleartext.
 
-## 2. LLM data egress — `ask_codebase`
+## 2. LLM data egress
 
-Most MCP tools are fully local: they query FalkorDB / the `.cih` artifacts and send
-nothing outside the machine.
+`cih-server` no longer performs any **LLM** egress. The embedded `ask_codebase`
+agent — the one tool that POSTed your code (symbol names, method signatures, file
+paths, search snippets) to an external LLM — has been **removed**. All MCP tools are
+now deterministic and local: they query FalkorDB / the `.cih` artifacts and send no
+code off-box.
 
-**The exception is `ask_codebase`.** It runs an internal agent loop that calls an
-external, OpenAI-compatible LLM endpoint. The requests include the user's question,
-a codebase description, and tool results — which contain **symbol names, fully
-qualified method signatures, file paths, and code-search snippets** from your repo.
+Natural-language Q&A now lives in your **MCP client** (Claude Code or any agent),
+which you control and can point at an approved model. The client drives CIH's raw
+structured tools (`search_code`, `context`, `impact`, `route_map`, `trace_flow`,
+`trace_flow_x`, `detect_changes`, `taint_paths`, …), none of which send code off-box —
+and, unlike the old embedded agent, it reasons across your **whole repo group**, not
+just one primary repo. For a headless "ask" endpoint with no model client, run a
+separate sidecar that is itself an MCP client and holds your own key (see the
+`cih-agent` follow-up); the graph server stays egress-free.
 
-- It is **opt-in and off by default**: the tool is only enabled when an API key is
-  configured (`CIH_AGENT_API_KEY`, or `GEMINI_API_KEY` / `OPENAI_API_KEY` /
-  `ANTHROPIC_API_KEY`). With no key set, `ask_codebase` is disabled.
-- The **default endpoint is Google Gemini** (`generativelanguage.googleapis.com`).
-  Override with `CIH_AGENT_LLM_BASE_URL` / `CIH_AGENT_LLM_MODEL` to point at an
-  internal or approved endpoint.
+### Remaining outbound path — embedding model download (not LLM, not code)
+
+`cih-server` still makes **one** kind of outbound call when semantic search is
+enabled: the `cih-embed` crate (via `fastembed` → `hf-hub`) downloads the sentence
+embedding model from **huggingface.co** on first use. This sends **no repository
+data** — only a public model fetch. For a fully air-gapped deployment, pre-provision
+the model and set `HF_HUB_OFFLINE=1`, or run without `CIH_PG_URL` (BM25-only search
+needs no embeddings). Making the core provably zero-egress is a tracked follow-up.
 
 ### Recommendation for sensitive / regulated codebases
 
-Leave `ask_codebase` **disabled** (set no agent API key). Do LLM reasoning in your
-downstream agent, which you control and can point at an approved model — and drive
-it with the raw structured tools (`search_code`, `context`, `impact`, `trace_flow`,
-`detect_changes`, `taint_paths`, …), none of which send code off-box. If you do want
-`ask_codebase` on, point `CIH_AGENT_LLM_BASE_URL` at an internally hosted,
-contractually-approved endpoint — never the public default.
+This is now the default posture — the graph server holds no LLM key and makes no
+code-bearing outbound call. Keep LLM reasoning in a client/sidecar you control, and
+air-gap the embedding model (above) if required.
 
 ## 3. Other notes
 

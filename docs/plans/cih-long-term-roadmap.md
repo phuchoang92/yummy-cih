@@ -44,9 +44,9 @@ must make it easy — not expensive — to onboard the next team.
 | `cih-embed` enriched text | ✅ Phase 3 | Route `httpMethod+path` and IntegrationRoute `uri+source` added to embedding text |
 | `cih-search` BM25 enrichment | ✅ Phase 3 | Route path segments, IntegrationRoute uri/source in BM25 index |
 | `search_code` MCP tool | ✅ Phase 3 | Hybrid BM25 search exposed as MCP tool; `limit` 1–50 |
-| `AgentRunner` (Phase 4) | ✅ Phase 4 | Multi-turn OpenAI-compatible tool-use loop in `cih-server/src/agent.rs` |
-| `ask_codebase` MCP tool | ✅ Phase 4 | Wired to `AgentRunner`; activated when `CIH_AGENT_API_KEY` / `GEMINI_API_KEY` is set |
-| Agent LLM config | ✅ Phase 4 | `CIH_AGENT_LLM_BASE_URL`, `CIH_AGENT_LLM_MODEL`, `CIH_AGENT_API_KEY` env vars |
+| `AgentRunner` (Phase 4) | ⛔ Removed | Embedded LLM agent deleted — CIH is now a pure deterministic tool provider; NL Q&A lives in the MCP client. See `docs/SECURITY.md §2`. |
+| `ask_codebase` MCP tool | ⛔ Removed | Superseded by external MCP-client agents (which reason across the whole repo group, not just the primary) |
+| Agent LLM config | ⛔ Removed | `CIH_AGENT_*` env vars removed; the server holds no LLM key |
 | Built-in graph browser | ✅ | Local `/graph` UI and bounded graph APIs exist in `cih-server` |
 | Multi-language core vocabulary | ✅ | `RouteSource`, `IntegrationSource`, `IntegrationRoute`, `MessageDestination`, `IntegrationLink` all in `cih-core` |
 

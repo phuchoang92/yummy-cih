@@ -127,6 +127,6 @@ matching `resolve_*` function in `crates/cih-engine/src/settings.rs`.
 **Conventions.**
 - Write implementation plans as markdown in `docs/plans/`; parser assumptions/known
   graph limits are documented in `docs/ARCHITECTURE.md`.
-- Security posture (mandatory auth on non-loopback bind, `ask_codebase` LLM egress):
-  see `SECURITY.md`. Keep `ask_codebase` off for sensitive codebases.
+- Security posture (mandatory auth on non-loopback bind; the server is LLM-egress-free
+  — NL Q&A lives in the MCP client, not the server): see `SECURITY.md`.
 - Don't commit on the default branch — branch first; commits/PRs only when asked.
