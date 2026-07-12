@@ -18,6 +18,7 @@ cih-grouping.workspace = true
 cih-graph-store.workspace = true
 cih-falkor.workspace = true
 cih-search.workspace = true
+cih-wiki.workspace = true
 cih-taint.workspace = true
 cih-patterns.workspace = true
 tokio.workspace = true

@@ -775,6 +775,7 @@ dependencies = [
  "cih-patterns",
  "cih-search",
  "cih-taint",
+ "cih-wiki",
  "constant_time_eq",
  "globset",
  "ignore",
@@ -811,6 +812,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cih-core",
+ "cih-grouping",
  "cih-lang",
  "serde",
  "serde_json",

@@ -280,10 +280,19 @@ fn wiki_err_to_mcp(err: WikiError) -> McpError {
     }
 }
 
+/// A resident renderer + the artifacts mtime it was built from (for invalidation).
+struct ResidentEntry {
+    nodes_mtime: Option<SystemTime>,
+    owned: Arc<cih_wiki::OwnedWiki>,
+}
+
 #[derive(Clone)]
 pub(crate) struct WikiSearchState {
     graph_key: String,
     cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, Arc<WikiIndex>>>>,
+    /// Resident renderers for live on-demand page rendering (P3.8), keyed by
+    /// repo path, invalidated on `.cih/artifacts` nodes.jsonl mtime change.
+    render_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, ResidentEntry>>>,
 }
 
 impl WikiSearchState {
@@ -291,7 +300,54 @@ impl WikiSearchState {
         Self {
             graph_key,
             cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            render_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Resolve `repo` to its resident renderer, (re)loading when the graph
+    /// artifacts change. `Ok(None)` when the repo has no graph artifacts (caller
+    /// falls back to on-disk pages). Loading + rendering are CPU-bound, so this
+    /// and `render_slug` run on `spawn_blocking`.
+    pub(crate) async fn resident_for(
+        &self,
+        repo: &str,
+    ) -> Result<Option<Arc<cih_wiki::OwnedWiki>>, WikiError> {
+        let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
+        let repo_path = PathBuf::from(repo_path);
+        let artifacts = repo_path.join(".cih").join("artifacts");
+        // Latest nodes.jsonl mtime = cache key freshness; absent ⇒ no artifacts.
+        let Ok(ga) = cih_core::GraphArtifacts::latest_in_dir(&artifacts) else {
+            return Ok(None);
+        };
+        let mtime = std::fs::metadata(&ga.nodes_path)
+            .and_then(|m| m.modified())
+            .ok();
+        if let Some(entry) = self.render_cache.read().await.get(&repo_path) {
+            if entry.nodes_mtime == mtime && mtime.is_some() {
+                return Ok(Some(entry.owned.clone()));
+            }
+        }
+        let load_repo = repo_path.clone();
+        let name = repo_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo")
+            .to_string();
+        let owned = tokio::task::spawn_blocking(move || {
+            cih_wiki::OwnedWiki::load_package_mode(&load_repo, name)
+        })
+        .await
+        .map_err(|e| WikiError::Internal(format!("resident load task failed: {e}")))?
+        .map_err(|e| WikiError::Internal(format!("failed to load resident wiki: {e}")))?;
+        let owned = Arc::new(owned);
+        self.render_cache.write().await.insert(
+            repo_path,
+            ResidentEntry {
+                nodes_mtime: mtime,
+                owned: owned.clone(),
+            },
+        );
+        Ok(Some(owned))
     }
 
     /// Resolve `repo` (registry name/path, or empty for the active graph key)
@@ -426,10 +482,31 @@ pub(crate) async fn search_wiki(
 }
 
 /// MCP tool body for `get_wiki_page` — full page markdown by slug.
+///
+/// P3.8: renders the page **live** from the resident graph (always fresh at the
+/// current graph_version, no `.cih/wiki/` files needed). Falls back to the
+/// on-disk generated bundle when the repo has no graph artifacts or the slug
+/// isn't a live page.
 pub(crate) async fn get_wiki_page(
     state: &WikiSearchState,
     args: GetWikiPageArgs,
 ) -> Result<CallToolResult, McpError> {
+    // Live render first.
+    if let Some(owned) = state
+        .resident_for(&args.repo)
+        .await
+        .map_err(wiki_err_to_mcp)?
+    {
+        let slug = args.slug.clone();
+        let rendered = tokio::task::spawn_blocking(move || owned.render_slug(&slug))
+            .await
+            .map_err(|e| McpError::internal_error(format!("render task failed: {e}"), None))?;
+        if let Some(page) = rendered {
+            return text_result(page.content);
+        }
+        // Slug not a live page → fall through to on-disk (e.g. legacy bundle).
+    }
+
     let index = state.index_for(&args.repo).await.map_err(wiki_err_to_mcp)?;
     let page = index.page_by_slug(&args.slug).ok_or_else(|| {
         McpError::invalid_params(

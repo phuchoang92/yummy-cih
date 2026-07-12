@@ -15,6 +15,7 @@ pub mod mermaid;
 pub mod module_tree;
 pub mod pages;
 pub mod render;
+pub mod resident;
 pub mod sink;
 pub mod slugify;
 
@@ -33,6 +34,7 @@ pub use render::{
     build_page_index, render_page, resolve_slug, PageIndex, PageSubject, RenderContext,
     RenderedPage,
 };
+pub use resident::OwnedWiki;
 
 use sink::PageSink;
 
@@ -165,7 +167,9 @@ pub struct WikiInput<'a> {
     /// (case-insensitive). Empty = no filter.
     pub filter_feature: Vec<String>,
     /// Stripped source bodies keyed by node_id string. Empty map = no bodies shown.
-    pub bodies: HashMap<String, BodyEntry>,
+    /// `Arc` so the on-demand render path (P3.8) can build a fresh `WikiInput`
+    /// per request without cloning the whole (large) map.
+    pub bodies: std::sync::Arc<HashMap<String, BodyEntry>>,
     /// Maps `(node_id, file)` to a feature slug. Supplied by `cih-engine`; called during
     /// `WikiGraph::build_package_grouped`. When grouping is "graph"/"llm" never called.
     /// When a pre-computed artifact is available, `node_id` gives a direct lookup;

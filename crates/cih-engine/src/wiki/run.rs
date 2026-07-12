@@ -642,7 +642,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         flow_llm_summaries: flow_llm_map,
         grouping: grouping.to_string(),
         filter_feature,
-        bodies,
+        bodies: std::sync::Arc::new(bodies),
         feature_of,
         entrypoints,
         repo_commit: repo_commit.clone(),
