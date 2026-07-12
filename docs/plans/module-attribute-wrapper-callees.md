@@ -1,5 +1,9 @@
 # Module-attribute wrapper callees: `api.api_get("/x")` / `import * as api` join wrapper defs
 
+> **STATUS: COMPLETED 2026-07-12** — commits `ad1e657` (RawImport.alias + py/ts capture, schema→7) and `2ca9b99` (parse arms + import-pinned lookup split, schema→8), docs in the same push.
+> **Live results:** synthetic e2e joins all three shapes — python aliased (`api.api_get` → `GET /api/v1/admin/items/{*}`), python full-dotted receiver (`services.api_client.api_get` → `GET /api/v1/items`), TS namespace import (`api.apiFetch` → `POST /api/v2/admin/x`) — each with `via_wrapper` + `base_source: env_default`. Regressions exact: 212ecom-fe 163 endpoints, headroom 11, java eval PASS, instance-client guard untouched. 104 workspace suites green, clippy clean.
+
+
 ## Context
 
 The wrapper-following stack (TS `01141ec..46b44a4`, Python `ecf2cea..7e7feb6`) covers bare-identifier callees (`from services.api_client import api_get; api_get(...)` / named TS imports). The other common import style is module-attribute calls: Python `import services.api_client as api; api.api_get("/x")` (plus the full dotted receiver `services.api_client.api_get(...)` — note: `import a.b; b.f()` is INVALID Python, only `a` gets bound, so "non-aliased" coverage means the dotted-receiver form) and TS namespace imports `import * as api from './apiClient'; api.apiFetch('/x')`. Today both are documented v1 limits: import ALIASES are dropped at parse (`RawImport` has no alias field) and member/attribute callees never emit provisional sites.
