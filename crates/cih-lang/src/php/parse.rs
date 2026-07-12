@@ -52,7 +52,7 @@ fn walk(
                     if clause.kind() == "namespace_use_clause" {
                         if let Some(n) = clause.child_by_field_name("name") {
                             let raw = text(n, src).replace('\\', ".");
-                            imports.push(RawImport { raw, is_static: false, is_wildcard: false, range: range_of(clause) });
+                            imports.push(RawImport { raw, is_static: false, is_wildcard: false, alias: None, range: range_of(clause) });
                         }
                     }
                 }

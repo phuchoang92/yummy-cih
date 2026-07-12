@@ -396,13 +396,29 @@ impl Builder {
     }
 
     fn emit_import(&mut self, node: TsNode<'_>, src: &str) {
-        // import_statement → `from` "path" + named/namespace/default imports
-        // We record the module path as the raw import
+        // import_statement → `from` "path" + named/namespace/default imports.
+        // The module path becomes the raw import; a namespace import's local
+        // binding (`import * as api from './m'`) is recorded as the alias —
+        // named and default bindings are not captured.
         let mut from_path = None;
+        let mut alias = None;
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if child.kind() == "string" {
-                from_path = Some(unquote(&text(child, src)));
+            match child.kind() {
+                "string" => from_path = Some(unquote(&text(child, src))),
+                "import_clause" => {
+                    let mut clause_cursor = child.walk();
+                    for clause_child in child.named_children(&mut clause_cursor) {
+                        if clause_child.kind() == "namespace_import" {
+                            let mut ns_cursor = clause_child.walk();
+                            alias = clause_child
+                                .named_children(&mut ns_cursor)
+                                .find(|inner| inner.kind() == "identifier")
+                                .map(|inner| text(inner, src));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         let raw = from_path.unwrap_or_else(|| text(node, src));
@@ -410,6 +426,7 @@ impl Builder {
             raw,
             is_static: false,
             is_wildcard: false,
+            alias,
             range: range_of(node),
         });
     }

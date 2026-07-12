@@ -100,6 +100,7 @@ fn import(raw: &str) -> RawImport {
         raw: raw.into(),
         is_static: false,
         is_wildcard: raw.ends_with(".*"),
+        alias: None,
         range: Range::default(),
     }
 }

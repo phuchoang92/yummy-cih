@@ -681,6 +681,7 @@ pub(super) fn parse_import(node: TsNode<'_>, src: &str) -> Option<RawImport> {
         raw: body.to_string(),
         is_static,
         is_wildcard: body.ends_with(".*"),
+        alias: None,
         range: range_of(node),
     })
 }

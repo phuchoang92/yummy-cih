@@ -282,6 +282,11 @@ pub struct RawImport {
     pub is_static: bool,
     /// Wildcard import (`…*`).
     pub is_wildcard: bool,
+    /// Local binding alias: python `import a.b as c` / TS
+    /// `import * as c from './m'` → `Some("c")`. Named/default/from-import
+    /// aliases are not captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     pub range: Range,
 }
 

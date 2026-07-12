@@ -304,6 +304,7 @@ fn collect_imports(import_list: TsNode<'_>, src: &str, builder: &mut Builder) {
             raw,
             is_static: false,
             is_wildcard,
+            alias: None,
             range,
         });
     }

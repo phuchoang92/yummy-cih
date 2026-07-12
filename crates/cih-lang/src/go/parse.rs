@@ -196,6 +196,7 @@ fn collect_imports(import_decl: TsNode<'_>, src: &str, imports: &mut Vec<RawImpo
                         raw,
                         is_static: false,
                         is_wildcard: false,
+                        alias: None,
                         range: range_of(child),
                     });
                 }
@@ -210,6 +211,7 @@ fn collect_imports(import_decl: TsNode<'_>, src: &str, imports: &mut Vec<RawImpo
                                 raw,
                                 is_static: false,
                                 is_wildcard: false,
+                                alias: None,
                                 range: range_of(spec),
                             });
                         }

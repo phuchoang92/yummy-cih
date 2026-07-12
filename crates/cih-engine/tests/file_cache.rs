@@ -69,6 +69,7 @@ fn parsed(file: &str, package: &str, class_name: &str, imports: Vec<&str>) -> Pa
                 raw: raw.to_string(),
                 is_static: false,
                 is_wildcard: raw.ends_with(".*"),
+                alias: None,
                 range: Range::default(),
             })
             .collect(),

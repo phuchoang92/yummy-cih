@@ -755,7 +755,7 @@ impl Builder {
         // against this file's directory; un-normalizable forms record the
         // node text as-is (lookups miss — degrade, never guess).
         let range = range_of(node);
-        let mut raws: Vec<(String, bool)> = Vec::new();
+        let mut raws: Vec<(String, bool, Option<String>)> = Vec::new();
         match node.kind() {
             // `import a.b`, `import a.b as c`, `import os, sys` — one entry
             // per imported module.
@@ -763,10 +763,13 @@ impl Builder {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
                     match child.kind() {
-                        "dotted_name" => raws.push((text(child, src), false)),
+                        "dotted_name" => raws.push((text(child, src), false, None)),
                         "aliased_import" => {
                             if let Some(name) = child.child_by_field_name("name") {
-                                raws.push((text(name, src), false));
+                                let alias = child
+                                    .child_by_field_name("alias")
+                                    .map(|alias| text(alias, src));
+                                raws.push((text(name, src), false, alias));
                             }
                         }
                         _ => {}
@@ -789,18 +792,19 @@ impl Builder {
                     }
                     _ => text(node, src),
                 };
-                raws.push((raw, is_wildcard));
+                raws.push((raw, is_wildcard, None));
             }
-            _ => raws.push((text(node, src), false)),
+            _ => raws.push((text(node, src), false, None)),
         }
         if raws.is_empty() {
-            raws.push((text(node, src), false));
+            raws.push((text(node, src), false, None));
         }
-        for (raw, is_wildcard) in raws {
+        for (raw, is_wildcard, alias) in raws {
             self.imports.push(RawImport {
                 raw,
                 is_static: false,
                 is_wildcard,
+                alias,
                 range,
             });
         }

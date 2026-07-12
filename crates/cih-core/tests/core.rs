@@ -205,6 +205,7 @@ fn parsed_file_round_trips_json() {
             raw: "java.util.List".into(),
             is_static: false,
             is_wildcard: false,
+            alias: None,
             range: Range {
                 start_line: 3,
                 start_col: 0,

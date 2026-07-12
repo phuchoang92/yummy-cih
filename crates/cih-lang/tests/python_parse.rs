@@ -499,3 +499,27 @@ fn py_provisional_not_emitted_for_non_url_args() {
     let sites = py_sites("def f(x):\n    t(\"common.x\")\n    helper(x)\n");
     assert!(sites.is_empty(), "{sites:?}");
 }
+
+#[test]
+fn python_imports_record_aliases() {
+    let imports = parse_python_file(
+        "app/main.py",
+        "import services.api_client as api\nimport plain.module\nfrom a.b import x as y\n",
+    )
+    .expect("should parse")
+    .parsed_file
+    .imports;
+    let pairs: Vec<(String, Option<String>)> = imports
+        .iter()
+        .map(|imp| (imp.raw.clone(), imp.alias.clone()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("services.api_client".to_string(), Some("api".to_string())),
+            ("plain.module".to_string(), None),
+            // from-import name aliases are deliberately not captured
+            ("a.b".to_string(), None),
+        ]
+    );
+}

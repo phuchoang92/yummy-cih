@@ -213,6 +213,7 @@ fn collect_use(node: TsNode<'_>, src: &str, imports: &mut Vec<RawImport>) {
             raw: raw.trim_end_matches("::*").to_string(),
             is_static: false,
             is_wildcard,
+            alias: None,
             range: range_of(node),
         });
     }

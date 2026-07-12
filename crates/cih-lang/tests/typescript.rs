@@ -455,3 +455,27 @@ fn wrapper_inner_fetch_stays_unresolvable() {
         Some(&[cih_core::UrlPart::ConstRef("url".into())][..])
     );
 }
+
+#[test]
+fn namespace_import_records_alias() {
+    let imports = TypescriptProvider::new()
+        .parse_file(
+            "src/svc.ts",
+            "import * as api from './apiClient';\nimport def from './d';\nimport { named } from './n';\n",
+        )
+        .expect("should parse")
+        .parsed_file
+        .imports;
+    let pairs: Vec<(String, Option<String>)> = imports
+        .iter()
+        .map(|imp| (imp.raw.clone(), imp.alias.clone()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("./apiClient".to_string(), Some("api".to_string())),
+            ("./d".to_string(), None),
+            ("./n".to_string(), None),
+        ]
+    );
+}
