@@ -479,3 +479,30 @@ fn namespace_import_records_alias() {
         ]
     );
 }
+
+#[test]
+fn ts_provisional_sites_for_namespace_alias_calls() {
+    let sites = ts_contract_sites(
+        r#"
+import * as api from './apiClient';
+export const create = (body: any) =>
+    api.apiFetch('/admin/x', { method: 'POST' }, body);
+"#,
+    );
+    assert_eq!(sites.len(), 1, "{sites:?}");
+    assert_eq!(sites[0].via_wrapper.as_deref(), Some("api.apiFetch"));
+    assert_eq!(sites[0].http_method.as_deref(), Some("POST"));
+}
+
+#[test]
+fn ts_named_import_member_call_not_emitted() {
+    // Named imports carry no alias — member calls on them stay out (the
+    // named-import bare-callee path already covers `apiFetch(...)` directly).
+    let sites = ts_contract_sites(
+        r#"
+import { api } from './x';
+export const f = () => api.get('/y');
+"#,
+    );
+    assert!(sites.is_empty(), "{sites:?}");
+}

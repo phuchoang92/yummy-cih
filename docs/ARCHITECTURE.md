@@ -181,11 +181,20 @@ companion-object/`object` `val`s with literal initializers):
   Python imports are recorded as DOTTED modules (`from a.b import x` → `a.b`;
   relative imports normalize against the file's package), which also powers
   cross-file constant resolution via imports.
-- **v1 limits**: barrel re-exports and `import x as y` aliases (rescued only
-  when the name is repo-unique), `new URL()` construction, axios.create /
-  requests.Session instances, options objects not at arg 1, module-attribute
-  callees (`api_client.api_get(...)`), and method-param pass-through wrappers
-  (`def call(method, path)`) are out of scope.
+- **Module-attribute callees**: `import services.api_client as api;
+  api.api_get(...)`, the full dotted receiver
+  (`services.api_client.api_get(...)`), a plain import's last segment
+  (python), and TS namespace imports (`import * as api from './apiClient'`)
+  all join. Parse-side emission is gated on a known import binding in the
+  same file (arbitrary `obj.method(url)` calls never emit); dotted callees
+  resolve import-scoped ONLY — the receiver pins the module, no unique-name
+  fallback, miss → drop.
+- **v1 limits**: barrel re-exports (bare-name callees rescued only when
+  repo-unique), TS default imports and tsconfig path aliases, `new URL()`
+  construction, axios.create / requests.Session instances, options objects
+  not at arg 1, python `from x import y as z` name aliases, function-local
+  imports appearing after the call site, and method-param pass-through
+  wrappers (`def call(method, path)`) are out of scope.
 
 ## SQL / DB access (`cih-parse/src/sql.rs`, `cih-resolve/src/db_access.rs`)
 

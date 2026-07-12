@@ -2237,3 +2237,167 @@ fn unmatched_python_provisional_vanishes() {
         .all(|n| n.kind != NodeKind::ExternalEndpoint));
     assert!(out.edges.iter().all(|e| e.kind != EdgeKind::ExternalCall));
 }
+
+// ── Module-attribute wrapper callees ─────────────────────────────────────────
+
+fn aliased_import(raw: &str, alias: &str) -> RawImport {
+    RawImport {
+        raw: raw.into(),
+        is_static: false,
+        is_wildcard: false,
+        alias: Some(alias.into()),
+        range: Range::default(),
+    }
+}
+
+#[test]
+fn ts_namespace_alias_call_joins() {
+    let wrapper = wrapper_file(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "apiFetch",
+        vec![UrlPart::Lit("/api/v1".into())],
+    );
+    // Decoy same-named wrapper elsewhere: dotted callees never use the
+    // unique-name fallback, so this must not interfere either way.
+    let decoy = wrapper_file(
+        "src/legacy/old.ts",
+        "src/legacy/old",
+        "apiFetch",
+        vec![UrlPart::Lit("/legacy".into())],
+    );
+    let mut caller = wrapper_call_file(
+        "src/components/admin.ts",
+        "Function:src/components/admin#create/1",
+        "api.apiFetch",
+        "POST",
+        vec![UrlPart::Lit("/admin/x".into())],
+    );
+    caller.imports = vec![aliased_import("../services/apiClient", "api")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/admin/x");
+    assert_eq!(props["via_wrapper"], "src/services/apiClient#apiFetch");
+}
+
+#[test]
+fn py_module_alias_call_joins_with_fixed_method() {
+    let mut wrapper = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_post",
+        vec![UrlPart::ConstRef("API_BASE".into())],
+        Some("POST"),
+    );
+    wrapper.string_constants = vec![StringConstant {
+        const_name: "API_BASE".into(),
+        owner_fqcn: "services.api_client".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: true,
+        range: Range::default(),
+    }];
+    let decoy = py_wrapper_file(
+        "legacy/client.py",
+        "legacy.client",
+        "api_post",
+        vec![UrlPart::Lit("/legacy".into())],
+        Some("POST"),
+    );
+    let mut caller = py_wrapper_call_file(
+        "app/views.py",
+        "Function:app.views#save/1",
+        "api.api_post",
+        vec![UrlPart::Lit("/items".into())],
+    );
+    caller.imports = vec![aliased_import("services.api_client", "api")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/items");
+    assert_eq!(props["httpMethod"], "POST", "fixed_method override applies");
+    assert_eq!(props["base_source"], "env_default");
+}
+
+#[test]
+fn py_dotted_receiver_and_last_segment_join() {
+    let wrapper = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_get",
+        vec![UrlPart::Lit("/api".into())],
+        Some("GET"),
+    );
+    // Full dotted receiver.
+    let mut full = py_wrapper_call_file(
+        "app/full.py",
+        "Function:app.full#f/0",
+        "services.api_client.api_get",
+        vec![UrlPart::Lit("/a".into())],
+    );
+    full.imports = vec![import("services.api_client")];
+    // Last-segment receiver.
+    let mut seg = py_wrapper_call_file(
+        "app/seg.py",
+        "Function:app.seg#g/0",
+        "api_client.api_get",
+        vec![UrlPart::Lit("/b".into())],
+    );
+    seg.imports = vec![import("services.api_client")];
+
+    let out = resolve_with_constants(vec![wrapper, full, seg]);
+    let mut paths = endpoint_paths(&out);
+    paths.sort();
+    assert_eq!(paths, vec!["/api/a", "/api/b"]);
+}
+
+#[test]
+fn dotted_callee_without_matching_import_drops() {
+    // The wrapper name is repo-UNIQUE, but dotted callees never use the
+    // unique-name fallback — no matching import binding means no endpoint.
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api".into())],
+    );
+    let caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#f/0",
+        "api.apiFetch",
+        "GET",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}
+
+#[test]
+fn aliased_requests_dotted_callee_drops() {
+    let mut caller = py_wrapper_call_file(
+        "app/r.py",
+        "Function:app.r#f/0",
+        "r.get",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    caller.imports = vec![aliased_import("requests", "r")];
+    let out = resolve_with_constants(vec![caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}

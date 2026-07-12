@@ -317,6 +317,20 @@ fn fold_wrapper_py_url_expr(
     }
 }
 
+/// Does any import in this file bind `obj` as a module? True for an aliased
+/// import (`import a.b as obj`), the full dotted receiver (`a.b` written out),
+/// or the last segment of a plain dotted import (belt-and-braces — such
+/// provisional sites can only drop at resolve, never mis-join).
+fn py_import_binds_module(imports: &[RawImport], obj_kind: &str, obj: &str) -> bool {
+    imports.iter().filter(|imp| !imp.is_static).any(|imp| {
+        imp.alias.as_deref() == Some(obj)
+            || (obj_kind == "attribute" && imp.alias.is_none() && imp.raw == obj)
+            || (obj_kind == "identifier"
+                && imp.alias.is_none()
+                && imp.raw.rsplit('.').next() == Some(obj))
+    })
+}
+
 /// URL-ish gate for provisional wrapper calls: the folded first part must be
 /// a `Lit` starting with `/`. Keeps `t("common.x")` / `helper(x)` out.
 fn py_arg_is_url_ish(node: TsNode<'_>, src: &str) -> bool {
@@ -1199,7 +1213,49 @@ fn try_emit_http_contract(
     let Some(obj) = func.child_by_field_name("object") else {
         return;
     };
-    if obj.kind() != "identifier" || !matches!(text(obj, src).as_str(), "requests" | "httpx") {
+    let obj_text = text(obj, src);
+    if obj.kind() != "identifier" || !matches!(obj_text.as_str(), "requests" | "httpx") {
+        // Module-attribute wrapper candidate (`api.api_get("/x")` via
+        // `import services.api_client as api`, or the full dotted receiver
+        // `services.api_client.api_get(...)`). Gated on a known import
+        // binding in this file — arbitrary `obj.method(...)` calls never
+        // emit. The resolve join pins the module; non-matches vanish.
+        if !py_import_binds_module(&builder.imports, obj.kind(), &obj_text) {
+            return;
+        }
+        let attr = func
+            .child_by_field_name("attribute")
+            .map(|n| text(n, src))
+            .unwrap_or_default();
+        if attr.is_empty() {
+            return;
+        }
+        let Some(arg0) = positional_argument(node, 0) else {
+            return;
+        };
+        if !py_arg_is_url_ish(arg0, src) {
+            return;
+        }
+        let mut parts = Vec::new();
+        fold_py_url_expr(arg0, src, &mut parts);
+        if parts.is_empty() {
+            return;
+        }
+        let in_callable = match enclosing {
+            Some((id, _)) => id.clone(),
+            None => file_id(&builder.rel),
+        };
+        builder.contract_sites.push(ContractSite {
+            kind: ContractKind::HttpCall,
+            url_template: None,
+            topic: None,
+            http_method: Some("GET".into()),
+            messaging_framework: None,
+            url_parts: Some(parts),
+            via_wrapper: Some(format!("{obj_text}.{attr}")),
+            in_callable,
+            range: range_of(node),
+        });
         return;
     }
     let attr = func

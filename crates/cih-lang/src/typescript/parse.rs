@@ -527,17 +527,45 @@ fn try_emit_http_contract(
             }
         },
         "member_expression" => {
-            let object = func.child_by_field_name("object").map(|n| text(n, src));
-            if object.as_deref() != Some("axios") {
-                return;
+            let object_node = func.child_by_field_name("object");
+            let object = object_node.map(|n| text(n, src));
+            if object.as_deref() == Some("axios") {
+                let Some(verb) = func
+                    .child_by_field_name("property")
+                    .and_then(|prop| axios_http_verb(&text(prop, src)))
+                else {
+                    return;
+                };
+                verb.to_string()
+            } else {
+                // Namespace-import alias receiver (`import * as api from
+                // './apiClient'; api.apiFetch('/x')`). Bare identifiers
+                // matching a known import alias only — `this.http.get` has a
+                // member-expression receiver and `myobj.get` matches no
+                // import, so instance clients never emit.
+                let Some(obj) = object_node.filter(|n| n.kind() == "identifier") else {
+                    return;
+                };
+                let obj_text = text(obj, src);
+                if !builder
+                    .imports
+                    .iter()
+                    .any(|imp| !imp.is_static && imp.alias.as_deref() == Some(obj_text.as_str()))
+                {
+                    return;
+                }
+                let Some(prop) = func.child_by_field_name("property") else {
+                    return;
+                };
+                let Some(arg0) = ts_positional_argument(node, 0) else {
+                    return;
+                };
+                if !ts_arg_is_url_ish(arg0, src) {
+                    return;
+                }
+                via_wrapper = Some(format!("{obj_text}.{}", text(prop, src)));
+                call_options_method(node, src).unwrap_or_else(|| "GET".into())
             }
-            let Some(verb) = func
-                .child_by_field_name("property")
-                .and_then(|prop| axios_http_verb(&text(prop, src)))
-            else {
-                return;
-            };
-            verb.to_string()
         }
         _ => return,
     };

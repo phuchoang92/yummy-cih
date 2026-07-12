@@ -523,3 +523,46 @@ fn python_imports_record_aliases() {
         ]
     );
 }
+
+// ── Module-attribute wrapper callees ─────────────────────────────────────────
+
+#[test]
+fn py_provisional_sites_for_module_attribute_calls() {
+    let sites = py_sites(
+        "import services.api_client as api\n\ndef load(item_id):\n    return api.api_get(f\"/admin/items/{item_id}\")\n\ndef all_items():\n    return services.api_client.api_get(\"/items\")\n",
+    );
+    // Second call: full dotted receiver requires the plain import to bind it.
+    let sites2 = py_sites(
+        "import services.api_client\n\ndef all_items():\n    return services.api_client.api_get(\"/items\")\n",
+    );
+    assert_eq!(sites.len(), 1, "{sites:?}");
+    assert_eq!(sites[0].via_wrapper.as_deref(), Some("api.api_get"));
+    assert_eq!(sites[0].http_method.as_deref(), Some("GET"));
+    assert_eq!(sites2.len(), 1, "{sites2:?}");
+    assert_eq!(
+        sites2[0].via_wrapper.as_deref(),
+        Some("services.api_client.api_get")
+    );
+}
+
+#[test]
+fn py_module_attribute_without_import_not_emitted() {
+    let sites = py_sites("def load():\n    return api.api_get(\"/items\")\n");
+    assert!(sites.is_empty(), "{sites:?}");
+}
+
+#[test]
+fn py_module_attribute_non_url_arg_not_emitted() {
+    let sites = py_sites(
+        "import services.api_client as api\n\ndef f(x):\n    api.log(\"msg\")\n    api.helper(x)\n",
+    );
+    assert!(sites.is_empty(), "{sites:?}");
+}
+
+#[test]
+fn py_direct_requests_sites_keep_no_via_wrapper() {
+    let sites =
+        py_sites("import requests\n\ndef load():\n    return requests.get(\"/api/items\")\n");
+    assert_eq!(sites.len(), 1);
+    assert!(sites[0].via_wrapper.is_none());
+}

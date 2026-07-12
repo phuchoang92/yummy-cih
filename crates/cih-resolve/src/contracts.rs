@@ -234,6 +234,11 @@ impl<'a> WrapperIndex<'a> {
         callee: &str,
         caller_pf: &'a ParsedFile,
     ) -> Option<(&'a cih_core::HttpWrapperDef, &'a ParsedFile)> {
+        // Dotted callee = module-attribute call (`api.api_get`): the receiver
+        // names an import binding that PINS the module.
+        if let Some((obj, attr)) = callee.rsplit_once('.') {
+            return self.lookup_module_attr(obj, attr, caller_pf);
+        }
         let caller_module =
             cih_lang::strip_source_extension(&caller_pf.file).unwrap_or(caller_pf.file.as_str());
         if let Some(hit) = self
@@ -269,6 +274,46 @@ impl<'a> WrapperIndex<'a> {
             }
         }
         self.unique_by_name.get(callee).copied().flatten()
+    }
+
+    /// Dotted callee `obj.attr`: resolve `obj` through the caller's imports
+    /// only — an aliased import (`import a.b as obj` / `import * as obj`),
+    /// the full dotted receiver (python: raw == obj), or a plain import's
+    /// last segment (python). No same-module steps (a same-module call is a
+    /// bare name) and NO unique-name fallback: the receiver pins the module,
+    /// so a miss drops the site — never guess.
+    fn lookup_module_attr(
+        &self,
+        obj: &str,
+        attr: &str,
+        caller_pf: &'a ParsedFile,
+    ) -> Option<(&'a cih_core::HttpWrapperDef, &'a ParsedFile)> {
+        let python = caller_pf.language == "python";
+        for imp in &caller_pf.imports {
+            if imp.is_static {
+                continue;
+            }
+            let alias_hit = imp.alias.as_deref() == Some(obj);
+            let full_raw_hit = python && imp.alias.is_none() && imp.raw == obj;
+            let last_segment_hit =
+                python && imp.alias.is_none() && imp.raw.rsplit('.').next() == Some(obj);
+            if !(alias_hit || full_raw_hit || last_segment_hit) {
+                continue;
+            }
+            // TS namespace alias: relative spec → repo-relative module path.
+            if let Some(module) =
+                cih_lang::resolve_relative_module(Path::new(&caller_pf.file), &imp.raw)
+            {
+                if let Some(hit) = self.by_key.get(&(module, attr.to_string())) {
+                    return Some(*hit);
+                }
+            }
+            // Python raws ARE the dotted module keys.
+            if let Some(hit) = self.by_key.get(&(imp.raw.clone(), attr.to_string())) {
+                return Some(*hit);
+            }
+        }
+        None
     }
 }
 
