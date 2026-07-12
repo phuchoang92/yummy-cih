@@ -1,5 +1,9 @@
 # Python HTTP wrapper following (analog of the TS feature) + dotted-import bugfix
 
+> **STATUS: COMPLETED 2026-07-12** — commits `ecf2cea` (dotted imports + lookup normalization, schema→5), `7e7feb6` (detection + provisional sites + fixed_method join, schema→6), `265ea4c` (bonus: tree-sitter-rust ABI-14 pin — 0.24.x panicked every Rust parse, found via headroom), docs in the same push.
+> **Live results:** synthetic e2e → `GET /api/v1/admin/items/{*}` + `POST /api/v1/admin/items` with `via_wrapper` + `base_source: env_default`; headroom analyzes cleanly (11 direct endpoints, no false wrapper joins — its localhost pass-through correctly gated out); 212ecom-fe still exactly 163 endpoints; java eval PASS. 104 workspace suites green, clippy clean.
+
+
 ## Context
 
 The TS wrapper feature (commits `01141ec`/`ef0367e`/`46b44a4`) took 212ecom-fe from 1 → 163 endpoints and 1 → 140 cross-repo matches. Python services use the same pattern (`def api_get(path): url = f"{API_BASE}{path}"; return requests.get(url)`), and the IR (`HttpWrapperDef`, `via_wrapper`, `http_wrappers`) plus the resolve-side `WrapperIndex` join are already language-neutral — but exploration found three Python-specific blockers:

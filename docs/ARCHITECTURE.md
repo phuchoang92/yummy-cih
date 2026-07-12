@@ -173,10 +173,19 @@ companion-object/`object` `val`s with literal initializers):
   wrapper's own module; the caller's suffix in the caller's context. Endpoints
   carry `via_wrapper: "<module>#<name>"` (plus `base_source`/`dynamic` as
   usual).
-- **v1 limits**: barrel re-exports (rescued only when the name is repo-unique),
-  `new URL()` construction, axios.create instances, options objects not at
-  arg 1, and the Python analog are out of scope (IR is language-neutral for
-  later).
+- **Python analog**: module-scope `def`s (decorated included) whose first
+  param is a plain identifier and whose body calls `requests.*`/`httpx.*`
+  (incl. `requests.request("POST", url)` literal-verb form), with one level of
+  `url = …` assignment indirection. Python wrappers hard-code their verb —
+  recorded as `fixed_method`, overriding the call site's placeholder at join.
+  Python imports are recorded as DOTTED modules (`from a.b import x` → `a.b`;
+  relative imports normalize against the file's package), which also powers
+  cross-file constant resolution via imports.
+- **v1 limits**: barrel re-exports and `import x as y` aliases (rescued only
+  when the name is repo-unique), `new URL()` construction, axios.create /
+  requests.Session instances, options objects not at arg 1, module-attribute
+  callees (`api_client.api_get(...)`), and method-param pass-through wrappers
+  (`def call(method, path)`) are out of scope.
 
 ## SQL / DB access (`cih-parse/src/sql.rs`, `cih-resolve/src/db_access.rs`)
 
