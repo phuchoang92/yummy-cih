@@ -128,7 +128,7 @@ pub struct CommunityLlmFull {
 }
 
 /// Maps `(node_id, file_path)` to a feature name.
-pub type FeatureOfFn = Box<dyn Fn(&str, &str) -> String + Send>;
+pub type FeatureOfFn = Box<dyn Fn(&str, &str) -> String + Send + Sync>;
 
 pub struct WikiInput<'a> {
     pub nodes: &'a [Node],

@@ -213,5 +213,5 @@ pub(super) struct WikiArtifacts {
     pub bodies: HashMap<String, cih_wiki::BodyEntry>,
     pub file_dev_map: HashMap<String, String>,
     #[allow(clippy::type_complexity)] // LLM plumbing signature; alias with wiki rework
-    pub feature_of: Box<dyn Fn(&str, &str) -> String + Send>,
+    pub feature_of: Box<dyn Fn(&str, &str) -> String + Send + Sync>,
 }

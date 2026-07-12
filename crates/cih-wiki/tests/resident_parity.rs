@@ -58,10 +58,7 @@ fn render_slug_matches_batch_graph_mode() {
         for slug in slugs.iter().take(5) {
             let t = Instant::now();
             let _ = owned.render_slug(slug);
-            println!(
-                "  render_slug({slug}): {} ms (full ctx+index rebuild)",
-                t.elapsed().as_millis()
-            );
+            println!("  render_slug({slug}): {} ms", t.elapsed().as_millis());
         }
         return;
     }
@@ -95,7 +92,7 @@ fn render_slug_matches_batch_graph_mode() {
         let t = Instant::now();
         let _ = owned.render_slug(&first.slug);
         println!(
-            "single render_slug (incl. ctx+index build): {} ms",
+            "single render_slug (resident lookup): {} ms",
             t.elapsed().as_millis()
         );
     }

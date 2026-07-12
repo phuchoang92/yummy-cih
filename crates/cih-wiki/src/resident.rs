@@ -1,9 +1,9 @@
 //! Resident, on-demand wiki rendering (P3.8).
 //!
-//! [`OwnedWiki`] holds a repo's graph + community artifacts **owned** (so it can
-//! live resident in a server cache, `Send + Sync`), and renders a single page on
-//! request via the pure [`render_page`] core — no batch pipeline, no `.cih/wiki/`
-//! files, always fresh at the loaded `graph_version`.
+//! [`OwnedWiki`] holds a repo's graph **owned** (so it can live resident in a
+//! server cache, `Send + Sync`) and renders a single page on request via the
+//! pure [`render_page`] core — no batch pipeline, no `.cih/wiki/` files, always
+//! fresh at the loaded `graph_version`.
 //!
 //! This is the graph-only tier in the default **package** grouping: it
 //! reproduces exactly what `cih-engine wiki <repo>` writes for a page (mode
@@ -11,10 +11,12 @@
 //! assembling the same `WikiInput` (enrichment maps `None`). A read-only
 //! enrichment splice is layered on top in a later step.
 //!
-//! `RenderContext` + `PageIndex` are rebuilt per call from the owned data (the
-//! expensive `WikiGraph` build is done once, at load). Measurement: on Fineract
-//! (87k nodes) the per-call rebuild is ~150ms, so a resident-`RenderContext`
-//! cache is a warranted follow-up for high-throughput serving.
+//! The expensive `WikiGraph`, `RenderContext`, and `PageIndex` are all built
+//! **once at load** and cached resident, so `render_slug` is a sub-millisecond
+//! lookup + single-page render (no per-request ctx/index rebuild). The
+//! owner → `WikiInput` → `RenderContext` borrow chain is held together with
+//! `ouroboros` (`WikiInput` borrows the node/edge slices; `RenderContext`
+//! borrows the graph + input).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,20 +25,40 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use cih_core::{Edge, GraphArtifacts, Node, RepoMap};
 
-use crate::render::{build_page_index, render_page, RenderedPage};
+use crate::render::{build_page_index, render_page, PageIndex, RenderContext, RenderedPage};
 use crate::{
-    resolve_feature_groups, source_bodies, BodyEntry, EntrypointRecord, RenderContext,
-    WikiGenerationInfo, WikiGraph, WikiInput,
+    resolve_feature_groups, source_bodies, BodyEntry, EntrypointRecord, WikiGenerationInfo,
+    WikiGraph, WikiInput,
 };
 
-/// A repo's wiki render inputs, owned so they can be cached resident and shared
-/// across threads. Built once from `.cih/artifacts` (+ `artifacts-community`).
-pub struct OwnedWiki {
+/// Self-referential resident render state: owns the graph data, and the
+/// `WikiInput` + `RenderContext` that borrow it, built once.
+#[ouroboros::self_referencing]
+struct ResidentInner {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     community_nodes: Vec<Node>,
     community_edges: Vec<Edge>,
     graph: WikiGraph,
+    #[borrows(nodes, edges, community_nodes, community_edges)]
+    #[covariant]
+    input: WikiInput<'this>,
+    #[borrows(graph, input)]
+    #[covariant]
+    ctx: RenderContext<'this>,
+}
+
+/// A repo's resident wiki renderer. Cheap to render from once loaded.
+pub struct OwnedWiki {
+    inner: ResidentInner,
+    index: PageIndex,
+    repo_name: String,
+    graph_version: String,
+}
+
+/// Owned `WikiInput` parts (everything except the borrowed node/edge slices),
+/// moved into the resident `WikiInput` at build time.
+struct InputParts {
     bodies: Arc<HashMap<String, BodyEntry>>,
     repo_map: Option<RepoMap>,
     unresolved_report: Option<String>,
@@ -47,15 +69,11 @@ pub struct OwnedWiki {
 }
 
 impl OwnedWiki {
-    /// Load `repo`'s graph artifacts and build the resident graph in **package
-    /// grouping** — the `cih-engine wiki` default (grouping = "package"). Mirrors
-    /// the package branch of `cih-engine/src/wiki/loader.rs` so live output
-    /// matches the batch. `grouping` string recorded is "package"; no community
-    /// artifacts are read (features come from package paths), so the batch's
-    /// `Processes: 0` / package features are reproduced exactly.
+    /// Load `repo`'s graph artifacts and build the resident renderer in the
+    /// **package** grouping (the `cih-engine wiki` default). Mirrors the package
+    /// branch of `cih-engine/src/wiki/loader.rs` so live output matches batch:
+    /// no `artifacts-community` is read, features come from package paths.
     pub fn load_package_mode(repo: &Path, repo_name: String) -> Result<Self> {
-        use std::sync::Arc as StdArc;
-
         let graph_artifacts =
             GraphArtifacts::latest_in_dir(&repo.join(".cih").join("artifacts"))
                 .with_context(|| format!("no graph artifacts under {}", repo.display()))?;
@@ -69,9 +87,9 @@ impl OwnedWiki {
 
         // ── Package feature strategy (verbatim from loader.rs package branch) ──
         let pkg_cfg = cih_grouping::PackageConfig::load_or_default(repo);
-        let pkg_strategy: StdArc<dyn cih_grouping::FeatureStrategy> =
-            StdArc::new(cih_grouping::PackageStrategy::new(pkg_cfg));
-        let repo_default_feature: StdArc<String> = StdArc::new({
+        let pkg_strategy: Arc<dyn cih_grouping::FeatureStrategy> =
+            Arc::new(cih_grouping::PackageStrategy::new(pkg_cfg));
+        let repo_default_feature: Arc<String> = Arc::new({
             let raw = repo
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -104,7 +122,7 @@ impl OwnedWiki {
                 s.to_string()
             }
         });
-        let feature_lookup: StdArc<HashMap<String, String>> = StdArc::new(
+        let feature_lookup: Arc<HashMap<String, String>> = Arc::new(
             cih_grouping::find_feature_artifact_dir(repo, graph_artifacts.version.as_str())
                 .and_then(|dir| cih_grouping::read_feature_artifact(&dir).ok())
                 .map(|entries| entries.into_iter().map(|e| (e.node_id, e.name)).collect())
@@ -159,19 +177,41 @@ impl OwnedWiki {
             .and_then(|p| std::fs::read_to_string(p).ok());
         let entrypoints = read_entrypoints(repo);
 
-        Ok(Self {
+        let parts = InputParts {
+            bodies,
+            repo_map,
+            unresolved_report,
+            entrypoints,
+            repo_name: repo_name.clone(),
+            graph_version: graph_version.clone(),
+            community_version,
+        };
+
+        // Build the resident WikiInput + RenderContext once (self-referential).
+        let inner = ResidentInnerBuilder {
             nodes,
             edges,
             community_nodes,
             community_edges,
             graph,
-            bodies,
-            repo_map,
-            unresolved_report,
-            entrypoints,
+            input_builder: |nodes, edges, community_nodes, community_edges| {
+                graph_only_input(parts, nodes, edges, community_nodes, community_edges)
+            },
+            ctx_builder: |graph, input| {
+                let feature_groups = resolve_feature_groups(graph, input);
+                RenderContext::build(graph, input, &feature_groups)
+            },
+        }
+        .build();
+
+        // Build the page index once from the resident graph + ctx.
+        let index = build_page_index(inner.borrow_graph(), inner.borrow_ctx());
+
+        Ok(Self {
+            inner,
+            index,
             repo_name,
             graph_version,
-            community_version,
         })
     }
 
@@ -183,66 +223,68 @@ impl OwnedWiki {
         &self.repo_name
     }
 
-    /// Build a graph-only `WikiInput` borrowing this bundle's owned data. Cheap:
-    /// borrows the node/edge slices, `Arc`-clones bodies, clones only small
-    /// scalar fields.
-    fn graph_only_input(&self) -> WikiInput<'_> {
-        WikiInput {
-            nodes: &self.nodes,
-            edges: &self.edges,
-            community_nodes: &self.community_nodes,
-            community_edges: &self.community_edges,
-            repo_name: self.repo_name.clone(),
-            graph_version: self.graph_version.clone(),
-            community_version: self.community_version.clone(),
-            unresolved_report: self.unresolved_report.clone(),
-            repo_map: self.repo_map.clone(),
-            llm_summaries: None,
-            llm_full: None,
-            llm_info: None,
-            module_tree: None,
-            generation: WikiGenerationInfo {
-                mode: "graph".to_string(),
-                grouping: "package".to_string(),
-                review_required: false,
-                html_viewer: false,
-                incremental: false,
-            },
-            first_module_tree: None,
-            save_evidence: None,
-            controller_summaries: None,
-            feature_llm_summaries: None,
-            flow_llm_summaries: None,
-            grouping: "package".to_string(),
-            filter_feature: Vec::new(),
-            bodies: self.bodies.clone(),
-            // Package features were baked into `graph` at load via
-            // `build_package_grouped`; `feature_of` is not called during render
-            // (only during that build), so a placeholder is safe here.
-            feature_of: Box::new(|_, _| "shared".to_string()),
-            entrypoints: self.entrypoints.clone(),
-            repo_commit: None,
-            flags_hash: None,
-            changed_files: None,
-        }
-    }
-
-    /// Render one page by slug, live. `None` when the slug isn't a known page.
+    /// Render one page by slug from the resident state. Sub-millisecond: no
+    /// ctx/index rebuild. `None` when the slug isn't a known page.
     pub fn render_slug(&self, slug: &str) -> Option<RenderedPage> {
-        let input = self.graph_only_input();
-        let feature_groups = resolve_feature_groups(&self.graph, &input);
-        let ctx = RenderContext::build(&self.graph, &input, &feature_groups);
-        let index = build_page_index(&self.graph, &ctx);
-        render_page(&self.graph, &ctx, &index, slug, None)
+        render_page(
+            self.inner.borrow_graph(),
+            self.inner.borrow_ctx(),
+            &self.index,
+            slug,
+            None,
+        )
     }
 
     /// All addressable page slugs (for search / enumeration).
     pub fn slugs(&self) -> Vec<String> {
-        let input = self.graph_only_input();
-        let feature_groups = resolve_feature_groups(&self.graph, &input);
-        let ctx = RenderContext::build(&self.graph, &input, &feature_groups);
-        let index = build_page_index(&self.graph, &ctx);
-        index.slugs().map(str::to_string).collect()
+        self.index.slugs().map(str::to_string).collect()
+    }
+}
+
+/// Assemble the graph-only `WikiInput` from the borrowed slices + owned parts.
+fn graph_only_input<'a>(
+    parts: InputParts,
+    nodes: &'a [Node],
+    edges: &'a [Edge],
+    community_nodes: &'a [Node],
+    community_edges: &'a [Edge],
+) -> WikiInput<'a> {
+    WikiInput {
+        nodes,
+        edges,
+        community_nodes,
+        community_edges,
+        repo_name: parts.repo_name,
+        graph_version: parts.graph_version,
+        community_version: parts.community_version,
+        unresolved_report: parts.unresolved_report,
+        repo_map: parts.repo_map,
+        llm_summaries: None,
+        llm_full: None,
+        llm_info: None,
+        module_tree: None,
+        generation: WikiGenerationInfo {
+            mode: "graph".to_string(),
+            grouping: "package".to_string(),
+            review_required: false,
+            html_viewer: false,
+            incremental: false,
+        },
+        first_module_tree: None,
+        save_evidence: None,
+        controller_summaries: None,
+        feature_llm_summaries: None,
+        flow_llm_summaries: None,
+        grouping: "package".to_string(),
+        filter_feature: Vec::new(),
+        bodies: parts.bodies,
+        // Package features were baked into `graph` at load via
+        // `build_package_grouped`; `feature_of` is not called during render.
+        feature_of: Box::new(|_, _| "shared".to_string()),
+        entrypoints: parts.entrypoints,
+        repo_commit: None,
+        flags_hash: None,
+        changed_files: None,
     }
 }
 
