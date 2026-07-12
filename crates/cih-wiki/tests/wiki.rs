@@ -296,3 +296,150 @@ fn generate_wiki_since_skips_unchanged_features() {
 
     let _ = std::fs::remove_dir_all(&out);
 }
+
+// ── Standalone render_page equivalence (P2.5a) ───────────────────────────────
+
+/// Build a fixture graph exercising system/routes/feature/dev/community pages,
+/// with `llm_full` so community PO/BA pages render too.
+fn equivalence_fixture() -> (Vec<Node>, Vec<Edge>, Vec<Node>, Vec<Edge>) {
+    let m1 = make_node(
+        "Method:com.example.OrderService#place/0",
+        NodeKind::Method,
+        "place",
+    );
+    let m2 = make_node(
+        "Method:com.example.OrderService#cancel/0",
+        NodeKind::Method,
+        "cancel",
+    );
+    let cls = make_node(
+        "Class:com.example.OrderService",
+        NodeKind::Class,
+        "OrderService",
+    );
+    let comm = make_node("Community:0", NodeKind::Community, "orders");
+    let member_edges = [
+        Edge {
+            src: m1.id.clone(),
+            dst: NodeId::new("Community:0"),
+            kind: EdgeKind::MemberOf,
+            confidence: 1.0,
+            reason: String::new(),
+            props: None,
+        },
+        Edge {
+            src: m2.id.clone(),
+            dst: NodeId::new("Community:0"),
+            kind: EdgeKind::MemberOf,
+            confidence: 1.0,
+            reason: String::new(),
+            props: None,
+        },
+    ];
+    (vec![m1, m2, cls], vec![], vec![comm], member_edges.to_vec())
+}
+
+fn equivalence_input<'a>(
+    nodes: &'a [Node],
+    edges: &'a [Edge],
+    comm_nodes: &'a [Node],
+    comm_edges: &'a [Edge],
+) -> WikiInput<'a> {
+    let mut input = minimal_input(nodes, edges, comm_nodes, comm_edges);
+    // Enable community PO/BA pages.
+    let mut full = HashMap::new();
+    full.insert(
+        "Community:0".to_string(),
+        cih_wiki::CommunityLlmFull {
+            po_summary: "Handles orders.".into(),
+            ..Default::default()
+        },
+    );
+    input.llm_full = Some(full);
+    input
+}
+
+#[test]
+fn render_page_matches_batch_output_for_every_page() {
+    use cih_wiki::{
+        build_page_index, render_page, resolve_feature_groups, RenderContext, WikiGraph,
+    };
+
+    let (nodes, edges, comm_nodes, comm_edges) = equivalence_fixture();
+
+    // 1. Batch-generate the wiki to disk.
+    let out = tmp_dir("render-equivalence");
+    let input = equivalence_input(&nodes, &edges, &comm_nodes, &comm_edges);
+    generate_wiki(input, &out).unwrap();
+
+    // 2. Reconstruct the render context + page index from the same inputs.
+    let input2 = equivalence_input(&nodes, &edges, &comm_nodes, &comm_edges);
+    let graph = WikiGraph::build(&nodes, &edges, &comm_nodes, &comm_edges);
+    let feature_groups = resolve_feature_groups(&graph, &input2);
+    let ctx = RenderContext::build(&graph, &input2, &feature_groups);
+    let index = build_page_index(&graph, &ctx);
+
+    // 3. Every enumerated page must render byte-identically to the batch file,
+    //    and the enumerated set must equal the files on disk (no orphans/drift).
+    let mut expected_files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let slugs: Vec<String> = index.slugs().map(str::to_string).collect();
+    assert!(slugs.len() > 5, "fixture too thin: {} pages", slugs.len());
+    for slug in &slugs {
+        let rp = render_page(&graph, &ctx, &index, slug, None)
+            .unwrap_or_else(|| panic!("render_page returned None for {slug}"));
+        let disk = std::fs::read_to_string(out.join(&rp.rel_path))
+            .unwrap_or_else(|e| panic!("missing batch file {}: {e}", rp.rel_path));
+        assert_eq!(
+            disk, rp.content,
+            "content drift for {slug} ({})",
+            rp.rel_path
+        );
+        expected_files.insert(rp.rel_path.clone());
+        if let Some((json_path, json_content)) = &rp.json {
+            let disk_json = std::fs::read_to_string(out.join(json_path))
+                .unwrap_or_else(|e| panic!("missing json {json_path}: {e}"));
+            assert_eq!(&disk_json, json_content, "json drift for {slug}");
+            expected_files.insert(json_path.clone());
+        }
+    }
+
+    // Enumeration == on-disk page files.
+    let mut on_disk: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    collect_page_files(&out.join("pages"), &out, &mut on_disk);
+    assert_eq!(
+        expected_files, on_disk,
+        "render_page enumeration differs from batch page files"
+    );
+
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+fn collect_page_files(
+    dir: &std::path::Path,
+    out_root: &std::path::Path,
+    acc: &mut std::collections::BTreeSet<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_page_files(&path, out_root, acc);
+        } else if let Some(ext) = path.extension() {
+            // `_category_.json` sidecars are batch-only Docusaurus artifacts, not pages.
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "_category_.json" {
+                continue;
+            }
+            if ext == "md" || ext == "json" {
+                let rel = path
+                    .strip_prefix(out_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                acc.insert(rel);
+            }
+        }
+    }
+}

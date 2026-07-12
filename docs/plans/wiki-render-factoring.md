@@ -98,3 +98,20 @@ Existing green unchanged: second-run-zero-writes (:192), `--since` skip test (:2
 | WikiInput churn / double WikiGraph build | Both deferred: ctx borrows `&WikiInput`; double-build untouched (enrichment path in cih-engine) |
 
 Effort: M (~3d) — commit 1 is the bulk (careful cut-paste of ~250 lines), 2–3 mechanical, 4 small + fixture-heavy test. At implementation start also copy this plan to `/Users/phuc/BigMoves/AI/wiki-render-factoring-plan.md`.
+
+## Implementation outcome (2026-07-12)
+
+**Status: COMPLETE.** Delivered in two commits on `dev`:
+
+- **C1 `9e4944f`** `refactor(wiki): promote PageGenCtx to RenderContext with precomputed per-feature state` — `render.rs` added; `PageGenCtx` promoted to `RenderContext` with eager per-`FeatureContext` state (class sets, slug maps, class-dev links, effective-feature controllers, per-feature scheduled/listener grouping) plus the global derived maps (`method_flow_desc`, entrypoint counts, `all_method_desc`, `comm_slug_map`, `enrichment_tier`). `dev_slugs_visible(upto, rendered)` replicates the byte-load-bearing alphabetical-prefix accumulation. Verified byte-identical on the 15,998-page Fineract graph-mode corpus.
+- **C2 (this commit)** `feat(wiki): standalone render_page over a page index` — `RenderedPage`, `PageSubject`, `PageIndex`, `build_page_index`, `resolve_slug`, `render_page`, and the `render_subject` core, all **purely additive**, reusing `RenderContext` and the existing leaf renderers. `resolve_feature_groups(graph, input)` extracted (verbatim move) and made `pub` so both `generate_wiki` and the acceptance test build the same feature set. Public re-exports added. Acceptance test `render_page_matches_batch_output_for_every_page` proves `render_page` reproduces the batch bytes (content + json sidecars) for every enumerated page, and that the enumeration equals the on-disk page files.
+
+**Deviation from the 4-commit plan (deliberate, risk-reducing):** the byte-critical batch loop was left **entirely untouched** rather than being rewritten to route through `render_subject`. `render_page` is proven equivalent by the acceptance test + corpus diff instead of by shared code. This makes C2's byte-identity *structural* (the batch producing the golden output never changed) at the cost of a temporary second rendering path. Consequences ticketed below. Because the batch was untouched, the planned C2 (hoist fs sidecar writes) and C3 (route batch through `render_subject`) became unnecessary as P2.5a prerequisites and roll into the batch-unification ticket.
+
+Corpus re-verification (C2 vs C1 binary, Fineract graph mode): `pages/**` byte-identical, `manifest.json`/`module_tree.json` identical modulo `generated_at`, `agent-index.json` differs only in the `wiki_dir` output-name field. Full `cargo test -p cih-wiki` (42 tests) + `clippy --all-targets -D warnings` green.
+
+## Follow-up tickets
+
+- **FT-1 batch-unification** (was C2+C3): route `generate_wiki`'s emit loops through `render_subject`/`RenderedPage` and hoist the direct fs sidecar writes (`_category_.json`, api dirs, stale-file removal) into the driver, eliminating the second rendering path. Guarded by the existing acceptance test + corpus diff. Non-trivial byte discipline; deferred because P2.5a (standalone `render_page` for P3.8) no longer needs it.
+- **FT-2 nav-overwrite bug** (lib.rs `nav.extend(ep_batch.nav)` REPLACES a feature's nav with only entrypoint entries): real fix changes the manifest, so out of scope for a byte-identical refactor. `render_page` intentionally reproduces the artifact.
+- **FT-3 LLM-mode determinism**: `all_method_desc` and `method_flow_desc` iterate `HashMap`s with last-write-wins collisions → enriched page bytes can vary run-to-run. BTreeMap-ify (behavior change). Corpus verification stays graph-only until fixed.

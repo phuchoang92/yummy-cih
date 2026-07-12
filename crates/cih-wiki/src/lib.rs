@@ -23,12 +23,15 @@ pub use cih_core::RepoMap;
 pub use features::{assign_class_slugs, FeatureGroup};
 pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
-pub use render::RenderContext;
 pub use module_tree::{
     build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
     ClassCacheEntry, ClassEnrichmentStore, CommunityFullCacheEntry, FeatureMetaEntry,
     FlowCacheEntry, ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode,
     WikiModuleTree,
+};
+pub use render::{
+    build_page_index, render_page, resolve_slug, PageIndex, PageSubject, RenderContext,
+    RenderedPage,
 };
 
 use sink::PageSink;
@@ -262,6 +265,68 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
     }
 }
 
+/// Resolve the feature-group hierarchy the wiki is built around: Leiden
+/// communities (graph/llm) or Java packages (package mode), with synthesis from
+/// controller file paths when no communities exist, then the `--filter-feature`
+/// filter. Shared by `generate_wiki` and the standalone render path so both see
+/// the same feature set.
+pub fn resolve_feature_groups(graph: &WikiGraph, input: &WikiInput<'_>) -> Vec<FeatureGroup> {
+    let mut feature_groups = if input.grouping == "package" {
+        // Restrict to packages that survived --filter-route (stored in input.community_nodes).
+        // When no route filter was active, input.community_nodes contains all packages.
+        let allowed_ids: std::collections::HashSet<&str> = input
+            .community_nodes
+            .iter()
+            .map(|n| n.id.as_str())
+            .collect();
+        let all_groups = group_nodes_by_package(graph);
+        if allowed_ids.is_empty() {
+            all_groups
+        } else {
+            all_groups
+                .into_iter()
+                .filter(|g| {
+                    g.community_ids
+                        .iter()
+                        .any(|id| allowed_ids.contains(id.as_str()))
+                })
+                .collect()
+        }
+    } else {
+        group_communities_by_feature(graph)
+    };
+
+    // No communities (discover not run): synthesize one group per feature found in
+    // controller file paths so controller pages still get generated.
+    if feature_groups.is_empty() && !graph.routes_by_controller.is_empty() {
+        let mut features: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for feat in graph.controller_feature.values() {
+            features.insert(feat.clone());
+        }
+        feature_groups = features
+            .into_iter()
+            .map(|feature| FeatureGroup {
+                feature,
+                community_ids: vec![],
+            })
+            .collect();
+    }
+
+    // Apply --filter-feature: keep only groups whose name contains a filter substring.
+    if !input.filter_feature.is_empty() {
+        let filters: Vec<String> = input
+            .filter_feature
+            .iter()
+            .map(|f| f.to_lowercase())
+            .collect();
+        feature_groups.retain(|g| {
+            let name = g.feature.to_lowercase();
+            filters.iter().any(|f| name.contains(f.as_str()))
+        });
+    }
+    feature_groups
+}
+
 /// Collected page output from one generation phase (pages + nav entries).
 struct PageBatch {
     pages: Vec<PageEntry>,
@@ -361,8 +426,13 @@ fn emit_feature_section(
     };
 
     // D1 — Feature landing index
-    let idx_md =
-        pages::feature_index::render_feature_index(feature, cids, class_dev_links, graph, &page_meta);
+    let idx_md = pages::feature_index::render_feature_index(
+        feature,
+        cids,
+        class_dev_links,
+        graph,
+        &page_meta,
+    );
     sink.push(format!("pages/{}/index.md", feature), idx_md);
     batch
         .nav
@@ -846,8 +916,7 @@ fn emit_community_section(
                 community_id: Some(comm_id.clone()),
             });
 
-            let ba_md =
-                pages::community::render_community_ba(comm, graph, &processes_here, full);
+            let ba_md = pages::community::render_community_ba(comm, graph, &processes_here, full);
             sink.push(format!("pages/communities/{dir_name}/ba.md"), ba_md);
             batch.pages.push(PageEntry {
                 slug: format!("communities/{dir_name}/ba"),
@@ -899,60 +968,8 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         }
     }
 
-    // Feature grouping — the core of the new hierarchy
-    let mut feature_groups = if input.grouping == "package" {
-        // Restrict to packages that survived --filter-route (stored in input.community_nodes).
-        // When no route filter was active, input.community_nodes contains all packages.
-        let allowed_ids: std::collections::HashSet<&str> = input
-            .community_nodes
-            .iter()
-            .map(|n| n.id.as_str())
-            .collect();
-        let all_groups = group_nodes_by_package(&graph);
-        if allowed_ids.is_empty() {
-            all_groups
-        } else {
-            all_groups
-                .into_iter()
-                .filter(|g| {
-                    g.community_ids
-                        .iter()
-                        .any(|id| allowed_ids.contains(id.as_str()))
-                })
-                .collect()
-        }
-    } else {
-        group_communities_by_feature(&graph)
-    };
-
-    // No communities (discover not run): synthesize one group per feature found in
-    // controller file paths so controller pages still get generated.
-    if feature_groups.is_empty() && !graph.routes_by_controller.is_empty() {
-        let mut features: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for feat in graph.controller_feature.values() {
-            features.insert(feat.clone());
-        }
-        feature_groups = features
-            .into_iter()
-            .map(|feature| FeatureGroup {
-                feature,
-                community_ids: vec![],
-            })
-            .collect();
-    }
-
-    // Apply --filter-feature: keep only groups whose name contains a filter substring.
-    if !input.filter_feature.is_empty() {
-        let filters: Vec<String> = input
-            .filter_feature
-            .iter()
-            .map(|f| f.to_lowercase())
-            .collect();
-        feature_groups.retain(|g| {
-            let name = g.feature.to_lowercase();
-            filters.iter().any(|f| name.contains(f.as_str()))
-        });
-    }
+    // Feature grouping — the core of the new hierarchy.
+    let feature_groups = resolve_feature_groups(&graph, &input);
 
     let mut module_tree = input.module_tree.take().unwrap_or_else(|| {
         build_graph_module_tree(
@@ -1102,8 +1119,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // ── Scheduled jobs & event listeners ────────────────────────────────────
     {
-        let ep_batch =
-            emit_entrypoint_section(&graph, &ctx, out_dir, &class_dev_slugs, &mut sink)?;
+        let ep_batch = emit_entrypoint_section(&graph, &ctx, out_dir, &class_dev_slugs, &mut sink)?;
         page_count += ep_batch.pages.len();
         all_pages.extend(ep_batch.pages);
         nav.extend(ep_batch.nav);
