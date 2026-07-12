@@ -32,6 +32,7 @@ pub fn resolve_contract_edges(
                     // PROVISIONAL wrapper calls join against detected wrapper
                     // defs; no match ⇒ the site silently vanishes.
                     let mut wrapper_provenance = None;
+                    let mut wrapper_fixed_method = None;
                     let (url_template, dynamic, env_default) = if let Some(callee) =
                         site.via_wrapper.as_deref()
                     {
@@ -59,6 +60,9 @@ pub fn resolve_contract_edges(
                             continue;
                         };
                         wrapper_provenance = Some(format!("{}#{}", def.module, def.name));
+                        // Python wrappers hard-code their verb; the site's
+                        // method is a placeholder in that case.
+                        wrapper_fixed_method = def.fixed_method.clone();
                         (folded, true, env_default)
                     } else {
                         match site.url_template.as_deref() {
@@ -72,7 +76,10 @@ pub fn resolve_contract_edges(
                             }
                         }
                     };
-                    let Some(http_method) = site.http_method.as_deref() else {
+                    let Some(http_method) = wrapper_fixed_method
+                        .as_deref()
+                        .or(site.http_method.as_deref())
+                    else {
                         continue;
                     };
                     let method = http_method.to_ascii_uppercase();

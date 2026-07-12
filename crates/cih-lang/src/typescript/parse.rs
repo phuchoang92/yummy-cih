@@ -783,6 +783,7 @@ fn try_collect_http_wrapper(name: &str, fn_node: TsNode<'_>, src: &str, builder:
                 module: builder.module.clone(),
                 prefix_parts: Vec::new(),
                 options_arg_index: 1,
+                fixed_method: None,
                 range: range_of(fn_node),
             });
             return;
@@ -821,6 +822,7 @@ fn try_collect_http_wrapper(name: &str, fn_node: TsNode<'_>, src: &str, builder:
         module: builder.module.clone(),
         prefix_parts: prefix,
         options_arg_index: 1,
+                fixed_method: None,
         range: range_of(fn_node),
     });
 }

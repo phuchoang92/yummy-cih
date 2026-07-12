@@ -1790,6 +1790,7 @@ fn wrapper_file(file: &str, module: &str, name: &str, prefix: Vec<UrlPart>) -> P
         module: module.into(),
         prefix_parts: prefix,
         options_arg_index: 1,
+        fixed_method: None,
         range: Range::default(),
     }];
     pf
@@ -2017,4 +2018,221 @@ fn python_module_level_site_resolves_same_file_constant() {
 
     let out = resolve_with_constants(vec![pf]);
     assert_eq!(endpoint_paths(&out), vec!["/api/v1/ping"]);
+}
+
+// ── Python wrapper joins ─────────────────────────────────────────────────────
+
+fn py_wrapper_file(
+    file: &str,
+    module: &str,
+    name: &str,
+    prefix: Vec<UrlPart>,
+    fixed_method: Option<&str>,
+) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "python".into();
+    pf.package = None;
+    pf.http_wrappers = vec![cih_core::HttpWrapperDef {
+        name: name.into(),
+        module: module.into(),
+        prefix_parts: prefix,
+        options_arg_index: 1,
+        fixed_method: fixed_method.map(str::to_string),
+        range: Range::default(),
+    }];
+    pf
+}
+
+fn py_wrapper_call_file(
+    file: &str,
+    in_callable: &str,
+    callee: &str,
+    parts: Vec<UrlPart>,
+) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "python".into();
+    pf.package = None;
+    let mut site = http_parts_site(NodeId::new(in_callable), parts);
+    site.via_wrapper = Some(callee.into());
+    site.http_method = Some("GET".into()); // parse-side placeholder
+    pf.contract_sites = vec![site];
+    pf
+}
+
+#[test]
+fn py_wrapper_dotted_same_module_join() {
+    // Caller sites live in the SAME file as the wrapper — the dotted
+    // same-module try must bridge slashed file paths to dotted modules.
+    let mut pf = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_get",
+        vec![UrlPart::Lit("/api/v1".into())],
+        Some("GET"),
+    );
+    let mut site = http_parts_site(
+        NodeId::new("Function:services.api_client#load/0"),
+        vec![UrlPart::Lit("/items".into())],
+    );
+    site.via_wrapper = Some("api_get".into());
+    pf.contract_sites = vec![site];
+
+    let out = resolve_with_constants(vec![pf]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/items"]);
+}
+
+#[test]
+fn py_wrapper_from_import_scoped_join_with_two_context_fold() {
+    // Decoy same-named wrapper kills the unique fallback; the caller's dotted
+    // import raw must key the wrapper index directly. The wrapper's own
+    // env-default constant resolves in the wrapper file's context.
+    let mut wrapper = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_get",
+        vec![UrlPart::ConstRef("API_BASE".into())],
+        Some("GET"),
+    );
+    wrapper.string_constants = vec![StringConstant {
+        const_name: "API_BASE".into(),
+        owner_fqcn: "services.api_client".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: true,
+        range: Range::default(),
+    }];
+    let decoy = py_wrapper_file(
+        "legacy/client.py",
+        "legacy.client",
+        "api_get",
+        vec![UrlPart::Lit("/legacy".into())],
+        Some("GET"),
+    );
+    let mut caller = py_wrapper_call_file(
+        "app/views.py",
+        "Function:app.views#load/1",
+        "api_get",
+        vec![UrlPart::Lit("/admin/items/".into()), UrlPart::Dynamic],
+    );
+    caller.imports = vec![import("services.api_client")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/admin/items/{*}");
+    assert_eq!(props["base_source"], "env_default");
+    assert_eq!(props["via_wrapper"], "services.api_client#api_get");
+}
+
+#[test]
+fn py_wrapper_fixed_method_overrides_site_placeholder() {
+    let wrapper = py_wrapper_file(
+        "services/api.py",
+        "services.api",
+        "api_post",
+        vec![UrlPart::Lit("/api".into())],
+        Some("POST"),
+    );
+    let mut caller = py_wrapper_call_file(
+        "app/views.py",
+        "Function:app.views#save/1",
+        "api_post",
+        vec![UrlPart::Lit("/items".into())],
+    );
+    caller.imports = vec![import("services.api")];
+
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    assert_eq!(
+        endpoint.props.as_ref().unwrap()["httpMethod"],
+        "POST",
+        "fixed_method must override the GET placeholder"
+    );
+}
+
+#[test]
+fn py_pass_through_wrapper_empty_prefix() {
+    let wrapper = py_wrapper_file(
+        "e2e/wrap/run.py",
+        "e2e.wrap.run",
+        "wait_for_http",
+        Vec::new(),
+        Some("GET"),
+    );
+    // Literal suffix folds bare.
+    let mut ok_caller = py_wrapper_call_file(
+        "e2e/wrap/run.py",
+        "Function:e2e.wrap.run#test/0",
+        "wait_for_http",
+        vec![UrlPart::Lit("/health".into())],
+    );
+    ok_caller.http_wrappers = wrapper.http_wrappers.clone();
+    let out = resolve_with_constants(vec![ok_caller]);
+    assert_eq!(endpoint_paths(&out), vec!["/health"]);
+
+    // All-dynamic suffix drops.
+    let mut drop_caller = py_wrapper_call_file(
+        "e2e/wrap/run.py",
+        "Function:e2e.wrap.run#test2/0",
+        "wait_for_http",
+        vec![UrlPart::Dynamic],
+    );
+    drop_caller.http_wrappers = wrapper.http_wrappers;
+    let out = resolve_with_constants(vec![drop_caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}
+
+#[test]
+fn ts_wrapper_method_still_from_options() {
+    // TS defs carry fixed_method: None — the site's options-derived method
+    // must survive unchanged (no-regression pin for the override).
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api".into())],
+    );
+    let mut caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#save/1",
+        "apiFetch",
+        "POST",
+        vec![UrlPart::Lit("/items".into())],
+    );
+    caller.imports = vec![import("./api")];
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    assert_eq!(endpoint.props.as_ref().unwrap()["httpMethod"], "POST");
+}
+
+#[test]
+fn unmatched_python_provisional_vanishes() {
+    // log("/msg") is URL-ish at parse; with no wrapper def it must vanish.
+    let caller = py_wrapper_call_file(
+        "app/log.py",
+        "Function:app.log#warn/1",
+        "log",
+        vec![UrlPart::Lit("/msg".into())],
+    );
+    let out = resolve_with_constants(vec![caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+    assert!(out.edges.iter().all(|e| e.kind != EdgeKind::ExternalCall));
 }

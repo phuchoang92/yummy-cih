@@ -83,6 +83,12 @@ pub struct HttpWrapperDef {
     pub prefix_parts: Vec<UrlPart>,
     /// Positional index of the options object at call sites (v1: always 1).
     pub options_arg_index: u32,
+    /// Verb hard-coded by the wrapper itself (`requests.get` inside
+    /// `api_get` → `Some("GET")`) — overrides the call site's placeholder
+    /// method at join. `None` for TS options-object wrappers, whose verb
+    /// comes from the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_method: Option<String>,
     pub range: Range,
 }
 

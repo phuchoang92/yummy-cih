@@ -1,7 +1,7 @@
 use cih_core::{
     file_id, function_id, type_id, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId,
     NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource,
-    StringConstant, SymbolDef, UrlPart,
+    HttpWrapperDef, StringConstant, SymbolDef, UrlPart,
 };
 use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_python};
@@ -47,6 +47,282 @@ fn unquote(raw: &str) -> String {
 fn module_path(rel: &str) -> String {
     let stripped = rel.strip_suffix(".py").unwrap_or(rel);
     stripped.replace(['/', '\\'], ".")
+}
+
+// ── HTTP wrapper detection (python analog of the TS apiFetch pattern) ────────
+
+/// One piece of a candidate wrapper's URL expression: a regular part, or the
+/// pass-through parameter slot.
+enum WrapperUrlPiece {
+    Part(UrlPart),
+    Param,
+}
+
+/// Detect a same-repo HTTP wrapper: a module-scope `def` whose FIRST param is
+/// a plain identifier and whose body calls `requests.<verb>` / `httpx.<verb>`
+/// / `requests.request("VERB", …)` with a URL of `<Lit/ConstRef prefix><param>`
+/// (param LAST) — directly or via one `url = <expr>` same-body assignment.
+/// Python wrappers hard-code their verb, recorded as `fixed_method`. Anything
+/// fancier bails: a missed wrapper degrades coverage, a wrong one would
+/// fabricate endpoints.
+fn try_collect_py_http_wrapper(name: &str, fn_node: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let Some(param_name) = first_py_param_identifier(fn_node, src) else {
+        return;
+    };
+    let Some(body) = fn_node.child_by_field_name("body") else {
+        return;
+    };
+    let Some(http_call) = find_inner_py_http_call(body, src) else {
+        return;
+    };
+    let Some(func) = http_call.child_by_field_name("function") else {
+        return;
+    };
+    let attr = func
+        .child_by_field_name("attribute")
+        .map(|n| text(n, src))
+        .unwrap_or_default();
+    let (method, url_arg_index) = if attr == "request" {
+        // requests.request("POST", url) — literal verb only; a method-param
+        // pass-through (`def call(method, path)`) bails.
+        let Some(verb) = positional_argument(http_call, 0)
+            .filter(|arg| arg.kind() == "string")
+            .and_then(|arg| literal_py_string(arg, src))
+        else {
+            return;
+        };
+        (verb.to_ascii_uppercase(), 1)
+    } else {
+        let Some(verb) = python_http_verb(&attr) else {
+            return;
+        };
+        (verb.to_string(), 0)
+    };
+    let Some(mut url_expr) = positional_argument(http_call, url_arg_index) else {
+        return;
+    };
+    // One-level indirection: `url = f"{API_BASE}{path}"` then verb(url).
+    if url_expr.kind() == "identifier" {
+        let local = text(url_expr, src);
+        if local == param_name {
+            // Pure pass-through: verb(param) — empty prefix.
+            builder.http_wrappers.push(HttpWrapperDef {
+                name: name.to_string(),
+                module: builder.module.clone(),
+                prefix_parts: Vec::new(),
+                options_arg_index: 1,
+                fixed_method: Some(method),
+                range: range_of(fn_node),
+            });
+            return;
+        }
+        match find_unique_py_assignment(body, &local, src) {
+            Some(value) => url_expr = value,
+            None => return,
+        }
+    }
+    let mut pieces = Vec::new();
+    fold_wrapper_py_url_expr(url_expr, src, &param_name, &mut pieces);
+    let Some(WrapperUrlPiece::Param) = pieces.last() else {
+        return;
+    };
+    let Some(prefix) = pieces[..pieces.len() - 1]
+        .iter()
+        .map(|piece| match piece {
+            WrapperUrlPiece::Part(part) => Some(part.clone()),
+            WrapperUrlPiece::Param => None, // a second Param — bail
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    if prefix.iter().any(|part| matches!(part, UrlPart::Dynamic)) {
+        return;
+    }
+    builder.http_wrappers.push(HttpWrapperDef {
+        name: name.to_string(),
+        module: builder.module.clone(),
+        prefix_parts: prefix,
+        options_arg_index: 1,
+        fixed_method: Some(method),
+        range: range_of(fn_node),
+    });
+}
+
+/// First parameter when it is a plain identifier (typed params included);
+/// `self`/`cls` and destructuring → None. Deliberately NOT `parameter_count`,
+/// which unconditionally subtracts one.
+fn first_py_param_identifier(fn_node: TsNode<'_>, src: &str) -> Option<String> {
+    let params = fn_node.child_by_field_name("parameters")?;
+    let mut cursor = params.walk();
+    let first = params.named_children(&mut cursor).next()?;
+    let name = match first.kind() {
+        "identifier" => text(first, src),
+        "typed_parameter" => {
+            let mut inner_cursor = first.walk();
+            let inner = first
+                .named_children(&mut inner_cursor)
+                .find(|child| child.kind() == "identifier")?;
+            text(inner, src)
+        }
+        _ => return None,
+    };
+    (name != "self" && name != "cls").then_some(name)
+}
+
+/// First `requests.*`/`httpx.*` call inside `body`, NOT descending into nested
+/// function/class definitions or lambdas.
+fn find_inner_py_http_call<'a>(body: TsNode<'a>, src: &str) -> Option<TsNode<'a>> {
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "function_definition" | "decorated_definition" | "lambda" | "class_definition"
+        ) {
+            continue;
+        }
+        if child.kind() == "call" {
+            if let Some(func) = child.child_by_field_name("function") {
+                if func.kind() == "attribute" {
+                    let object = func
+                        .child_by_field_name("object")
+                        .filter(|obj| obj.kind() == "identifier")
+                        .map(|obj| text(obj, src))
+                        .unwrap_or_default();
+                    let attr = func
+                        .child_by_field_name("attribute")
+                        .map(|n| text(n, src))
+                        .unwrap_or_default();
+                    if (object == "requests" || object == "httpx")
+                        && (python_http_verb(&attr).is_some() || attr == "request")
+                    {
+                        return Some(child);
+                    }
+                }
+            }
+        }
+        if let Some(found) = find_inner_py_http_call(child, src) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The unique same-body `local = <expr>` assignment, or None when absent or
+/// ambiguous (reassignment across branches → refuse to guess).
+fn find_unique_py_assignment<'a>(body: TsNode<'a>, local: &str, src: &str) -> Option<TsNode<'a>> {
+    let mut found: Option<TsNode<'a>> = None;
+    let mut count = 0u32;
+    collect_py_assignments(body, local, src, &mut found, &mut count);
+    (count == 1).then_some(found).flatten()
+}
+
+fn collect_py_assignments<'a>(
+    node: TsNode<'a>,
+    local: &str,
+    src: &str,
+    found: &mut Option<TsNode<'a>>,
+    count: &mut u32,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "function_definition" | "decorated_definition" | "lambda" | "class_definition"
+        ) {
+            continue;
+        }
+        if child.kind() == "assignment" {
+            let lhs = child
+                .child_by_field_name("left")
+                .filter(|left| left.kind() == "identifier")
+                .map(|left| text(left, src));
+            if lhs.as_deref() == Some(local) {
+                if let Some(value) = child.child_by_field_name("right") {
+                    *count += 1;
+                    *found = Some(value);
+                }
+            }
+        }
+        collect_py_assignments(child, local, src, found, count);
+        if *count > 1 {
+            return;
+        }
+    }
+}
+
+/// Fold a wrapper's URL expression like [`fold_py_url_expr`], except any
+/// reference to the pass-through param — f-string `{param}` interpolation or
+/// bare `param` identifier — becomes [`WrapperUrlPiece::Param`] (checked
+/// BEFORE the SCREAMING_SNAKE gate / ungated ConstRef arm respectively).
+fn fold_wrapper_py_url_expr(
+    node: TsNode<'_>,
+    src: &str,
+    param: &str,
+    out: &mut Vec<WrapperUrlPiece>,
+) {
+    match node.kind() {
+        "identifier" if text(node, src) == param => out.push(WrapperUrlPiece::Param),
+        "string" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_content" | "escape_sequence" => {
+                        out.push(WrapperUrlPiece::Part(UrlPart::Lit(
+                            child
+                                .utf8_text(src.as_bytes())
+                                .unwrap_or_default()
+                                .to_string(),
+                        )))
+                    }
+                    "interpolation" => match child.named_child(0) {
+                        Some(inner) if inner.kind() == "identifier" && text(inner, src) == param => {
+                            out.push(WrapperUrlPiece::Param)
+                        }
+                        Some(inner)
+                            if inner.kind() == "identifier"
+                                && crate::contracts_common::is_screaming_snake(&text(
+                                    inner, src,
+                                )) =>
+                        {
+                            out.push(WrapperUrlPiece::Part(UrlPart::ConstRef(text(inner, src))))
+                        }
+                        _ => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+                    },
+                    _ => {}
+                }
+            }
+        }
+        "binary_operator" => {
+            let op = node.child_by_field_name("operator").map(|op| text(op, src));
+            if op.as_deref() != Some("+") {
+                out.push(WrapperUrlPiece::Part(UrlPart::Dynamic));
+                return;
+            }
+            for field in ["left", "right"] {
+                match node.child_by_field_name(field) {
+                    Some(side) => fold_wrapper_py_url_expr(side, src, param, out),
+                    None => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+                }
+            }
+        }
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => fold_wrapper_py_url_expr(inner, src, param, out),
+            None => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+        },
+        "identifier" | "attribute" => {
+            out.push(WrapperUrlPiece::Part(UrlPart::ConstRef(text(node, src))))
+        }
+        _ => out.push(WrapperUrlPiece::Part(UrlPart::Dynamic)),
+    }
+}
+
+/// URL-ish gate for provisional wrapper calls: the folded first part must be
+/// a `Lit` starting with `/`. Keeps `t("common.x")` / `helper(x)` out.
+fn py_arg_is_url_ish(node: TsNode<'_>, src: &str) -> bool {
+    let mut parts = Vec::new();
+    fold_py_url_expr(node, src, &mut parts);
+    matches!(parts.first(), Some(UrlPart::Lit(lit)) if lit.starts_with('/'))
 }
 
 /// Normalize a relative import (`.api_client`, `..pkg.mod`, `.`) against the
@@ -277,6 +553,7 @@ struct Builder {
     has_fastapi: bool,
     has_flask: bool,
     string_constants: Vec<StringConstant>,
+    http_wrappers: Vec<HttpWrapperDef>,
 }
 
 impl Builder {
@@ -752,6 +1029,9 @@ fn walk(
                     let arity = parameter_count(child);
                     let fn_fqcn = callable_fqcn(builder, class_fqn, &name, arity);
                     let fn_id = builder.emit_function(child, src, &name, arity, class_fqn);
+                    if class_fqn.is_none() && enclosing.is_none() {
+                        try_collect_py_http_wrapper(&name, child, src, builder);
+                    }
                     process_function_decorators(child, &fn_id, &decorators, builder);
                     // Walk body — calls inside attribute to this function.
                     if let Some(body) = child.child_by_field_name("body") {
@@ -806,6 +1086,9 @@ fn walk(
             let arity = parameter_count(node);
             let fn_fqcn = callable_fqcn(builder, class_fqn, &name, arity);
             let fn_id = builder.emit_function(node, src, &name, arity, class_fqn);
+            if class_fqn.is_none() && enclosing.is_none() {
+                try_collect_py_http_wrapper(&name, node, src, builder);
+            }
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
                 for child in body.named_children(&mut cursor) {
@@ -874,6 +1157,38 @@ fn try_emit_http_contract(
     let Some(func) = node.child_by_field_name("function") else {
         return;
     };
+    // Bare-identifier callee (`api_get('/x')`) MAY be a same-repo HTTP
+    // wrapper. Emit a PROVISIONAL site (placeholder GET — the resolve join
+    // overrides with the wrapper's fixed verb); non-matches vanish at resolve.
+    if func.kind() == "identifier" {
+        let Some(arg0) = positional_argument(node, 0) else {
+            return;
+        };
+        if !py_arg_is_url_ish(arg0, src) {
+            return;
+        }
+        let mut parts = Vec::new();
+        fold_py_url_expr(arg0, src, &mut parts);
+        if parts.is_empty() {
+            return;
+        }
+        let in_callable = match enclosing {
+            Some((id, _)) => id.clone(),
+            None => file_id(&builder.rel),
+        };
+        builder.contract_sites.push(ContractSite {
+            kind: ContractKind::HttpCall,
+            url_template: None,
+            topic: None,
+            http_method: Some("GET".into()),
+            messaging_framework: None,
+            url_parts: Some(parts),
+            via_wrapper: Some(text(func, src)),
+            in_callable,
+            range: range_of(node),
+        });
+        return;
+    }
     if func.kind() != "attribute" {
         return;
     }
@@ -1176,7 +1491,7 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
             string_constants: builder.string_constants,
-        http_wrappers: Vec::new(),
+            http_wrappers: builder.http_wrappers,
     },
     })
 }

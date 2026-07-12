@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (5, "39574dc0c00f656f");
+const GOLDEN: (u32, &str) = (6, "7e1d2f89613326e6");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -79,6 +79,29 @@ export async function load(id: string) {
   const r = await fetch(`${API_BASE_URL}/items/${id}`);
   return r.json();
 }
+"#,
+    ),
+    (
+        "services/api_client.py",
+        r#"import os
+import requests
+
+API_BASE = os.environ.get("API_URL", "/api/v1")
+
+def api_get(path):
+    url = f"{API_BASE}{path}"
+    return requests.get(url)
+
+def api_post(path, data):
+    return requests.post(API_BASE + path, json=data)
+"#,
+    ),
+    (
+        "services/caller.py",
+        r#"from services.api_client import api_get
+
+def load(item_id):
+    return api_get(f"/admin/items/{item_id}")
 "#,
     ),
     (

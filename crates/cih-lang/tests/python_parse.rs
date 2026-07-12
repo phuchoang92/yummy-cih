@@ -368,3 +368,134 @@ fn python_relative_imports_normalize_against_file_dir() {
         vec!["services.sub.api_client", "services.pkg", "services.sub"]
     );
 }
+
+// ── HTTP wrapper detection + provisional call sites ─────────────────────────
+
+fn py_http_wrappers(src: &str) -> Vec<cih_core::HttpWrapperDef> {
+    parse_python_file("services/api_client.py", src)
+        .expect("should parse")
+        .parsed_file
+        .http_wrappers
+}
+
+const PY_API_CLIENT: &str = r#"import os
+import requests
+
+API_BASE = os.environ.get("API_URL", "/api/v1")
+
+def api_get(path):
+    url = f"{API_BASE}{path}"
+    return requests.get(url)
+
+def api_post(path, data):
+    return requests.post(API_BASE + path, json=data)
+
+def api_call(path):
+    return requests.request("POST", API_BASE + path)
+
+def passthrough(url):
+    return requests.get(url)
+"#;
+
+#[test]
+fn py_wrapper_defs_detected() {
+    let wrappers = py_http_wrappers(PY_API_CLIENT);
+    let by_name: std::collections::HashMap<_, _> =
+        wrappers.iter().map(|w| (w.name.as_str(), w)).collect();
+    assert_eq!(wrappers.len(), 4, "{wrappers:?}");
+
+    let get = by_name["api_get"];
+    assert_eq!(get.module, "services.api_client");
+    assert_eq!(
+        get.prefix_parts,
+        vec![cih_core::UrlPart::ConstRef("API_BASE".into())]
+    );
+    assert_eq!(get.fixed_method.as_deref(), Some("GET"));
+
+    // json= kwarg must not shift the URL arg.
+    let post = by_name["api_post"];
+    assert_eq!(post.fixed_method.as_deref(), Some("POST"));
+    assert_eq!(
+        post.prefix_parts,
+        vec![cih_core::UrlPart::ConstRef("API_BASE".into())]
+    );
+
+    // requests.request("POST", url) literal-verb form.
+    let call = by_name["api_call"];
+    assert_eq!(call.fixed_method.as_deref(), Some("POST"));
+
+    // Pure pass-through: empty prefix.
+    let pt = by_name["passthrough"];
+    assert!(pt.prefix_parts.is_empty());
+    assert_eq!(pt.fixed_method.as_deref(), Some("GET"));
+}
+
+#[test]
+fn py_wrapper_rejections() {
+    // Method with self param inside a class.
+    assert!(py_http_wrappers(
+        "import requests\nclass C:\n    def get(self, path):\n        return requests.get(\"/api\" + path)\n"
+    )
+    .is_empty());
+    // Nested def (closure) containing the call.
+    assert!(py_http_wrappers(
+        "import requests\ndef outer(path):\n    def inner():\n        return requests.get(\"/api\" + path)\n    return inner\n"
+    )
+    .is_empty());
+    // Param mid-URL.
+    assert!(py_http_wrappers(
+        "import requests\ndef f(path):\n    return requests.get(f\"/a/{path}/suffix\")\n"
+    )
+    .is_empty());
+    // No inner http call.
+    assert!(py_http_wrappers("def f(path):\n    return compute(path)\n").is_empty());
+    // Two url assignments (ambiguous).
+    assert!(py_http_wrappers(
+        "import requests\ndef f(path, flag):\n    if flag:\n        url = \"/a\" + path\n    else:\n        url = \"/b\" + path\n    return requests.get(url)\n"
+    )
+    .is_empty());
+    // Non-literal request method (pass-through method wrapper) bails.
+    assert!(py_http_wrappers(
+        "import requests\ndef f(method, path):\n    return requests.request(method, \"/api\" + path)\n"
+    )
+    .is_empty());
+}
+
+#[test]
+fn py_decorated_module_scope_def_is_detected() {
+    let wrappers = py_http_wrappers(
+        "import requests\n\n@retry\ndef api_get(path):\n    return requests.get(\"/api/v1\" + path)\n",
+    );
+    assert_eq!(wrappers.len(), 1);
+    assert_eq!(wrappers[0].name, "api_get");
+}
+
+#[test]
+fn py_provisional_sites_for_wrapper_calls() {
+    let sites = py_sites(
+        "from services.api_client import api_get\n\ndef load(item_id):\n    return api_get(f\"/admin/items/{item_id}\")\n\ndef all_items():\n    return api_get(\"/items\")\n",
+    );
+    assert_eq!(sites.len(), 2, "{sites:?}");
+    assert_eq!(sites[0].via_wrapper.as_deref(), Some("api_get"));
+    assert_eq!(sites[0].http_method.as_deref(), Some("GET"));
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(
+            &[
+                cih_core::UrlPart::Lit("/admin/items/".into()),
+                cih_core::UrlPart::Dynamic
+            ][..]
+        )
+    );
+    // All-Lit args still carry parts (resolve must prepend the prefix).
+    assert_eq!(
+        sites[1].url_parts.as_deref(),
+        Some(&[cih_core::UrlPart::Lit("/items".into())][..])
+    );
+}
+
+#[test]
+fn py_provisional_not_emitted_for_non_url_args() {
+    let sites = py_sites("def f(x):\n    t(\"common.x\")\n    helper(x)\n");
+    assert!(sites.is_empty(), "{sites:?}");
+}
