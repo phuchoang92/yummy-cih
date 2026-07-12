@@ -28,8 +28,9 @@ use cih_core::{Edge, GraphArtifacts, Node, RepoMap};
 use crate::render::{build_page_index, render_page, PageIndex, RenderContext, RenderedPage};
 use crate::{
     build_class_maps, class_method_chains, resolve_feature_groups, source_bodies, BodyEntry,
-    ClassEnrichmentStore, CommunityLlmSummary, ControllerLlmSummary, EntrypointRecord,
-    FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo, WikiGraph, WikiInput, WikiMeta,
+    ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary, ControllerLlmSummary,
+    EntrypointRecord, FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo, WikiGraph, WikiInput,
+    WikiMeta,
 };
 
 /// Self-referential resident render state: owns the graph data, and the
@@ -73,6 +74,7 @@ struct InputParts {
     controller_summaries: Option<HashMap<String, ControllerLlmSummary>>,
     feature_llm_summaries: Option<HashMap<String, FeatureLlmSummary>>,
     flow_llm_summaries: Option<HashMap<String, FlowLlmSummary>>,
+    llm_full: Option<HashMap<String, CommunityLlmFull>>,
 }
 
 impl OwnedWiki {
@@ -186,7 +188,7 @@ impl OwnedWiki {
 
         // Read-only enrichment splice: load persisted summaries if present.
         let (llm_summaries, controller_summaries) = load_class_enrichment(repo, &graph);
-        let (feature_llm_summaries, flow_llm_summaries) = load_meta_enrichment(repo);
+        let (feature_llm_summaries, flow_llm_summaries, llm_full) = load_meta_enrichment(repo);
 
         let parts = InputParts {
             bodies,
@@ -200,6 +202,7 @@ impl OwnedWiki {
             controller_summaries,
             feature_llm_summaries,
             flow_llm_summaries,
+            llm_full,
         };
 
         // Build the resident WikiInput + RenderContext once (self-referential).
@@ -275,7 +278,7 @@ fn graph_only_input<'a>(
         unresolved_report: parts.unresolved_report,
         repo_map: parts.repo_map,
         llm_summaries: parts.llm_summaries,
-        llm_full: None,
+        llm_full: parts.llm_full,
         llm_info: None,
         module_tree: None,
         generation: WikiGenerationInfo {
@@ -330,23 +333,25 @@ fn load_class_enrichment(
     (Some(comm_map), Some(ctrl_map))
 }
 
-/// Read-only enrichment splice (feature + flow): load `.cih/wiki/wiki_meta.json`
-/// (written by a prior `cih-engine wiki --llm` run) and lift its per-feature and
-/// per-flow caches into the `WikiInput` maps — no LLM call, no evidence
-/// re-hashing (the cache is served as-is). `(None, None)` when absent/empty.
+/// Read-only enrichment splice (feature + flow + llm-full): load
+/// `.cih/wiki/wiki_meta.json` (written by a prior `cih-engine wiki --llm` run)
+/// and lift its per-feature, per-flow, and per-community-full caches into the
+/// `WikiInput` maps — no LLM call, no evidence re-hashing (served as-is).
+/// All `None` when absent/empty.
 #[allow(clippy::type_complexity)]
 fn load_meta_enrichment(
     repo: &Path,
 ) -> (
     Option<HashMap<String, FeatureLlmSummary>>,
     Option<HashMap<String, FlowLlmSummary>>,
+    Option<HashMap<String, CommunityLlmFull>>,
 ) {
     let path = repo.join(".cih").join("wiki").join("wiki_meta.json");
     let Ok(text) = std::fs::read_to_string(path) else {
-        return (None, None);
+        return (None, None, None);
     };
     let Ok(meta) = serde_json::from_str::<WikiMeta>(&text) else {
-        return (None, None);
+        return (None, None, None);
     };
     let feature_map: HashMap<String, FeatureLlmSummary> = meta
         .feature_cache
@@ -368,10 +373,32 @@ fn load_meta_enrichment(
         .into_iter()
         .map(|(id, e)| (id, e.summary))
         .collect();
+    let full_map: HashMap<String, CommunityLlmFull> = meta
+        .full_cache
+        .into_iter()
+        .map(|(id, e)| {
+            (
+                id,
+                CommunityLlmFull {
+                    po_summary: e.po_summary,
+                    po_capabilities: e.po_capabilities,
+                    po_workflows: e.po_workflows,
+                    po_open_questions: e.po_open_questions,
+                    ba_process_overview: e.ba_process_overview,
+                    ba_contracts: e.ba_contracts,
+                    ba_business_rules: e.ba_business_rules,
+                    dev_responsibility: e.dev_responsibility,
+                    dev_key_classes: e.dev_key_classes,
+                    dev_entry_points: e.dev_entry_points,
+                },
+            )
+        })
+        .collect();
 
     (
         (!feature_map.is_empty()).then_some(feature_map),
         (!flow_map.is_empty()).then_some(flow_map),
+        (!full_map.is_empty()).then_some(full_map),
     )
 }
 
@@ -386,5 +413,51 @@ fn read_entrypoints(repo: &Path) -> Vec<EntrypointRecord> {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str::<Vec<EntrypointRecord>>(&raw).unwrap_or_default(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_meta_enrichment;
+
+    #[test]
+    fn meta_enrichment_lifts_feature_flow_full_caches() {
+        // Hermetic: write a wiki_meta.json with one entry per cache and assert
+        // load_meta_enrichment lifts each into the right WikiInput map (locks the
+        // 1:1 conversions, incl. the llm-full tier which dry-run can't populate).
+        let dir = std::env::temp_dir().join(format!("cih-meta-test-{}", std::process::id()));
+        let wiki = dir.join(".cih").join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        let json = r#"{
+            "schema_version": 5, "graph_version": "v1", "community_version": "v1",
+            "prompt_version": "p1",
+            "feature_cache": {"orders": {"ev_hash":"h","po_overview":"PO","po_capabilities":"CAP","ba_process_overview":"BAP","ba_business_rules":"BR"}},
+            "flow_cache": {"proc1": {"evidence_hash":"h","summary":{"narrative":"N","business_impact":"BI","step_descriptions":["s1"]}}},
+            "full_cache": {"Community:0": {"evidence_hash":"h","po_summary":"PS","po_capabilities":"PC","po_workflows":"PW","po_open_questions":"PQ","ba_process_overview":"BPO","ba_contracts":"BC","ba_business_rules":"BBR","dev_responsibility":"DR","dev_key_classes":"DK","dev_entry_points":"DE"}}
+        }"#;
+        std::fs::write(wiki.join("wiki_meta.json"), json).unwrap();
+
+        let (feature, flow, full) = load_meta_enrichment(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let feature = feature.expect("feature map");
+        assert_eq!(feature["orders"].po_overview, "PO");
+        assert_eq!(feature["orders"].ba_business_rules, "BR");
+
+        let flow = flow.expect("flow map");
+        assert_eq!(flow["proc1"].narrative, "N");
+        assert_eq!(flow["proc1"].step_descriptions, vec!["s1".to_string()]);
+
+        let full = full.expect("full map");
+        assert_eq!(full["Community:0"].po_summary, "PS");
+        assert_eq!(full["Community:0"].dev_entry_points, "DE");
+        assert_eq!(full["Community:0"].ba_contracts, "BC");
+    }
+
+    #[test]
+    fn meta_enrichment_absent_is_none() {
+        let dir = std::env::temp_dir().join(format!("cih-meta-none-{}", std::process::id()));
+        let (f, fl, fu) = load_meta_enrichment(&dir);
+        assert!(f.is_none() && fl.is_none() && fu.is_none());
     }
 }
