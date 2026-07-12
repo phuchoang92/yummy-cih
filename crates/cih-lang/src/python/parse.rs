@@ -49,6 +49,29 @@ fn module_path(rel: &str) -> String {
     stripped.replace(['/', '\\'], ".")
 }
 
+/// Normalize a relative import (`.api_client`, `..pkg.mod`, `.`) against the
+/// importing file's repo-relative path into a dotted absolute module. One
+/// package level is stripped per leading dot beyond the first; walking above
+/// the repo root returns `None`.
+fn normalize_relative_import(spec: &str, rel: &str) -> Option<String> {
+    let dots = spec.chars().take_while(|c| *c == '.').count();
+    if dots == 0 {
+        return None;
+    }
+    let remainder = &spec[dots..];
+    let mut package: Vec<&str> = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("").split('/').filter(|part| !part.is_empty()).collect();
+    for _ in 1..dots {
+        package.pop()?;
+    }
+    for segment in remainder.split('.').filter(|segment| !segment.is_empty()) {
+        package.push(segment);
+    }
+    if package.is_empty() {
+        return None;
+    }
+    Some(package.join("."))
+}
+
 fn parameter_count(node: TsNode<'_>) -> u16 {
     let Some(params) = node.child_by_field_name("parameters") else {
         return 0;
@@ -449,15 +472,61 @@ impl Builder {
     }
 
     fn emit_import(&mut self, node: TsNode<'_>, src: &str) {
-        // import_statement: `import X` or `from X import Y`
-        // import_from_statement: `from module import names`
-        let raw = text(node, src);
-        self.imports.push(RawImport {
-            raw,
-            is_static: false,
-            is_wildcard: false,
-            range: range_of(node),
-        });
+        // Record DOTTED MODULE paths (`services.api_client`), not statement
+        // text — the module string is the cross-file owner key the constant
+        // resolver and wrapper index look up. Relative imports normalize
+        // against this file's directory; un-normalizable forms record the
+        // node text as-is (lookups miss — degrade, never guess).
+        let range = range_of(node);
+        let mut raws: Vec<(String, bool)> = Vec::new();
+        match node.kind() {
+            // `import a.b`, `import a.b as c`, `import os, sys` — one entry
+            // per imported module.
+            "import_statement" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    match child.kind() {
+                        "dotted_name" => raws.push((text(child, src), false)),
+                        "aliased_import" => {
+                            if let Some(name) = child.child_by_field_name("name") {
+                                raws.push((text(name, src), false));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // `from a.b import x, y` / `from a.b import *` / `from .x import y`
+            // — ONE entry: the source module.
+            "import_from_statement" => {
+                let mut cursor = node.walk();
+                let is_wildcard = node
+                    .named_children(&mut cursor)
+                    .any(|child| child.kind() == "wildcard_import");
+                drop(cursor);
+                let raw = match node.child_by_field_name("module_name") {
+                    Some(module) if module.kind() == "dotted_name" => text(module, src),
+                    Some(module) if module.kind() == "relative_import" => {
+                        normalize_relative_import(&text(module, src), &self.rel)
+                            .unwrap_or_else(|| text(node, src))
+                    }
+                    _ => text(node, src),
+                };
+                raws.push((raw, is_wildcard));
+            }
+            _ => raws.push((text(node, src), false)),
+        }
+        if raws.is_empty() {
+            raws.push((text(node, src), false));
+        }
+        for (raw, is_wildcard) in raws {
+            self.imports.push(RawImport {
+                raw,
+                is_static: false,
+                is_wildcard,
+                range,
+            });
+        }
     }
 
     /// `enclosing` is the function that lexically contains this call — its node id and its

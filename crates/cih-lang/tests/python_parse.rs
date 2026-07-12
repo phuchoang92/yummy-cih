@@ -325,3 +325,46 @@ fn computed_and_function_scoped_assignments_emit_nothing() {
         py_string_constants("def f():\n    API_BASE = \"/x\"\n    return API_BASE\n").is_empty()
     );
 }
+
+// ── Dotted import recording (review: python cross-file resolution bugfix) ────
+
+fn py_import_raws(rel: &str, src: &str) -> Vec<(String, bool)> {
+    parse_python_file(rel, src)
+        .expect("should parse")
+        .parsed_file
+        .imports
+        .iter()
+        .map(|imp| (imp.raw.clone(), imp.is_wildcard))
+        .collect()
+}
+
+#[test]
+fn python_imports_record_dotted_modules() {
+    let raws = py_import_raws(
+        "services/sub/mod.py",
+        "import a.b\nimport a.b as c\nimport os, sys\nfrom a.b import x, y\nfrom a.b import *\n",
+    );
+    assert_eq!(
+        raws,
+        vec![
+            ("a.b".to_string(), false),
+            ("a.b".to_string(), false),
+            ("os".to_string(), false),
+            ("sys".to_string(), false),
+            ("a.b".to_string(), false),
+            ("a.b".to_string(), true),
+        ]
+    );
+}
+
+#[test]
+fn python_relative_imports_normalize_against_file_dir() {
+    let raws = py_import_raws(
+        "services/sub/mod.py",
+        "from .api_client import api_get\nfrom ..pkg import w\nfrom . import z\n",
+    );
+    assert_eq!(
+        raws.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+        vec!["services.sub.api_client", "services.pkg", "services.sub"]
+    );
+}

@@ -235,6 +235,16 @@ impl<'a> WrapperIndex<'a> {
         {
             return Some(*hit);
         }
+        // Python modules are DOTTED (`src.app.client`); language-gated so a
+        // TS caller `src/api.ts` can never cross-match a python `src.api`.
+        if caller_pf.language == "python" {
+            if let Some(hit) = self
+                .by_key
+                .get(&(caller_module.replace('/', "."), callee.to_string()))
+            {
+                return Some(*hit);
+            }
+        }
         for imp in &caller_pf.imports {
             if imp.is_static {
                 continue;
@@ -245,6 +255,10 @@ impl<'a> WrapperIndex<'a> {
                 if let Some(hit) = self.by_key.get(&(module, callee.to_string())) {
                     return Some(*hit);
                 }
+            }
+            // Python raws ARE dotted module keys; TS `./x` raws never are.
+            if let Some(hit) = self.by_key.get(&(imp.raw.clone(), callee.to_string())) {
+                return Some(*hit);
             }
         }
         self.unique_by_name.get(callee).copied().flatten()

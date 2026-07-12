@@ -124,6 +124,14 @@ impl ConstantResolver for JavaConstantResolver {
                     if let Some(v) = self.index.get(&(stripped.to_string(), name.to_string())) {
                         return Some(v.clone());
                     }
+                    // Python module owners are DOTTED (`src.app.client`) while
+                    // `File:`-derived owners are slashed — try the dotted form.
+                    if let Some(v) = self
+                        .index
+                        .get(&(stripped.replace('/', "."), name.to_string()))
+                    {
+                        return Some(v.clone());
+                    }
                 }
                 // (b) Import-scoped: the site's file imports the constant's
                 // module (TS relative specifiers; Python dotted modules).

@@ -1957,3 +1957,64 @@ fn unique_wrapper_resolves_without_import() {
     let out = resolve_with_constants(vec![wrapper, caller]);
     assert_eq!(endpoint_paths(&out), vec!["/api/x"]);
 }
+
+// ── Python dotted-import constant resolution (previously dead path) ─────────
+
+fn py_const(file: &str, owner: &str, name: &str, value: &str) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "python".into();
+    pf.package = None;
+    pf.string_constants = vec![StringConstant {
+        const_name: name.into(),
+        owner_fqcn: owner.into(),
+        value: value.into(),
+        dynamic: false,
+        env_default: false,
+        range: Range::default(),
+    }];
+    pf
+}
+
+#[test]
+fn python_constant_resolves_via_from_import() {
+    // The decoy kills the unique-name fallback; only the dotted-direct import
+    // lookup (dead before the import-recording fix) can resolve this.
+    let settings = py_const(
+        "services/settings.py",
+        "services.settings",
+        "API_BASE",
+        "/api/v1",
+    );
+    let decoy = py_const("legacy/old.py", "legacy.old", "API_BASE", "/legacy");
+    let mut caller = empty_file("app/main.py");
+    caller.language = "python".into();
+    caller.package = None;
+    caller.imports = vec![import("services.settings")];
+    caller.contract_sites = vec![http_parts_site(
+        NodeId::new("Function:app.main#load/0"),
+        vec![
+            UrlPart::ConstRef("API_BASE".into()),
+            UrlPart::Lit("/items".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![settings, decoy, caller]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/items"]);
+}
+
+#[test]
+fn python_module_level_site_resolves_same_file_constant() {
+    // Module-scope sites carry `File:src/app/client.py` owners (slashed);
+    // python constants own dotted modules — the dotted branch-(a) try.
+    let mut pf = py_const("src/app/client.py", "src.app.client", "API_BASE", "/api/v1");
+    pf.contract_sites = vec![http_parts_site(
+        NodeId::new("File:src/app/client.py"),
+        vec![
+            UrlPart::ConstRef("API_BASE".into()),
+            UrlPart::Lit("/ping".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![pf]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/ping"]);
+}
