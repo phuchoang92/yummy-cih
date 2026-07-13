@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (10, "d3953674ca07d426");
+const GOLDEN: (u32, &str) = (11, "29cf69b0bd5ec477");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -154,6 +154,19 @@ app.route({ method: ['GET', 'POST'], url: '/api/items' });
         "src/app/api/orders/[id]/route.ts",
         r#"export async function GET() { return Response.json({ ok: true }); }
 export async function POST() { return Response.json({ ok: true }); }
+"#,
+    ),
+    (
+        // Outbound clients: axios.create() instance (baseURL fold) + Angular HttpClient.
+        "src/http-clients.ts",
+        r#"import axios from 'axios';
+import { HttpClient } from '@angular/common/http';
+const api = axios.create({ baseURL: '/api/v1' });
+export async function load() { return api.get('/orders/1'); }
+class Svc {
+    constructor(private http: HttpClient) {}
+    users() { return this.http.get('/api/users'); }
+}
 "#,
     ),
     (

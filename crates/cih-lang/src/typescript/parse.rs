@@ -506,6 +506,9 @@ struct Builder {
     contract_sites: Vec<ContractSite>,
     string_constants: Vec<StringConstant>,
     http_wrappers: Vec<HttpWrapperDef>,
+    /// `const api = axios.create({ baseURL })` instances → optional literal
+    /// baseURL, so `api.get('/x')` resolves to `<baseURL>/x` (P2 instance clients).
+    axios_instances: std::collections::HashMap<String, Option<String>>,
 }
 
 impl Builder {
@@ -888,6 +891,134 @@ fn axios_http_verb(prop: &str) -> Option<&'static str> {
     }
 }
 
+/// Fetch-like bare-identifier client whose method comes from the options object.
+/// `fetch`/`axios`/`$fetch`/`ofetch` are distinctive enough to match unconditionally;
+/// `got`/`ky` are import-gated (checked by the caller) as they collide with common names.
+fn fetch_like_identifier(callee: &str) -> bool {
+    matches!(callee, "fetch" | "axios" | "$fetch" | "ofetch")
+}
+
+/// The receiver name of a member call for HttpClient detection: a bare identifier
+/// (`http.get`) or a `this.<name>` member (`this.http.get`).
+fn httpclient_receiver_name(object_node: TsNode<'_>, src: &str) -> Option<String> {
+    match object_node.kind() {
+        "identifier" => Some(text(object_node, src)),
+        "member_expression" => {
+            let inner = object_node.child_by_field_name("object")?;
+            if text(inner, src) == "this" {
+                object_node.child_by_field_name("property").map(|p| text(p, src))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a `<receiver>.<verb>(...)` member call to `(http_method, base_url)` for
+/// a recognized outbound client: axios (+ `axios.create()` instances), ky,
+/// superagent, undici, and Angular/Nest HttpClient (`this.http`). `None` = not a client.
+fn resolve_client_call(
+    node: TsNode<'_>,
+    func: TsNode<'_>,
+    src: &str,
+    builder: &Builder,
+) -> Option<(String, Option<String>)> {
+    let object_node = func.child_by_field_name("object")?;
+    let prop_node = func.child_by_field_name("property")?;
+    let prop = text(prop_node, src);
+
+    // Angular `HttpClient` / Nest `HttpService`: `(this.)http|httpClient|httpService.<verb>`,
+    // import-gated to bound false positives on the generic verb names.
+    if let Some(recv) = httpclient_receiver_name(object_node, src) {
+        if matches!(recv.as_str(), "http" | "httpClient" | "httpService")
+            && (builder.imports_pkg("@angular/common/http") || builder.imports_pkg("@nestjs/axios"))
+        {
+            if let Some(v) = axios_http_verb(&prop) {
+                return Some((v.to_string(), None));
+            }
+        }
+    }
+
+    // Identifier-receiver clients.
+    if object_node.kind() == "identifier" {
+        let obj = text(object_node, src);
+        if obj == "axios" {
+            return axios_http_verb(&prop).map(|v| (v.to_string(), None));
+        }
+        if let Some(base) = builder.axios_instances.get(&obj) {
+            return axios_http_verb(&prop).map(|v| (v.to_string(), base.clone()));
+        }
+        if (obj == "ky" && builder.imports_pkg("ky"))
+            || (obj == "superagent" && builder.imports_pkg("superagent"))
+        {
+            return axios_http_verb(&prop).map(|v| (v.to_string(), None));
+        }
+        // undici: `undici.request(url, { method })` (method from options).
+        if obj == "undici" && builder.imports_pkg("undici") && prop == "request" {
+            return Some((call_options_method(node, src).unwrap_or_else(|| "GET".into()), None));
+        }
+    }
+    None
+}
+
+/// Join a client baseURL with a call path (skips absolute URLs on the path side).
+fn join_client_url(base: &str, path: &str) -> String {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return path.to_string();
+    }
+    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+}
+
+/// True if `value` is an `axios.create(...)` call.
+fn is_axios_create(value: TsNode<'_>, src: &str) -> bool {
+    if value.kind() != "call_expression" {
+        return false;
+    }
+    let Some(func) = value.child_by_field_name("function") else {
+        return false;
+    };
+    func.kind() == "member_expression"
+        && func.child_by_field_name("object").map(|o| text(o, src)).as_deref() == Some("axios")
+        && func
+            .child_by_field_name("property")
+            .map(|p| text(p, src))
+            .as_deref()
+            == Some("create")
+}
+
+/// Literal `baseURL` from an `axios.create({ baseURL })` config, if present.
+fn axios_create_base_url(value: TsNode<'_>, src: &str) -> Option<String> {
+    let arg0 = ts_positional_argument(value, 0)?;
+    if arg0.kind() != "object" {
+        return None;
+    }
+    literal_ts_string(object_pair_value(arg0, "baseURL", src)?, src)
+}
+
+/// Pre-pass: record `const X = axios.create({ baseURL })` instances (name →
+/// optional literal baseURL) so their `.get/.post/…` calls resolve as axios.
+fn collect_axios_instances(root: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "variable_declarator" {
+            if let (Some(name), Some(value)) = (
+                n.child_by_field_name("name"),
+                n.child_by_field_name("value"),
+            ) {
+                if name.kind() == "identifier" && is_axios_create(value, src) {
+                    let base = axios_create_base_url(value, src);
+                    builder.axios_instances.insert(text(name, src), base);
+                }
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.named_children(&mut c) {
+            stack.push(ch);
+        }
+    }
+}
+
 fn try_emit_http_contract(
     node: TsNode<'_>,
     src: &str,
@@ -898,42 +1029,40 @@ fn try_emit_http_contract(
         return;
     };
     let mut via_wrapper = None;
+    // Literal baseURL prefix for `axios.create()` instance calls, applied below.
+    let mut base_prefix: Option<String> = None;
     let http_method = match func.kind() {
-        "identifier" => match text(func, src).as_str() {
-            // Method comes from the second-arg options object, default GET.
-            "fetch" | "axios" => call_options_method(node, src).unwrap_or_else(|| "GET".into()),
-            // Any other plain identifier MAY be a same-repo HTTP wrapper
-            // (`apiFetch('/admin/x', { method: 'POST' }, token)`). Emit a
-            // PROVISIONAL site only when arg 0 is URL-ish; the resolve phase
-            // joins it against detected wrapper defs and drops non-matches.
-            callee => {
+        "identifier" => {
+            let callee = text(func, src);
+            if fetch_like_identifier(&callee)
+                || (matches!(callee.as_str(), "got" | "ky") && builder.imports_pkg(&callee))
+            {
+                // Method comes from the second-arg options object, default GET.
+                call_options_method(node, src).unwrap_or_else(|| "GET".into())
+            } else {
+                // Any other plain identifier MAY be a same-repo HTTP wrapper
+                // (`apiFetch('/admin/x', { method: 'POST' }, token)`). Emit a
+                // PROVISIONAL site only when arg 0 is URL-ish; the resolve phase
+                // joins it against detected wrapper defs and drops non-matches.
                 let Some(arg0) = ts_positional_argument(node, 0) else {
                     return;
                 };
                 if !ts_arg_is_url_ish(arg0, src) {
                     return;
                 }
-                via_wrapper = Some(callee.to_string());
+                via_wrapper = Some(callee);
                 call_options_method(node, src).unwrap_or_else(|| "GET".into())
             }
-        },
+        }
         "member_expression" => {
-            let object_node = func.child_by_field_name("object");
-            let object = object_node.map(|n| text(n, src));
-            if object.as_deref() == Some("axios") {
-                let Some(verb) = func
-                    .child_by_field_name("property")
-                    .and_then(|prop| axios_http_verb(&text(prop, src)))
-                else {
-                    return;
-                };
-                verb.to_string()
+            if let Some((method, base)) = resolve_client_call(node, func, src, builder) {
+                base_prefix = base;
+                method
             } else {
                 // Namespace-import alias receiver (`import * as api from
-                // './apiClient'; api.apiFetch('/x')`). Bare identifiers
-                // matching a known import alias only — `this.http.get` has a
-                // member-expression receiver and `myobj.get` matches no
-                // import, so instance clients never emit.
+                // './apiClient'; api.apiFetch('/x')`) — bare identifiers matching
+                // a known import alias only.
+                let object_node = func.child_by_field_name("object");
                 let Some(obj) = object_node.filter(|n| n.kind() == "identifier") else {
                     return;
                 };
@@ -974,7 +1103,13 @@ fn try_emit_http_contract(
         }
         (None, Some(parts))
     } else {
-        let template = literal_ts_string(url_node, src).map(|url| normalize_external_url(&url));
+        let template = literal_ts_string(url_node, src).map(|url| {
+            let full = match &base_prefix {
+                Some(base) => join_client_url(base, &url),
+                None => url,
+            };
+            normalize_external_url(&full)
+        });
         let parts = if template.is_none() {
             ts_url_parts(url_node, src)
         } else {
@@ -1733,6 +1868,10 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
         ..Builder::default()
     };
 
+    // Pre-pass: axios.create() instances must be known before their `.get/.post`
+    // calls are visited during the walk.
+    collect_axios_instances(tree.root_node(), src, &mut builder);
+
     walk(tree.root_node(), src, &mut builder, None, None, None);
 
     // File-based routes (Next.js / Remix) are a path convention, not a call —
@@ -1965,6 +2104,83 @@ class UserResolver {
         assert!(gql
             .iter()
             .any(|c| c.http_method.as_deref() == Some("MUTATION")));
+    }
+
+    // ── P2: outbound HTTP clients ────────────────────────────────────────────
+
+    fn http_calls(unit: &cih_core::ParsedUnit) -> Vec<(String, String)> {
+        unit.parsed_file
+            .contract_sites
+            .iter()
+            .filter(|c| matches!(c.kind, cih_core::ContractKind::HttpCall))
+            .map(|c| {
+                (
+                    c.http_method.clone().unwrap_or_default(),
+                    c.url_template.clone().unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn axios_create_instance_folds_base_url() {
+        let src = r#"import axios from 'axios';
+const api = axios.create({ baseURL: '/api/v1' });
+export async function load() { return api.get('/orders/1'); }
+"#;
+        let unit = parse_typescript_file("src/api.ts", src).expect("parses");
+        let calls = http_calls(&unit);
+        assert!(
+            calls
+                .iter()
+                .any(|(m, u)| m == "GET" && u == "/api/v1/orders/1"),
+            "axios instance call with folded baseURL missing: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn angular_httpclient_this_http() {
+        let src = r#"import { HttpClient } from '@angular/common/http';
+class UserService {
+    constructor(private http: HttpClient) {}
+    load() { return this.http.get('/api/users'); }
+    create() { return this.http.post('/api/users', {}); }
+}
+"#;
+        let unit = parse_typescript_file("src/user.service.ts", src).expect("parses");
+        let calls = http_calls(&unit);
+        assert!(
+            calls.iter().any(|(m, u)| m == "GET" && u == "/api/users")
+                && calls.iter().any(|(m, u)| m == "POST" && u == "/api/users"),
+            "angular HttpClient calls missing: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn got_import_gated_client() {
+        let src = r#"import got from 'got';
+export async function f() { return got('http://svc/data', { method: 'POST' }); }
+"#;
+        let unit = parse_typescript_file("src/g.ts", src).expect("parses");
+        assert!(
+            http_calls(&unit).iter().any(|(m, _)| m == "POST"),
+            "got POST call missing: {:?}",
+            http_calls(&unit)
+        );
+    }
+
+    #[test]
+    fn plain_http_get_not_a_client_without_import() {
+        // `http.get` with no @angular/@nestjs import must NOT emit (Node's http core).
+        let src = r#"import http from 'http';
+export function f() { return http.get('http://x/y'); }
+"#;
+        let unit = parse_typescript_file("src/n.ts", src).expect("parses");
+        assert!(
+            http_calls(&unit).is_empty(),
+            "node http.get must not be treated as a client: {:?}",
+            http_calls(&unit)
+        );
     }
 
     #[test]

@@ -104,11 +104,14 @@ sites — visible/queryable, not auto-resolved to edges.
 
 Deliberately tight recognizers — false positives poison cross-repo matching:
 
-- **TypeScript**: bare `fetch(url[, {method}])` (default GET; `method` read from
-  a literal options object), `axios.get|post|put|delete|patch|head(url, …)`,
-  and `axios(url, {method})`. The receiver must be the literal identifier
-  `axios` — instance clients (`this.http.get`, injected wrappers) are out of
-  scope v1.
+- **TypeScript**: bare `fetch|$fetch|ofetch(url[, {method}])` (default GET;
+  `method` from a literal options object), import-gated `got`/`ky`,
+  `axios.get|post|…(url, …)` and `axios(url, {method})`. Instance & member
+  clients are now in scope: `axios.create({ baseURL })` instances (a literal
+  `baseURL` folds into the call path), Angular `HttpClient` / Nest `HttpService`
+  (`(this.)http|httpClient|httpService.<verb>`, import-gated on
+  `@angular/common/http` / `@nestjs/axios`), and import-gated `superagent` /
+  `undici.request`. Node's core `http.get` stays out (no client import).
 - **Python**: module-receiver `requests.*` / `httpx.*` verb calls plus
   `requests.request("POST", url)`. Session/client instances (`session.get`)
   are out of scope v1.
