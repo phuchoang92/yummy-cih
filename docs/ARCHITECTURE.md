@@ -154,8 +154,10 @@ the table must still resolve to a model/prisma/knex receiver, so plain
   Nest by an `@angular/core` import), `graphql_resolver`, and React
   (`react_component`/`react_hook`). React function components are matched by
   PascalCase name + a `react` import (the TypeScript grammar can't confirm JSX);
-  class components by `extends …Component`. **Limitation**: arrow-const components
-  (`const App = () => …`) are not emitted as function nodes, so they're unlabeled.
+  class components by `extends …Component`. Both `function X()` declarations and
+  the dominant `const X = () => …` / function-expression arrow-const forms are
+  emitted as `Function` nodes (the latter only when they name a component/hook),
+  and calls inside them attribute to the component rather than the file.
 - **DI**: a provider class's `constructor(private x: Dep)` param types are emitted
   as `TypeRef` reference sites from the class, which the resolver turns into
   `Uses` edges — the JS analog of Spring constructor injection.

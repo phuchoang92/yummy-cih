@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (14, "50345091c1130000");
+const GOLDEN: (u32, &str) = (15, "95013c63421a8860");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -154,6 +154,18 @@ app.route({ method: ['GET', 'POST'], url: '/api/items' });
         "src/app/api/orders/[id]/route.ts",
         r#"export async function GET() { return Response.json({ ok: true }); }
 export async function POST() { return Response.json({ ok: true }); }
+"#,
+    ),
+    (
+        // React arrow-const component + hook (P4 arrow-const gap) → Function nodes
+        // with stereotypes; the fetch attributes to the component, not the file.
+        "src/ui.tsx",
+        r#"import React from 'react';
+export const UserCard = ({ id }) => {
+    fetch(`/api/users/${id}`);
+    return null;
+};
+export const useUser = (id) => id;
 "#,
     ),
     (

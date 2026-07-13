@@ -2246,31 +2246,56 @@ fn walk(
         }
         "lexical_declaration" => {
             // Module-level `const X = '…'` (incl. env-default initializers)
-            // becomes a StringConstant for cross-file URL folding. Recurse
-            // regardless — initializers can contain contract calls.
+            // becomes a StringConstant for cross-file URL folding.
             if class_fqn.is_none() && enclosing_fn.is_none() {
                 collect_module_string_constants(node, src, builder);
-                // `export const apiFetch = async (endpoint, …) => …` — the
-                // dominant wrapper shape.
-                let mut cursor = node.walk();
-                for declarator in node.named_children(&mut cursor) {
-                    if declarator.kind() != "variable_declarator" {
-                        continue;
-                    }
-                    let (Some(name_node), Some(value)) = (
-                        declarator.child_by_field_name("name"),
-                        declarator.child_by_field_name("value"),
-                    ) else {
-                        continue;
-                    };
-                    if name_node.kind() == "identifier" && value.kind() == "arrow_function" {
-                        try_collect_http_wrapper(&text(name_node, src), value, src, builder);
-                    }
-                }
             }
             let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
+            for declarator in node.named_children(&mut cursor) {
+                if declarator.kind() != "variable_declarator" {
+                    walk(declarator, src, builder, class_fqn, controller_prefix, enclosing_fn);
+                    continue;
+                }
+                let name_node = declarator.child_by_field_name("name");
+                let value = declarator.child_by_field_name("value");
+
+                // `export const apiFetch = async (endpoint, …) => …` wrapper shape.
+                if class_fqn.is_none() && enclosing_fn.is_none() {
+                    if let (Some(nn), Some(v)) = (name_node, value) {
+                        if nn.kind() == "identifier" && v.kind() == "arrow_function" {
+                            try_collect_http_wrapper(&text(nn, src), v, src, builder);
+                        }
+                    }
+                }
+
+                // React component/hook defined as an arrow/function const
+                // (`const Card = () => …`, `const useAuth = () => …`). These are
+                // not otherwise emitted as nodes, so the P4 stereotype missed
+                // them; emit the Function node and walk its body attributed to it.
+                let component = name_node.zip(value).and_then(|(nn, v)| {
+                    if class_fqn.is_none()
+                        && nn.kind() == "identifier"
+                        && matches!(
+                            v.kind(),
+                            "arrow_function" | "function" | "function_expression"
+                        )
+                    {
+                        let name = text(nn, src);
+                        react_function_stereotype(&name, builder).map(|s| (name, v, s))
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some((name, v, stereo)) = component {
+                    let arity = parameter_count(v);
+                    let fn_id = builder.emit_function(v, src, &name, arity, None, Some(&stereo));
+                    if let Some(body) = v.child_by_field_name("body") {
+                        walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
+                    }
+                } else {
+                    walk(declarator, src, builder, class_fqn, controller_prefix, enclosing_fn);
+                }
             }
         }
         "class_declaration" | "abstract_class_declaration" => {
@@ -2993,6 +3018,56 @@ export function helper() { return 1; }
         assert_eq!(stereotype_of(&unit, "Card").as_deref(), Some("react_component"));
         assert_eq!(stereotype_of(&unit, "useAuth").as_deref(), Some("react_hook"));
         assert_eq!(stereotype_of(&unit, "helper"), None); // lowercase, not a component
+    }
+
+    #[test]
+    fn react_arrow_const_component_and_hook() {
+        // The dominant React shape: components/hooks as `const X = () => …`.
+        let src = r#"import React from 'react';
+export const Card = ({ title }) => null;
+export const useAuth = () => true;
+const helper = () => 1;
+"#;
+        let unit = parse_typescript_file("src/ui.tsx", src).expect("parses");
+        assert_eq!(
+            stereotype_of(&unit, "Card").as_deref(),
+            Some("react_component"),
+            "arrow-const component not labeled"
+        );
+        assert_eq!(
+            stereotype_of(&unit, "useAuth").as_deref(),
+            Some("react_hook"),
+            "arrow-const hook not labeled"
+        );
+        // lowercase non-component arrow const is NOT emitted as a node.
+        assert!(
+            !unit.nodes.iter().any(|n| n.name == "helper"),
+            "lowercase arrow const should not be emitted"
+        );
+    }
+
+    #[test]
+    fn arrow_const_contract_attributes_to_component() {
+        // A fetch inside an arrow component now attributes to the component fn,
+        // not the file (arrow functions were untracked before).
+        let src = r#"import React from 'react';
+export const UserList = () => {
+    fetch('/api/users');
+    return null;
+};
+"#;
+        let unit = parse_typescript_file("src/list.tsx", src).expect("parses");
+        let site = unit
+            .parsed_file
+            .contract_sites
+            .iter()
+            .find(|c| matches!(c.kind, cih_core::ContractKind::HttpCall))
+            .expect("fetch contract site");
+        assert!(
+            site.in_callable.as_str().contains("UserList"),
+            "contract should attribute to UserList, got {}",
+            site.in_callable.as_str()
+        );
     }
 
     #[test]
