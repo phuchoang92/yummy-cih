@@ -227,6 +227,8 @@ fn route_source_label(source: RouteSource) -> &'static str {
         RouteSource::Hapi => "hapi",
         RouteSource::NextJs => "nextjs",
         RouteSource::Remix => "remix",
+        RouteSource::GraphQl => "graphql",
+        RouteSource::Trpc => "trpc",
         _ => "route",
     }
 }
@@ -1169,28 +1171,46 @@ impl Builder {
         });
     }
 
-    /// Emit a non-HTTP `ContractSite` (`ContractKind::Custom(tag)`) — used for
-    /// GraphQL resolvers (`tag="graphql"`) and tRPC procedures (`tag="trpc"`).
-    /// Custom contracts are visible/queryable but not auto-resolved to edges.
-    fn emit_custom_contract(
+    /// Emit a `Route` node for a GraphQL/tRPC producer operation (`path` = the
+    /// operation name, `httpMethod` = `QUERY`/`MUTATION`/`SUBSCRIPTION`), plus a
+    /// `HandlesRoute` edge from the handler when known. Reuses the Route model so
+    /// operations flow through route_map / trace_flow / cross-repo matching.
+    fn emit_operation_route(
         &mut self,
-        tag: &str,
-        op: &str,
-        name: Option<String>,
-        in_callable: NodeId,
-        range: Range,
+        node: TsNode<'_>,
+        source: RouteSource,
+        method: &str,
+        name: &str,
+        handler: Option<&NodeId>,
     ) {
-        self.contract_sites.push(ContractSite {
-            kind: ContractKind::Custom(tag.to_string()),
-            url_template: name,
-            topic: None,
-            http_method: Some(op.to_string()),
-            messaging_framework: None,
-            url_parts: None,
-            via_wrapper: None,
-            in_callable,
-            range,
+        let label = route_source_label(source);
+        let route_id = NodeId::new(format!("Route:{label}:{method}:{name}"));
+        let display = format!("{method} {name}");
+        self.nodes.push(Node {
+            id: route_id.clone(),
+            kind: NodeKind::Route,
+            name: display.clone(),
+            qualified_name: Some(display),
+            file: self.rel.clone(),
+            range: range_of(node),
+            props: Some(serde_json::json!({
+                "httpMethod": method,
+                "path": name,
+                "route_annotations": [],
+                "source": source,
+                "operation": true,
+            })),
         });
+        if let Some(h) = handler {
+            self.edges.push(Edge {
+                src: h.clone(),
+                dst: route_id,
+                kind: EdgeKind::HandlesRoute,
+                confidence: 1.0,
+                reason: format!("{label}-{}", method.to_ascii_lowercase()),
+                props: None,
+            });
+        }
     }
 
     /// Emit a `DbTable` node (deduplicated per file). `db_table_id` upper-cases
@@ -1777,10 +1797,31 @@ fn try_emit_trpc_contract(
     ) {
         return;
     }
-    let in_callable = enclosing_fn
-        .cloned()
-        .unwrap_or_else(|| file_id(&builder.rel));
-    builder.emit_custom_contract("trpc", op, None, in_callable, range_of(node));
+    // Procedure name = the enclosing router property key
+    // (`getUser: t.procedure.query(...)`). Without one, skip — a nameless route
+    // is useless.
+    let Some(name) = trpc_procedure_name(node, src) else {
+        return;
+    };
+    builder.emit_operation_route(node, RouteSource::Trpc, op, &name, enclosing_fn);
+}
+
+/// The router property key enclosing a tRPC procedure call
+/// (`getUser: t.procedure.query(...)` → `"getUser"`). Walks up to the nearest
+/// `pair`, stopping at function/statement boundaries.
+fn trpc_procedure_name(call: TsNode<'_>, src: &str) -> Option<String> {
+    let mut n = call;
+    while let Some(parent) = n.parent() {
+        match parent.kind() {
+            "pair" => {
+                return parent.child_by_field_name("key").map(|k| unquote(&text(k, src)));
+            }
+            "statement_block" | "program" | "function_declaration" | "arrow_function"
+            | "method_definition" => return None,
+            _ => n = parent,
+        }
+    }
+    None
 }
 
 /// URL-ish gate for provisional wrapper calls: a string starting with `/`, a
@@ -2399,12 +2440,12 @@ fn walk(
                 }
                 if let Some(op) = graphql_operation(dname) {
                     let opname = dpath.clone().unwrap_or_else(|| name.clone());
-                    builder.emit_custom_contract(
-                        "graphql",
+                    builder.emit_operation_route(
+                        node,
+                        RouteSource::GraphQl,
                         op,
-                        Some(opname),
-                        fn_id.clone(),
-                        range_of(node),
+                        &opname,
+                        Some(&fn_id),
                     );
                 }
                 // NestJS microservice / WebSocket message handlers → EventListen.
@@ -2453,12 +2494,12 @@ fn walk(
                 }
                 if let Some(op) = graphql_operation(dname) {
                     let opname = dpath.clone().unwrap_or_else(|| name.clone());
-                    builder.emit_custom_contract(
-                        "graphql",
+                    builder.emit_operation_route(
+                        node,
+                        RouteSource::GraphQl,
                         op,
-                        Some(opname),
-                        fn_id.clone(),
-                        range_of(node),
+                        &opname,
+                        Some(&fn_id),
                     );
                 }
                 // NestJS microservice / WebSocket message handlers → EventListen.
@@ -2779,7 +2820,7 @@ export async function action() { return {}; }
     }
 
     #[test]
-    fn graphql_resolver_custom_contract() {
+    fn graphql_resolver_routes() {
         let src = r#"import { Resolver, Query, Mutation } from 'type-graphql';
 @Resolver()
 class UserResolver {
@@ -2790,17 +2831,22 @@ class UserResolver {
 }
 "#;
         let unit = parse_typescript_file("src/user.resolver.ts", src).expect("parses");
-        let gql: Vec<_> = unit
-            .parsed_file
-            .contract_sites
-            .iter()
-            .filter(|c| matches!(&c.kind, cih_core::ContractKind::Custom(t) if t == "graphql"))
-            .collect();
-        assert_eq!(gql.len(), 2, "expected 2 graphql contract sites");
-        assert!(gql.iter().any(|c| c.http_method.as_deref() == Some("QUERY")));
-        assert!(gql
-            .iter()
-            .any(|c| c.http_method.as_deref() == Some("MUTATION")));
+        assert!(
+            has_route(&unit, "Route:graphql:QUERY:users"),
+            "graphql query route missing: {:?}",
+            route_ids(&unit)
+        );
+        assert!(
+            has_route(&unit, "Route:graphql:MUTATION:createUser"),
+            "graphql mutation route missing: {:?}",
+            route_ids(&unit)
+        );
+        // HandlesRoute edge from the resolver method to the operation.
+        assert!(
+            unit.edges.iter().any(|e| e.kind == cih_core::EdgeKind::HandlesRoute
+                && e.dst.as_str().contains("graphql")),
+            "graphql HandlesRoute edge missing"
+        );
     }
 
     // ── P2: outbound HTTP clients ────────────────────────────────────────────
@@ -3232,7 +3278,7 @@ class Handler {
     }
 
     #[test]
-    fn trpc_procedure_custom_contract() {
+    fn trpc_procedure_routes() {
         let src = r#"import { initTRPC } from '@trpc/server';
 const t = initTRPC.create();
 export const appRouter = t.router({
@@ -3241,19 +3287,11 @@ export const appRouter = t.router({
 });
 "#;
         let unit = parse_typescript_file("src/router.ts", src).expect("parses");
-        let trpc: Vec<_> = unit
-            .parsed_file
-            .contract_sites
-            .iter()
-            .filter(|c| matches!(&c.kind, cih_core::ContractKind::Custom(t) if t == "trpc"))
-            .collect();
         assert!(
-            trpc.iter().any(|c| c.http_method.as_deref() == Some("QUERY"))
-                && trpc
-                    .iter()
-                    .any(|c| c.http_method.as_deref() == Some("MUTATION")),
-            "trpc query+mutation contracts missing: {} sites",
-            trpc.len()
+            has_route(&unit, "Route:trpc:QUERY:getUser")
+                && has_route(&unit, "Route:trpc:MUTATION:setUser"),
+            "trpc routes missing: {:?}",
+            route_ids(&unit)
         );
     }
 }

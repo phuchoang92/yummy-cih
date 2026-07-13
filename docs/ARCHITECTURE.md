@@ -99,8 +99,12 @@ Beyond NestJS decorators and Express, the parser emits `Route` nodes for:
 Receiver-name disambiguation (`app`/`router`) is import-gated so **Express output
 is unchanged** when neither Fastify nor Koa is imported. GraphQL resolvers
 (`@Query`/`@Mutation`/`@Subscription`, type-graphql / NestJS) and tRPC procedures
-(`.query`/`.mutation`, `@trpc/server`-gated) emit `ContractKind::Custom("graphql"|"trpc")`
-sites — visible/queryable, not auto-resolved to edges.
+(`.query`/`.mutation`, `@trpc/server`-gated) are emitted as **`Route` nodes**
+(`RouteSource::GraphQl`/`Trpc`; `path` = operation/procedure name, `httpMethod` =
+`QUERY`/`MUTATION`/`SUBSCRIPTION`) with a `HandlesRoute` edge from the resolver
+method — so they flow through `route_map`/`trace_flow`/`impact` and cross-repo
+route matching, like HTTP routes. The tRPC procedure name comes from the enclosing
+router property key (`getUser: t.procedure.query(…)` → `getUser`).
 
 Deliberately tight recognizers — false positives poison cross-repo matching:
 

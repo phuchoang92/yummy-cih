@@ -132,6 +132,12 @@ pub enum RouteSource {
     NextJs,
     /// Remix route modules (`loader`/`action` exports).
     Remix,
+    /// GraphQL resolver operation (`@Query`/`@Mutation`/`@Subscription`); the
+    /// `path` prop is the operation name and `httpMethod` is `QUERY`/`MUTATION`/`SUBSCRIPTION`.
+    GraphQl,
+    /// tRPC router procedure (`.query`/`.mutation`/`.subscription`); `path` is the
+    /// procedure name.
+    Trpc,
 }
 
 pub fn function_id(fqn: &str, name: &str, arity: u16) -> NodeId {

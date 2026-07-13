@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (16, "0a69f74ff5078d99");
+const GOLDEN: (u32, &str) = (17, "70d8c239044b2329");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -164,6 +164,19 @@ app.route({ method: ['GET', 'POST'], url: '/api/items' });
         "src/app/api/orders/[id]/route.ts",
         r#"export async function GET() { return Response.json({ ok: true }); }
 export async function POST() { return Response.json({ ok: true }); }
+"#,
+    ),
+    (
+        // GraphQL resolver → Route nodes (QUERY/MUTATION) + HandlesRoute edges.
+        "src/user.resolver.ts",
+        r#"import { Resolver, Query, Mutation } from 'type-graphql';
+@Resolver()
+export class UserResolver {
+    @Query()
+    users() { return []; }
+    @Mutation()
+    createUser() { return {}; }
+}
 "#,
     ),
     (
