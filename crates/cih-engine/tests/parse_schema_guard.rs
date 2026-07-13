@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (12, "451bbe24541885f7");
+const GOLDEN: (u32, &str) = (13, "9737a2e7343016f1");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -154,6 +154,18 @@ app.route({ method: ['GET', 'POST'], url: '/api/items' });
         "src/app/api/orders/[id]/route.ts",
         r#"export async function GET() { return Response.json({ ok: true }); }
 export async function POST() { return Response.json({ ok: true }); }
+"#,
+    ),
+    (
+        // Component stereotype + constructor DI (NestJS provider → TypeRef refs).
+        "src/user.service.ts",
+        r#"import { Injectable } from '@nestjs/common';
+@Injectable()
+export class UserService {
+    constructor(private readonly repo: UserRepository) {}
+}
+@Injectable()
+export class UserRepository {}
 "#,
     ),
     (

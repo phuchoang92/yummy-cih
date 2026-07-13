@@ -133,7 +133,19 @@ fn collect_sibling_decorators<'a>(node: TsNode<'a>, src: &str) -> Vec<(String, O
         return out;
     }
 
-    // (b) Preceding decorator siblings.
+    // (b) Preceding decorator siblings of the node. `@Dec() export class X` nests
+    // the class under an `export_statement` whose children are
+    // `[decorator, "export", class_declaration]` — the reset must ignore the
+    // `export`/`abstract`/`{` keyword & punctuation tokens between them.
+    preceding_decorators(node, src)
+}
+
+/// The contiguous run of `decorator` siblings immediately preceding `node`,
+/// resetting only on a *named* non-decorator sibling (a real member/statement),
+/// so members don't inherit each other's decorators while keyword/punctuation
+/// tokens (`export`, `abstract`, `{`) between a decorator and its target are ignored.
+fn preceding_decorators(node: TsNode<'_>, src: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
     let Some(parent) = node.parent() else {
         return out;
     };
@@ -148,8 +160,9 @@ fn collect_sibling_decorators<'a>(node: TsNode<'a>, src: &str) -> Vec<(String, O
                     out.push(info);
                 }
             }
-            "comment" => {} // decorators may be interleaved with comments
-            _ => out.clear(), // a non-decorator sibling ends the run
+            "comment" => {}
+            _ if !child.is_named() => {} // keyword / punctuation token — not a boundary
+            _ => out.clear(), // a real declaration/statement ends the run
         }
     }
     out
@@ -692,6 +705,70 @@ fn try_emit_db_query(
     }
 }
 
+// ── Component stereotypes + DI (P4) ───────────────────────────────────────────
+
+/// True if the class extends `React.Component` / `Component` / `PureComponent`.
+fn class_extends_react_component(node: TsNode<'_>, src: &str) -> bool {
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        if child.kind() == "class_heritage" {
+            return text(child, src).contains("Component");
+        }
+    }
+    false
+}
+
+/// Stereotype for a top-level function: React component (PascalCase) or hook
+/// (`use<Upper>`), gated on a `react` import (the grammar can't confirm JSX).
+fn react_function_stereotype(name: &str, builder: &Builder) -> Option<String> {
+    if !builder.imports_pkg("react") {
+        return None;
+    }
+    let rest = name.strip_prefix("use");
+    if matches!(rest.and_then(|r| r.chars().next()), Some(c) if c.is_uppercase()) {
+        return Some("react_hook".to_string());
+    }
+    if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+        return Some("react_component".to_string());
+    }
+    None
+}
+
+/// A class stereotype that participates in constructor DI (Nest/Angular provider).
+fn is_di_provider(stereotype: Option<&str>) -> bool {
+    matches!(
+        stereotype,
+        Some("nestjs_controller")
+            | Some("nestjs_injectable")
+            | Some("angular_injectable")
+            | Some("angular_component")
+            | Some("graphql_resolver")
+    )
+}
+
+/// Simple type name of a constructor parameter's `: Type` annotation
+/// (`private svc: UserService` → `UserService`; `Repository<User>` → `Repository`).
+fn param_type_name(param: TsNode<'_>, src: &str) -> Option<String> {
+    let mut c = param.walk();
+    let ann = param
+        .named_children(&mut c)
+        .find(|n| n.kind() == "type_annotation")?;
+    let mut c2 = ann.walk();
+    let ty = ann.named_children(&mut c2).next()?;
+    match ty.kind() {
+        "type_identifier" => Some(text(ty, src)),
+        "generic_type" => {
+            let mut c3 = ty.walk();
+            let base = ty
+                .named_children(&mut c3)
+                .find(|n| n.kind() == "type_identifier")
+                .map(|n| text(n, src));
+            base
+        }
+        _ => None,
+    }
+}
+
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -722,20 +799,13 @@ impl Builder {
         node: TsNode<'_>,
         _src: &str,
         class_name: &str,
-        decorators: &[(String, Option<String>)],
+        stereotype: Option<&str>,
     ) -> String {
         let fqn = format!("{}.{}", self.module, class_name);
         let id = type_id(NodeKind::Class, &fqn);
         let range = range_of(node);
 
-        // Check for NestJS stereotype
-        let stereotype = if decorators.iter().any(|(n, _)| n == "Controller") {
-            Some("nestjs_controller".to_string())
-        } else if decorators.iter().any(|(n, _)| n == "Injectable") {
-            Some("nestjs_injectable".to_string())
-        } else {
-            None
-        };
+        let stereotype = stereotype.map(str::to_string);
 
         self.nodes.push(Node {
             id: id.clone(),
@@ -821,6 +891,7 @@ impl Builder {
         name: &str,
         arity: u16,
         owner_fqn: Option<&str>,
+        stereotype: Option<&str>,
     ) -> NodeId {
         let _ = src; // retained for API consistency
         let container_fqn = owner_fqn.unwrap_or(&self.module);
@@ -835,7 +906,7 @@ impl Builder {
             qualified_name: Some(format!("{container_fqn}#{name}/{arity}")),
             file: self.rel.clone(),
             range,
-            props: None,
+            props: stereotype.map(|s| serde_json::json!({ "stereotype": s })),
         });
 
         if let Some(ref owner_id) = owner_id {
@@ -872,7 +943,7 @@ impl Builder {
             param_types: Vec::new(),
             return_type: None,
             declared_type: None,
-            framework_role: None,
+            framework_role: stereotype.map(str::to_string),
             complexity: None,
             body_fingerprint,
             lang_meta: None,
@@ -1029,6 +1100,83 @@ impl Builder {
             reason: format!("{engine}-orm"),
             props: None,
         });
+    }
+
+    /// Framework stereotype for a class: NestJS/Angular/GraphQL decorators
+    /// (Angular vs Nest `@Injectable` disambiguated by import) or a React class
+    /// component (`extends Component`).
+    fn class_stereotype(
+        &self,
+        node: TsNode<'_>,
+        src: &str,
+        decorators: &[(String, Option<String>)],
+    ) -> Option<String> {
+        for (dn, _) in decorators {
+            let s = match dn.as_str() {
+                "Controller" => "nestjs_controller",
+                "Component" => "angular_component",
+                "Directive" => "angular_directive",
+                "Pipe" => "angular_pipe",
+                "NgModule" => "angular_module",
+                "Resolver" => "graphql_resolver",
+                "Injectable" => {
+                    if self.imports_pkg("@angular/core") {
+                        "angular_injectable"
+                    } else {
+                        "nestjs_injectable"
+                    }
+                }
+                _ => continue,
+            };
+            return Some(s.to_string());
+        }
+        if self.imports_pkg("react") && class_extends_react_component(node, src) {
+            return Some("react_component".to_string());
+        }
+        None
+    }
+
+    /// Emit constructor-injection `TypeRef` reference sites for a provider class:
+    /// each `constructor(private x: Dep)` param type becomes a ref from the class,
+    /// which the resolver turns into a `Uses` edge — the JS analog of Spring DI.
+    fn emit_constructor_di_refs(&mut self, class_node: TsNode<'_>, src: &str, fqn: &str) {
+        let class_id = type_id(NodeKind::Class, fqn);
+        let Some(body) = class_node.child_by_field_name("body") else {
+            return;
+        };
+        let mut bc = body.walk();
+        for member in body.named_children(&mut bc) {
+            if member.kind() != "method_definition" {
+                continue;
+            }
+            let is_ctor = member
+                .child_by_field_name("name")
+                .map(|n| text(n, src))
+                .as_deref()
+                == Some("constructor");
+            if !is_ctor {
+                continue;
+            }
+            let Some(params) = member.child_by_field_name("parameters") else {
+                return;
+            };
+            let mut pc = params.walk();
+            for p in params.named_children(&mut pc) {
+                if let Some(ty) = param_type_name(p, src) {
+                    self.reference_sites.push(ReferenceSite {
+                        name: ty,
+                        receiver: None,
+                        kind: RefKind::TypeRef,
+                        arity: None,
+                        range: range_of(p),
+                        in_fqcn: fqn.to_string(),
+                        in_callable: class_id.clone(),
+                        arg_texts: Vec::new(),
+                    });
+                }
+            }
+            return;
+        }
     }
 
     /// True if any (non-static) import's module path equals or starts with `pkg`
@@ -1959,7 +2107,8 @@ fn walk(
                 .and_then(|(_, path)| path.clone())
                 .unwrap_or_default();
 
-            let fqn = builder.emit_class(node, src, &class_name, &decorators);
+            let stereotype = builder.class_stereotype(node, src, &decorators);
+            let fqn = builder.emit_class(node, src, &class_name, stereotype.as_deref());
 
             // TypeORM / sequelize-typescript entity: `@Entity('t')` / `@Table('t')`
             // → DbTable (arg overrides the class name).
@@ -1969,6 +2118,11 @@ fn walk(
             {
                 let table = arg.clone().unwrap_or_else(|| class_name.clone());
                 builder.emit_db_table(&table, &builder.rel.clone(), range_of(node));
+            }
+
+            // Constructor DI: provider classes wire in their injected dependencies.
+            if is_di_provider(stereotype.as_deref()) {
+                builder.emit_constructor_di_refs(node, src, &fqn);
             }
 
             // Walk body
@@ -2000,7 +2154,14 @@ fn walk(
             if class_fqn.is_none() {
                 try_collect_http_wrapper(&name, node, src, builder);
             }
-            let fn_id = builder.emit_function(node, src, &name, arity, class_fqn);
+            // React component/hook stereotype (top-level functions only).
+            let stereotype = if class_fqn.is_none() {
+                react_function_stereotype(&name, builder)
+            } else {
+                None
+            };
+            let fn_id =
+                builder.emit_function(node, src, &name, arity, class_fqn, stereotype.as_deref());
 
             // Check NestJS decorators
             let ctrl_prefix = controller_prefix.unwrap_or("");
@@ -2040,7 +2201,7 @@ fn walk(
             }
             let arity = parameter_count(node);
             let decorators = collect_sibling_decorators(node, src);
-            let fn_id = builder.emit_function(node, src, &name, arity, class_fqn);
+            let fn_id = builder.emit_function(node, src, &name, arity, class_fqn, None);
 
             // Check NestJS method decorators
             let ctrl_prefix = controller_prefix.unwrap_or("");
@@ -2557,6 +2718,83 @@ class User { }
         );
     }
 
+    // ── P4: component stereotypes + DI ───────────────────────────────────────
+
+    fn stereotype_of(unit: &cih_core::ParsedUnit, name: &str) -> Option<String> {
+        unit.nodes
+            .iter()
+            .find(|n| n.name == name)
+            .and_then(|n| n.props.as_ref())
+            .and_then(|p| p.get("stereotype"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn angular_component_stereotype() {
+        let src = r#"import { Component } from '@angular/core';
+@Component({ selector: 'app-root' })
+class AppComponent {}
+"#;
+        let unit = parse_typescript_file("src/app.component.ts", src).expect("parses");
+        assert_eq!(
+            stereotype_of(&unit, "AppComponent").as_deref(),
+            Some("angular_component")
+        );
+    }
+
+    #[test]
+    fn nest_injectable_di_refs() {
+        // Exported form (`@Dec() export class`) — the common real-world shape.
+        let src = r#"import { Injectable } from '@nestjs/common';
+@Injectable()
+export class UserService {
+    constructor(private readonly repo: UserRepository, private mailer: Mailer) {}
+}
+"#;
+        let unit = parse_typescript_file("src/user.service.ts", src).expect("parses");
+        assert_eq!(
+            stereotype_of(&unit, "UserService").as_deref(),
+            Some("nestjs_injectable")
+        );
+        let type_refs: Vec<&str> = unit
+            .parsed_file
+            .reference_sites
+            .iter()
+            .filter(|r| r.kind == cih_core::RefKind::TypeRef)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(
+            type_refs.contains(&"UserRepository") && type_refs.contains(&"Mailer"),
+            "DI constructor type refs missing: {type_refs:?}"
+        );
+    }
+
+    #[test]
+    fn react_function_component_and_hook() {
+        let src = r#"import React from 'react';
+export function Card() { return null; }
+export function useAuth() { return true; }
+export function helper() { return 1; }
+"#;
+        let unit = parse_typescript_file("src/ui.tsx", src).expect("parses");
+        assert_eq!(stereotype_of(&unit, "Card").as_deref(), Some("react_component"));
+        assert_eq!(stereotype_of(&unit, "useAuth").as_deref(), Some("react_hook"));
+        assert_eq!(stereotype_of(&unit, "helper"), None); // lowercase, not a component
+    }
+
+    #[test]
+    fn react_class_component_stereotype() {
+        let src = r#"import React from 'react';
+class Widget extends React.Component { render() { return null; } }
+"#;
+        let unit = parse_typescript_file("src/widget.tsx", src).expect("parses");
+        assert_eq!(
+            stereotype_of(&unit, "Widget").as_deref(),
+            Some("react_component")
+        );
+    }
+
     #[test]
     fn trpc_procedure_custom_contract() {
         let src = r#"import { initTRPC } from '@trpc/server';
@@ -2583,4 +2821,5 @@ export const appRouter = t.router({
         );
     }
 }
+
 

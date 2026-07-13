@@ -145,6 +145,21 @@ Op classification (`db_op_kind`) gates which method names count as data access;
 the table must still resolve to a model/prisma/knex receiver, so plain
 `array.find(…)` never emits (pinned by test).
 
+### JS/TS component stereotypes + DI
+
+- **Stereotypes** (`stereotype` prop on `Class`/`Function` nodes, feeding
+  `feature_map`/`communities`/`architecture_hint`): NestJS
+  (`nestjs_controller`/`nestjs_injectable`), Angular (`angular_component`/
+  `_directive`/`_pipe`/`_module`/`_injectable` — `@Injectable` disambiguated from
+  Nest by an `@angular/core` import), `graphql_resolver`, and React
+  (`react_component`/`react_hook`). React function components are matched by
+  PascalCase name + a `react` import (the TypeScript grammar can't confirm JSX);
+  class components by `extends …Component`. **Limitation**: arrow-const components
+  (`const App = () => …`) are not emitted as function nodes, so they're unlabeled.
+- **DI**: a provider class's `constructor(private x: Dep)` param types are emitted
+  as `TypeRef` reference sites from the class, which the resolver turns into
+  `Uses` edges — the JS analog of Spring constructor injection.
+
 ## Dynamic-URL folding (`ContractSite.url_parts`, `cih-resolve/src/contracts.rs`)
 
 Outbound URLs/topics that are not plain literals are captured as structured
