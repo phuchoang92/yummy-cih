@@ -507,3 +507,82 @@ fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
         None
     }
 }
+
+/// Walk `repo_root` for `*.xml` files and run [`extract_integration_xml`] on each,
+/// de-duplicating nodes by id across files. Best-effort: unreadable files and walk
+/// errors are skipped with a warning, never fatal.
+pub fn extract_integration_xml_in_repo(repo_root: &std::path::Path) -> (Vec<Node>, Vec<Edge>) {
+    use rayon::prelude::*;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let xml_files: Vec<PathBuf> = {
+        let walker = ignore::WalkBuilder::new(repo_root)
+            .hidden(false)
+            .git_ignore(true)
+            .git_exclude(true)
+            .git_global(true)
+            .build();
+
+        walker
+            .filter_map(|result| match result {
+                Ok(entry) if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) => {
+                    let path = entry.into_path();
+                    let is_xml = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("xml"))
+                        .unwrap_or(false);
+                    if is_xml {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "integration-xml: walk error — skipping");
+                    None
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let per_file: Vec<_> = xml_files
+        .par_iter()
+        .filter_map(|path| {
+            let rel = path
+                .strip_prefix(repo_root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(err) => {
+                    tracing::warn!(file = %rel, error = %err, "integration-xml: read failed — skipping");
+                    return None;
+                }
+            };
+            let output = extract_integration_xml(&rel, &content);
+            if output.nodes.is_empty() && output.edges.is_empty() {
+                None
+            } else {
+                Some(output)
+            }
+        })
+        .collect();
+
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut seen_node_ids: HashSet<String> = HashSet::new();
+    for output in per_file {
+        for node in output.nodes {
+            if seen_node_ids.insert(node.id.as_str().to_string()) {
+                nodes.push(node);
+            }
+        }
+        edges.extend(output.edges);
+    }
+
+    (nodes, edges)
+}

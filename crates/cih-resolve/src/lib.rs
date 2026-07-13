@@ -42,7 +42,9 @@ pub use constant_propagation::build_java_constant_resolver;
 pub use contracts::resolve_contract_edges;
 pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
-pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
+pub use integration_xml::{
+    extract_integration_xml, extract_integration_xml_in_repo, IntegrationXmlOutput,
+};
 pub use lang::{all_resolvers, PostProcessOptions, ResolverRegistry};
 pub use patterns::apply_pattern_rules;
 pub use reports::write_unresolved_reports;

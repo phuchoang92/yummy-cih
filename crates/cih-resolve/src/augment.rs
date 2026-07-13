@@ -53,10 +53,15 @@ pub trait GraphAugmentor: Send + Sync {
     fn augment(&self, ctx: &AugmentCtx) -> AugmentOutput;
 }
 
-/// The augmentors that live in `cih-resolve` (DB/JPA + Spring DI). Engine-side
-/// augmentors (e.g. JVM integration XML) are appended by the caller.
+/// The language/framework graph augmentors (DB/JPA, integration XML, Spring DI).
+/// The JAR-API phase stays engine-side (it needs `cih-jar` and owns summary
+/// metadata), so the core appends it separately.
 pub fn language_augmentors() -> Vec<Box<dyn GraphAugmentor>> {
-    vec![Box::new(DbAccessAugmentor), Box::new(DiXmlAugmentor)]
+    vec![
+        Box::new(DbAccessAugmentor),
+        Box::new(IntegrationXmlAugmentor),
+        Box::new(DiXmlAugmentor),
+    ]
 }
 
 /// True when any parsed file carries SQL evidence (only some languages emit it).
@@ -99,6 +104,31 @@ impl GraphAugmentor for DbAccessAugmentor {
         let (jpa_nodes, jpa_edges) = crate::emit_jpa_tables(ctx.nodes);
         nodes.extend(jpa_nodes);
         edges.extend(jpa_edges);
+        AugmentOutput { nodes, edges }
+    }
+}
+
+/// Spring/Camel integration-XML routes + message destinations, discovered by an
+/// FS walk of the repo. JVM/Spring-only, so it gates on `java` being in scope
+/// (matching the historical gate) and honors `--skip-xml-integration`.
+struct IntegrationXmlAugmentor;
+impl GraphAugmentor for IntegrationXmlAugmentor {
+    fn id(&self) -> &'static str {
+        "integration-xml"
+    }
+    fn order(&self) -> u16 {
+        30
+    }
+    fn applies(&self, ctx: &AugmentCtx) -> bool {
+        !ctx.skip_xml_integration
+            && ctx.languages_in_scope.contains("java")
+            && ctx.repo_root.is_some()
+    }
+    fn augment(&self, ctx: &AugmentCtx) -> AugmentOutput {
+        let Some(root) = ctx.repo_root else {
+            return AugmentOutput::default();
+        };
+        let (nodes, edges) = crate::extract_integration_xml_in_repo(root);
         AugmentOutput { nodes, edges }
     }
 }

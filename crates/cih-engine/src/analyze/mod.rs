@@ -14,12 +14,11 @@ use cache::{parse_scope, ParseScopeOutcome};
 use extract::{build_scope_request, load_jars_from_repo_map};
 use merge::combined_edges;
 
-mod augmentors;
 mod cache;
 mod extract;
 mod merge;
 
-pub use extract::{extract_integration_xml_in_repo, extract_jar_api};
+pub use extract::extract_jar_api;
 
 #[derive(Debug)]
 pub struct AnalyzeFlags {
@@ -438,7 +437,6 @@ pub fn analyze_from_scope_with_options(
         resolvers: &resolvers,
     };
     let mut augs = cih_resolve::language_augmentors();
-    augs.push(Box::new(augmentors::IntegrationXmlAugmentor));
     augs.sort_by_key(|a| a.order());
     let mut aug_nodes: Vec<cih_core::Node> = Vec::new();
     let mut aug_edges: Vec<cih_core::Edge> = Vec::new();
