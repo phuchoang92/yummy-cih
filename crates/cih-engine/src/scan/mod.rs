@@ -198,7 +198,11 @@ pub fn scan_repo(repo: &Path) -> Result<ScanResult> {
     owned_source_files.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let discovered_jars = discover_and_link_jars(&root, &all_deps, &own_group_prefix);
-    tracing::info!(jars = discovered_jars.len(), "JAR discovery complete");
+    // Only announce JAR discovery for JVM repos; a non-JVM repo finds 0 and the
+    // line is just noise.
+    if !discovered_jars.is_empty() {
+        tracing::info!(jars = discovered_jars.len(), "JAR discovery complete");
+    }
 
     let total_source_loc: u64 = source_files_info.iter().map(|f| f.loc).sum();
     let total_source_files = source_files_info.len() as u64;
