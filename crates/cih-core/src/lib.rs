@@ -122,6 +122,16 @@ pub enum RouteSource {
     Django,
     /// net/http, gin, echo, chi, gorilla/mux (import-gated Go detection).
     Go,
+    /// Fastify (`fastify.get(...)` / `fastify.route({method,url})`).
+    Fastify,
+    /// Koa via `@koa/router` (`router.get(...)`, import-gated to disambiguate from Express).
+    Koa,
+    /// hapi (`server.route({method,path})`).
+    Hapi,
+    /// Next.js file-based API routes (`pages/api/**`, App Router `app/**/route.ts`).
+    NextJs,
+    /// Remix route modules (`loader`/`action` exports).
+    Remix,
 }
 
 pub fn function_id(fqn: &str, name: &str, arity: u16) -> NodeId {

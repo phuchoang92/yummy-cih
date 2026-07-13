@@ -107,7 +107,10 @@ fn first_string_arg_in_call(call_node: TsNode<'_>, src: &str) -> Option<String> 
     None
 }
 
-/// Collect all decorators that appear before a declaration node (siblings).
+/// Collect the decorators that decorate `node` — the contiguous run of
+/// `decorator` siblings immediately preceding it. Resetting on any other sibling
+/// (e.g. a previous method) is essential: without it, later members in a class
+/// body inherit earlier members' decorators (duplicate routes / contracts).
 fn collect_sibling_decorators<'a>(node: TsNode<'a>, src: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     let Some(parent) = node.parent() else {
@@ -118,10 +121,14 @@ fn collect_sibling_decorators<'a>(node: TsNode<'a>, src: &str) -> Vec<(String, O
         if child.id() == node.id() {
             break;
         }
-        if child.kind() == "decorator" {
-            if let Some(info) = decorator_info(child, src) {
-                out.push(info);
+        match child.kind() {
+            "decorator" => {
+                if let Some(info) = decorator_info(child, src) {
+                    out.push(info);
+                }
             }
+            "comment" => {} // decorators may be interleaved with comments
+            _ => out.clear(), // a non-decorator sibling ends the run
         }
     }
     out
@@ -153,6 +160,335 @@ fn express_http_method(method: &str) -> Option<&'static str> {
         "delete" => Some("DELETE"),
         "patch" => Some("PATCH"),
         _ => None,
+    }
+}
+
+// ── Additional backend route frameworks (Fastify / Koa / Hapi) ─────────────────
+
+/// Lower-case HTTP verb → canonical method, covering the broader set Fastify/Koa
+/// expose (`head`/`options`/`all`) on top of Express's five.
+fn any_http_verb(method: &str) -> Option<&'static str> {
+    match method {
+        "get" => Some("GET"),
+        "post" => Some("POST"),
+        "put" => Some("PUT"),
+        "delete" => Some("DELETE"),
+        "patch" => Some("PATCH"),
+        "head" => Some("HEAD"),
+        "options" => Some("OPTIONS"),
+        "all" => Some("ALL"),
+        _ => None,
+    }
+}
+
+/// Short id-prefix label for a route source (route ids are opaque — matching keys
+/// off props, per docs/ARCHITECTURE.md — but a stable label keeps ids readable).
+fn route_source_label(source: RouteSource) -> &'static str {
+    match source {
+        RouteSource::Express => "express",
+        RouteSource::NestJs => "nestjs",
+        RouteSource::Fastify => "fastify",
+        RouteSource::Koa => "koa",
+        RouteSource::Hapi => "hapi",
+        RouteSource::NextJs => "nextjs",
+        RouteSource::Remix => "remix",
+        _ => "route",
+    }
+}
+
+/// GraphQL resolver operation from a `@Query`/`@Mutation`/`@Subscription`
+/// decorator (type-graphql / NestJS).
+fn graphql_operation(dname: &str) -> Option<&'static str> {
+    match dname {
+        "Query" => Some("QUERY"),
+        "Mutation" => Some("MUTATION"),
+        "Subscription" => Some("SUBSCRIPTION"),
+        _ => None,
+    }
+}
+
+/// Value node of `{ key: value }` pair `key_name` in an `object` literal.
+fn object_pair_value<'a>(obj: TsNode<'a>, key_name: &str, src: &str) -> Option<TsNode<'a>> {
+    let mut cursor = obj.walk();
+    for entry in obj.named_children(&mut cursor) {
+        if entry.kind() != "pair" {
+            continue;
+        }
+        let key = entry.child_by_field_name("key").map(|n| unquote(&text(n, src)));
+        if key.as_deref() == Some(key_name) {
+            return entry.child_by_field_name("value");
+        }
+    }
+    None
+}
+
+/// HTTP method(s) from a config object's `method` value — a string (`'GET'`) or
+/// an array (`['GET','POST']`). Upper-cased.
+fn config_route_methods(obj: TsNode<'_>, src: &str) -> Vec<String> {
+    let Some(value) = object_pair_value(obj, "method", src) else {
+        return Vec::new();
+    };
+    match value.kind() {
+        "string" => vec![unquote(&text(value, src)).to_ascii_uppercase()],
+        "array" => {
+            let mut out = Vec::new();
+            let mut cursor = value.walk();
+            for el in value.named_children(&mut cursor) {
+                if el.kind() == "string" {
+                    out.push(unquote(&text(el, src)).to_ascii_uppercase());
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `server.route({ method, path })` (hapi) / `fastify.route({ method, url })` —
+/// config-object route registration. `path_key` is `"path"` (hapi) or `"url"` (fastify).
+fn emit_config_routes(
+    call: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    source: RouteSource,
+    path_key: &str,
+) {
+    let Some(arg0) = ts_positional_argument(call, 0) else {
+        return;
+    };
+    if arg0.kind() != "object" {
+        return;
+    }
+    let Some(path) = object_pair_value(arg0, path_key, src)
+        .filter(|v| v.kind() == "string")
+        .map(|v| unquote(&text(v, src)))
+    else {
+        return;
+    };
+    let methods = config_route_methods(arg0, src);
+    let methods = if methods.is_empty() {
+        vec!["ALL".to_string()]
+    } else {
+        methods
+    };
+    for m in methods {
+        builder.emit_backend_route(call, source, &m, &path);
+    }
+}
+
+/// Detect a backend HTTP route from a `call_expression` across Express, Fastify,
+/// Koa (verb calls) and Fastify/Hapi (config-object `.route({...})`). Express is
+/// unchanged; new frameworks are import-gated to disambiguate shared receiver
+/// names (`app`/`router`).
+fn detect_call_route(node: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "member_expression" {
+        return;
+    }
+    let (Some(obj), Some(prop_node)) = (
+        func.child_by_field_name("object"),
+        func.child_by_field_name("property"),
+    ) else {
+        return;
+    };
+    let object = text(obj, src);
+    let prop = text(prop_node, src);
+
+    // Config-object forms: `server.route({...})` (hapi), `fastify.route({...})`.
+    if prop == "route" {
+        if object == "server" && (builder.imports_pkg("@hapi/hapi") || builder.imports_pkg("hapi")) {
+            emit_config_routes(node, src, builder, RouteSource::Hapi, "path");
+            return;
+        }
+        if (object == "fastify" || object == "app") && builder.imports_pkg("fastify") {
+            emit_config_routes(node, src, builder, RouteSource::Fastify, "url");
+            return;
+        }
+    }
+
+    // Verb forms: `<object>.<verb>(path, handler)`.
+    let Some(source) = builder.route_framework_for(&object) else {
+        return;
+    };
+    // Express keeps its original 5-verb set; the others get head/options/all too.
+    let http_method = match source {
+        RouteSource::Express => express_http_method(&prop),
+        _ => any_http_verb(&prop),
+    };
+    let Some(http_method) = http_method else {
+        return;
+    };
+    if let Some(path) = first_string_arg_in_call(node, src) {
+        builder.emit_backend_route(node, source, http_method, &path);
+    }
+}
+
+// ── File-based routes (Next.js / Remix) ───────────────────────────────────────
+
+/// Top-level exported names (functions + `export const`), used to detect
+/// App-Router verb handlers (`export function GET`) and Remix `loader`/`action`.
+fn exported_top_level_names(root: TsNode<'_>, src: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        if child.kind() != "export_statement" {
+            continue;
+        }
+        let mut c2 = child.walk();
+        for inner in child.named_children(&mut c2) {
+            match inner.kind() {
+                "function_declaration" | "generator_function_declaration" => {
+                    if let Some(n) = inner.child_by_field_name("name") {
+                        out.insert(text(n, src));
+                    }
+                }
+                "lexical_declaration" | "variable_declaration" => {
+                    let mut c3 = inner.walk();
+                    for d in inner.named_children(&mut c3) {
+                        if d.kind() == "variable_declarator" {
+                            if let Some(n) = d.child_by_field_name("name") {
+                                out.insert(text(n, src));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// `[id]` → `:id`, `[...slug]`/`[[...slug]]` → `:slug` (Next.js dynamic segments).
+fn next_dynamic_segment(seg: &str) -> String {
+    let inner = seg.trim_start_matches('[').trim_end_matches(']');
+    if inner.len() != seg.len() {
+        format!(":{}", inner.trim_start_matches("..."))
+    } else {
+        seg.to_string()
+    }
+}
+
+/// Substring after a `pages/api/` path boundary, if `norm` is a Next.js pages API file.
+fn pages_api_subpath(norm: &str) -> Option<&str> {
+    let idx = norm.find("pages/api/")?;
+    if idx != 0 && norm.as_bytes()[idx - 1] != b'/' {
+        return None;
+    }
+    Some(&norm[idx + "pages/api/".len()..])
+}
+
+/// Next.js pages API file path → HTTP path (e.g. `users/[id].ts` → `/api/users/:id`).
+fn next_pages_api_path(rest: &str) -> String {
+    let stem = module_path(rest);
+    let stem = stem.strip_suffix("/index").unwrap_or(&stem);
+    let stem = if stem == "index" { "" } else { stem };
+    let mut p = String::from("/api");
+    for seg in stem.split('/').filter(|s| !s.is_empty()) {
+        p.push('/');
+        p.push_str(&next_dynamic_segment(seg));
+    }
+    p
+}
+
+/// App-Router directory (between `app/` and `/route.<ext>`), if `norm` is one.
+fn app_router_dir(norm: &str) -> Option<String> {
+    let stem = module_path(norm);
+    let base = stem.strip_suffix("/route")?;
+    if base == "app" || base.ends_with("/app") {
+        return Some(String::new());
+    }
+    let after = if let Some(i) = base.find("/app/") {
+        &base[i + "/app/".len()..]
+    } else {
+        base.strip_prefix("app/")?
+    };
+    Some(after.to_string())
+}
+
+/// App-Router directory → HTTP path (drops `(groups)` and `@slots`; `[id]` → `:id`).
+fn next_app_router_path(dir: &str) -> String {
+    let mut segs = Vec::new();
+    for seg in dir.split('/').filter(|s| !s.is_empty()) {
+        if (seg.starts_with('(') && seg.ends_with(')')) || seg.starts_with('@') {
+            continue;
+        }
+        segs.push(next_dynamic_segment(seg));
+    }
+    if segs.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segs.join("/"))
+    }
+}
+
+/// Remix route file (after `app/routes/`), if `norm` is one.
+fn remix_route_file(norm: &str) -> Option<&str> {
+    let idx = norm.find("app/routes/")?;
+    if idx != 0 && norm.as_bytes()[idx - 1] != b'/' {
+        return None;
+    }
+    Some(&norm[idx + "app/routes/".len()..])
+}
+
+/// Remix route filename → HTTP path (`users.$id.tsx` → `/users/:id`; `$` splat → `*`).
+fn remix_route_path(routefile: &str) -> String {
+    let stem = module_path(routefile);
+    let stem = stem.strip_suffix("/route").unwrap_or(&stem);
+    let mut segs = Vec::new();
+    for seg in stem.split(['/', '.']) {
+        if seg.is_empty() || seg == "_index" || seg.starts_with('_') {
+            continue;
+        }
+        segs.push(match seg.strip_prefix('$') {
+            Some("") => "*".to_string(),          // bare `$` splat
+            Some(name) => format!(":{name}"),      // `$id` → `:id`
+            None => seg.to_string(),
+        });
+    }
+    if segs.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segs.join("/"))
+    }
+}
+
+/// Detect file-based routes from the path convention + exported handler names:
+/// Next.js pages API (all-methods handler), App Router (`export GET/POST/…`),
+/// and Remix (`loader` → GET, `action` → POST).
+fn detect_file_based_routes(rel: &str, root: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let norm = rel.strip_prefix("src/").unwrap_or(rel);
+
+    if let Some(rest) = pages_api_subpath(norm) {
+        let path = next_pages_api_path(rest);
+        builder.emit_backend_route(root, RouteSource::NextJs, "ALL", &path);
+        return;
+    }
+    if let Some(dir) = app_router_dir(norm) {
+        let path = next_app_router_path(&dir);
+        let exports = exported_top_level_names(root, src);
+        for verb in [
+            "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+        ] {
+            if exports.contains(verb) {
+                builder.emit_backend_route(root, RouteSource::NextJs, verb, &path);
+            }
+        }
+        return;
+    }
+    if let Some(routefile) = remix_route_file(norm) {
+        let exports = exported_top_level_names(root, src);
+        if exports.contains("loader") || exports.contains("action") {
+            let path = remix_route_path(routefile);
+            if exports.contains("loader") {
+                builder.emit_backend_route(root, RouteSource::Remix, "GET", &path);
+            }
+            if exports.contains("action") {
+                builder.emit_backend_route(root, RouteSource::Remix, "POST", &path);
+            }
+        }
     }
 }
 
@@ -371,16 +707,21 @@ impl Builder {
         });
     }
 
-    fn emit_express_route(
+    /// Emit a `Route` node for a call/config-based backend framework
+    /// (Express/Fastify/Koa/Hapi). No handler edge — the handler is an inline
+    /// callback we don't resolve here (parity with the original Express path).
+    fn emit_backend_route(
         &mut self,
         call_node: TsNode<'_>,
+        source: RouteSource,
         http_method: &str,
         path: &str,
     ) {
-        let route_id = NodeId::new(format!("Route:express:{http_method}:{path}"));
+        let label = route_source_label(source);
+        let route_id = NodeId::new(format!("Route:{label}:{http_method}:{path}"));
         let name = format!("{http_method} {path}");
         self.nodes.push(Node {
-            id: route_id.clone(),
+            id: route_id,
             kind: NodeKind::Route,
             name: name.clone(),
             qualified_name: Some(name),
@@ -390,11 +731,59 @@ impl Builder {
                 "httpMethod": http_method,
                 "path": path,
                 "route_annotations": [],
-                "source": RouteSource::Express,
+                "source": source,
             })),
         });
-        // No handler edge — we don't resolve the handler function here
-        let _ = route_id;
+    }
+
+    /// Emit a non-HTTP `ContractSite` (`ContractKind::Custom(tag)`) — used for
+    /// GraphQL resolvers (`tag="graphql"`) and tRPC procedures (`tag="trpc"`).
+    /// Custom contracts are visible/queryable but not auto-resolved to edges.
+    fn emit_custom_contract(
+        &mut self,
+        tag: &str,
+        op: &str,
+        name: Option<String>,
+        in_callable: NodeId,
+        range: Range,
+    ) {
+        self.contract_sites.push(ContractSite {
+            kind: ContractKind::Custom(tag.to_string()),
+            url_template: name,
+            topic: None,
+            http_method: Some(op.to_string()),
+            messaging_framework: None,
+            url_parts: None,
+            via_wrapper: None,
+            in_callable,
+            range,
+        });
+    }
+
+    /// True if any (non-static) import's module path equals or starts with `pkg`
+    /// (so `@koa/router` matches `@koa/router`, `koa` matches `koa`).
+    fn imports_pkg(&self, pkg: &str) -> bool {
+        self.imports.iter().any(|imp| {
+            !imp.is_static && (imp.raw == pkg || imp.raw.starts_with(&format!("{pkg}/")))
+        })
+    }
+
+    /// Pick the backend framework for a verb call `<object>.<verb>(...)`, using
+    /// the receiver name disambiguated by the file's imports. Express stays the
+    /// default for `app`/`router`/`express` so existing behavior is preserved.
+    fn route_framework_for(&self, object: &str) -> Option<RouteSource> {
+        let has_express = self.imports_pkg("express");
+        let has_fastify = self.imports_pkg("fastify");
+        let has_koa = self.imports_pkg("koa") || self.imports_pkg("@koa/router");
+        match object {
+            "fastify" => Some(RouteSource::Fastify),
+            // `const app = fastify()` — attribute to Fastify only when the file
+            // imports fastify and not express (an express app also uses `app`).
+            "app" if has_fastify && !has_express => Some(RouteSource::Fastify),
+            "router" if has_koa && !has_express => Some(RouteSource::Koa),
+            "app" | "router" | "express" => Some(RouteSource::Express),
+            _ => None,
+        }
     }
 
     fn emit_import(&mut self, node: TsNode<'_>, src: &str) {
@@ -610,6 +999,48 @@ fn try_emit_http_contract(
         in_callable,
         range: range_of(node),
     });
+}
+
+/// tRPC procedure: `<proc>.query(resolver)` / `.mutation(...)` / `.subscription(...)`
+/// in a file that imports `@trpc/server`. Import-gated + requires a function
+/// argument to avoid react-query `.query` false positives.
+fn try_emit_trpc_contract(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    enclosing_fn: Option<&NodeId>,
+) {
+    if !builder.imports_pkg("@trpc/server") {
+        return;
+    }
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "member_expression" {
+        return;
+    }
+    let Some(prop) = func.child_by_field_name("property") else {
+        return;
+    };
+    let op = match text(prop, src).as_str() {
+        "query" => "QUERY",
+        "mutation" => "MUTATION",
+        "subscription" => "SUBSCRIPTION",
+        _ => return,
+    };
+    let Some(arg0) = ts_positional_argument(node, 0) else {
+        return;
+    };
+    if !matches!(
+        arg0.kind(),
+        "arrow_function" | "function" | "function_expression"
+    ) {
+        return;
+    }
+    let in_callable = enclosing_fn
+        .cloned()
+        .unwrap_or_else(|| file_id(&builder.rel));
+    builder.emit_custom_contract("trpc", op, None, in_callable, range_of(node));
 }
 
 /// URL-ish gate for provisional wrapper calls: a string starting with `/`, a
@@ -1166,6 +1597,16 @@ fn walk(
                     let full_path = join_paths(ctrl_prefix, method_path);
                     builder.emit_nestjs_route(node, &fn_id, http_method, &full_path, dname);
                 }
+                if let Some(op) = graphql_operation(dname) {
+                    let opname = dpath.clone().unwrap_or_else(|| name.clone());
+                    builder.emit_custom_contract(
+                        "graphql",
+                        op,
+                        Some(opname),
+                        fn_id.clone(),
+                        range_of(node),
+                    );
+                }
             }
 
             // Walk body for call references
@@ -1196,6 +1637,16 @@ fn walk(
                     let full_path = join_paths(ctrl_prefix, method_path);
                     builder.emit_nestjs_route(node, &fn_id, http_method, &full_path, dname);
                 }
+                if let Some(op) = graphql_operation(dname) {
+                    let opname = dpath.clone().unwrap_or_else(|| name.clone());
+                    builder.emit_custom_contract(
+                        "graphql",
+                        op,
+                        Some(opname),
+                        fn_id.clone(),
+                        range_of(node),
+                    );
+                }
             }
 
             // Walk body
@@ -1210,33 +1661,11 @@ fn walk(
             builder.emit_import(node, src);
         }
         "call_expression" => {
-            // Check for Express-style routes: app.get('/path', ...) / router.post(...)
-            if let Some(func) = node.child_by_field_name("function") {
-                if func.kind() == "member_expression" {
-                    if let Some(obj) = func.child_by_field_name("object") {
-                        let obj_name = text(obj, src);
-                        if matches!(obj_name.as_str(), "app" | "router" | "express") {
-                            if let Some(prop) = func.child_by_field_name("property") {
-                                let method = text(prop, src);
-                                if let Some(http_method) = express_http_method(&method) {
-                                    // first argument is the path
-                                    if let Some(args) = node.child_by_field_name("arguments") {
-                                        let mut cursor = args.walk();
-                                        for arg in args.named_children(&mut cursor) {
-                                            if arg.kind() == "string" {
-                                                let path = unquote(&text(arg, src));
-                                                builder.emit_express_route(node, http_method, &path);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Backend HTTP routes: Express / Fastify / Koa verb calls + Fastify/Hapi
+            // config-object `.route({...})` (import-gated; Express behavior unchanged).
+            detect_call_route(node, src, builder);
             try_emit_http_contract(node, src, builder, enclosing_fn);
+            try_emit_trpc_contract(node, src, builder, enclosing_fn);
             builder.emit_call_reference(node, src);
             // recurse into arguments
             let mut cursor = node.walk();
@@ -1305,6 +1734,10 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
     };
 
     walk(tree.root_node(), src, &mut builder, None, None, None);
+
+    // File-based routes (Next.js / Remix) are a path convention, not a call —
+    // detect after the walk so exported handler names are available.
+    detect_file_based_routes(rel, tree.root_node(), src, &mut builder);
 
     // Convert RawImports to ImportBindings (best-effort for TypeScript)
     let import_bindings = builder.imports.iter().map(|imp| {
@@ -1388,5 +1821,175 @@ module.exports = app;
         ] {
             assert_eq!(module_path(input), want, "module_path({input})");
         }
+    }
+
+    // ── P1: additional backend route frameworks ──────────────────────────────
+
+    fn route_ids(unit: &cih_core::ParsedUnit) -> Vec<String> {
+        unit.nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::Route)
+            .map(|n| n.id.as_str().to_string())
+            .collect()
+    }
+
+    fn has_route(unit: &cih_core::ParsedUnit, id_contains: &str) -> bool {
+        route_ids(unit).iter().any(|id| id.contains(id_contains))
+    }
+
+    #[test]
+    fn fastify_verb_and_config_routes() {
+        let src = r#"import fastify from 'fastify';
+const app = fastify();
+app.get('/api/users/:id', async () => ({}));
+app.route({ method: ['GET', 'POST'], url: '/api/items' });
+"#;
+        let unit = parse_typescript_file("src/app.ts", src).expect("parses");
+        let ids = route_ids(&unit);
+        assert!(
+            ids.iter().any(|i| i == "Route:fastify:GET:/api/users/:id"),
+            "fastify verb route missing: {ids:?}"
+        );
+        assert!(
+            has_route(&unit, "Route:fastify:GET:/api/items")
+                && has_route(&unit, "Route:fastify:POST:/api/items"),
+            "fastify config routes missing: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn koa_router_import_gated() {
+        let src = r#"import Router from '@koa/router';
+const router = new Router();
+router.get('/api/ping', async (ctx) => { ctx.body = 'ok'; });
+"#;
+        let unit = parse_typescript_file("src/routes.ts", src).expect("parses");
+        assert!(
+            has_route(&unit, "Route:koa:GET:/api/ping"),
+            "koa route missing: {:?}",
+            route_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn hapi_config_route() {
+        let src = r#"import Hapi from '@hapi/hapi';
+const server = Hapi.server({ port: 3000 });
+server.route({ method: 'GET', path: '/api/health', handler: () => 'ok' });
+"#;
+        let unit = parse_typescript_file("src/server.ts", src).expect("parses");
+        assert!(
+            has_route(&unit, "Route:hapi:GET:/api/health"),
+            "hapi route missing: {:?}",
+            route_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn express_unchanged_when_no_fastify_import() {
+        // `router` without a koa import, `app` without a fastify import → Express.
+        let src = r#"import express from 'express';
+const app = express();
+app.post('/api/orders', (req, res) => res.end());
+"#;
+        let unit = parse_typescript_file("src/index.ts", src).expect("parses");
+        assert!(
+            has_route(&unit, "Route:express:POST:/api/orders"),
+            "express route missing: {:?}",
+            route_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn nextjs_pages_api_route() {
+        let src = "export default function handler(req, res) { res.json({}); }";
+        let unit =
+            parse_typescript_file("src/pages/api/users/[id].ts", src).expect("parses");
+        assert!(
+            has_route(&unit, "Route:nextjs:ALL:/api/users/:id"),
+            "next pages api route missing: {:?}",
+            route_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn nextjs_app_router_route() {
+        let src = r#"export async function GET() { return Response.json({}); }
+export async function POST() { return Response.json({}); }
+"#;
+        let unit =
+            parse_typescript_file("app/orders/[id]/route.ts", src).expect("parses");
+        assert!(
+            has_route(&unit, "Route:nextjs:GET:/orders/:id")
+                && has_route(&unit, "Route:nextjs:POST:/orders/:id"),
+            "next app router routes missing: {:?}",
+            route_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn remix_loader_action_routes() {
+        let src = r#"export async function loader() { return {}; }
+export async function action() { return {}; }
+"#;
+        let unit =
+            parse_typescript_file("app/routes/users.$id.tsx", src).expect("parses");
+        assert!(
+            has_route(&unit, "Route:remix:GET:/users/:id")
+                && has_route(&unit, "Route:remix:POST:/users/:id"),
+            "remix routes missing: {:?}",
+            route_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn graphql_resolver_custom_contract() {
+        let src = r#"import { Resolver, Query, Mutation } from 'type-graphql';
+@Resolver()
+class UserResolver {
+    @Query()
+    users() { return []; }
+    @Mutation()
+    createUser() { return {}; }
+}
+"#;
+        let unit = parse_typescript_file("src/user.resolver.ts", src).expect("parses");
+        let gql: Vec<_> = unit
+            .parsed_file
+            .contract_sites
+            .iter()
+            .filter(|c| matches!(&c.kind, cih_core::ContractKind::Custom(t) if t == "graphql"))
+            .collect();
+        assert_eq!(gql.len(), 2, "expected 2 graphql contract sites");
+        assert!(gql.iter().any(|c| c.http_method.as_deref() == Some("QUERY")));
+        assert!(gql
+            .iter()
+            .any(|c| c.http_method.as_deref() == Some("MUTATION")));
+    }
+
+    #[test]
+    fn trpc_procedure_custom_contract() {
+        let src = r#"import { initTRPC } from '@trpc/server';
+const t = initTRPC.create();
+export const appRouter = t.router({
+    getUser: t.procedure.query(() => ({ id: 1 })),
+    setUser: t.procedure.mutation(() => ({ ok: true })),
+});
+"#;
+        let unit = parse_typescript_file("src/router.ts", src).expect("parses");
+        let trpc: Vec<_> = unit
+            .parsed_file
+            .contract_sites
+            .iter()
+            .filter(|c| matches!(&c.kind, cih_core::ContractKind::Custom(t) if t == "trpc"))
+            .collect();
+        assert!(
+            trpc.iter().any(|c| c.http_method.as_deref() == Some("QUERY"))
+                && trpc
+                    .iter()
+                    .any(|c| c.http_method.as_deref() == Some("MUTATION")),
+            "trpc query+mutation contracts missing: {} sites",
+            trpc.len()
+        );
     }
 }

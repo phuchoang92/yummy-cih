@@ -81,6 +81,24 @@ impl LanguageProvider for TypescriptProvider {
         {
             frameworks.insert("express".into());
         }
+        // Additional backend frameworks — cheap import string-match (single or
+        // double quotes), matching the import-gating in the parser.
+        for (needle, fw) in [
+            ("fastify", "fastify"),
+            ("@koa/router", "koa"),
+            ("@hapi/hapi", "hapi"),
+            ("next", "nextjs"),
+            ("@remix-run/", "remix"),
+            ("@trpc/server", "trpc"),
+            ("type-graphql", "graphql"),
+            ("@nestjs/graphql", "graphql"),
+        ] {
+            if src.contains(&format!("'{needle}"))
+                || src.contains(&format!("\"{needle}"))
+            {
+                frameworks.insert(fw.into());
+            }
+        }
         Ok(SourceScan {
             loc,
             package: None,

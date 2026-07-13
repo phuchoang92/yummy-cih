@@ -81,6 +81,27 @@ handling as `.tsx` (no TSX grammar switch). Functions, classes, Express routes,
 and outbound `fetch`/HTTP calls are extracted identically to `.ts`. Nodes from
 JS files carry `language = "typescript"` (one provider for the whole family).
 
+### Backend route frameworks (`RouteSource`)
+
+Beyond NestJS decorators and Express, the parser emits `Route` nodes for:
+
+- **Fastify** — `fastify.get|post|…(path, …)` and `fastify.route({ method, url })`
+  (method may be an array). Import-gated on `fastify`.
+- **Koa** (`@koa/router`) — `router.get|post|…(path, …)`, import-gated so it does
+  not collide with Express's `router` receiver.
+- **hapi** — `server.route({ method, path })` (`@hapi/hapi`).
+- **Next.js** (file-based, keyed off the file path): `pages/api/**` default-export
+  handlers → one `ALL`-method route (path `/api/…`, `[id]` → `:id`); App Router
+  `app/**/route.ts` → one route per exported `GET/POST/…` (path from the dir).
+- **Remix** — `app/routes/**` modules exporting `loader` (→ GET) / `action`
+  (→ POST); path derived from the flat-route filename (`$id` → `:id`).
+
+Receiver-name disambiguation (`app`/`router`) is import-gated so **Express output
+is unchanged** when neither Fastify nor Koa is imported. GraphQL resolvers
+(`@Query`/`@Mutation`/`@Subscription`, type-graphql / NestJS) and tRPC procedures
+(`.query`/`.mutation`, `@trpc/server`-gated) emit `ContractKind::Custom("graphql"|"trpc")`
+sites — visible/queryable, not auto-resolved to edges.
+
 Deliberately tight recognizers — false positives poison cross-repo matching:
 
 - **TypeScript**: bare `fetch(url[, {method}])` (default GET; `method` read from

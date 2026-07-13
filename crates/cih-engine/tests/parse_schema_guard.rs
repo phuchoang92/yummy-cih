@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (9, "32a35c018e037ea5");
+const GOLDEN: (u32, &str) = (10, "d3953674ca07d426");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -138,6 +138,22 @@ app.get('/api/orders/:id', async (req, res) => {
 });
 
 module.exports = app;
+"#,
+    ),
+    (
+        // Fastify (import-gated verb call + config-object route).
+        "src/fastify-app.ts",
+        r#"import fastify from 'fastify';
+const app = fastify();
+app.get('/api/users/:id', async (req) => ({ id: req.params.id }));
+app.route({ method: ['GET', 'POST'], url: '/api/items' });
+"#,
+    ),
+    (
+        // Next.js App Router (file-based: exported verb handlers).
+        "src/app/api/orders/[id]/route.ts",
+        r#"export async function GET() { return Response.json({ ok: true }); }
+export async function POST() { return Response.json({ ok: true }); }
 "#,
     ),
     (
