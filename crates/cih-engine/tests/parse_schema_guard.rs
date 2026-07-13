@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (11, "29cf69b0bd5ec477");
+const GOLDEN: (u32, &str) = (12, "451bbe24541885f7");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -154,6 +154,18 @@ app.route({ method: ['GET', 'POST'], url: '/api/items' });
         "src/app/api/orders/[id]/route.ts",
         r#"export async function GET() { return Response.json({ ok: true }); }
 export async function POST() { return Response.json({ ok: true }); }
+"#,
+    ),
+    (
+        // ORM DB access: Prisma query (table + read/write edges) + TypeORM entity.
+        "src/db.ts",
+        r#"import { PrismaClient } from '@prisma/client';
+import { Entity } from 'typeorm';
+const prisma = new PrismaClient();
+export async function list() { return prisma.user.findMany(); }
+export async function add(d) { return prisma.order.create({ data: d }); }
+@Entity('products')
+class Product {}
 "#,
     ),
     (

@@ -124,6 +124,27 @@ Deliberately tight recognizers — false positives poison cross-repo matching:
   to the **file id**. This degrades the *first leg* of cross-repo tracing
   (entry resolution), not just display granularity — pinned by test.
 
+### JS/TS DB & ORM access (`DbTable` / `DbQuery`)
+
+The parser emits `DbTable`/`DbQuery` nodes + `ExecutesQuery` (caller→query) and
+`Reads/WritesTable` (query→table) edges directly — the same node ids
+(`DbTable:<UPPER>`, `DbQuery:<file>:<line>:<col>`) and edge kinds Java JPA/SQL
+uses, so `taint_paths(category="sql")` and DB tooling work uniformly. Detectors:
+
+- **Prisma** — `prisma.<model>.<op>()` (op = `findMany`/`create`/…); receiver
+  `prisma` (or `db` when `@prisma/client` is imported). Model name → table.
+- **Mongoose / Sequelize** — a pre-pass records model vars
+  (`const User = mongoose.model('User', …)`, `sequelize.define('t', …)`) → table;
+  `User.find()/create()/…` then reads/writes it.
+- **Knex** — the receiver chain (`knex('t').where(…).select()`) is unwound to the
+  root `knex('t')` call for the table.
+- **TypeORM / sequelize-typescript** — `@Entity('t')` / `@Table('t')` class
+  decorators → `DbTable` (arg overrides class name).
+
+Op classification (`db_op_kind`) gates which method names count as data access;
+the table must still resolve to a model/prisma/knex receiver, so plain
+`array.find(…)` never emits (pinned by test).
+
 ## Dynamic-URL folding (`ContractSite.url_parts`, `cih-resolve/src/contracts.rs`)
 
 Outbound URLs/topics that are not plain literals are captured as structured

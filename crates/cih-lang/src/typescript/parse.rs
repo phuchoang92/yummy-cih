@@ -1,7 +1,7 @@
 use cih_core::{
-    file_id, function_id, type_id, ContractKind, ContractSite, Edge, EdgeKind, Node, NodeId,
-    NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource,
-    HttpWrapperDef, StringConstant, SymbolDef, UrlPart,
+    db_query_inline_id, db_table_id, file_id, function_id, type_id, ContractKind, ContractSite,
+    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind,
+    ReferenceSite, RouteSource, HttpWrapperDef, StringConstant, SymbolDef, UrlPart,
 };
 use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_typescript};
@@ -107,12 +107,33 @@ fn first_string_arg_in_call(call_node: TsNode<'_>, src: &str) -> Option<String> 
     None
 }
 
-/// Collect the decorators that decorate `node` — the contiguous run of
-/// `decorator` siblings immediately preceding it. Resetting on any other sibling
-/// (e.g. a previous method) is essential: without it, later members in a class
-/// body inherit earlier members' decorators (duplicate routes / contracts).
+/// Collect the decorators that decorate `node`, handling both grammar shapes:
+/// (a) leading `decorator` **children** of the node (top-level `class_declaration`),
+/// and (b) the contiguous run of `decorator` **siblings** immediately preceding it
+/// (`method_definition` / `function_declaration` in a class/statement body).
+///
+/// The sibling run resets on any non-decorator sibling — without it, later members
+/// inherit earlier members' decorators (duplicate routes / contracts).
 fn collect_sibling_decorators<'a>(node: TsNode<'a>, src: &str) -> Vec<(String, Option<String>)> {
+    // (a) Leading decorator children of the node itself.
     let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "decorator" => {
+                if let Some(info) = decorator_info(child, src) {
+                    out.push(info);
+                }
+            }
+            "comment" => {}
+            _ => break, // first non-decorator child (the `class`/`function` keyword)
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+
+    // (b) Preceding decorator siblings.
     let Some(parent) = node.parent() else {
         return out;
     };
@@ -492,6 +513,185 @@ fn detect_file_based_routes(rel: &str, root: TsNode<'_>, src: &str, builder: &mu
     }
 }
 
+// ── DB / ORM access (Prisma / Mongoose / Sequelize / Knex / TypeORM) ──────────
+
+/// Classify an ORM method name as a DB op: `Some(is_write)`, or `None` if the
+/// method is not a recognized data-access operation.
+fn db_op_kind(op: &str) -> Option<bool> {
+    match op {
+        "find" | "findOne" | "findById" | "findByPk" | "findAll" | "findMany"
+        | "findUnique" | "findFirst" | "findUniqueOrThrow" | "findFirstOrThrow" | "count"
+        | "aggregate" | "groupBy" | "exists" | "distinct"
+        // Knex query-builder terminals (read).
+        | "select" | "first" | "pluck" => Some(false),
+        "create" | "createMany" | "save" | "insert" | "insertMany" | "bulkCreate" | "update"
+        | "updateOne" | "updateMany" | "upsert" | "delete" | "deleteOne" | "deleteMany"
+        | "destroy" | "remove" | "findOneAndUpdate" | "findOneAndDelete"
+        | "findByIdAndUpdate" | "findByIdAndDelete"
+        // Knex write terminals.
+        | "del" | "increment" | "decrement" => Some(true),
+        _ => None,
+    }
+}
+
+/// A model-defining call → `(table_name, engine)`: `mongoose.model('T',…)`,
+/// bare `model('T',…)` (mongoose named import), or `sequelize.define('T',…)`.
+fn db_model_definition(value: TsNode<'_>, src: &str) -> Option<(String, &'static str)> {
+    if value.kind() != "call_expression" {
+        return None;
+    }
+    let func = value.child_by_field_name("function")?;
+    let engine = match func.kind() {
+        "identifier" if text(func, src) == "model" => "mongoose",
+        "member_expression" => {
+            let obj = func
+                .child_by_field_name("object")
+                .map(|n| text(n, src))
+                .unwrap_or_default();
+            let prop = func
+                .child_by_field_name("property")
+                .map(|n| text(n, src))
+                .unwrap_or_default();
+            if prop == "define" {
+                "sequelize"
+            } else if obj == "mongoose" && prop == "model" {
+                "mongoose"
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    let table = first_string_arg_in_call(value, src)?;
+    Some((table, engine))
+}
+
+/// Pre-pass: record ORM model vars (`const User = mongoose.model('User',…)`) →
+/// table name, and emit the `DbTable` node.
+fn collect_db_models(root: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let rel = builder.rel.clone();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "variable_declarator" {
+            if let (Some(name), Some(value)) = (
+                n.child_by_field_name("name"),
+                n.child_by_field_name("value"),
+            ) {
+                if name.kind() == "identifier" {
+                    if let Some((table, _engine)) = db_model_definition(value, src) {
+                        builder.db_models.insert(text(name, src), table.clone());
+                        builder.emit_db_table(&table, &rel, range_of(n));
+                    }
+                }
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.named_children(&mut c) {
+            stack.push(ch);
+        }
+    }
+}
+
+/// Receiver base name for a Prisma call `<base>.<model>.<op>()`: `prisma` /
+/// `this.prisma`.
+fn prisma_base_name(base: TsNode<'_>, src: &str) -> Option<String> {
+    match base.kind() {
+        "identifier" => Some(text(base, src)),
+        "member_expression" => {
+            let inner = base.child_by_field_name("object")?;
+            if text(inner, src) == "this" {
+                base.child_by_field_name("property").map(|p| text(p, src))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Unwind a Knex receiver chain (`knex('t').where(…).…`) to the root
+/// `knex('t')` call and return the table literal.
+fn knex_root_table(mut recv: TsNode<'_>, src: &str, builder: &Builder) -> Option<String> {
+    loop {
+        match recv.kind() {
+            "call_expression" => {
+                let f = recv.child_by_field_name("function")?;
+                if f.kind() == "identifier" {
+                    let name = text(f, src);
+                    if name == "knex" || (name == "db" && builder.imports_pkg("knex")) {
+                        return first_string_arg_in_call(recv, src);
+                    }
+                    return None;
+                }
+                // Member call (`.where(…)`) — descend into its receiver.
+                recv = f.child_by_field_name("object")?;
+            }
+            "member_expression" => recv = recv.child_by_field_name("object")?,
+            _ => return None,
+        }
+    }
+}
+
+/// Detect an ORM data-access call and emit `DbQuery`/`DbTable` + edges: Prisma
+/// (`prisma.model.op`), Mongoose/Sequelize model methods, and Knex query builders.
+fn try_emit_db_query(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    enclosing_fn: Option<&NodeId>,
+) {
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "member_expression" {
+        return;
+    }
+    let Some(prop_node) = func.child_by_field_name("property") else {
+        return;
+    };
+    let op = text(prop_node, src);
+    let Some(is_write) = db_op_kind(&op) else {
+        return;
+    };
+    let Some(object) = func.child_by_field_name("object") else {
+        return;
+    };
+    let in_callable = enclosing_fn
+        .cloned()
+        .unwrap_or_else(|| file_id(&builder.rel));
+
+    // Prisma: `prisma.<model>.<op>()` — object is the `prisma.<model>` member.
+    if object.kind() == "member_expression" {
+        if let (Some(base), Some(model)) = (
+            object.child_by_field_name("object"),
+            object.child_by_field_name("property"),
+        ) {
+            if let Some(bn) = prisma_base_name(base, src) {
+                let gated = bn == "prisma"
+                    || (builder.imports_pkg("@prisma/client") && matches!(bn.as_str(), "db"));
+                if gated {
+                    let table = text(model, src);
+                    builder.emit_db_query(node, &table, &op, "prisma", is_write, &in_callable);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Mongoose/Sequelize model var: `User.find()`.
+    if object.kind() == "identifier" {
+        if let Some(table) = builder.db_models.get(&text(object, src)).cloned() {
+            builder.emit_db_query(node, &table, &op, "orm", is_write, &in_callable);
+            return;
+        }
+    }
+
+    // Knex query builder: `knex('t').where(…).select()`.
+    if let Some(table) = knex_root_table(object, src, builder) {
+        builder.emit_db_query(node, &table, &op, "knex", is_write, &in_callable);
+    }
+}
+
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -509,6 +709,11 @@ struct Builder {
     /// `const api = axios.create({ baseURL })` instances → optional literal
     /// baseURL, so `api.get('/x')` resolves to `<baseURL>/x` (P2 instance clients).
     axios_instances: std::collections::HashMap<String, Option<String>>,
+    /// ORM model vars → table name (`const User = mongoose.model('User', …)`,
+    /// `sequelize.define('users', …)`) so `User.find()` accesses the right table (P3).
+    db_models: std::collections::HashMap<String, String>,
+    /// DbTable ids already emitted this file (dedup — one table, many queries).
+    seen_db_tables: std::collections::HashSet<String>,
 }
 
 impl Builder {
@@ -760,6 +965,69 @@ impl Builder {
             via_wrapper: None,
             in_callable,
             range,
+        });
+    }
+
+    /// Emit a `DbTable` node (deduplicated per file). `db_table_id` upper-cases
+    /// the name, matching the Java/JPA table ids.
+    fn emit_db_table(&mut self, table: &str, file: &str, range: Range) {
+        let id = db_table_id(table);
+        if self.seen_db_tables.insert(id.as_str().to_string()) {
+            self.nodes.push(Node {
+                id,
+                kind: NodeKind::DbTable,
+                name: table.to_string(),
+                qualified_name: None,
+                file: file.to_string(),
+                range,
+                props: None,
+            });
+        }
+    }
+
+    /// Emit a `DbQuery` node + `ExecutesQuery` (caller→query) and
+    /// `Reads/WritesTable` (query→table) edges, ensuring the `DbTable` exists.
+    /// Mirrors `cih_resolve::emit_db_access` so JS DB nodes match Java's.
+    fn emit_db_query(
+        &mut self,
+        node: TsNode<'_>,
+        table: &str,
+        op: &str,
+        engine: &str,
+        is_write: bool,
+        in_callable: &NodeId,
+    ) {
+        let range = range_of(node);
+        let query_id = db_query_inline_id(&self.rel, range.start_line, range.start_col);
+        self.nodes.push(Node {
+            id: query_id.clone(),
+            kind: NodeKind::DbQuery,
+            name: op.to_string(),
+            qualified_name: None,
+            file: self.rel.clone(),
+            range,
+            props: Some(serde_json::json!({ "op": op, "engine": engine })),
+        });
+        self.edges.push(Edge {
+            src: in_callable.clone(),
+            dst: query_id.clone(),
+            kind: EdgeKind::ExecutesQuery,
+            confidence: 1.0,
+            reason: format!("{engine}-{op}"),
+            props: None,
+        });
+        self.emit_db_table(table, "", Range::default());
+        self.edges.push(Edge {
+            src: query_id,
+            dst: db_table_id(table),
+            kind: if is_write {
+                EdgeKind::WritesTable
+            } else {
+                EdgeKind::ReadsTable
+            },
+            confidence: 1.0,
+            reason: format!("{engine}-orm"),
+            props: None,
         });
     }
 
@@ -1693,6 +1961,16 @@ fn walk(
 
             let fqn = builder.emit_class(node, src, &class_name, &decorators);
 
+            // TypeORM / sequelize-typescript entity: `@Entity('t')` / `@Table('t')`
+            // → DbTable (arg overrides the class name).
+            if let Some((_, arg)) = decorators
+                .iter()
+                .find(|(n, _)| n == "Entity" || n == "Table")
+            {
+                let table = arg.clone().unwrap_or_else(|| class_name.clone());
+                builder.emit_db_table(&table, &builder.rel.clone(), range_of(node));
+            }
+
             // Walk body
             if let Some(body) = node.child_by_field_name("body") {
                 let mut cursor = body.walk();
@@ -1801,6 +2079,7 @@ fn walk(
             detect_call_route(node, src, builder);
             try_emit_http_contract(node, src, builder, enclosing_fn);
             try_emit_trpc_contract(node, src, builder, enclosing_fn);
+            try_emit_db_query(node, src, builder, enclosing_fn);
             builder.emit_call_reference(node, src);
             // recurse into arguments
             let mut cursor = node.walk();
@@ -1868,9 +2147,10 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
         ..Builder::default()
     };
 
-    // Pre-pass: axios.create() instances must be known before their `.get/.post`
-    // calls are visited during the walk.
+    // Pre-pass: axios.create() instances and ORM model vars must be known before
+    // their calls are visited during the walk.
     collect_axios_instances(tree.root_node(), src, &mut builder);
+    collect_db_models(tree.root_node(), src, &mut builder);
 
     walk(tree.root_node(), src, &mut builder, None, None, None);
 
@@ -2183,6 +2463,100 @@ export function f() { return http.get('http://x/y'); }
         );
     }
 
+    // ── P3: DB / ORM access ──────────────────────────────────────────────────
+
+    fn db_table_ids(unit: &cih_core::ParsedUnit) -> Vec<String> {
+        unit.nodes
+            .iter()
+            .filter(|n| n.kind == cih_core::NodeKind::DbTable)
+            .map(|n| n.id.as_str().to_string())
+            .collect()
+    }
+
+    fn has_db_query_edge(unit: &cih_core::ParsedUnit, kind: cih_core::EdgeKind) -> bool {
+        unit.edges.iter().any(|e| e.kind == kind)
+    }
+
+    #[test]
+    fn prisma_query_emits_table_and_edges() {
+        let src = r#"import { PrismaClient } from '@prisma/client';
+const prisma = new PrismaClient();
+export async function list() { return prisma.user.findMany(); }
+export async function make(d) { return prisma.order.create({ data: d }); }
+"#;
+        let unit = parse_typescript_file("src/repo.ts", src).expect("parses");
+        let tables = db_table_ids(&unit);
+        assert!(tables.contains(&"DbTable:USER".to_string()), "USER table: {tables:?}");
+        assert!(tables.contains(&"DbTable:ORDER".to_string()), "ORDER table: {tables:?}");
+        assert!(has_db_query_edge(&unit, cih_core::EdgeKind::ReadsTable));
+        assert!(has_db_query_edge(&unit, cih_core::EdgeKind::WritesTable));
+        assert!(has_db_query_edge(&unit, cih_core::EdgeKind::ExecutesQuery));
+    }
+
+    #[test]
+    fn mongoose_model_var_query() {
+        let src = r#"import mongoose from 'mongoose';
+const User = mongoose.model('User', new mongoose.Schema({}));
+export async function find(id) { return User.findById(id); }
+"#;
+        let unit = parse_typescript_file("src/user.model.ts", src).expect("parses");
+        assert!(
+            db_table_ids(&unit).contains(&"DbTable:USER".to_string()),
+            "mongoose table missing: {:?}",
+            db_table_ids(&unit)
+        );
+        assert!(has_db_query_edge(&unit, cih_core::EdgeKind::ReadsTable));
+    }
+
+    #[test]
+    fn sequelize_define_write() {
+        let src = r#"const Order = sequelize.define('orders', {});
+export async function add(d) { return Order.create(d); }
+"#;
+        let unit = parse_typescript_file("src/order.ts", src).expect("parses");
+        assert!(db_table_ids(&unit).contains(&"DbTable:ORDERS".to_string()));
+        assert!(has_db_query_edge(&unit, cih_core::EdgeKind::WritesTable));
+    }
+
+    #[test]
+    fn knex_chained_query_finds_table() {
+        let src = r#"import knex from 'knex';
+export async function get(id) { return knex('products').where('id', id).select(); }
+"#;
+        let unit = parse_typescript_file("src/products.ts", src).expect("parses");
+        assert!(
+            db_table_ids(&unit).contains(&"DbTable:PRODUCTS".to_string()),
+            "knex table missing: {:?}",
+            db_table_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn typeorm_entity_table() {
+        let src = r#"import { Entity, Column } from 'typeorm';
+@Entity('users')
+class User { }
+"#;
+        let unit = parse_typescript_file("src/user.entity.ts", src).expect("parses");
+        assert!(
+            db_table_ids(&unit).contains(&"DbTable:USERS".to_string()),
+            "typeorm entity table missing: {:?}",
+            db_table_ids(&unit)
+        );
+    }
+
+    #[test]
+    fn plain_array_find_is_not_a_db_query() {
+        // `.find` on a plain array must NOT emit a DbQuery (no model/prisma/knex).
+        let src = r#"export function f(xs) { return xs.find(x => x.id === 1); }"#;
+        let unit = parse_typescript_file("src/util.ts", src).expect("parses");
+        assert!(
+            db_table_ids(&unit).is_empty()
+                && !has_db_query_edge(&unit, cih_core::EdgeKind::ReadsTable),
+            "array .find must not be a DB query"
+        );
+    }
+
     #[test]
     fn trpc_procedure_custom_contract() {
         let src = r#"import { initTRPC } from '@trpc/server';
@@ -2209,3 +2583,4 @@ export const appRouter = t.router({
         );
     }
 }
+
