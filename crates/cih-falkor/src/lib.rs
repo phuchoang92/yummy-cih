@@ -146,6 +146,71 @@ impl FalkorStore {
         Ok(out)
     }
 
+    /// True when a backend error is FalkorDB/Redis reporting it is still loading
+    /// its persisted dataset into memory (`BusyLoadingError`). Transient at
+    /// startup — especially when one instance holds a large (multi-GB) AOF/RDB.
+    fn is_loading_error(e: &GraphStoreError) -> bool {
+        matches!(e, GraphStoreError::Backend(msg) if msg.to_ascii_lowercase().contains("loading"))
+    }
+
+    /// Max time to wait for a loading FalkorDB before giving up, from
+    /// `CIH_FALKOR_LOAD_WAIT_SECS` (default 600s — enough for a multi-GB reload).
+    fn load_wait_budget() -> Duration {
+        Duration::from_secs(
+            std::env::var("CIH_FALKOR_LOAD_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
+        )
+    }
+
+    /// Block until FalkorDB can serve a trivial query, tolerating the
+    /// `BusyLoadingError` window while it loads a large dataset. Polls with
+    /// exponential backoff (capped at 5s) up to `max_wait`, logging progress so a
+    /// multi-minute wait is visible. Any non-loading error fails fast.
+    async fn wait_until_ready(&self, max_wait: Duration) -> Result<()> {
+        let start = std::time::Instant::now();
+        let mut delay = Duration::from_millis(200);
+        let mut next_log = Duration::from_secs(5);
+        loop {
+            match self.run("RETURN 1").await {
+                Ok(_) => return Ok(()),
+                Err(e) if Self::is_loading_error(&e) => {
+                    if start.elapsed() >= max_wait {
+                        return Err(GraphStoreError::Backend(format!(
+                            "FalkorDB still loading its dataset after {}s — artifacts are on \
+                             disk; re-run once it is ready, or raise CIH_FALKOR_LOAD_WAIT_SECS",
+                            max_wait.as_secs()
+                        )));
+                    }
+                    if start.elapsed() >= next_log {
+                        tracing::info!(
+                            elapsed_s = start.elapsed().as_secs(),
+                            "waiting for FalkorDB to finish loading its dataset…"
+                        );
+                        next_log += Duration::from_secs(15);
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Run a write query, waiting out a `BusyLoadingError` (e.g. FalkorDB
+    /// restarted mid-load) once before retrying — so a batch never fails just
+    /// because the instance was momentarily loading.
+    async fn run_write(&self, cypher: &str) -> Result<Value> {
+        match self.run(cypher).await {
+            Err(e) if Self::is_loading_error(&e) => {
+                self.wait_until_ready(Self::load_wait_budget()).await?;
+                self.run(cypher).await
+            }
+            other => other,
+        }
+    }
+
     /// Core write path: MERGE nodes then edges in UNWIND batches. Idempotent
     /// (re-running the same artifact is a no-op), so it doubles as upsert.
     async fn load_nodes_edges(&self, nodes: &[Node], edges: &[Edge]) -> Result<LoadStats> {
@@ -174,7 +239,7 @@ impl FalkorStore {
                      n.loopDepth = row.loopDepth, n.transitiveLoopDepth = row.transitiveLoopDepth",
                 arr = nodes_to_list(chunk)
             );
-            self.run(&q).await.inspect_err(|_| {
+            self.run_write(&q).await.inspect_err(|_| {
                 tracing::error!(
                     batch = batch_idx,
                     committed_batches = batch_idx,
@@ -203,7 +268,7 @@ impl FalkorStore {
                          r.callSites = row.callSites",
                     arr = edges_to_list(chunk)
                 );
-                self.run(&q).await.inspect_err(|_| {
+                self.run_write(&q).await.inspect_err(|_| {
                     tracing::error!(
                         kind = ?kind,
                         batch = batch_idx,
@@ -232,6 +297,9 @@ impl GraphStore for FalkorStore {
     }
 
     async fn bulk_load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
+        // Wait out a `BusyLoadingError` window before writing, so a FalkorDB that
+        // is still loading a large persisted dataset doesn't cause a partial write.
+        self.wait_until_ready(Self::load_wait_budget()).await?;
         let nodes = artifacts
             .read_nodes()
             .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;

@@ -47,3 +47,39 @@ async fn query_limit_allows_within_capacity() {
     let b = store.acquire_permit().await.expect("second slot");
     drop((a, b));
 }
+
+#[test]
+fn is_loading_error_detects_busy_loading() {
+    // The exact message FalkorDB/redis surfaces during dataset load, as seen in
+    // the field log — mapped to GraphStoreError::Backend via run()'s e.to_string().
+    let loading = GraphStoreError::Backend(
+        "graph backend error: An error was signalled by the server - BusyLoadingError: \
+         Redis is loading the dataset in memory"
+            .into(),
+    );
+    assert!(FalkorStore::is_loading_error(&loading));
+
+    // Non-loading backend errors must NOT be treated as loading (fail fast).
+    for other in [
+        "graph backend error: syntax error",
+        "graph store overloaded: concurrent query limit reached",
+        "connection refused",
+    ] {
+        assert!(
+            !FalkorStore::is_loading_error(&GraphStoreError::Backend(other.into())),
+            "false positive on: {other}"
+        );
+    }
+    // Wrong variant is never a loading error.
+    assert!(!FalkorStore::is_loading_error(&GraphStoreError::NotFound(
+        "x".into()
+    )));
+}
+
+#[test]
+fn load_wait_budget_defaults_to_600s() {
+    // Only asserts the default when the env var is unset (test env doesn't set it).
+    if std::env::var("CIH_FALKOR_LOAD_WAIT_SECS").is_err() {
+        assert_eq!(FalkorStore::load_wait_budget(), Duration::from_secs(600));
+    }
+}
