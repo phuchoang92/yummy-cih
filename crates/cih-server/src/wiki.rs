@@ -286,6 +286,100 @@ struct ResidentEntry {
     owned: Arc<cih_wiki::OwnedWiki>,
 }
 
+/// A live BM25 search index built by rendering the resident wiki's pages
+/// (no on-disk `.cih/wiki/` needed). Mirrors `WikiIndex` but holds bodies in
+/// memory. Built once (renders all pages), cached + mtime-invalidated.
+struct LiveWikiIndex {
+    pages: Vec<PageMeta>,
+    bodies: Vec<String>,
+    index: TextIndex,
+}
+
+impl LiveWikiIndex {
+    fn build(owned: &cih_wiki::OwnedWiki) -> Self {
+        let mut pages = Vec::new();
+        let mut bodies = Vec::new();
+        let mut corpus = Vec::new();
+        for (entry, content) in owned.rendered_manifest_pages() {
+            let body = strip_front_matter(&content).to_string();
+            corpus.push(format!(
+                "{} {} {} {} {}",
+                entry.title, entry.role, entry.kind, entry.slug, body
+            ));
+            pages.push(PageMeta {
+                slug: entry.slug,
+                role: entry.role,
+                title: entry.title,
+                kind: entry.kind,
+                path: entry.path,
+                community_id: entry.community_id,
+            });
+            bodies.push(body);
+        }
+        let index = TextIndex::build(corpus.iter().map(String::as_str));
+        Self {
+            pages,
+            bodies,
+            index,
+        }
+    }
+
+    fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Ranked, faceted search — mirrors `WikiIndex::search`, bodies from memory.
+    fn search(&self, query: &str, facets: &WikiFacets, limit: usize) -> Vec<WikiHit> {
+        let ranked = self.index.search(query, self.pages.len());
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut hits = Vec::new();
+        for (ordinal, score) in ranked {
+            let page = &self.pages[ordinal];
+            if !seen.insert(page.slug.as_str()) {
+                continue;
+            }
+            if facets
+                .role
+                .is_some_and(|r| !page.role.eq_ignore_ascii_case(r))
+            {
+                continue;
+            }
+            if facets
+                .kind
+                .is_some_and(|k| !page.kind.eq_ignore_ascii_case(k))
+            {
+                continue;
+            }
+            if facets
+                .feature
+                .is_some_and(|f| page.community_id.as_deref() != Some(f))
+            {
+                continue;
+            }
+            hits.push(WikiHit {
+                slug: page.slug.clone(),
+                role: page.role.clone(),
+                title: page.title.clone(),
+                kind: page.kind.clone(),
+                path: page.path.clone(),
+                community_id: page.community_id.clone(),
+                score,
+                snippet: make_snippet(&self.bodies[ordinal], query, SNIPPET_MAX_CHARS),
+            });
+            if hits.len() == limit {
+                break;
+            }
+        }
+        hits
+    }
+}
+
+/// A live search index + the artifacts mtime it was built from.
+struct LiveSearchEntry {
+    nodes_mtime: Option<SystemTime>,
+    index: Arc<LiveWikiIndex>,
+}
+
 #[derive(Clone)]
 pub(crate) struct WikiSearchState {
     graph_key: String,
@@ -293,6 +387,8 @@ pub(crate) struct WikiSearchState {
     /// Resident renderers for live on-demand page rendering (P3.8), keyed by
     /// repo path, invalidated on `.cih/artifacts` nodes.jsonl mtime change.
     render_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, ResidentEntry>>>,
+    /// Live search indexes (built by rendering all resident pages), same keying.
+    live_search_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, LiveSearchEntry>>>,
 }
 
 impl WikiSearchState {
@@ -301,7 +397,44 @@ impl WikiSearchState {
             graph_key,
             cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             render_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            live_search_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Resolve `repo` to its live search index, building it (renders all pages)
+    /// and caching it on first use, mtime-invalidated. `Ok(None)` when the repo
+    /// has no graph artifacts (caller falls back to the on-disk index).
+    async fn live_index_for(&self, repo: &str) -> Result<Option<Arc<LiveWikiIndex>>, WikiError> {
+        let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
+        let repo_path = PathBuf::from(repo_path);
+        let Ok(ga) =
+            cih_core::GraphArtifacts::latest_in_dir(&repo_path.join(".cih").join("artifacts"))
+        else {
+            return Ok(None);
+        };
+        let mtime = std::fs::metadata(&ga.nodes_path)
+            .and_then(|m| m.modified())
+            .ok();
+        if let Some(entry) = self.live_search_cache.read().await.get(&repo_path) {
+            if entry.nodes_mtime == mtime && mtime.is_some() {
+                return Ok(Some(entry.index.clone()));
+            }
+        }
+        let Some(owned) = self.resident_for(repo).await? else {
+            return Ok(None);
+        };
+        let index = tokio::task::spawn_blocking(move || LiveWikiIndex::build(&owned))
+            .await
+            .map_err(|e| WikiError::Internal(format!("live search build task failed: {e}")))?;
+        let index = Arc::new(index);
+        self.live_search_cache.write().await.insert(
+            repo_path,
+            LiveSearchEntry {
+                nodes_mtime: mtime,
+                index: index.clone(),
+            },
+        );
+        Ok(Some(index))
     }
 
     /// Resolve `repo` to its resident renderer, (re)loading when the graph
@@ -446,7 +579,11 @@ fn error_response(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
-/// MCP tool body for `search_wiki` — same envelope as the HTTP handler.
+/// MCP tool body for `search_wiki`.
+///
+/// P3.8: searches a **live** index built from the resident graph (no
+/// `.cih/wiki/` files needed, always fresh). Falls back to the on-disk bundle
+/// when the repo has no graph artifacts.
 pub(crate) async fn search_wiki(
     state: &WikiSearchState,
     args: SearchWikiArgs,
@@ -455,7 +592,6 @@ pub(crate) async fn search_wiki(
     if query.is_empty() {
         return Err(McpError::invalid_params("query must not be empty", None));
     }
-    let index = state.index_for(&args.repo).await.map_err(wiki_err_to_mcp)?;
     let limit = if args.limit == 0 {
         DEFAULT_LIMIT
     } else {
@@ -470,6 +606,24 @@ pub(crate) async fn search_wiki(
         kind: non_empty(&args.kind),
         feature: non_empty(&args.feature),
     };
+
+    // Live index first.
+    if let Some(live) = state
+        .live_index_for(&args.repo)
+        .await
+        .map_err(wiki_err_to_mcp)?
+    {
+        let hits = live.search(query, &facets, limit);
+        return json_result(&json!({
+            "query": query,
+            "page_count": live.page_count(),
+            "hits": hits,
+            "source": "live",
+        }));
+    }
+
+    // Fallback: on-disk generated bundle.
+    let index = state.index_for(&args.repo).await.map_err(wiki_err_to_mcp)?;
     let hits = index.search(query, &facets, limit);
     json_result(&json!({
         "repo": index.repo_name,

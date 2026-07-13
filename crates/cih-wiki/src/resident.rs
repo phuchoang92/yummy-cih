@@ -257,6 +257,22 @@ impl OwnedWiki {
     pub fn slugs(&self) -> Vec<String> {
         self.index.slugs().map(str::to_string).collect()
     }
+
+    /// Render every manifest page as `(entry, markdown)` for building a live
+    /// search index. Pages without a manifest entry (controller API index pages)
+    /// are skipped, matching the on-disk manifest the batch writes. Renders all
+    /// pages, so callers should cache the result.
+    pub fn rendered_manifest_pages(&self) -> Vec<(crate::PageEntry, String)> {
+        let slugs: Vec<String> = self.index.slugs().map(str::to_string).collect();
+        slugs
+            .into_iter()
+            .filter_map(|slug| {
+                let page = self.render_slug(&slug)?;
+                let entry = page.entry?;
+                Some((entry, page.content))
+            })
+            .collect()
+    }
 }
 
 /// Assemble the graph-only `WikiInput` from the borrowed slices + owned parts.
