@@ -79,6 +79,34 @@ pub fn lang_for_path(path: &str) -> &'static str {
     map.get(ext).copied().unwrap_or("")
 }
 
+/// The set of language ids ([`LanguageProvider::language_id`]) present among
+/// `paths`, derived from file extensions via the provider registry. The single
+/// source of truth for "which languages are in scope" — drives
+/// language-conditional analysis phases so the core never hardcodes a language
+/// (e.g. `f.ends_with(".java")`).
+pub fn language_ids_for_paths<S: AsRef<str>>(paths: &[S]) -> BTreeSet<&'static str> {
+    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        let mut m = HashMap::new();
+        for p in all_providers() {
+            let id = p.language_id();
+            for &ext in p.extensions() {
+                m.insert(ext, id);
+            }
+        }
+        m
+    });
+    let mut out = BTreeSet::new();
+    for path in paths {
+        let path = path.as_ref();
+        let ext = path.rfind('.').map(|i| &path[i..]).unwrap_or("");
+        if let Some(&id) = map.get(ext) {
+            out.insert(id);
+        }
+    }
+    out
+}
+
 /// Returns the single-line comment prefix for a language id (e.g. `"#"` for python, `"//"` for java).
 pub fn comment_prefix_for_lang(lang: &str) -> &'static str {
     static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
@@ -137,4 +165,27 @@ pub enum Stereotype {
     NestJs,
     Flask,
     FastApi,
+}
+
+#[cfg(test)]
+mod scope_lang_tests {
+    use super::language_ids_for_paths;
+
+    #[test]
+    fn language_ids_derived_from_extensions() {
+        let ids = language_ids_for_paths(&[
+            "src/A.java".to_string(),
+            "src/b.ts".to_string(),
+            "src/c.js".to_string(), // JS is handled by the typescript provider
+            "svc/d.py".to_string(),
+            "README.md".to_string(), // unknown ext → ignored
+            "Makefile".to_string(),  // no ext → ignored
+        ]);
+        assert!(ids.contains("java"));
+        assert!(ids.contains("typescript")); // both .ts and .js
+        assert!(ids.contains("python"));
+        assert!(!ids.contains("go"));
+        // Empty / unknown-only inputs yield an empty set.
+        assert!(language_ids_for_paths(&["x.md".to_string(), "y".to_string()]).is_empty());
+    }
 }
