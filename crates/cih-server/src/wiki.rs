@@ -280,9 +280,34 @@ fn wiki_err_to_mcp(err: WikiError) -> McpError {
     }
 }
 
-/// A resident renderer + the artifacts mtime it was built from (for invalidation).
+/// Freshness token for the resident caches: the mtimes of everything a resident
+/// `OwnedWiki` reads. Includes the enrichment caches (which change independently
+/// of the graph artifacts), so adding/refreshing enrichment invalidates the
+/// resident render + search without a server restart.
+#[derive(Clone, PartialEq)]
+struct Freshness {
+    nodes: Option<SystemTime>,
+    class_enrich: Option<SystemTime>,
+    wiki_meta: Option<SystemTime>,
+}
+
+impl Freshness {
+    /// Compute from a repo path; `None` graph-artifacts mtime ⇒ no artifacts.
+    fn probe(repo_path: &Path) -> Option<Self> {
+        let ga = cih_core::GraphArtifacts::latest_in_dir(&repo_path.join(".cih").join("artifacts"))
+            .ok()?;
+        let mt = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        Some(Self {
+            nodes: mt(ga.nodes_path),
+            class_enrich: mt(repo_path.join(".cih").join("class-enrichment.json")),
+            wiki_meta: mt(repo_path.join(".cih").join("wiki").join("wiki_meta.json")),
+        })
+    }
+}
+
+/// A resident renderer + the freshness token it was built from (for invalidation).
 struct ResidentEntry {
-    nodes_mtime: Option<SystemTime>,
+    freshness: Freshness,
     owned: Arc<cih_wiki::OwnedWiki>,
 }
 
@@ -374,9 +399,9 @@ impl LiveWikiIndex {
     }
 }
 
-/// A live search index + the artifacts mtime it was built from.
+/// A live search index + the freshness token it was built from.
 struct LiveSearchEntry {
-    nodes_mtime: Option<SystemTime>,
+    freshness: Freshness,
     index: Arc<LiveWikiIndex>,
 }
 
@@ -407,16 +432,11 @@ impl WikiSearchState {
     async fn live_index_for(&self, repo: &str) -> Result<Option<Arc<LiveWikiIndex>>, WikiError> {
         let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
         let repo_path = PathBuf::from(repo_path);
-        let Ok(ga) =
-            cih_core::GraphArtifacts::latest_in_dir(&repo_path.join(".cih").join("artifacts"))
-        else {
+        let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        let mtime = std::fs::metadata(&ga.nodes_path)
-            .and_then(|m| m.modified())
-            .ok();
         if let Some(entry) = self.live_search_cache.read().await.get(&repo_path) {
-            if entry.nodes_mtime == mtime && mtime.is_some() {
+            if entry.freshness == freshness && freshness.nodes.is_some() {
                 return Ok(Some(entry.index.clone()));
             }
         }
@@ -430,7 +450,7 @@ impl WikiSearchState {
         self.live_search_cache.write().await.insert(
             repo_path,
             LiveSearchEntry {
-                nodes_mtime: mtime,
+                freshness,
                 index: index.clone(),
             },
         );
@@ -447,16 +467,12 @@ impl WikiSearchState {
     ) -> Result<Option<Arc<cih_wiki::OwnedWiki>>, WikiError> {
         let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
         let repo_path = PathBuf::from(repo_path);
-        let artifacts = repo_path.join(".cih").join("artifacts");
-        // Latest nodes.jsonl mtime = cache key freshness; absent ⇒ no artifacts.
-        let Ok(ga) = cih_core::GraphArtifacts::latest_in_dir(&artifacts) else {
+        // No graph artifacts ⇒ nothing to render (caller falls back to on-disk).
+        let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        let mtime = std::fs::metadata(&ga.nodes_path)
-            .and_then(|m| m.modified())
-            .ok();
         if let Some(entry) = self.render_cache.read().await.get(&repo_path) {
-            if entry.nodes_mtime == mtime && mtime.is_some() {
+            if entry.freshness == freshness && freshness.nodes.is_some() {
                 return Ok(Some(entry.owned.clone()));
             }
         }
@@ -476,7 +492,7 @@ impl WikiSearchState {
         self.render_cache.write().await.insert(
             repo_path,
             ResidentEntry {
-                nodes_mtime: mtime,
+                freshness,
                 owned: owned.clone(),
             },
         );
