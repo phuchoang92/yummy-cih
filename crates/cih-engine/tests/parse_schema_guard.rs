@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (17, "70d8c239044b2329");
+const GOLDEN: (u32, &str) = (18, "e8b35d5442040a83");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -164,6 +164,17 @@ app.route({ method: ['GET', 'POST'], url: '/api/items' });
         "src/app/api/orders/[id]/route.ts",
         r#"export async function GET() { return Response.json({ ok: true }); }
 export async function POST() { return Response.json({ ok: true }); }
+"#,
+    ),
+    (
+        // GraphQL/tRPC CONSUMER side → operation-call contracts (→ ExternalEndpoint),
+        // matched cross-repo against producer Routes by (method, name).
+        "src/queries.ts",
+        r#"import { gql } from '@apollo/client';
+import { createTRPCReact } from '@trpc/react-query';
+export const GET_ME = gql`query GetMe { me { id } }`;
+export const trpc = createTRPCReact();
+export function C() { return trpc.user.getUser.useQuery({ id: 1 }); }
 "#,
     ),
     (

@@ -1213,6 +1213,24 @@ impl Builder {
         }
     }
 
+    /// Emit a consumer-side contract for a GraphQL/tRPC operation call. Modeled as
+    /// an `HttpCall` (→ `ExternalEndpoint` at resolve) so the cross-repo matcher
+    /// links it to the producer `Route` by (method, name). The QUERY/MUTATION/
+    /// SUBSCRIPTION method namespace never collides with HTTP GET/POST.
+    fn emit_operation_call(&mut self, node: TsNode<'_>, method: &str, name: &str, in_callable: NodeId) {
+        self.contract_sites.push(ContractSite {
+            kind: ContractKind::HttpCall,
+            url_template: Some(name.to_string()),
+            topic: None,
+            http_method: Some(method.to_string()),
+            messaging_framework: None,
+            url_parts: None,
+            via_wrapper: None,
+            in_callable,
+            range: range_of(node),
+        });
+    }
+
     /// Emit a `DbTable` node (deduplicated per file). `db_table_id` upper-cases
     /// the name, matching the Java/JPA table ids.
     fn emit_db_table(&mut self, table: &str, file: &str, range: Range) {
@@ -1822,6 +1840,119 @@ fn trpc_procedure_name(call: TsNode<'_>, src: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// tRPC CONSUMER call: `trpc.<...>.<proc>.useQuery|query|useMutation|mutate|
+/// useSubscription|subscribe(...)`. Import-gated on a tRPC *client* package;
+/// requires a member-chain receiver (so React-Query's bare `useQuery(...)` and
+/// the producer `t.procedure.query(fn)` are excluded). Emits a consumer contract
+/// keyed by (method, procedure name) that the matcher links to the producer Route.
+fn try_emit_trpc_consumer(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    enclosing_fn: Option<&NodeId>,
+) {
+    if !(builder.imports_pkg("@trpc/react-query")
+        || builder.imports_pkg("@trpc/client")
+        || builder.imports_pkg("@trpc/next"))
+    {
+        return;
+    }
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "member_expression" {
+        return;
+    }
+    let Some(prop) = func.child_by_field_name("property") else {
+        return;
+    };
+    let arg0_is_fn = ts_positional_argument(node, 0)
+        .is_some_and(|a| matches!(a.kind(), "arrow_function" | "function" | "function_expression"));
+    let method = match text(prop, src).as_str() {
+        "useQuery" => "QUERY",
+        "useMutation" | "mutate" => "MUTATION",
+        "useSubscription" | "subscribe" => "SUBSCRIPTION",
+        // `.query(input)` on the client — a `.query(fn)` is the producer.
+        "query" if !arg0_is_fn => "QUERY",
+        _ => return,
+    };
+    // Procedure name = the last property of the receiver chain (`trpc.user.getUser`).
+    let Some(recv) = func.child_by_field_name("object") else {
+        return;
+    };
+    if recv.kind() != "member_expression" {
+        return;
+    }
+    let Some(name_node) = recv.child_by_field_name("property") else {
+        return;
+    };
+    let in_callable = enclosing_fn
+        .cloned()
+        .unwrap_or_else(|| file_id(&builder.rel));
+    builder.emit_operation_call(node, method, &text(name_node, src), in_callable);
+}
+
+/// GraphQL CONSUMER: a `gql`/`graphql` tagged template holding an operation.
+/// Emits a consumer contract keyed by (operation type, first root field).
+fn try_emit_graphql_consumer(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    enclosing_fn: Option<&NodeId>,
+) {
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "identifier" || !matches!(text(func, src).as_str(), "gql" | "graphql") {
+        return;
+    }
+    let Some(tmpl) = node.child_by_field_name("arguments") else {
+        return;
+    };
+    if tmpl.kind() != "template_string" {
+        return;
+    }
+    let mut body = String::new();
+    let mut cursor = tmpl.walk();
+    for child in tmpl.named_children(&mut cursor) {
+        if child.kind() == "string_fragment" {
+            body.push_str(child.utf8_text(src.as_bytes()).unwrap_or_default());
+        }
+    }
+    let Some((method, field)) = graphql_root_op(&body) else {
+        return;
+    };
+    let in_callable = enclosing_fn
+        .cloned()
+        .unwrap_or_else(|| file_id(&builder.rel));
+    builder.emit_operation_call(node, method, &field, in_callable);
+}
+
+/// From a GraphQL document body, the operation type + first root field
+/// (`query GetMe { me { id } }` → `("QUERY", "me")`; anonymous `{ me }` → query).
+fn graphql_root_op(body: &str) -> Option<(&'static str, String)> {
+    let body = body.trim_start();
+    let boundary = |r: &str| r.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '(');
+    let (method, rest) = if let Some(r) = body.strip_prefix("query").filter(|r| boundary(r)) {
+        ("QUERY", r)
+    } else if let Some(r) = body.strip_prefix("mutation").filter(|r| boundary(r)) {
+        ("MUTATION", r)
+    } else if let Some(r) = body.strip_prefix("subscription").filter(|r| boundary(r)) {
+        ("SUBSCRIPTION", r)
+    } else if body.starts_with('{') {
+        ("QUERY", body)
+    } else {
+        return None;
+    };
+    let after = &rest[rest.find('{')? + 1..];
+    let field: String = after
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!field.is_empty()).then_some((method, field))
 }
 
 /// URL-ish gate for provisional wrapper calls: a string starting with `/`, a
@@ -2535,6 +2666,8 @@ fn walk(
             detect_call_route(node, src, builder);
             try_emit_http_contract(node, src, builder, enclosing_fn);
             try_emit_trpc_contract(node, src, builder, enclosing_fn);
+            try_emit_trpc_consumer(node, src, builder, enclosing_fn);
+            try_emit_graphql_consumer(node, src, builder, enclosing_fn);
             try_emit_db_query(node, src, builder, enclosing_fn);
             try_emit_messaging(node, src, builder, enclosing_fn);
             builder.emit_call_reference(node, src);
@@ -3294,6 +3427,59 @@ export const appRouter = t.router({
             route_ids(&unit)
         );
     }
+
+    #[test]
+    fn trpc_consumer_calls() {
+        let src = r#"import { createTRPCReact } from '@trpc/react-query';
+export const trpc = createTRPCReact();
+export function C() {
+    const q = trpc.user.getUser.useQuery({ id: 1 });
+    const m = trpc.post.create.useMutation();
+    return q;
 }
+"#;
+        let unit = parse_typescript_file("src/client.ts", src).expect("parses");
+        let calls = http_calls(&unit);
+        assert!(
+            calls.iter().any(|(m, u)| m == "QUERY" && u == "getUser"),
+            "trpc query consumer missing: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|(m, u)| m == "MUTATION" && u == "create"),
+            "trpc mutation consumer missing: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn react_query_usequery_is_not_a_trpc_consumer() {
+        let src = r#"import { useQuery } from '@tanstack/react-query';
+export function C() { return useQuery({ queryKey: ['x'], queryFn: () => 1 }); }
+"#;
+        let unit = parse_typescript_file("src/rq.ts", src).expect("parses");
+        assert!(
+            !http_calls(&unit).iter().any(|(m, _)| m == "QUERY"),
+            "bare react-query useQuery must not be a trpc consumer"
+        );
+    }
+
+    #[test]
+    fn graphql_consumer_gql_templates() {
+        let src = r#"import { gql } from '@apollo/client';
+export const GET_ME = gql`query GetMe { me { id name } }`;
+export const CREATE = gql`mutation { createPost(title: "x") { id } }`;
+"#;
+        let unit = parse_typescript_file("src/queries.ts", src).expect("parses");
+        let calls = http_calls(&unit);
+        assert!(
+            calls.iter().any(|(m, u)| m == "QUERY" && u == "me"),
+            "graphql query consumer missing: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|(m, u)| m == "MUTATION" && u == "createPost"),
+            "graphql mutation consumer missing: {calls:?}"
+        );
+    }
+}
+
 
 

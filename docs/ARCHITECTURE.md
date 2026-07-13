@@ -106,6 +106,17 @@ method — so they flow through `route_map`/`trace_flow`/`impact` and cross-repo
 route matching, like HTTP routes. The tRPC procedure name comes from the enclosing
 router property key (`getUser: t.procedure.query(…)` → `getUser`).
 
+The **consumer** side is detected too and resolves to `ExternalEndpoint`s (via an
+`HttpCall` site) so the cross-repo matcher links consumer→producer by
+`(method, name)` — the `QUERY`/`MUTATION`/`SUBSCRIPTION` method namespace never
+collides with HTTP `GET`/`POST`:
+- **tRPC** — `trpc.<…>.<proc>.useQuery|query|useMutation|mutate|useSubscription|
+  subscribe(...)`, import-gated on a tRPC *client* package and requiring a
+  member-chain receiver (so React-Query's bare `useQuery(...)` and the producer
+  `t.procedure.query(fn)` are excluded); name = the receiver's last property.
+- **GraphQL** — a `gql`/`graphql` tagged template; the operation type + first root
+  field are read from the document (`gql\`query GetMe { me }\`` → `QUERY me`).
+
 Deliberately tight recognizers — false positives poison cross-repo matching:
 
 - **TypeScript**: bare `fetch|$fetch|ofetch(url[, {method}])` (default GET;
