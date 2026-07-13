@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (13, "9737a2e7343016f1");
+const GOLDEN: (u32, &str) = (14, "50345091c1130000");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -154,6 +154,14 @@ app.route({ method: ['GET', 'POST'], url: '/api/items' });
         "src/app/api/orders/[id]/route.ts",
         r#"export async function GET() { return Response.json({ ok: true }); }
 export async function POST() { return Response.json({ ok: true }); }
+"#,
+    ),
+    (
+        // Messaging: kafkajs publish/subscribe → EventPublish/EventListen contracts.
+        "src/kafka.ts",
+        r#"import { Kafka } from 'kafkajs';
+export async function pub(producer) { await producer.send({ topic: 'orders', messages: [] }); }
+export async function sub(consumer) { await consumer.subscribe({ topic: 'orders' }); }
 "#,
     ),
     (

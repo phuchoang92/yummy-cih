@@ -28,8 +28,13 @@ pub enum ContractMatchKind {
 impl From<crate::MessagingFramework> for ContractMatchKind {
     fn from(fw: crate::MessagingFramework) -> Self {
         match fw {
-            crate::MessagingFramework::Kafka => ContractMatchKind::KafkaTopic,
             crate::MessagingFramework::Spring => ContractMatchKind::SpringEvent,
+            // Kafka + the JS topic/queue/event frameworks all match by topic name.
+            crate::MessagingFramework::Kafka
+            | crate::MessagingFramework::SocketIo
+            | crate::MessagingFramework::Bull
+            | crate::MessagingFramework::Rabbitmq
+            | crate::MessagingFramework::NestMicroservice => ContractMatchKind::KafkaTopic,
         }
     }
 }

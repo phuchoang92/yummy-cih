@@ -160,6 +160,23 @@ the table must still resolve to a model/prisma/knex receiver, so plain
   as `TypeRef` reference sites from the class, which the resolver turns into
   `Uses` edges — the JS analog of Spring constructor injection.
 
+### JS/TS messaging / realtime
+
+Emits `EventPublish`/`EventListen` `ContractSite`s (topic + `messaging_framework`);
+the resolver folds these into `KafkaTopic` nodes + `PublishesEvent`/`ListensTo`
+edges — the same path Java Kafka/Spring events use, so single- and cross-service
+event flows are visible. All detectors are **import-gated** (the method names
+`emit`/`on`/`send`/`add` are too common otherwise):
+
+- **socket.io** — `socket.emit('e')` → publish, `socket.on('e')` → listen.
+- **kafkajs** — `producer.send({ topic })` → publish, `consumer.subscribe({ topic })` → listen.
+- **Bull/BullMQ** — a pre-pass records `new Queue('n')` vars; `queue.add(…)` → publish to `n`.
+- **amqplib** — `channel.sendToQueue/publish` → publish, `channel.consume` → listen.
+- **NestJS** — `@MessagePattern`/`@EventPattern`/`@SubscribeMessage` method decorators → listen.
+
+For cross-repo grouping these JS frameworks map to the topic-keyed
+`ContractMatchKind::KafkaTopic` bucket (matched by topic string).
+
 ## Dynamic-URL folding (`ContractSite.url_parts`, `cih-resolve/src/contracts.rs`)
 
 Outbound URLs/topics that are not plain literals are captured as structured

@@ -178,6 +178,15 @@ pub enum UrlPart {
 pub enum MessagingFramework {
     Kafka,
     Spring,
+    /// socket.io realtime events (`socket.emit` / `socket.on`).
+    SocketIo,
+    /// Bull / BullMQ job queues (`queue.add` / `new Worker`).
+    Bull,
+    /// RabbitMQ via amqplib (`channel.sendToQueue` / `channel.consume`).
+    Rabbitmq,
+    /// NestJS microservices / WebSocket gateways (`@MessagePattern` / `@EventPattern`
+    /// / `@SubscribeMessage`, `client.emit`).
+    NestMicroservice,
 }
 
 /// Type of contract site discovered by the parser.

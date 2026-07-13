@@ -1,7 +1,8 @@
 use cih_core::{
     db_query_inline_id, db_table_id, file_id, function_id, type_id, ContractKind, ContractSite,
-    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport, RefKind,
-    ReferenceSite, RouteSource, HttpWrapperDef, StringConstant, SymbolDef, UrlPart,
+    Edge, EdgeKind, MessagingFramework, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range,
+    RawImport, RefKind, ReferenceSite, RouteSource, HttpWrapperDef, StringConstant, SymbolDef,
+    UrlPart,
 };
 use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_typescript};
@@ -705,6 +706,156 @@ fn try_emit_db_query(
     }
 }
 
+// ── Messaging / realtime (P5) ─────────────────────────────────────────────────
+
+/// True if `value` is `new Queue('name')` (Bull/BullMQ).
+fn is_new_queue(value: TsNode<'_>, src: &str) -> bool {
+    value.kind() == "new_expression"
+        && value
+            .child_by_field_name("constructor")
+            .map(|c| text(c, src))
+            .as_deref()
+            == Some("Queue")
+}
+
+/// Pre-pass: record `const q = new Queue('emails')` vars → queue name.
+fn collect_queue_instances(root: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "variable_declarator" {
+            if let (Some(name), Some(value)) = (
+                n.child_by_field_name("name"),
+                n.child_by_field_name("value"),
+            ) {
+                if name.kind() == "identifier" && is_new_queue(value, src) {
+                    if let Some(q) = first_string_arg_in_call(value, src) {
+                        builder.queue_instances.insert(text(name, src), q);
+                    }
+                }
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.named_children(&mut c) {
+            stack.push(ch);
+        }
+    }
+}
+
+/// Topic literal from a kafkajs `{ topic: 't', … }` first-arg config.
+fn kafka_topic_arg(node: TsNode<'_>, src: &str) -> Option<String> {
+    let arg0 = ts_positional_argument(node, 0)?;
+    if arg0.kind() != "object" {
+        return None;
+    }
+    literal_ts_string(object_pair_value(arg0, "topic", src)?, src)
+}
+
+/// Detect a messaging call and emit an `EventPublish`/`EventListen` contract:
+/// socket.io, kafkajs, Bull/BullMQ, amqplib (all import-gated to bound false
+/// positives on the generic method names `emit`/`on`/`send`/`add`).
+fn try_emit_messaging(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    enclosing_fn: Option<&NodeId>,
+) {
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "member_expression" {
+        return;
+    }
+    let (Some(obj), Some(prop_node)) = (
+        func.child_by_field_name("object"),
+        func.child_by_field_name("property"),
+    ) else {
+        return;
+    };
+    let obj_text = text(obj, src);
+    let prop = text(prop_node, src);
+    let in_callable = || {
+        enclosing_fn
+            .cloned()
+            .unwrap_or_else(|| file_id(&builder.rel))
+    };
+
+    // socket.io realtime events.
+    if builder.imports_pkg("socket.io") || builder.imports_pkg("socket.io-client") {
+        let publish = match prop.as_str() {
+            "emit" => Some(true),
+            "on" => Some(false),
+            _ => None,
+        };
+        if let Some(is_pub) = publish {
+            if let Some(topic) = first_string_arg_in_call(node, src) {
+                builder.emit_event_contract(
+                    node,
+                    topic,
+                    MessagingFramework::SocketIo,
+                    is_pub,
+                    in_callable(),
+                );
+                return;
+            }
+        }
+    }
+
+    // kafkajs producer/consumer.
+    if builder.imports_pkg("kafkajs") {
+        let publish = match prop.as_str() {
+            "send" => Some(true),
+            "subscribe" => Some(false),
+            _ => None,
+        };
+        if let Some(is_pub) = publish {
+            if let Some(topic) = kafka_topic_arg(node, src) {
+                builder.emit_event_contract(
+                    node,
+                    topic,
+                    MessagingFramework::Kafka,
+                    is_pub,
+                    in_callable(),
+                );
+                return;
+            }
+        }
+    }
+
+    // Bull/BullMQ: `queue.add(...)` publishes to the tracked queue name.
+    if (builder.imports_pkg("bull") || builder.imports_pkg("bullmq")) && prop == "add" {
+        if let Some(topic) = builder.queue_instances.get(&obj_text).cloned() {
+            builder.emit_event_contract(
+                node,
+                topic,
+                MessagingFramework::Bull,
+                true,
+                in_callable(),
+            );
+            return;
+        }
+    }
+
+    // amqplib (RabbitMQ) channel ops.
+    if builder.imports_pkg("amqplib") {
+        let publish = match prop.as_str() {
+            "sendToQueue" | "publish" => Some(true),
+            "consume" => Some(false),
+            _ => None,
+        };
+        if let Some(is_pub) = publish {
+            if let Some(topic) = first_string_arg_in_call(node, src) {
+                builder.emit_event_contract(
+                    node,
+                    topic,
+                    MessagingFramework::Rabbitmq,
+                    is_pub,
+                    in_callable(),
+                );
+            }
+        }
+    }
+}
+
 // ── Component stereotypes + DI (P4) ───────────────────────────────────────────
 
 /// True if the class extends `React.Component` / `Component` / `PureComponent`.
@@ -791,6 +942,9 @@ struct Builder {
     db_models: std::collections::HashMap<String, String>,
     /// DbTable ids already emitted this file (dedup — one table, many queries).
     seen_db_tables: std::collections::HashSet<String>,
+    /// Bull/BullMQ queue vars → queue name (`const q = new Queue('emails')`) so
+    /// `q.add(...)` publishes to the right destination (P5).
+    queue_instances: std::collections::HashMap<String, String>,
 }
 
 impl Builder {
@@ -1099,6 +1253,34 @@ impl Builder {
             confidence: 1.0,
             reason: format!("{engine}-orm"),
             props: None,
+        });
+    }
+
+    /// Emit an `EventPublish`/`EventListen` contract site. The resolver turns
+    /// these (topic-keyed) into `KafkaTopic` nodes + `PublishesEvent`/`ListensTo`
+    /// edges — the same path Java Kafka/Spring events use.
+    fn emit_event_contract(
+        &mut self,
+        node: TsNode<'_>,
+        topic: String,
+        framework: MessagingFramework,
+        is_publish: bool,
+        in_callable: NodeId,
+    ) {
+        self.contract_sites.push(ContractSite {
+            kind: if is_publish {
+                ContractKind::EventPublish
+            } else {
+                ContractKind::EventListen
+            },
+            url_template: None,
+            topic: Some(topic),
+            http_method: None,
+            messaging_framework: Some(framework),
+            url_parts: None,
+            via_wrapper: None,
+            in_callable,
+            range: range_of(node),
         });
     }
 
@@ -2181,6 +2363,20 @@ fn walk(
                         range_of(node),
                     );
                 }
+                // NestJS microservice / WebSocket message handlers → EventListen.
+                if matches!(
+                    dname.as_str(),
+                    "MessagePattern" | "EventPattern" | "SubscribeMessage"
+                ) {
+                    let topic = dpath.clone().unwrap_or_else(|| name.clone());
+                    builder.emit_event_contract(
+                        node,
+                        topic,
+                        MessagingFramework::NestMicroservice,
+                        false,
+                        fn_id.clone(),
+                    );
+                }
             }
 
             // Walk body for call references
@@ -2221,6 +2417,20 @@ fn walk(
                         range_of(node),
                     );
                 }
+                // NestJS microservice / WebSocket message handlers → EventListen.
+                if matches!(
+                    dname.as_str(),
+                    "MessagePattern" | "EventPattern" | "SubscribeMessage"
+                ) {
+                    let topic = dpath.clone().unwrap_or_else(|| name.clone());
+                    builder.emit_event_contract(
+                        node,
+                        topic,
+                        MessagingFramework::NestMicroservice,
+                        false,
+                        fn_id.clone(),
+                    );
+                }
             }
 
             // Walk body
@@ -2241,6 +2451,7 @@ fn walk(
             try_emit_http_contract(node, src, builder, enclosing_fn);
             try_emit_trpc_contract(node, src, builder, enclosing_fn);
             try_emit_db_query(node, src, builder, enclosing_fn);
+            try_emit_messaging(node, src, builder, enclosing_fn);
             builder.emit_call_reference(node, src);
             // recurse into arguments
             let mut cursor = node.walk();
@@ -2312,6 +2523,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
     // their calls are visited during the walk.
     collect_axios_instances(tree.root_node(), src, &mut builder);
     collect_db_models(tree.root_node(), src, &mut builder);
+    collect_queue_instances(tree.root_node(), src, &mut builder);
 
     walk(tree.root_node(), src, &mut builder, None, None, None);
 
@@ -2793,6 +3005,106 @@ class Widget extends React.Component { render() { return null; } }
             stereotype_of(&unit, "Widget").as_deref(),
             Some("react_component")
         );
+    }
+
+    // ── P5: messaging / realtime ─────────────────────────────────────────────
+
+    fn event_contracts(
+        unit: &cih_core::ParsedUnit,
+    ) -> Vec<(cih_core::ContractKind, String)> {
+        unit.parsed_file
+            .contract_sites
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    cih_core::ContractKind::EventPublish | cih_core::ContractKind::EventListen
+                )
+            })
+            .map(|c| (c.kind.clone(), c.topic.clone().unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn socketio_emit_and_on() {
+        let src = r#"import { Server } from 'socket.io';
+export function wire(io) {
+    io.on('connection', (socket) => {
+        socket.emit('welcome', {});
+        socket.on('message', (m) => {});
+    });
+}
+"#;
+        let unit = parse_typescript_file("src/gateway.ts", src).expect("parses");
+        let evs = event_contracts(&unit);
+        assert!(
+            evs.iter()
+                .any(|(k, t)| *k == cih_core::ContractKind::EventPublish && t == "welcome"),
+            "socket emit missing: {evs:?}"
+        );
+        assert!(
+            evs.iter()
+                .any(|(k, t)| *k == cih_core::ContractKind::EventListen && t == "message"),
+            "socket on missing: {evs:?}"
+        );
+    }
+
+    #[test]
+    fn kafkajs_producer_consumer() {
+        let src = r#"import { Kafka } from 'kafkajs';
+export async function pub(producer) { await producer.send({ topic: 'orders', messages: [] }); }
+export async function sub(consumer) { await consumer.subscribe({ topic: 'orders' }); }
+"#;
+        let unit = parse_typescript_file("src/kafka.ts", src).expect("parses");
+        let evs = event_contracts(&unit);
+        assert!(evs
+            .iter()
+            .any(|(k, t)| *k == cih_core::ContractKind::EventPublish && t == "orders"));
+        assert!(evs
+            .iter()
+            .any(|(k, t)| *k == cih_core::ContractKind::EventListen && t == "orders"));
+    }
+
+    #[test]
+    fn bull_queue_add_publishes() {
+        let src = r#"import { Queue } from 'bullmq';
+const emailQueue = new Queue('emails');
+export async function enqueue() { await emailQueue.add('send', {}); }
+"#;
+        let unit = parse_typescript_file("src/queue.ts", src).expect("parses");
+        assert!(
+            event_contracts(&unit)
+                .iter()
+                .any(|(k, t)| *k == cih_core::ContractKind::EventPublish && t == "emails"),
+            "bull queue.add missing: {:?}",
+            event_contracts(&unit)
+        );
+    }
+
+    #[test]
+    fn nest_message_pattern_listen() {
+        let src = r#"import { MessagePattern } from '@nestjs/microservices';
+class Handler {
+    @MessagePattern('order.created')
+    handle() {}
+}
+"#;
+        let unit = parse_typescript_file("src/handler.ts", src).expect("parses");
+        assert!(
+            event_contracts(&unit)
+                .iter()
+                .any(|(k, t)| *k == cih_core::ContractKind::EventListen && t == "order.created"),
+            "nest @MessagePattern missing: {:?}",
+            event_contracts(&unit)
+        );
+    }
+
+    #[test]
+    fn socket_emit_not_detected_without_import() {
+        // `.emit` with no socket.io import must not be a messaging contract.
+        let src = r#"export function f(ee) { ee.emit('data', {}); }"#;
+        let unit = parse_typescript_file("src/x.ts", src).expect("parses");
+        assert!(event_contracts(&unit).is_empty());
     }
 
     #[test]
