@@ -391,49 +391,80 @@ pub fn analyze_from_scope_with_options(
         crate::ui::fmt_count(resolve_output.skipped as usize)
     ));
 
-    if !jars.is_empty() {
+    // JAR API extraction is JVM-only: JARs come solely from Maven/Gradle repo-maps.
+    // A non-JVM repo (JS/TS/Python) has no JARs, so skip the phase and its logs
+    // entirely rather than running/logging a no-op.
+    let (jar_nodes, jar_edges, jar_node_count, jar_failed) = if jars.is_empty() {
+        (Vec::new(), Vec::new(), 0, 0)
+    } else {
         ui.spin(format!("JAR API ({} JARs)", jars.len()));
-    }
-    tracing::info!(
-        jars = jars.len(),
-        unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
-        "starting JAR API extraction"
-    );
-    let (jar_nodes, jar_edges, jar_failed) =
-        extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
-    let jar_node_count = jar_nodes.len();
-    tracing::info!(
-        jar_nodes = jar_node_count,
-        jar_edges = jar_edges.len(),
-        jar_failed,
-        "JAR API extraction complete"
-    );
-    if !jars.is_empty() {
+        tracing::info!(
+            jars = jars.len(),
+            unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
+            "starting JAR API extraction"
+        );
+        let (jar_nodes, jar_edges, jar_failed) =
+            extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
+        let jar_node_count = jar_nodes.len();
+        tracing::info!(
+            jar_nodes = jar_node_count,
+            jar_edges = jar_edges.len(),
+            jar_failed,
+            "JAR API extraction complete"
+        );
         ui.finish_with(format!("{} nodes", crate::ui::fmt_count(jar_node_count)));
-    }
+        (jar_nodes, jar_edges, jar_node_count, jar_failed)
+    };
 
     ui.spin("Writing artifacts");
 
-    let (mut db_nodes, mut db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
-    let (jpa_nodes, jpa_edges) = cih_resolve::emit_jpa_tables(&parse_output.nodes);
-    db_nodes.extend(jpa_nodes);
-    db_edges.extend(jpa_edges);
-    tracing::info!(
-        db_query_nodes = db_nodes
-            .iter()
-            .filter(|n| n.kind == cih_core::NodeKind::DbQuery)
-            .count(),
-        db_table_nodes = db_nodes
-            .iter()
-            .filter(|n| n.kind == cih_core::NodeKind::DbTable)
-            .count(),
-        "DB access emit complete"
-    );
+    // DB access (SQL sites/constants) + JPA (@Entity tables) — only some languages
+    // produce these (Java; TS/JS/Python emit none). Skip the phase + log when the
+    // parse output contains nothing to emit, so it's silent for non-DB repos.
+    let has_sql = parse_output
+        .parsed_files
+        .iter()
+        .any(|f| !f.sql_execution_sites.is_empty() || !f.sql_constants.is_empty());
+    // Mirror emit_jpa_tables' gate exactly (stereotype == "entity" on a
+    // Class/Interface/Record) so has_jpa is a true superset — never skips a repo
+    // that would produce JPA table nodes.
+    let has_jpa = parse_output.nodes.iter().any(|n| {
+        matches!(
+            n.kind,
+            cih_core::NodeKind::Class | cih_core::NodeKind::Interface | cih_core::NodeKind::Record
+        ) && n
+            .props
+            .as_ref()
+            .and_then(|p| p.get("stereotype"))
+            .and_then(|v| v.as_str())
+            == Some("entity")
+    });
+    let (db_nodes, db_edges) = if has_sql || has_jpa {
+        let (mut db_nodes, mut db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
+        let (jpa_nodes, jpa_edges) = cih_resolve::emit_jpa_tables(&parse_output.nodes);
+        db_nodes.extend(jpa_nodes);
+        db_edges.extend(jpa_edges);
+        tracing::info!(
+            db_query_nodes = db_nodes
+                .iter()
+                .filter(|n| n.kind == cih_core::NodeKind::DbQuery)
+                .count(),
+            db_table_nodes = db_nodes
+                .iter()
+                .filter(|n| n.kind == cih_core::NodeKind::DbTable)
+                .count(),
+            "DB access emit complete"
+        );
+        (db_nodes, db_edges)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let has_java = scope_file.files.iter().any(|f| f.ends_with(".java"));
     let (xml_nodes, xml_edges) = if cache.skip_xml_integration || !has_java {
+        // Debug-level: a non-Java analyze shouldn't advertise skipped Java phases.
         if !has_java {
-            tracing::info!("Skipping XML integration + DI extraction (no Java files in scope)");
+            tracing::debug!("Skipping XML integration + DI extraction (no Java files in scope)");
         } else {
             tracing::info!("Skipping XML integration + DI extraction (--skip-xml-integration)");
         }
