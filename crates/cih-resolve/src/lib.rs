@@ -28,6 +28,7 @@ pub(crate) mod inheritance;
 pub(crate) mod lang;
 pub(crate) mod similarity;
 
+pub mod augment;
 mod contracts;
 pub mod db_access;
 pub mod di_xml;
@@ -35,6 +36,7 @@ pub mod integration_xml;
 pub mod patterns;
 pub(crate) mod reports;
 mod types;
+pub use augment::{language_augmentors, AugmentCtx, AugmentOutput, GraphAugmentor};
 pub use complexity::propagate_loop_depths;
 pub use constant_propagation::build_java_constant_resolver;
 pub use contracts::resolve_contract_edges;

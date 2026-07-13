@@ -14,6 +14,7 @@ use cache::{parse_scope, ParseScopeOutcome};
 use extract::{build_scope_request, load_jars_from_repo_map};
 use merge::combined_edges;
 
+mod augmentors;
 mod cache;
 mod extract;
 mod merge;
@@ -418,94 +419,51 @@ pub fn analyze_from_scope_with_options(
 
     ui.spin("Writing artifacts");
 
-    // DB access (SQL sites/constants) + JPA (@Entity tables) — only some languages
-    // produce these (Java; TS/JS/Python emit none). Skip the phase + log when the
-    // parse output contains nothing to emit, so it's silent for non-DB repos.
-    let has_sql = parse_output
-        .parsed_files
-        .iter()
-        .any(|f| !f.sql_execution_sites.is_empty() || !f.sql_constants.is_empty());
-    // Mirror emit_jpa_tables' gate exactly (stereotype == "entity" on a
-    // Class/Interface/Record) so has_jpa is a true superset — never skips a repo
-    // that would produce JPA table nodes.
-    let has_jpa = parse_output.nodes.iter().any(|n| {
-        matches!(
-            n.kind,
-            cih_core::NodeKind::Class | cih_core::NodeKind::Interface | cih_core::NodeKind::Record
-        ) && n
-            .props
-            .as_ref()
-            .and_then(|p| p.get("stereotype"))
-            .and_then(|v| v.as_str())
-            == Some("entity")
-    });
-    let (db_nodes, db_edges) = if has_sql || has_jpa {
-        let (mut db_nodes, mut db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
-        let (jpa_nodes, jpa_edges) = cih_resolve::emit_jpa_tables(&parse_output.nodes);
-        db_nodes.extend(jpa_nodes);
-        db_edges.extend(jpa_edges);
-        tracing::info!(
-            db_query_nodes = db_nodes
-                .iter()
-                .filter(|n| n.kind == cih_core::NodeKind::DbQuery)
-                .count(),
-            db_table_nodes = db_nodes
-                .iter()
-                .filter(|n| n.kind == cih_core::NodeKind::DbTable)
-                .count(),
-            "DB access emit complete"
-        );
-        (db_nodes, db_edges)
-    } else {
-        (Vec::new(), Vec::new())
+    // Language/framework graph augmentation (DB access + JPA, integration XML, DI)
+    // runs behind a language-agnostic augmentor registry: the core iterates the set
+    // generically and each augmentor self-gates via `applies`, so a non-JVM scope
+    // skips (and doesn't log) the Java/Spring phases automatically — the core never
+    // names a language. `order()` reproduces the historical concat order
+    // (db → integration-xml → di), which `content_version` hashes. The JAR phase
+    // above stays inline because it owns summary metadata (jar_node_count /
+    // jar_failed); it is already gated on JVM artifacts, not a language name.
+    let languages_in_scope = cih_lang::language_ids_for_paths(&scope_file.files);
+    let ctx = cih_resolve::AugmentCtx {
+        repo_root: Some(&repo_root),
+        parsed: &parse_output.parsed_files,
+        nodes: &parse_output.nodes,
+        unresolved_external_fqcns: &resolve_output.unresolved_external_fqcns,
+        languages_in_scope: &languages_in_scope,
+        skip_xml_integration: cache.skip_xml_integration,
+        resolvers: &resolvers,
     };
-
-    let has_java = scope_file.files.iter().any(|f| f.ends_with(".java"));
-    let (xml_nodes, xml_edges) = if cache.skip_xml_integration || !has_java {
-        // Debug-level: a non-Java analyze shouldn't advertise skipped Java phases.
-        if !has_java {
-            tracing::debug!("Skipping XML integration + DI extraction (no Java files in scope)");
-        } else {
-            tracing::info!("Skipping XML integration + DI extraction (--skip-xml-integration)");
+    let mut augs = cih_resolve::language_augmentors();
+    augs.push(Box::new(augmentors::IntegrationXmlAugmentor));
+    augs.sort_by_key(|a| a.order());
+    let mut aug_nodes: Vec<cih_core::Node> = Vec::new();
+    let mut aug_edges: Vec<cih_core::Edge> = Vec::new();
+    for aug in &augs {
+        if aug.applies(&ctx) {
+            let out = aug.augment(&ctx);
+            tracing::info!(
+                phase = aug.id(),
+                nodes = out.nodes.len(),
+                edges = out.edges.len(),
+                "graph augmentation phase complete"
+            );
+            aug_nodes.extend(out.nodes);
+            aug_edges.extend(out.edges);
         }
-        (Vec::new(), Vec::new())
-    } else {
-        let (mut xml_nodes, mut xml_edges) = extract_integration_xml_in_repo(&repo_root);
-        tracing::info!(
-            integration_route_nodes = xml_nodes
-                .iter()
-                .filter(|n| n.kind == cih_core::NodeKind::IntegrationRoute)
-                .count(),
-            message_destination_nodes = xml_nodes
-                .iter()
-                .filter(|n| n.kind == cih_core::NodeKind::MessageDestination)
-                .count(),
-            integration_edges = xml_edges.len(),
-            "integration XML extraction complete"
-        );
-
-        let (di_nodes, di_edges) =
-            resolvers.extra_edges(Some(&repo_root), &parse_output.parsed_files);
-        tracing::info!(
-            di_bean_nodes = di_nodes.len(),
-            di_calls_edges = di_edges.len(),
-            "DI XML extraction complete"
-        );
-        xml_nodes.extend(di_nodes);
-        xml_edges.extend(di_edges);
-        (xml_nodes, xml_edges)
-    };
+    }
 
     let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
     edges.extend(jar_edges);
-    edges.extend(db_edges);
-    edges.extend(xml_edges);
+    edges.extend(aug_edges);
 
     let mut all_nodes = parse_output.nodes;
     all_nodes.extend(resolve_output.nodes);
     all_nodes.extend(jar_nodes);
-    all_nodes.extend(db_nodes);
-    all_nodes.extend(xml_nodes);
+    all_nodes.extend(aug_nodes);
 
     // Language-specific post-processing over the assembled graph (e.g. the Java resolver
     // rewrites HTTP route paths from framework config). The base-path override is resolved
