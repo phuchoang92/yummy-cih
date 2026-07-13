@@ -35,8 +35,11 @@ impl LanguageProvider for TypescriptProvider {
         "typescript"
     }
 
+    /// TypeScript **and** JavaScript. JS is parsed with the TypeScript grammar
+    /// (a syntactic superset), so `.js`/`.mjs`/`.cjs` parse cleanly and `.jsx`
+    /// gets the same error-tolerant JSX handling as `.tsx`.
     fn extensions(&self) -> &'static [&'static str] {
-        &[".ts", ".tsx"]
+        &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
     }
 
     fn scope_query(&self) -> &Query {
@@ -69,6 +72,14 @@ impl LanguageProvider for TypescriptProvider {
             || src.contains("@Module")
         {
             frameworks.insert("nestjs".into());
+        }
+        // Express (common in JavaScript): `require('express')` / `from 'express'`.
+        if src.contains("require('express')")
+            || src.contains("require(\"express\")")
+            || src.contains("from 'express'")
+            || src.contains("from \"express\"")
+        {
+            frameworks.insert("express".into());
         }
         Ok(SourceScan {
             loc,

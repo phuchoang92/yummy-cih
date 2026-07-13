@@ -38,11 +38,13 @@ fn unquote(raw: &str) -> String {
 }
 
 fn module_path(rel: &str) -> String {
-    let stripped = rel
-        .strip_suffix(".tsx")
-        .or_else(|| rel.strip_suffix(".ts"))
-        .unwrap_or(rel);
-    stripped.to_string()
+    // TypeScript + JavaScript extensions (longest/most-specific first).
+    for ext in [".tsx", ".jsx", ".mjs", ".cjs", ".ts", ".js"] {
+        if let Some(stripped) = rel.strip_suffix(ext) {
+            return stripped.to_string();
+        }
+    }
+    rel.to_string()
 }
 
 fn parameter_count(node: TsNode<'_>) -> u16 {
@@ -1336,4 +1338,55 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
             http_wrappers: builder.http_wrappers,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{module_path, parse_typescript_file};
+
+    #[test]
+    fn parses_javascript_file() {
+        // JS is handled by the TypeScript provider: functions + Express routes
+        // are extracted the same as in .ts files.
+        let src = r#"const express = require('express');
+const app = express();
+async function getStock(id) {
+    const r = await fetch(`http://inventory/api/stock/${id}`);
+    return r.json();
+}
+app.get('/api/orders/:id', async (req, res) => {
+    res.json(await getStock(req.params.id));
+});
+module.exports = app;
+"#;
+        let unit = parse_typescript_file("src/server.js", src).expect("JS parses");
+        let names: Vec<&str> = unit.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(
+            names.contains(&"getStock"),
+            "getStock function node missing: {names:?}"
+        );
+        assert!(
+            unit.nodes.iter().any(|n| {
+                let id = n.id.as_str();
+                id.starts_with("Route:express:GET") && id.contains("orders")
+            }),
+            "express GET /api/orders route node missing: {:?}",
+            unit.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn module_path_strips_js_and_ts_extensions() {
+        for (input, want) in [
+            ("src/a.mjs", "src/a"),
+            ("src/a.cjs", "src/a"),
+            ("src/a.jsx", "src/a"),
+            ("src/a.js", "src/a"),
+            ("src/a.tsx", "src/a"),
+            ("src/a.ts", "src/a"),
+            ("src/a.min.js", "src/a.min"),
+        ] {
+            assert_eq!(module_path(input), want, "module_path({input})");
+        }
+    }
 }

@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (8, "b1851640c32af1e8");
+const GOLDEN: (u32, &str) = (9, "32a35c018e037ea5");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -119,6 +119,25 @@ API_BASE = "/api/v1"
 
 def load(item_id):
     return requests.get(f"{API_BASE}/items/{item_id}").json()
+"#,
+    ),
+    (
+        // JavaScript (parsed by the TypeScript provider): Express route + an
+        // outbound fetch call + CommonJS export.
+        "src/server.js",
+        r#"const express = require('express');
+const app = express();
+
+async function getStock(id) {
+    const r = await fetch(`http://inventory/api/stock/${id}`);
+    return r.json();
+}
+
+app.get('/api/orders/:id', async (req, res) => {
+    res.json(await getStock(req.params.id));
+});
+
+module.exports = app;
 "#,
     ),
     (

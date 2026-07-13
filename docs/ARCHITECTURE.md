@@ -74,6 +74,13 @@ shape-gated:
 
 ## TypeScript / Python outbound HTTP (`typescript/parse.rs`, `python/parse.rs`)
 
+The TypeScript provider also handles **JavaScript** (`.js`, `.jsx`, `.mjs`,
+`.cjs`): JS is a syntactic superset-compatible subset of the TypeScript grammar,
+so `.js`/`.mjs`/`.cjs` parse cleanly and `.jsx` gets the same error-tolerant JSX
+handling as `.tsx` (no TSX grammar switch). Functions, classes, Express routes,
+and outbound `fetch`/HTTP calls are extracted identically to `.ts`. Nodes from
+JS files carry `language = "typescript"` (one provider for the whole family).
+
 Deliberately tight recognizers — false positives poison cross-repo matching:
 
 - **TypeScript**: bare `fetch(url[, {method}])` (default GET; `method` read from
