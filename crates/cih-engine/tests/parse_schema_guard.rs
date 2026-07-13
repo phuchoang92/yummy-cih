@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (15, "95013c63421a8860");
+const GOLDEN: (u32, &str) = (16, "0a69f74ff5078d99");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -81,6 +81,16 @@ export const viaNamespace = (token: string) =>
 export async function load(id: string) {
   const r = await fetch(`${API_BASE_URL}/items/${id}`);
   return r.json();
+}
+"#,
+    ),
+    (
+        // camelCase in-file const in a `${…}` template folds (ConstRef); the `${id}`
+        // param stays Dynamic.
+        "src/services/lower.ts",
+        r#"const apiBase = '/api/v2';
+export async function get(id: string) {
+  return fetch(`${apiBase}/items/${id}`);
 }
 "#,
     ),

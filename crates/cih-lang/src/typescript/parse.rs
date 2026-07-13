@@ -1626,6 +1626,13 @@ fn try_emit_http_contract(
     let Some(func) = node.child_by_field_name("function") else {
         return;
     };
+    // In-file module constant names — a `${ident}` naming one folds cross-file at
+    // resolve time; other identifiers (params/locals) stay Dynamic.
+    let consts: std::collections::HashSet<&str> = builder
+        .string_constants
+        .iter()
+        .map(|c| c.const_name.as_str())
+        .collect();
     let mut via_wrapper = None;
     // Literal baseURL prefix for `axios.create()` instance calls, applied below.
     let mut base_prefix: Option<String> = None;
@@ -1645,7 +1652,7 @@ fn try_emit_http_contract(
                 let Some(arg0) = ts_positional_argument(node, 0) else {
                     return;
                 };
-                if !ts_arg_is_url_ish(arg0, src) {
+                if !ts_arg_is_url_ish(arg0, src, &consts) {
                     return;
                 }
                 via_wrapper = Some(callee);
@@ -1678,7 +1685,7 @@ fn try_emit_http_contract(
                 let Some(arg0) = ts_positional_argument(node, 0) else {
                     return;
                 };
-                if !ts_arg_is_url_ish(arg0, src) {
+                if !ts_arg_is_url_ish(arg0, src, &consts) {
                     return;
                 }
                 via_wrapper = Some(format!("{obj_text}.{}", text(prop, src)));
@@ -1695,7 +1702,7 @@ fn try_emit_http_contract(
         // Wrapper calls ALWAYS carry parts — even plain literals — because the
         // resolve join must prepend the wrapper's base parts.
         let mut parts = Vec::new();
-        fold_ts_url_expr(url_node, src, &mut parts);
+        fold_ts_url_expr(url_node, src, &mut parts, &consts);
         if parts.is_empty() {
             return;
         }
@@ -1709,7 +1716,7 @@ fn try_emit_http_contract(
             normalize_external_url(&full)
         });
         let parts = if template.is_none() {
-            ts_url_parts(url_node, src)
+            ts_url_parts(url_node, src, &consts)
         } else {
             None
         };
@@ -1779,9 +1786,9 @@ fn try_emit_trpc_contract(
 /// URL-ish gate for provisional wrapper calls: a string starting with `/`, a
 /// template whose first fragment starts with `/`, or a concat whose folded
 /// first part is such a Lit. Keeps `t('common.title')` / `helper(id)` out.
-fn ts_arg_is_url_ish(node: TsNode<'_>, src: &str) -> bool {
+fn ts_arg_is_url_ish(node: TsNode<'_>, src: &str, consts: &std::collections::HashSet<&str>) -> bool {
     let mut parts = Vec::new();
-    fold_ts_url_expr(node, src, &mut parts);
+    fold_ts_url_expr(node, src, &mut parts, consts);
     matches!(parts.first(), Some(UrlPart::Lit(lit)) if lit.starts_with('/'))
 }
 
@@ -1839,16 +1846,25 @@ fn literal_ts_string(node: TsNode<'_>, src: &str) -> Option<String> {
 /// module constants and the gated unique-name fallback), any other `${…}` →
 /// `Dynamic`, `+`-concat folds recursively. Unresolved refs degrade to `{*}`
 /// — never a wrong match.
-fn ts_url_parts(node: TsNode<'_>, src: &str) -> Option<Vec<UrlPart>> {
+fn ts_url_parts(
+    node: TsNode<'_>,
+    src: &str,
+    consts: &std::collections::HashSet<&str>,
+) -> Option<Vec<UrlPart>> {
     let mut parts = Vec::new();
-    fold_ts_url_expr(node, src, &mut parts);
+    fold_ts_url_expr(node, src, &mut parts, consts);
     parts
         .iter()
         .any(|part| !matches!(part, UrlPart::Lit(_)))
         .then_some(parts)
 }
 
-fn fold_ts_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
+fn fold_ts_url_expr(
+    node: TsNode<'_>,
+    src: &str,
+    out: &mut Vec<UrlPart>,
+    consts: &std::collections::HashSet<&str>,
+) {
     match node.kind() {
         "string" => out.push(UrlPart::Lit(unquote(&text(node, src)))),
         "template_string" => {
@@ -1858,18 +1874,21 @@ fn fold_ts_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
                     "string_fragment" | "escape_sequence" => out.push(UrlPart::Lit(
                         child.utf8_text(src.as_bytes()).unwrap_or_default().to_string(),
                     )),
-                    // `${API_BASE_URL}` → ConstRef; SCREAMING_SNAKE identifiers
-                    // only — params/locals (`${id}`) and property chains
-                    // (`${cfg.base}`) stay Dynamic so they can never feed the
-                    // cross-file unique-name fallback.
+                    // `${IDENT}` → ConstRef when IDENT is a SCREAMING_SNAKE name
+                    // (imported/external constants) OR a known in-file module
+                    // constant (`${apiBase}`). Params/locals (`${id}`, `${userId}`)
+                    // and property chains (`${cfg.base}`) stay Dynamic so they
+                    // never feed the cross-file unique-name fallback.
                     "template_substitution" => match child.named_child(0) {
-                        Some(inner)
-                            if inner.kind() == "identifier"
-                                && crate::contracts_common::is_screaming_snake(&text(
-                                    inner, src,
-                                )) =>
-                        {
-                            out.push(UrlPart::ConstRef(text(inner, src)))
+                        Some(inner) if inner.kind() == "identifier" => {
+                            let name = text(inner, src);
+                            if crate::contracts_common::is_screaming_snake(&name)
+                                || consts.contains(name.as_str())
+                            {
+                                out.push(UrlPart::ConstRef(name));
+                            } else {
+                                out.push(UrlPart::Dynamic);
+                            }
                         }
                         _ => out.push(UrlPart::Dynamic),
                     },
@@ -1884,16 +1903,16 @@ fn fold_ts_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {
                 return;
             }
             match node.child_by_field_name("left") {
-                Some(left) => fold_ts_url_expr(left, src, out),
+                Some(left) => fold_ts_url_expr(left, src, out, consts),
                 None => out.push(UrlPart::Dynamic),
             }
             match node.child_by_field_name("right") {
-                Some(right) => fold_ts_url_expr(right, src, out),
+                Some(right) => fold_ts_url_expr(right, src, out, consts),
                 None => out.push(UrlPart::Dynamic),
             }
         }
         "parenthesized_expression" => match node.named_child(0) {
-            Some(inner) => fold_ts_url_expr(inner, src, out),
+            Some(inner) => fold_ts_url_expr(inner, src, out, consts),
             None => out.push(UrlPart::Dynamic),
         },
         "identifier" | "member_expression" => out.push(UrlPart::ConstRef(text(node, src))),
@@ -2831,6 +2850,36 @@ class UserService {
             calls.iter().any(|(m, u)| m == "GET" && u == "/api/users")
                 && calls.iter().any(|(m, u)| m == "POST" && u == "/api/users"),
             "angular HttpClient calls missing: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn in_file_const_template_folds_param_stays_dynamic() {
+        // `${apiBase}` (a same-file module const) → ConstRef (folds at resolve);
+        // `${userId}` (a param) → Dynamic → stays `{*}`.
+        let src = r#"const apiBase = '/api/v2';
+export async function a() { return fetch(`${apiBase}/users`); }
+export async function b(userId) { return fetch(`/api/users/${userId}`); }
+"#;
+        let unit = parse_typescript_file("src/api.ts", src).expect("parses");
+        let all_parts: Vec<&cih_core::UrlPart> = unit
+            .parsed_file
+            .contract_sites
+            .iter()
+            .filter_map(|c| c.url_parts.as_ref())
+            .flatten()
+            .collect();
+        assert!(
+            all_parts
+                .iter()
+                .any(|p| matches!(p, cih_core::UrlPart::ConstRef(n) if n == "apiBase")),
+            "in-file const apiBase should be a ConstRef: {all_parts:?}"
+        );
+        assert!(
+            !all_parts
+                .iter()
+                .any(|p| matches!(p, cih_core::UrlPart::ConstRef(n) if n == "userId")),
+            "param userId must stay Dynamic, not a ConstRef: {all_parts:?}"
         );
     }
 

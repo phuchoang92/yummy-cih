@@ -116,9 +116,14 @@ Deliberately tight recognizers — false positives poison cross-repo matching:
   `requests.request("POST", url)`. Session/client instances (`session.get`)
   are out of scope v1.
 - **URLs reuse the dynamic-parts model** (below): template-string / f-string
-  interpolations become `Dynamic` parts and fold to `{*}`; constant references
-  currently never resolve for TS/Py (no constant index) and also degrade to
-  `{*}`.
+  interpolations become `ConstRef` when they name a resolvable constant and
+  `Dynamic` (→ `{*}`) otherwise. A `${IDENT}` folds cross-file at resolve time
+  when `IDENT` is SCREAMING_SNAKE (imported/external constants) **or** a known
+  in-file module constant (`const apiBase = '/api/v2'; fetch(\`${apiBase}/x\`)` →
+  `/api/v2/x`). Params/locals (`${id}`, `${userId}`) and property chains
+  (`${cfg.base}`) stay `Dynamic` so they can't feed the cross-file unique-name
+  fallback. The constant index is language-agnostic (`JavaConstantResolver`,
+  reused for TS/Python via `allow_unique_fallback`).
 - **`in_callable` fallback**: calls inside tracked functions attribute to the
   function; module-level calls (and TS arrow functions, untracked v1) fall back
   to the **file id**. This degrades the *first leg* of cross-repo tracing
