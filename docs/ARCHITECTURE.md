@@ -179,6 +179,16 @@ event flows are visible. All detectors are **import-gated** (the method names
 For cross-repo grouping these JS frameworks map to the topic-keyed
 `ContractMatchKind::KafkaTopic` bucket (matched by topic string).
 
+**Limitation — dynamic topics.** Only a **literal** topic is captured (the first
+string arg, or the `{ topic }` config value). Topics built at runtime — a channel
+key variable (`io.emit(channelKey)`), a template (`` `chat:${id}` ``), or a
+parameter (`socket.on(addKey)`) — are skipped, since there is no concrete topic to
+key a node/match on. This mostly affects **socket.io** apps, which lean on dynamic
+per-channel rooms; kafkajs/NestJS/Bull typically use literal or config-declared
+topics and are captured well. (Observed on a real Discord clone: only the literal
+`connect`/`disconnect` lifecycle events resolved; the domain events used
+parameter-supplied keys.)
+
 ## Dynamic-URL folding (`ContractSite.url_parts`, `cih-resolve/src/contracts.rs`)
 
 Outbound URLs/topics that are not plain literals are captured as structured
