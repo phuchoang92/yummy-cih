@@ -115,3 +115,40 @@ Corpus re-verification (C2 vs C1 binary, Fineract graph mode): `pages/**` byte-i
 - **FT-1 batch-unification** (was C2+C3): route `generate_wiki`'s emit loops through `render_subject`/`RenderedPage` and hoist the direct fs sidecar writes (`_category_.json`, api dirs, stale-file removal) into the driver, eliminating the second rendering path. Guarded by the existing acceptance test + corpus diff. Non-trivial byte discipline; deferred because P2.5a (standalone `render_page` for P3.8) no longer needs it.
 - **FT-2 nav-overwrite bug** (lib.rs `nav.extend(ep_batch.nav)` REPLACES a feature's nav with only entrypoint entries): real fix changes the manifest, so out of scope for a byte-identical refactor. `render_page` intentionally reproduces the artifact.
 - **FT-3 LLM-mode determinism**: `all_method_desc` and `method_flow_desc` iterate `HashMap`s with last-write-wins collisions → enriched page bytes can vary run-to-run. BTreeMap-ify (behavior change). Corpus verification stays graph-only until fixed.
+
+## P3.8 — live on-demand serving (built on this factoring, 2026-07-13)
+
+The render factoring above (P2.5a) was the prerequisite for **live wiki serving**,
+now shipped on `dev` in five commits:
+
+- **C1** `a59dbb9` — `cih_wiki::OwnedWiki`: owns a repo's graph artifacts and renders
+  a page live via `render_page`. `get_wiki_page` renders on demand (no `.cih/wiki/`
+  files), on-disk fallback. `WikiInput.bodies` → `Arc<HashMap>`. Byte-parity 636/636
+  vs batch on 212ecom-be. **Key gotcha:** `cih-engine wiki` grouping defaults to
+  `package` (not community/graph); the resident loader must mirror the package
+  branch of `loader.rs`.
+- **C5** `899f296` — resident `RenderContext` + `PageIndex` built once (self-referential
+  `ResidentInner` via `ouroboros`; `FeatureOfFn` → `+Send+Sync`). Per-request render
+  **~148ms → <1ms** on Fineract (87k nodes); load ~3.9s once.
+- **C2+C3** `0a0d774` — read-only enrichment splice, **zero server LLM egress**. C2
+  factored the LLM-free class map assembly into `cih-wiki::enrich_maps`
+  (`class_method_chains` + `build_class_maps`), shared by batch + server. C3 loads
+  `.cih/class-enrichment.json` + `.cih/wiki/wiki_meta.json` (feature/flow caches) into
+  the resident `WikiInput`. **Correctness gotcha:** a partial (class-only) splice is a
+  "third state" matching neither graph-only nor full-batch — must splice class+feature+flow
+  together. Verified via `--llm-dry-run` (persists placeholder caches, no API key):
+  hit → 636/636 byte-identical to full `--llm` batch; miss → graph-only 636/636.
+- **llm_full** `d612ebc` — extends the splice to the `LlmFull` tier (`wiki_meta.json`
+  `full_cache` → `CommunityLlmFull`, 1:1). Locked by a hermetic `load_meta_enrichment`
+  test (dry-run can't populate `full_cache`).
+- **C4** `d21ffe1` — `search_wiki` over a live BM25 index built from the resident pages
+  (`OwnedWiki::rendered_manifest_pages` → `LiveWikiIndex`, cached per repo); on-disk
+  fallback retained. Cold ~133ms (renders all pages), warm ~5ms.
+
+**Deviation from the original P3.8 spec:** the async-LLM-enrich-on-miss step was dropped —
+it would re-introduce the LLM egress removed from the server in the agent-removal work.
+Enrichment is strictly read-only from caches a prior `cih-engine wiki --llm` run wrote.
+
+**Follow-ups:** FalkorDB query-backed fetch (no resident graph); TTL eviction of resident
+entries (currently mtime-only, unbounded); `generation.mode` string on the resident input
+is cosmetically `"graph"` regardless of the enrichment tier (manifest-only, not per-page).
