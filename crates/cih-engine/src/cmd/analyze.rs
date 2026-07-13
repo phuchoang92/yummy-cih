@@ -59,7 +59,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
             no_cache: args.no_cache,
             skip_xml_integration: resolved.skip_xml_integration,
             languages: resolved.languages,
-            cxf_base_path: resolved.cxf_base_path,
+            route_base_path: resolved.cxf_base_path,
         },
     )
 }

@@ -290,7 +290,7 @@ mod tests {
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: skip_xml,
-            cxf_base_path: cxf.map(String::from),
+            route_base_path: cxf.map(String::from),
         }
     }
 

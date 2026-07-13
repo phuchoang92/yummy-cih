@@ -37,8 +37,10 @@ pub struct AnalyzeFlags {
     pub skip_xml_integration: bool,
     /// Language filter: only include files for these languages (empty = all).
     pub languages: Vec<String>,
-    /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
-    pub cxf_base_path: Option<String>,
+    /// Explicit HTTP route base path (e.g. `/rest`) prepended to framework routes
+    /// (e.g. CXF `<jaxrs:server>`). Framework-agnostic at the core; the resolver
+    /// that owns the framework interprets it.
+    pub route_base_path: Option<String>,
 }
 
 pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -72,7 +74,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
             use_cache: !flags.no_cache,
             allow_noop: !flags.no_cache,
             skip_xml_integration: flags.skip_xml_integration,
-            cxf_base_path: flags.cxf_base_path.clone(),
+            route_base_path: flags.route_base_path.clone(),
         },
     )?;
 
@@ -143,7 +145,7 @@ pub fn run_resolve(
 
     let jars = load_jars_from_repo_map(&repo);
     // No CLI flags on `resolve`; honor the repo/home cih.toml layers for the base path.
-    let cxf_base_path = {
+    let route_base_path = {
         let layers = crate::settings::Layers::load(&repo);
         layers
             .repo
@@ -160,7 +162,7 @@ pub fn run_resolve(
             use_cache: true,
             allow_noop: false,
             skip_xml_integration: false,
-            cxf_base_path,
+            route_base_path,
         },
     )?;
 
@@ -207,7 +209,7 @@ pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<Em
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
-            cxf_base_path: None,
+            route_base_path: None,
         },
     )
 }
@@ -236,7 +238,7 @@ pub fn analyze_from_scope(
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
-            cxf_base_path: None,
+            route_base_path: None,
         },
     )
 }
@@ -467,7 +469,7 @@ pub fn analyze_from_scope_with_options(
     // rewrites HTTP route paths from framework config). The base-path override is resolved
     // at the dispatch arm (flag > cih.toml > home) and passed through generically.
     let post_opts = cih_resolve::PostProcessOptions {
-        route_base_path: cache.cxf_base_path.clone(),
+        route_base_path: cache.route_base_path.clone(),
     };
     resolvers.post_process(
         Some(&repo_root),
@@ -580,13 +582,14 @@ pub struct AnalyzeCacheOptions {
     /// Skip the integration + DI XML walk (faster on large repos).
     pub skip_xml_integration: bool,
     /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
-    /// Resolved at the dispatch arm (flag > `cih.toml` > `~/.cih/config.toml`); `None`
-    /// falls back to auto-detection.
-    pub cxf_base_path: Option<String>,
+    /// HTTP route base path, resolved at the dispatch arm (flag > `cih.toml` >
+    /// `~/.cih/config.toml`); `None` falls back to auto-detection. Flows into
+    /// `PostProcessOptions.route_base_path` for the framework resolver to apply.
+    pub route_base_path: Option<String>,
 }
 
 /// Fingerprint of the analyze inputs that affect graph output but are **not** source-file
-/// hashes: the resolved `cxf_base_path`, `skip_xml_integration`, and the effective
+/// hashes: the resolved `route_base_path`, `skip_xml_integration`, and the effective
 /// `cih.patterns.toml` rules. The incremental no-op reuse gate compares this against the value
 /// stored from the last run so a config-only change (e.g. a new `--cxf-base-path`) re-runs the
 /// resolve/post-process/emit path instead of silently reusing stale artifacts. Cache-control
@@ -604,8 +607,10 @@ fn analyze_config_fingerprint_with(
 ) -> String {
     let patterns = cih_patterns::load_patterns(repo_root);
     let material = format!(
+        // Key string kept as `cxf_base_path` deliberately: it's the persisted
+        // fingerprint material — renaming it would bust every repo's analyze cache.
         "cxf_base_path={:?}\nskip_xml_integration={}\nparse_cache_schema={}\npatterns=\n{}",
-        cache.cxf_base_path,
+        cache.route_base_path,
         cache.skip_xml_integration,
         parse_schema,
         cih_patterns::to_toml(&patterns),
@@ -800,7 +805,7 @@ mod tests {
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
-            cxf_base_path: None,
+            route_base_path: None,
         };
 
         let v1 = analyze_config_fingerprint_with(&dir, &cache, 1);

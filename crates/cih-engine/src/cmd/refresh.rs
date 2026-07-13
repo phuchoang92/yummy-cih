@@ -113,7 +113,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
                 no_cache: false,
                 skip_xml_integration: false,
                 languages: vec![],
-                cxf_base_path: None,
+                route_base_path: None,
             },
         )?;
         let elapsed = t.elapsed();
