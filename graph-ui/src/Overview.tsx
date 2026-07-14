@@ -1,15 +1,11 @@
-import { Check, ChevronRight, RefreshCw, Search, X } from "lucide-react";
+import { Check, ChevronRight, Maximize, Orbit, RefreshCw, Search, Tag, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 import type { GraphSummary } from "./api";
 import { cameraTarget, GalaxyScene } from "./Scene";
+import { kindColor } from "./colors";
+import { Legend } from "./Legend";
 import type { OverviewData, OverviewNode, SymbolContext } from "./types";
-
-const KIND_COLORS: Record<string, string> = {
-  Community: "#a78bfa", Process: "#f59e0b", Route: "#eab308", IntegrationRoute: "#22d3ee",
-  Class: "#a855f7", Interface: "#c084fc", Method: "#06b6d4", Function: "#06b6d4",
-  File: "#3b82f6", Folder: "#22c55e", DbTable: "#60a5fa", ExternalEndpoint: "#fb7185",
-};
 
 // These kinds are pre-selected in the selector for large graphs.
 const STRUCTURAL_KINDS = new Set([
@@ -56,66 +52,39 @@ function KindSelector({ summary, selected, onChange, onLoad }: {
   };
 
   return (
-    <div style={{
-      position: "fixed", inset: 0, background: "rgba(6,9,15,0.88)",
-      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50,
-    }}>
-      <div style={{
-        background: "#0e2028", border: "1px solid rgba(98,150,158,.2)", borderRadius: "12px",
-        padding: "24px", width: "380px", maxHeight: "85vh",
-        display: "flex", flexDirection: "column", gap: "16px",
-      }}>
+    <div className="kind-selector-backdrop">
+      <div className="kind-selector">
         <div>
-          <h2 style={{ margin: "0 0 4px", fontSize: "15px", color: "#e1ecec" }}>Graph Explorer</h2>
-          <p style={{ margin: 0, color: "#709093", fontSize: "10px" }}>
+          <h2>Graph Explorer</h2>
+          <p>
             {summary.total_nodes.toLocaleString()} nodes · {summary.total_edges.toLocaleString()} edges
-            <span style={{ marginLeft: 8, color: "#425d61" }}>— select kinds to load</span>
+            <span> — select kinds to load</span>
           </p>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+        <div className="kind-selector-group">
           <div className="rail-label">
             <span>Node kinds</span>
             <button onClick={() => onChange(new Set(summary.kinds.map((k) => k.kind)))}>All</button>
             <button onClick={() => onChange(new Set())}>None</button>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: "2px", maxHeight: "380px", overflowY: "auto" }}>
+          <div className="kind-selector-list">
             {summary.kinds.map(({ kind, count }) => {
               const isLarge = count > LARGE_KIND_WARN;
               const isActive = selected.has(kind);
               return (
-                <button
-                  key={kind}
-                  onClick={() => toggle(kind)}
-                  style={{
-                    display: "flex", alignItems: "center", gap: "8px", width: "100%",
-                    border: "1px solid", borderColor: isActive ? "rgba(255,255,255,.1)" : "transparent",
-                    borderRadius: "6px", background: isActive ? "rgba(255,255,255,.05)" : "transparent",
-                    color: isActive ? "#9cb0b2" : "#425d61", padding: "5px 8px",
-                    textAlign: "left", cursor: "pointer", fontSize: "10px", transition: ".12s",
-                  }}
-                >
-                  <i style={{ width: 5, height: 5, borderRadius: "50%", flex: "none", background: KIND_COLORS[kind] ?? "#94a3b8" }} />
-                  <span style={{ flex: 1 }}>{kind}</span>
-                  <span style={{ fontVariantNumeric: "tabular-nums", color: "#425d61" }}>{count.toLocaleString()}</span>
-                  {isLarge && <span style={{ color: "#f59e0b", fontSize: "9px" }}>⚠</span>}
+                <button key={kind} onClick={() => toggle(kind)} className={isActive ? "kind-option is-active" : "kind-option"}>
+                  <i style={{ background: kindColor(kind) }} />
+                  <span>{kind}</span>
+                  <em>{count.toLocaleString()}</em>
+                  {isLarge && <span className="kind-warn">⚠</span>}
                 </button>
               );
             })}
           </div>
         </div>
 
-        <button
-          onClick={onLoad}
-          disabled={selected.size === 0}
-          style={{
-            height: "34px", border: "1px solid rgba(29,162,126,.45)", borderRadius: "7px",
-            background: selected.size === 0 ? "transparent" : "#1da27e",
-            color: selected.size === 0 ? "#425d61" : "#03120e",
-            fontWeight: 700, fontSize: "11px",
-            cursor: selected.size === 0 ? "not-allowed" : "pointer",
-          }}
-        >
+        <button className="kind-selector-load" onClick={onLoad} disabled={selected.size === 0}>
           Load Graph →
         </button>
       </div>
@@ -131,7 +100,7 @@ function Inspector({ context, loading, onClose, onNavigate }: {
   const groups = [{ title: "Calls", items: context.callees }, { title: "Called by", items: context.callers }];
   return <aside className="inspector">
     <div className="inspector-head">
-      <div><span className="kind-dot" style={{ background: KIND_COLORS[context.node.kind] ?? "#94a3b8" }} /><small>{context.node.kind}</small><h2>{context.node.name}</h2></div>
+      <div><span className="kind-dot" style={{ background: kindColor(context.node.kind) }} /><small>{context.node.kind}</small><h2>{context.node.name}</h2></div>
       <button className="icon-button" onClick={onClose} aria-label="Close inspector"><X size={16} /></button>
     </div>
     <p className="node-id">{context.node.qualified_name || context.node.id}</p>
@@ -141,7 +110,7 @@ function Inspector({ context, loading, onClose, onNavigate }: {
     {context.processes.length > 0 && <section className="inspector-section"><h3>Processes</h3>{context.processes.map((process) => <p key={process}>{process}</p>)}</section>}
     {groups.map((group) => group.items.length > 0 && <section className="inspector-section" key={group.title}>
       <h3>{group.title} <span>{group.items.length}</span></h3>
-      <div className="connection-list">{group.items.slice(0, 50).map((item) => <button key={item.id} onClick={() => onNavigate(item.id)}><span className="kind-dot" style={{ background: KIND_COLORS[item.kind] ?? "#94a3b8" }} /><span><b>{item.name}</b><small>{item.kind}</small></span><ChevronRight size={13} /></button>)}</div>
+      <div className="connection-list">{group.items.slice(0, 50).map((item) => <button key={item.id} onClick={() => onNavigate(item.id)}><span className="kind-dot" style={{ background: kindColor(item.kind) }} /><span><b>{item.name}</b><small>{item.kind}</small></span><ChevronRight size={13} /></button>)}</div>
     </section>)}
   </aside>;
 }
@@ -158,8 +127,13 @@ export function Overview({ selectedId, onSelectedId }: { selectedId: string | nu
   const [context, setContext] = useState<SymbolContext | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [autoRotate, setAutoRotate] = useState(false);
+  const [showLabels, setShowLabels] = useState(true);
+  const [resetNonce, setResetNonce] = useState(0);
   const [leftWidth, setLeftWidth] = useState(() => storedWidth("cih-left-width", 276));
   const [rightWidth, setRightWidth] = useState(() => storedWidth("cih-right-width", 310));
+
+  const resetView = () => { setSelected(null); setContext(null); onSelectedId(null); setResetNonce((n) => n + 1); };
 
   const loadOverview = async (kinds?: string[]) => {
     setPhase("loading");
@@ -247,7 +221,7 @@ export function Overview({ selectedId, onSelectedId }: { selectedId: string | nu
     <aside className="filter-rail" style={{ width: leftWidth }}>
       <div className="rail-section rail-heading"><span>Projection</span><button className="icon-button" onClick={handleRefresh} title="Change selection"><RefreshCw size={14} /></button></div>
       <div className="projection-meta"><b>{data.nodes.length.toLocaleString()}</b> of {data.total_nodes.toLocaleString()} nodes<br/><b>{data.edges.length.toLocaleString()}</b> of {data.total_edges.toLocaleString()} edges{data.truncated && <em>bounded view</em>}</div>
-      <div className="rail-section"><div className="rail-label"><span>Node types</span><button onClick={() => setEnabledKinds(new Set(counts.kinds.map(([kind]) => kind)))}>All</button><button onClick={() => setEnabledKinds(new Set())}>None</button></div><div className="filter-chips">{counts.kinds.map(([kind, count]) => <button key={kind} className={enabledKinds.has(kind) ? "is-active" : ""} onClick={() => setEnabledKinds((before) => { const next = new Set(before); next.has(kind) ? next.delete(kind) : next.add(kind); return next; })}><i style={{ background: KIND_COLORS[kind] ?? "#94a3b8" }} />{kind}<span>{count.toLocaleString()}</span></button>)}</div></div>
+      <div className="rail-section"><div className="rail-label"><span>Node types</span><button onClick={() => setEnabledKinds(new Set(counts.kinds.map(([kind]) => kind)))}>All</button><button onClick={() => setEnabledKinds(new Set())}>None</button></div><div className="filter-chips">{counts.kinds.map(([kind, count]) => <button key={kind} className={enabledKinds.has(kind) ? "is-active" : ""} onClick={() => setEnabledKinds((before) => { const next = new Set(before); next.has(kind) ? next.delete(kind) : next.add(kind); return next; })}><i style={{ background: kindColor(kind) }} />{kind}<span>{count.toLocaleString()}</span></button>)}</div></div>
       <div className="rail-section"><div className="rail-label"><span>Relationships</span></div><div className="filter-chips edge-chips">{counts.edges.map(([kind, count]) => <button key={kind} className={enabledEdges.has(kind) ? "is-active" : ""} onClick={() => setEnabledEdges((before) => { const next = new Set(before); next.has(kind) ? next.delete(kind) : next.add(kind); return next; })}>{enabledEdges.has(kind) && <Check size={10} />}{kind.replaceAll("_", " ").toLowerCase()}<span>{count.toLocaleString()}</span></button>)}</div></div>
       <div className="rail-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find node or file…" />{search && <button onClick={() => setSearch("")}><X size={13}/></button>}</div>
       <div className="tree-list">{search ? matches.map((node) => <button key={node.id} onClick={() => void selectNode(node)}><i style={{ background: node.color }} /><span><b>{node.name}</b><small>{node.file || node.kind}</small></span></button>) : counts.clusters.slice(0, 120).map(([cluster, count]) => <button key={cluster} onClick={() => { const ids = new Set(data.nodes.filter((node) => clusterName(node.file, node.kind) === cluster).map((node) => node.index)); setSelected(ids); }}><ChevronRight size={11}/><span><b>{cluster}</b></span><em>{count.toLocaleString()}</em></button>)}</div>
@@ -255,8 +229,14 @@ export function Overview({ selectedId, onSelectedId }: { selectedId: string | nu
     </aside>
     <ResizeHandle side="left" onDelta={(delta) => setLeftWidth((width) => { const next = Math.max(210, Math.min(480, width + delta)); storeWidth("cih-left-width", next); return next; })} />
     <main className="galaxy-workspace">
-      <GalaxyScene nodes={filteredNodes} edges={filteredEdges} selected={selected} target={target} onSelect={(node) => void selectNode(node)} />
+      <GalaxyScene nodes={filteredNodes} edges={filteredEdges} selected={selected} target={target} autoRotate={autoRotate} showLabels={showLabels} resetNonce={resetNonce} onSelect={(node) => void selectNode(node)} />
       <div className="canvas-hud"><span>{filteredNodes.length.toLocaleString()} stars</span><span>{filteredEdges.length.toLocaleString()} links</span>{selected && <span className="is-accent">{selected.size.toLocaleString()} focused</span>}</div>
+      <div className="hud-controls">
+        <Legend />
+        <button className="hud-button" onClick={resetView} title="Reset view"><Maximize size={13} /></button>
+        <button className={autoRotate ? "hud-button is-on" : "hud-button"} aria-pressed={autoRotate} onClick={() => setAutoRotate((v) => !v)} title="Auto-rotate"><Orbit size={13} /></button>
+        <button className={showLabels ? "hud-button is-on" : "hud-button"} aria-pressed={showLabels} onClick={() => setShowLabels((v) => !v)} title="Toggle labels"><Tag size={13} /></button>
+      </div>
     </main>
     {(context || contextLoading) && <><ResizeHandle side="right" onDelta={(delta) => setRightWidth((width) => { const next = Math.max(250, Math.min(520, width + delta)); storeWidth("cih-right-width", next); return next; })} /><div style={{ width: rightWidth }} className="inspector-wrap"><Inspector context={context} loading={contextLoading} onClose={() => { setContext(null); setSelected(null); onSelectedId(null); }} onNavigate={selectById} /></div></>}
   </div>;

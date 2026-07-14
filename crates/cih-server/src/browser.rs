@@ -1,7 +1,9 @@
 //! Local graph browser HTTP routes.
 //!
-//! This is intentionally CIH-only and read-only. It serves a small static UI and
-//! bounded JSON endpoints backed by the existing `GraphStore` domain methods.
+//! This is intentionally CIH-only and read-only. It serves the embedded graph
+//! explorer UI (a React 19 + Three.js single-page app built from `graph-ui/` and
+//! baked in via `include_str!`) plus bounded JSON endpoints backed by the existing
+//! `GraphStore` domain methods.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

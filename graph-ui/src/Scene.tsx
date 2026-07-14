@@ -8,14 +8,8 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { edgeColor } from "./colors";
 import type { OverviewEdge, OverviewNode } from "./types";
-
-const EDGE_COLORS: Record<string, string> = {
-  CALLS: "#1da27e", HANDLES_ROUTE: "#eab308", IMPORTS: "#3b82f6",
-  EXTENDS: "#f97316", IMPLEMENTS: "#a855f7", EXTERNAL_CALL: "#e11d48",
-  PUBLISHES_EVENT: "#ec4899", LISTENS_TO: "#ec4899", INTEGRATION_LINK: "#06b6d4",
-  READS_TABLE: "#60a5fa", WRITES_TABLE: "#fb7185", TESTS: "#22d3ee",
-};
 
 export interface CameraTarget { position: THREE.Vector3; lookAt: THREE.Vector3 }
 
@@ -126,7 +120,7 @@ function EdgeCloud({ nodes, edges, selected }: { nodes: OverviewNode[]; edges: O
       const targetActive = !active || selected.has(target.index);
       if (active && !sourceActive && !targetActive) continue;
       const intensity = active ? (sourceActive && targetActive ? .72 : .08) : .2;
-      color.set(EDGE_COLORS[edge.kind] ?? "#1c8585").multiplyScalar(intensity);
+      color.set(edgeColor(edge.kind)).multiplyScalar(intensity);
       positions.push(source.x, source.y, source.z, target.x, target.y, target.z);
       colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
     }
@@ -152,21 +146,24 @@ function Labels({ nodes, selected }: { nodes: OverviewNode[]; selected: Set<numb
   ))}</>;
 }
 
-function SceneContent({ nodes, edges, selected, target, reducedMotion, onSelect, onHover }: {
+function SceneContent({ nodes, edges, selected, target, reducedMotion, autoRotate, showLabels, resetNonce, onSelect, onHover }: {
   nodes: OverviewNode[]; edges: OverviewEdge[]; selected: Set<number> | null; target: CameraTarget | null;
-  reducedMotion: boolean; onSelect: (node: OverviewNode) => void; onHover: (node: OverviewNode | null) => void;
+  reducedMotion: boolean; autoRotate: boolean; showLabels: boolean; resetNonce: number;
+  onSelect: (node: OverviewNode) => void; onHover: (node: OverviewNode | null) => void;
 }) {
   const controls = useRef<any>(null);
-  const lastInteraction = useRef(Date.now());
-  useFrame(() => { if (controls.current) controls.current.autoRotate = !reducedMotion && Date.now() - lastInteraction.current > 60_000; });
+  // Auto-rotate is an explicit, opt-in toggle (reduced-motion always wins).
+  useFrame(() => { if (controls.current) controls.current.autoRotate = autoRotate && !reducedMotion; });
+  // Reset view: return OrbitControls to its initial framing when the nonce bumps.
+  useEffect(() => { if (resetNonce > 0) controls.current?.reset(); }, [resetNonce]);
   return <>
     <ambientLight intensity={.4} />
     <EdgeCloud nodes={nodes} edges={edges} selected={selected} />
     <NodeCloud nodes={nodes} selected={selected} onSelect={onSelect} onHover={onHover} />
-    <Labels nodes={nodes} selected={selected} />
+    {showLabels && <Labels nodes={nodes} selected={selected} />}
     <CameraAnimator target={target} reducedMotion={reducedMotion} />
     <EffectComposer><Bloom luminanceThreshold={.22} luminanceSmoothing={.72} intensity={1.25} mipmapBlur radius={.65} /></EffectComposer>
-    <OrbitControls ref={controls} enableDamping dampingFactor={.08} rotateSpeed={.45} zoomSpeed={1.35} minDistance={20} maxDistance={20_000} onStart={() => { lastInteraction.current = Date.now(); }} />
+    <OrbitControls ref={controls} enableDamping dampingFactor={.08} rotateSpeed={.45} zoomSpeed={1.35} autoRotateSpeed={.6} minDistance={20} maxDistance={20_000} />
   </>;
 }
 
@@ -179,6 +176,7 @@ export function hasWebGl(): boolean {
 
 export function GalaxyScene(props: {
   nodes: OverviewNode[]; edges: OverviewEdge[]; selected: Set<number> | null; target: CameraTarget | null;
+  autoRotate: boolean; showLabels: boolean; resetNonce: number;
   onSelect: (node: OverviewNode) => void;
 }) {
   const [hovered, setHovered] = useState<OverviewNode | null>(null);

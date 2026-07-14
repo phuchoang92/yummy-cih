@@ -6,6 +6,16 @@
     <meta name="theme-color" content="#06090f" />
     <title>CIH Graph Explorer</title>
     <link rel="icon" href="data:," />
+    <script>
+      // Resolve the theme before first paint to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var t = localStorage.getItem("cih-theme");
+          if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          document.documentElement.dataset.theme = t;
+        } catch (e) { document.documentElement.dataset.theme = "dark"; }
+      })();
+    </script>
     <script type="module" crossorigin src="/graph/assets/app.js"></script>
     <link rel="stylesheet" crossorigin href="/graph/assets/styles.css">
   </head>
