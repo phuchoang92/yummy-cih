@@ -1,8 +1,8 @@
 use cih_core::{
-    db_query_inline_id, db_table_id, file_id, function_id, type_id, ContractKind, ContractSite,
-    Edge, EdgeKind, MessagingFramework, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range,
-    RawImport, RefKind, ReferenceSite, RouteSource, HttpWrapperDef, StringConstant, SymbolDef,
-    UrlPart,
+    db_query_inline_id, db_table_id, file_id, function_id, type_id, BindingKind, ContractKind,
+    ContractSite, Edge, EdgeKind, MessagingFramework, Node, NodeId, NodeKind, ParsedFile,
+    ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource, HttpWrapperDef,
+    StringConstant, SymbolDef, TypeBinding, UrlPart,
 };
 use crate::contracts_common::normalize_external_url;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_typescript};
@@ -899,6 +899,25 @@ fn is_di_provider(stereotype: Option<&str>) -> bool {
     )
 }
 
+/// Simple type name from a `type_annotation` node (`: User` → `User`,
+/// `: Repository<User>` → `Repository`); `None` for primitives/unions/etc.
+fn type_annotation_name(annotation: TsNode<'_>, src: &str) -> Option<String> {
+    let mut c = annotation.walk();
+    let ty = annotation.named_children(&mut c).next()?;
+    match ty.kind() {
+        "type_identifier" => Some(text(ty, src)),
+        "generic_type" => {
+            let mut c2 = ty.walk();
+            let base = ty
+                .named_children(&mut c2)
+                .find(|n| n.kind() == "type_identifier")
+                .map(|n| text(n, src));
+            base
+        }
+        _ => None,
+    }
+}
+
 /// Simple type name of a constructor parameter's `: Type` annotation
 /// (`private svc: UserService` → `UserService`; `Repository<User>` → `Repository`).
 fn param_type_name(param: TsNode<'_>, src: &str) -> Option<String> {
@@ -933,6 +952,7 @@ struct Builder {
     defs: Vec<SymbolDef>,
     imports: Vec<RawImport>,
     reference_sites: Vec<ReferenceSite>,
+    type_bindings: Vec<TypeBinding>,
     contract_sites: Vec<ContractSite>,
     string_constants: Vec<StringConstant>,
     http_wrappers: Vec<HttpWrapperDef>,
@@ -1104,6 +1124,9 @@ impl Builder {
             body_fingerprint,
             lang_meta: None,
         });
+        // Typed params → type_bindings scoped to this callable's signature.
+        let sig = format!("{container_fqn}#{name}/{arity}");
+        self.emit_param_bindings(node, src, &sig);
         id
     }
 
@@ -1506,7 +1529,26 @@ impl Builder {
         }
     }
 
-    fn emit_call_reference(&mut self, node: TsNode<'_>, src: &str) {
+    /// Resolve the enclosing scope for a reference site: the enclosing function's
+    /// `(node id, callable signature)` when inside one, else `(file id, module)`.
+    /// The signature (`fqcn#name/arity`) is what the resolver keys `type_bindings`
+    /// and `this`/receiver resolution on — using the function scope (not the
+    /// module) is what makes typed-receiver and `this.method()` calls resolve.
+    fn call_scope(&self, enclosing_fn: Option<&NodeId>) -> (NodeId, String) {
+        match enclosing_fn {
+            Some(fn_id) => {
+                let sig = fn_id
+                    .as_str()
+                    .strip_prefix("Function:")
+                    .unwrap_or(&self.module)
+                    .to_string();
+                (fn_id.clone(), sig)
+            }
+            None => (file_id(&self.rel), self.module.clone()),
+        }
+    }
+
+    fn emit_call_reference(&mut self, node: TsNode<'_>, src: &str, enclosing_fn: Option<&NodeId>) {
         // call_expression → function: (member_expression | identifier)
         let Some(func) = node.child_by_field_name("function") else {
             return;
@@ -1526,16 +1568,79 @@ impl Builder {
         if name.is_empty() {
             return;
         }
+        let (in_callable, in_fqcn) = self.call_scope(enclosing_fn);
         self.reference_sites.push(ReferenceSite {
             name,
             receiver,
             kind: RefKind::Call,
             arity: call_arity(node),
             range: range_of(func),
-            in_fqcn: self.module.clone(),
-            in_callable: file_id(&self.rel),
+            in_fqcn,
+            in_callable,
             arg_texts: Vec::new(),
         });
+    }
+
+    /// Emit a `Ctor` reference for `new X(...)` / `new a.B(...)` — resolved to the
+    /// type's constructor by the resolver (type-name resolution, not receiver).
+    fn emit_ctor_reference(&mut self, node: TsNode<'_>, src: &str, enclosing_fn: Option<&NodeId>) {
+        let Some(ctor) = node.child_by_field_name("constructor") else {
+            return;
+        };
+        // Simple type name: `User` → User; `a.B` → B (the resolver keys on it).
+        let name = match ctor.kind() {
+            "identifier" => text(ctor, src),
+            "member_expression" => ctor
+                .child_by_field_name("property")
+                .map(|p| text(p, src))
+                .unwrap_or_default(),
+            _ => return,
+        };
+        if name.is_empty() {
+            return;
+        }
+        let (in_callable, in_fqcn) = self.call_scope(enclosing_fn);
+        self.reference_sites.push(ReferenceSite {
+            name,
+            receiver: None,
+            kind: RefKind::Ctor,
+            arity: call_arity(node),
+            range: range_of(ctor),
+            in_fqcn,
+            in_callable,
+            arg_texts: Vec::new(),
+        });
+    }
+
+    /// Emit `type_bindings` for a callable's typed formal parameters
+    /// (`f(u: User)` → `u : User`). `sig` is the callable signature the resolver
+    /// keys receiver lookups on. Primitive annotations (`n: number`) are skipped.
+    fn emit_param_bindings(&mut self, fn_node: TsNode<'_>, src: &str, sig: &str) {
+        let Some(params) = fn_node.child_by_field_name("parameters") else {
+            return;
+        };
+        let mut cursor = params.walk();
+        for p in params.named_children(&mut cursor) {
+            if !matches!(p.kind(), "required_parameter" | "optional_parameter") {
+                continue;
+            }
+            let (Some(pat), Some(ty)) = (
+                p.child_by_field_name("pattern"),
+                p.child_by_field_name("type").and_then(|a| type_annotation_name(a, src)),
+            ) else {
+                continue;
+            };
+            if pat.kind() != "identifier" {
+                continue;
+            }
+            self.type_bindings.push(TypeBinding {
+                name: text(pat, src),
+                raw_type: ty,
+                kind: BindingKind::Param,
+                in_fqcn: sig.to_string(),
+                range: range_of(p),
+            });
+        }
     }
 }
 
@@ -2495,6 +2600,24 @@ fn walk(
                 let name_node = declarator.child_by_field_name("name");
                 let value = declarator.child_by_field_name("value");
 
+                // Typed local (`const x: Order = …`) → type_binding scoped to the
+                // enclosing callable, so `x.method()` resolves its receiver type.
+                if let (Some(nn), Some(ty)) = (
+                    name_node.filter(|n| n.kind() == "identifier"),
+                    declarator
+                        .child_by_field_name("type")
+                        .and_then(|a| type_annotation_name(a, src)),
+                ) {
+                    let (_, sig) = builder.call_scope(enclosing_fn);
+                    builder.type_bindings.push(TypeBinding {
+                        name: text(nn, src),
+                        raw_type: ty,
+                        kind: BindingKind::Local,
+                        in_fqcn: sig,
+                        range: range_of(declarator),
+                    });
+                }
+
                 // `export const apiFetch = async (endpoint, …) => …` wrapper shape.
                 if class_fqn.is_none() && enclosing_fn.is_none() {
                     if let (Some(nn), Some(v)) = (name_node, value) {
@@ -2715,8 +2838,15 @@ fn walk(
             try_emit_graphql_consumer(node, src, builder, enclosing_fn);
             try_emit_db_query(node, src, builder, enclosing_fn);
             try_emit_messaging(node, src, builder, enclosing_fn);
-            builder.emit_call_reference(node, src);
+            builder.emit_call_reference(node, src, enclosing_fn);
             // recurse into arguments
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
+            }
+        }
+        "new_expression" => {
+            builder.emit_ctor_reference(node, src, enclosing_fn);
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
@@ -2818,7 +2948,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
             defs: builder.defs,
             imports: builder.imports,
             reference_sites: builder.reference_sites,
-            type_bindings: Vec::new(),
+            type_bindings: builder.type_bindings,
             contract_sites: builder.contract_sites,
             sql_constants: Vec::new(),
             sql_execution_sites: Vec::new(),
@@ -3074,6 +3204,61 @@ class UserService {
             calls.iter().any(|(m, u)| m == "GET" && u == "/api/users")
                 && calls.iter().any(|(m, u)| m == "POST" && u == "/api/users"),
             "angular HttpClient calls missing: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn method_params_new_and_scope_aware_calls() {
+        let src = r#"class Svc {
+  handle(u: User) { u.save(); }
+  make() { const x = new User(1); x.load(); return x; }
+}
+"#;
+        let unit = parse_typescript_file("src/svc.ts", src).expect("parses");
+        let pf = &unit.parsed_file;
+        // Typed param → Param type_binding scoped to the method signature.
+        assert!(
+            pf.type_bindings.iter().any(|b| b.name == "u"
+                && b.raw_type == "User"
+                && b.kind == cih_core::BindingKind::Param
+                && b.in_fqcn == "src/svc.Svc#handle/1"),
+            "param binding missing: {:?}",
+            pf.type_bindings
+        );
+        // Typed local `const x: … = new User()` has no annotation here, but the
+        // `new User(1)` emits a Ctor reference.
+        assert!(
+            pf.reference_sites
+                .iter()
+                .any(|r| r.kind == cih_core::RefKind::Ctor && r.name == "User"),
+            "ctor ref for `new User()` missing"
+        );
+        // Call refs are scoped to the enclosing method (not the module), which is
+        // what makes `this.x()` / typed-receiver resolution work.
+        assert!(
+            pf.reference_sites.iter().any(|r| r.kind == cih_core::RefKind::Call
+                && r.name == "save"
+                && r.in_fqcn == "src/svc.Svc#handle/1"),
+            "call ref not scoped to method: {:?}",
+            pf.reference_sites
+                .iter()
+                .filter(|r| r.name == "save")
+                .map(|r| &r.in_fqcn)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn typed_local_emits_binding() {
+        let src = r#"function f() { const o: Order = load(); o.total(); }"#;
+        let unit = parse_typescript_file("src/f.ts", src).expect("parses");
+        assert!(
+            unit.parsed_file.type_bindings.iter().any(|b| b.name == "o"
+                && b.raw_type == "Order"
+                && b.kind == cih_core::BindingKind::Local
+                && b.in_fqcn == "src/f#f/0"),
+            "typed local binding missing: {:?}",
+            unit.parsed_file.type_bindings
         );
     }
 
@@ -3557,6 +3742,7 @@ export const CREATE = gql`mutation { createPost(title: "x") { id } }`;
         );
     }
 }
+
 
 
 

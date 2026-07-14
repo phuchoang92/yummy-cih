@@ -31,7 +31,7 @@ pub use contracts_common::normalize_external_url;
 /// `parse_schema_guard` test in cih-engine fails when parser output changes
 /// without a bump. Starts at 2: the flat pre-versioning cache layout is
 /// implicitly v1 and is pruned on first contact.
-pub const PARSE_CACHE_SCHEMA: u32 = 19;
+pub const PARSE_CACHE_SCHEMA: u32 = 20;
 
 /// Declares all language modules and generates `all_providers()`.
 /// To add a new language: add one line here (plus the implementation files).

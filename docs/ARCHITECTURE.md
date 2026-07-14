@@ -157,11 +157,19 @@ target class FQCN, so imported types resolve **and disambiguate** (the fallback 
 `index.rs` resolve_type already handles *unique* simple names, so this mainly fixes **ambiguous**
 names and raises confidence to the explicit-import tier).
 
-**Reach is bounded by other parser gaps** (larger, separate levers): the TS parser emits no `Ctor`
-reference for `new X()`, no `type_bindings` for typed params (`u: User` → `u.save()`), and no
-`Extends`/`Implements` heritage refs — so today the binding fix mainly improves `Imports` edges and
-decorated-DI `TypeRef`s; deep call resolution needs those companion emitters. Aliased imports
-(`X as Y`), namespace/wildcard imports, and CommonJS `require()` binding remain unresolved.
+The TS parser also emits **scope-aware call references** (each call's `in_fqcn`/`in_callable` is the
+enclosing function's signature, not the module — this alone fixes `this.method()`, which previously
+resolved `this` to the module), **`type_bindings`** for typed params (`f(u: User)`) and typed locals
+(`const o: Order = …`), and **`Ctor` references** for `new X(...)`. Together these resolve the dominant
+OOP-TS pattern: `class C { m(u: User) { u.save() } }` → `C#m → User#save`, and `new User(…)` →
+`User#constructor`, including disambiguating same-named classes via the import map.
+
+**Remaining reach limits** (resolver-side, separate follow-ups): a **free-function** param/local does
+not resolve — `resolve_binding` → `resolve_in_type(raw, owner_class)` and a free function's owner is
+the *module* (not a type with a file), so the import map isn't consulted; and `new X()` on a class with
+**no explicit constructor** yields no edge (`resolve_constructor` needs a constructor member).
+`Extends`/`Implements` heritage refs, aliased imports (`X as Y`), namespace/wildcard imports, typed
+class *fields* (member receivers), and CommonJS `require()` binding remain unresolved.
 
 ### JS/TS DB & ORM access (`DbTable` / `DbQuery`)
 
