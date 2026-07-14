@@ -101,9 +101,13 @@ pub fn run_decompile_precheck(
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
+    // Size the slot bookkeeping to the pool's ACTUAL width: the fallback pool
+    // above may have more threads than `threads`, and there must be one display
+    // slot per worker or `slot_pool.pop_front()` underflows (panics) under load.
+    let slot_count = pool.current_num_threads().max(1);
     // N-slot live display: each rayon worker holds one slot while processing a JAR.
-    let slots: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![None; threads]));
-    let slot_pool: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..threads).collect()));
+    let slots: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![None; slot_count]));
+    let slot_pool: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..slot_count).collect()));
 
     let results: Vec<(PathBuf, Result<usize>, bool)> = pool.install(|| {
         jars.par_iter()

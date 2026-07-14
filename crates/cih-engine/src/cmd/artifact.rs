@@ -95,7 +95,16 @@ pub fn run(command: ArtifactCommand) -> Result<()> {
             // Register in registry.
             let root_abs = repo.canonicalize().unwrap_or(repo.clone());
             let registry_path = dirs_next_or_home().join(".cih").join("registry.json");
-            let _ = register_repo_in_registry(&registry_path, &root_abs, &artifacts, &graph_key);
+            if let Err(e) =
+                register_repo_in_registry(&registry_path, &root_abs, &artifacts, &graph_key)
+            {
+                tracing::warn!(
+                    error = %e,
+                    registry = %registry_path.display(),
+                    "bootstrap loaded the graph but failed to register the repo; \
+                     it will not appear in `list_repos` until re-registered"
+                );
+            }
 
             println!("Bootstrap complete. Graph key: {graph_key}");
             Ok(())

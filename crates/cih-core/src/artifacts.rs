@@ -155,7 +155,11 @@ const BUNDLE_MAGIC: &[u8; 8] = b"CIHPACK1";
 /// Write one entry to a bundle: 4-byte LE length + zstd-compressed content.
 fn write_bundle_entry(w: &mut impl Write, content: &[u8]) -> io::Result<()> {
     let compressed = zstd::encode_all(content, 3).map_err(io::Error::other)?;
-    let len = compressed.len() as u32;
+    // The entry length prefix is 4 bytes — refuse rather than silently truncate a
+    // compressed entry that does not fit in u32 (> 4 GiB).
+    let len = u32::try_from(compressed.len()).map_err(|_| {
+        io::Error::other("bundle entry exceeds 4 GiB compressed; cannot encode length")
+    })?;
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&compressed)?;
     Ok(())
