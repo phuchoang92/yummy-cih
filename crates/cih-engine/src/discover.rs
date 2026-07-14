@@ -481,12 +481,40 @@ fn is_project_node(n: &cih_core::Node) -> bool {
                 || p.get("fromJar").and_then(|v| v.as_bool()).unwrap_or(false)
         })
         .unwrap_or(false);
-    let f = n.file.as_str();
-    let is_test = f.ends_with(".jar")
-        || f.contains("src/test/")
-        || f.contains("/test/java/")
-        || f.contains("/test/kotlin/");
-    !is_external && !is_test
+    !is_external && !is_test_source(n.file.as_str())
+}
+
+/// Language-agnostic test-source detection (drives embed cluster exclusion).
+/// Covers the common directory and filename conventions across the supported
+/// languages — kept conservative on bare `test`/`spec` segments so a `test`
+/// *package* (e.g. Java `com/test/…`) is not mistaken for a test source.
+fn is_test_source(f: &str) -> bool {
+    // Third-party JVM artifact.
+    if f.ends_with(".jar") {
+        return true;
+    }
+    // Test-source directory roots.
+    if f.contains("src/test/")        // Maven/Gradle (java/kotlin/scala/groovy)
+        || f.contains("/test/java/")  // non-standard JVM layouts (retained)
+        || f.contains("/test/kotlin/")
+        || f.contains("__tests__/")   // JS/TS
+        || f.contains("__mocks__/")
+        || f.starts_with("tests/")    // Python / others
+        || f.contains("/tests/")
+    {
+        return true;
+    }
+    // Filename conventions (unambiguous across languages).
+    let base = f.rsplit('/').next().unwrap_or(f);
+    base.ends_with("_test.go")                       // Go
+        || base.ends_with("_spec.rb")                // Ruby
+        || base.ends_with("_test.rb")
+        || base.contains(".test.")                   // JS/TS  foo.test.ts
+        || base.contains(".spec.")                   // JS/TS  foo.spec.tsx
+        || (base.ends_with(".py")                    // Python
+            && (base.starts_with("test_")
+                || base.ends_with("_test.py")
+                || base == "conftest.py"))
 }
 
 /// Build the embedding clusterer: connect to pgvector, fetch per-node vectors + k-NN edges, run
@@ -833,4 +861,45 @@ fn read_architecture_hint(repo: &Path) -> ArchitectureHint {
     serde_json::from_str::<RepoMap>(&raw)
         .map(|rm| rm.architecture_hint)
         .unwrap_or(ArchitectureHint::Unknown)
+}
+
+#[cfg(test)]
+mod test_source_tests {
+    use super::is_test_source;
+
+    #[test]
+    fn excludes_test_sources_across_languages() {
+        // Test sources — every supported language's convention.
+        for f in [
+            "target/deps/commons-lang3.jar",
+            "src/test/java/com/acme/OrderTest.java",
+            "src/test/kotlin/com/acme/PingTest.kt",
+            "web/__tests__/App.test.tsx",
+            "web/src/Button.test.ts",
+            "web/src/Button.spec.tsx",
+            "cmd/server/handler_test.go",
+            "svc/tests/test_api.py",
+            "svc/utils_test.py",
+            "svc/conftest.py",
+            "app/models/user_spec.rb",
+        ] {
+            assert!(is_test_source(f), "should be a test source: {f}");
+        }
+    }
+
+    #[test]
+    fn keeps_first_party_sources() {
+        // Production sources — including a legit `test` *package* (not a test dir).
+        for f in [
+            "src/main/java/com/acme/OrderService.java",
+            "src/main/java/com/acme/test/TestHarnessConfig.java", // `test` package
+            "web/src/components/Button.tsx",
+            "web/src/latest.ts",
+            "cmd/server/main.go",
+            "svc/api_client.py",
+            "app/models/user.rb",
+        ] {
+            assert!(!is_test_source(f), "should NOT be a test source: {f}");
+        }
+    }
 }
