@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use cih_core::{Edge, ImportBinding, Node, ParsedFile, SymbolDef};
+use cih_core::{Edge, Node, ParsedFile, SymbolDef};
 
 use crate::index::ResolveIndex;
 
@@ -90,18 +90,6 @@ pub trait LanguageResolver: Send + Sync {
     ) -> (Vec<Node>, Vec<Edge>) {
         let _ = (repo_root, parsed);
         (vec![], vec![])
-    }
-
-    /// Resolve a normalized import binding to the qualified name of the symbol it imports.
-    /// Returns None if the import cannot be resolved within the workspace.
-    fn resolve_import(
-        &self,
-        binding: &ImportBinding,
-        from_file: &str,
-        index: &ResolveIndex,
-    ) -> Option<String> {
-        let _ = (binding, from_file, index);
-        None
     }
 
     /// Post-process the fully-assembled graph, once every phase's nodes/edges are merged.

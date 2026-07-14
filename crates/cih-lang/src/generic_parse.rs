@@ -246,6 +246,5 @@ pub fn build_unit(
         nodes,
         edges,
         parsed_file,
-        import_bindings: Vec::new(),
     }
 }

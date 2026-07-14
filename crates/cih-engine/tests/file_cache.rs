@@ -88,7 +88,6 @@ fn unit(parsed_file: ParsedFile) -> ParsedUnit {
         rel: parsed_file.file.clone(),
         nodes: Vec::new(),
         edges: Vec::new(),
-        import_bindings: Vec::new(),
         parsed_file,
     }
 }

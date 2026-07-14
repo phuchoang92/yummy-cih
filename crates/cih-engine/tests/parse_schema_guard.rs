@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (22, "2076ee284140912c");
+const GOLDEN: (u32, &str) = (23, "faa470af0dfa9296");
 
 const FIXTURES: &[(&str, &str)] = &[
     (

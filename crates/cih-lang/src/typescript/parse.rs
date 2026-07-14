@@ -3082,7 +3082,6 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
                 rel: rel.to_string(),
                 nodes: Vec::new(),
                 edges: Vec::new(),
-                import_bindings: Vec::new(),
                 parsed_file: ParsedFile {
                     file: rel.to_string(),
                     language: String::new(),
@@ -3120,23 +3119,10 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
     // detect after the walk so exported handler names are available.
     detect_file_based_routes(rel, tree.root_node(), src, &mut builder);
 
-    // Convert RawImports to ImportBindings (best-effort for TypeScript)
-    let import_bindings = builder.imports.iter().map(|imp| {
-        use cih_core::{ImportBinding, ImportBindingKind};
-        ImportBinding {
-            module: imp.raw.clone(),
-            imported: None,
-            local: None,
-            kind: ImportBindingKind::Named,
-            range: imp.range,
-        }
-    }).collect::<Vec<_>>();
-
     Ok(ParsedUnit {
         rel: rel.to_string(),
         nodes: builder.nodes,
         edges: builder.edges,
-        import_bindings,
         parsed_file: ParsedFile {
             file: rel.to_string(),
             language: String::new(),

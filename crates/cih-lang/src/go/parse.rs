@@ -181,7 +181,6 @@ pub fn parse_go_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
         nodes,
         edges,
         parsed_file,
-        import_bindings: Vec::new(),
     })
 }
 

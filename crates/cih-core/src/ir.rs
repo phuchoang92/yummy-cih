@@ -250,38 +250,6 @@ pub struct SymbolDef {
     pub lang_meta: Option<serde_json::Value>,
 }
 
-/// Semantic import binding kind — more structured than raw text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ImportBindingKind {
-    /// `import com.example.Class` (Java explicit) or `import { X } from './m'` (TS named)
-    Named,
-    /// `import X from './m'` (TS/ES default)
-    Default,
-    /// `import * as ns from './m'` (TS namespace)
-    Namespace,
-    /// `import './m'` (side-effect only)
-    Module,
-    /// `import static com.example.Util.helper` (Java static member)
-    StaticMember,
-    /// `import com.example.*` (Java wildcard) or `from pkg import *` (Python)
-    Wildcard,
-}
-
-/// A structured import binding produced by the language parser.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImportBinding {
-    /// Module/package path as written: `"com.example.Class"`, `"./service"`, `"orders.service"`
-    pub module: String,
-    /// The imported name (for Named/StaticMember): `"Class"`, `"helper"`, `"X"`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imported: Option<String>,
-    /// Local alias: `import X as Y` → local = "Y"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<String>,
-    pub kind: ImportBindingKind,
-    pub range: Range,
-}
-
 /// A raw import statement, pre-resolution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawImport {
@@ -474,10 +442,6 @@ pub struct ParsedUnit {
     pub nodes: Vec<crate::Node>,
     pub edges: Vec<crate::Edge>,
     pub parsed_file: ParsedFile,
-    /// Normalized import bindings (language-aware). Added in V2 alongside `imports`.
-    /// Stored here to avoid breaking existing ParsedFile struct literal construction.
-    #[serde(default)]
-    pub import_bindings: Vec<ImportBinding>,
 }
 
 /// Origin of a [`TypeBinding`] — determines resolution precedence (nearest

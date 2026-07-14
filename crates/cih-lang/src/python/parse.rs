@@ -1492,7 +1492,6 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
                 rel: rel.to_string(),
                 nodes: Vec::new(),
                 edges: Vec::new(),
-                import_bindings: Vec::new(),
                 parsed_file: ParsedFile {
                     file: rel.to_string(),
                     language: String::new(),
@@ -1522,23 +1521,10 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
 
     walk(tree.root_node(), src, &mut builder, None, None);
 
-    // Convert RawImports to ImportBindings (best-effort for Python)
-    let import_bindings = builder.imports.iter().map(|imp| {
-        use cih_core::{ImportBinding, ImportBindingKind};
-        ImportBinding {
-            module: imp.raw.clone(),
-            imported: None,
-            local: None,
-            kind: if imp.is_wildcard { ImportBindingKind::Wildcard } else { ImportBindingKind::Named },
-            range: imp.range,
-        }
-    }).collect::<Vec<_>>();
-
     Ok(ParsedUnit {
         rel: rel.to_string(),
         nodes: builder.nodes,
         edges: builder.edges,
-        import_bindings,
         parsed_file: ParsedFile {
             file: rel.to_string(),
             language: String::new(),

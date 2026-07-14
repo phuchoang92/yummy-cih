@@ -239,26 +239,10 @@ pub fn parse_kotlin_file(rel: &str, src: &str) -> Result<ParsedUnit> {
 
     framework::collect(root, src, &mut builder);
 
-    let import_bindings = builder.imports.iter().map(|imp| {
-        use cih_core::{ImportBinding, ImportBindingKind};
-        ImportBinding {
-            module: imp.raw.clone(),
-            imported: None,
-            local: None,
-            kind: if imp.is_wildcard {
-                ImportBindingKind::Wildcard
-            } else {
-                ImportBindingKind::Named
-            },
-            range: imp.range,
-        }
-    }).collect();
-
     Ok(ParsedUnit {
         rel: rel.to_string(),
         nodes: builder.nodes,
         edges: builder.edges,
-        import_bindings,
         parsed_file: ParsedFile {
             file: rel.to_string(),
             language: String::new(), // set by parse driver

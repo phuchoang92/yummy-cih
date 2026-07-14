@@ -49,7 +49,7 @@ pub fn parse_rust_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
         reference_sites,
         ..Default::default()
     };
-    Ok(ParsedUnit { rel: rel.to_string(), nodes, edges, parsed_file, import_bindings: Vec::new() })
+    Ok(ParsedUnit { rel: rel.to_string(), nodes, edges, parsed_file })
 }
 
 #[allow(clippy::too_many_arguments)] // recursive tree-walker signature
