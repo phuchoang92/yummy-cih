@@ -900,53 +900,15 @@ impl GraphStore for FalkorStore {
         // handlers and falls through to the plain method walk below).
         let handlers = self.route_handler_nodes(entry).await?;
         if !handlers.is_empty() {
-            let route_name = entry
-                .as_str()
-                .strip_prefix("Route:")
-                .unwrap_or(entry.as_str())
-                .to_string();
-            let mut hops: Vec<FlowHop> = vec![FlowHop {
-                node: FlowNode {
-                    id: entry.clone(),
-                    kind: NodeKind::Route,
-                    name: route_name,
-                    qualified_name: None,
-                    file: String::new(),
-                    depth: 0,
-                    parent_id: None,
-                },
-                via: None,
-            }];
-            let mut seen: HashSet<String> = HashSet::new();
-            seen.insert(entry.as_str().to_string());
-            for mut handler in handlers {
-                if !seen.insert(handler.id.as_str().to_string()) {
-                    continue;
-                }
-                handler.depth = 1;
-                handler.parent_id = Some(entry.clone());
-                let handler_id = handler.id.clone();
-                hops.push(FlowHop {
-                    node: handler,
-                    via: Some(FlowEdge {
-                        kind: "HANDLES_ROUTE".to_string(),
-                        call_sites: Vec::new(),
-                    }),
-                });
-                // Downstream from the handler; skip its own root hop (index 0 —
-                // already emitted as the depth-1 handler above) and shift each
-                // remaining hop one level past the route.
-                let sub = self.flow_downstream(&handler_id, d).await?;
-                for mut hop in sub.into_iter().skip(1) {
-                    if !seen.insert(hop.node.id.as_str().to_string()) {
-                        continue;
-                    }
-                    hop.node.depth += 1;
-                    hops.push(hop);
-                }
+            // Collect each handler with its downstream walk, then assemble the
+            // route-entry flow. Recursion terminates: a handler is a method, so
+            // it has no inverse handlers and falls through to the method walk.
+            let mut with_downstream = Vec::with_capacity(handlers.len());
+            for handler in handlers {
+                let sub = self.flow_downstream(&handler.id, d).await?;
+                with_downstream.push((handler, sub));
             }
-            hops.truncate(100);
-            return Ok(hops);
+            return Ok(assemble_route_flow(entry, with_downstream));
         }
 
         // Phase 1: BFS to get node order, depth, and parent relationships.
@@ -1492,6 +1454,59 @@ fn cell_to_string(v: &&Value) -> String {
         }
         other => format!("{other:?}"),
     }
+}
+
+/// Assemble a route-entry flow from a route id and its handlers (each paired
+/// with its own downstream walk). The route becomes the depth-0 root; every
+/// handler sits at depth 1 reached via `HANDLES_ROUTE`; each handler's
+/// downstream hops (its own root hop dropped) are shifted one level past the
+/// route. Nodes are deduplicated by id (first occurrence wins) and the result
+/// is capped at 100 hops, mirroring the method-walk `LIMIT 100`.
+fn assemble_route_flow(entry: &NodeId, handlers: Vec<(FlowNode, Vec<FlowHop>)>) -> Vec<FlowHop> {
+    let route_name = entry
+        .as_str()
+        .strip_prefix("Route:")
+        .unwrap_or(entry.as_str())
+        .to_string();
+    let mut hops: Vec<FlowHop> = vec![FlowHop {
+        node: FlowNode {
+            id: entry.clone(),
+            kind: NodeKind::Route,
+            name: route_name,
+            qualified_name: None,
+            file: String::new(),
+            depth: 0,
+            parent_id: None,
+        },
+        via: None,
+    }];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(entry.as_str().to_string());
+    for (mut handler, sub) in handlers {
+        if !seen.insert(handler.id.as_str().to_string()) {
+            continue;
+        }
+        handler.depth = 1;
+        handler.parent_id = Some(entry.clone());
+        hops.push(FlowHop {
+            node: handler,
+            via: Some(FlowEdge {
+                kind: "HANDLES_ROUTE".to_string(),
+                call_sites: Vec::new(),
+            }),
+        });
+        // Drop the handler's own root hop (index 0 — already emitted as the
+        // depth-1 handler above) and shift the rest one level past the route.
+        for mut hop in sub.into_iter().skip(1) {
+            if !seen.insert(hop.node.id.as_str().to_string()) {
+                continue;
+            }
+            hop.node.depth += 1;
+            hops.push(hop);
+        }
+    }
+    hops.truncate(100);
+    hops
 }
 
 #[cfg(test)]
