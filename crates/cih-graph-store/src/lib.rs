@@ -318,3 +318,22 @@ pub fn risk_from_fanout(affected: usize) -> &'static str {
         _ => "critical",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::risk_from_fanout;
+
+    #[test]
+    fn risk_from_fanout_boundaries() {
+        // Exact bucket edges — guards the thresholds every adapter shares.
+        assert_eq!(risk_from_fanout(0), "none");
+        assert_eq!(risk_from_fanout(1), "low");
+        assert_eq!(risk_from_fanout(5), "low");
+        assert_eq!(risk_from_fanout(6), "medium");
+        assert_eq!(risk_from_fanout(20), "medium");
+        assert_eq!(risk_from_fanout(21), "high");
+        assert_eq!(risk_from_fanout(75), "high");
+        assert_eq!(risk_from_fanout(76), "critical");
+        assert_eq!(risk_from_fanout(usize::MAX), "critical");
+    }
+}
