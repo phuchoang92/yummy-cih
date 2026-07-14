@@ -376,6 +376,19 @@ companion-object/`object` `val`s with literal initializers):
   implementors found in the indexed scope; implementors outside the indexed
   modules are not linked.
 
+## Flow traversal (`trace_flow`, `cih-falkor::flow_downstream`)
+
+- Single-repo `trace_flow` walks **outgoing** `CALLS` / `HANDLES_ROUTE` /
+  `EXTERNAL_CALL` / `PUBLISHES_EVENT` / `LISTENS_TO` edges from the entry.
+- **A `Route` node can be the entry point.** `HandlesRoute` is stored
+  handler→route, so a route has no outgoing flow edges; `flow_downstream` detects
+  a route entry (via the *inverse* `HandlesRoute`) and prepends the hop
+  route→handler(s) at depth 1, then traces downstream from each handler. This
+  works for every route source — Java/Kotlin/Go HTTP routes and TS GraphQL/tRPC
+  `Route` nodes alike — so `trace_flow(entry_point="Route:…")` yields the full
+  `route → handler → call chain`, not just the route node. Method entries are
+  unchanged. (Mirrors the artifact-side cross-repo `trace_flow_x` Route handling.)
+
 ## Parse cache (`cih-engine/src/file_cache.rs`)
 
 - **Layout**: `.cih/parse-cache/v<N>/<blake3-16-of-file-bytes>.json`, one cached
