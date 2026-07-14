@@ -47,11 +47,11 @@ pub fn load_many_to_falkor(
         let staging_key = format!("{graph_key}-staging");
         let store = FalkorStore::connect(url, &staging_key)
             .map_err(|e| anyhow::anyhow!("FalkorDB connect: {e}"))?;
+        // No `ensure_schema` here: the first `bulk_load` into the freshly-dropped
+        // (unused) staging key takes the `GRAPH.BULK` fast path, which requires an
+        // unused key and creates the indexes itself afterward. The Cypher fallback
+        // (used for later sets, e.g. community) creates the id index idempotently.
         let _ = store.drop_graph().await;
-        store
-            .ensure_schema()
-            .await
-            .map_err(|e| anyhow::anyhow!("FalkorDB ensure_schema: {e}"))?;
 
         let mut total_nodes = 0u64;
         let mut total_edges = 0u64;

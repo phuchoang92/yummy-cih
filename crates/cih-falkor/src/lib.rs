@@ -24,6 +24,8 @@ use cih_graph_store::{
 };
 use redis::Value;
 
+mod bulk;
+
 /// Rows per UNWIND batch during bulk load. Larger batches cut Redis round-trips on big graphs
 /// (~2M edges at 600k nodes) at the cost of bigger per-statement strings — 4000 is a good balance.
 const BATCH: usize = 4000;
@@ -287,6 +289,80 @@ impl FalkorStore {
         })
     }
 
+    /// True when the graph holds no nodes — either it does not exist, or it is an
+    /// empty graph key auto-created by a `GRAPH.QUERY` (e.g. the readiness probe
+    /// in `wait_until_ready`, which is why an `EXISTS` check is not enough). Used
+    /// to route `bulk_load` between the native `GRAPH.BULK` path and the Cypher
+    /// upsert.
+    async fn graph_is_empty(&self) -> Result<bool> {
+        let rows = self
+            .rows("MATCH (n) RETURN count(n) AS c")
+            .await
+            .unwrap_or_default();
+        let count: u64 = rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Ok(count == 0)
+    }
+
+    /// Load a fresh graph via FalkorDB's native binary bulk-insert protocol
+    /// (`GRAPH.BULK`). Skips the Cypher parser and per-edge `MATCH`; produces the
+    /// same graph as the Cypher path (see `bulk::build_payload` for parity). The
+    /// `id`/`kind` indexes are created *after* the insert — `BEGIN` requires an
+    /// unused key, so no index may exist beforehand.
+    async fn bulk_insert(&self, nodes: &[Node], edges: &[Edge]) -> Result<LoadStats> {
+        // `GRAPH.BULK BEGIN` requires an unused key. The readiness probe and the
+        // emptiness check both auto-create an empty graph key, so drop it first.
+        let _ = self.drop_graph().await;
+        let t_build = std::time::Instant::now();
+        let payload = bulk::build_payload(nodes, edges);
+        let build_ms = t_build.elapsed().as_millis();
+        let payload_bytes: usize = payload.node_blobs.iter().map(Vec::len).sum::<usize>()
+            + payload.rel_blobs.iter().map(Vec::len).sum::<usize>();
+        let t_send = std::time::Instant::now();
+        let mut cmd = redis::cmd("GRAPH.BULK");
+        cmd.arg(&self.graph_key)
+            .arg("BEGIN")
+            .arg(payload.node_count)
+            .arg(payload.edge_count)
+            .arg(payload.node_blobs.len())
+            .arg(payload.rel_blobs.len());
+        for blob in &payload.node_blobs {
+            cmd.arg(blob.as_slice());
+        }
+        for blob in &payload.rel_blobs {
+            cmd.arg(blob.as_slice());
+        }
+        {
+            let _permit = self.acquire_permit().await?;
+            let mut con = self.conn().await?;
+            let _reply: Value = cmd
+                .query_async(&mut con)
+                .await
+                .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK: {e}")))?;
+        }
+        let send_ms = t_send.elapsed().as_millis();
+        // Indexes must be built after the bulk insert (see doc above).
+        let t_idx = std::time::Instant::now();
+        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
+        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
+        tracing::info!(
+            nodes = payload.node_count,
+            edges = payload.edge_count,
+            payload_mb = payload_bytes / 1_048_576,
+            build_ms,
+            send_ms,
+            index_ms = t_idx.elapsed().as_millis(),
+            "falkor GRAPH.BULK load timings"
+        );
+        Ok(LoadStats {
+            nodes: payload.node_count,
+            edges: payload.edge_count,
+        })
+    }
+
     /// Handlers that serve `route`, found via the **inverse** of the stored
     /// handler→route `HANDLES_ROUTE` edge. Returns empty when `route` is not a
     /// route node (nothing `HANDLES_ROUTE`s *to* a method), so this doubles as a
@@ -334,7 +410,15 @@ impl GraphStore for FalkorStore {
         let edges = artifacts
             .read_edges()
             .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
-        self.load_nodes_edges(&nodes, &edges).await
+        // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path;
+        // a populated one (e.g. the community set loaded after analyze) falls
+        // back to the Cypher upsert. `GRAPH.BULK BEGIN` requires an unused key,
+        // so this routing also honors that constraint.
+        if self.graph_is_empty().await? {
+            self.bulk_insert(&nodes, &edges).await
+        } else {
+            self.load_nodes_edges(&nodes, &edges).await
+        }
     }
 
     async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()> {
