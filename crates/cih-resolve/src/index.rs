@@ -388,11 +388,22 @@ impl ResolveIndex {
     /// Resolve a receiver name used inside callable `in_fqcn` to a type FQCN.
     /// Precedence: nearest param/local (then alias/call-result chains) → enclosing
     /// class field (incl. inherited) → `this`/`super`.
-    pub fn receiver_type(&self, in_fqcn: &str, receiver: &str) -> Option<String> {
-        self.receiver_type_inner(in_fqcn, receiver, 0)
+    /// `file` is the reference site's file — used to resolve a param/local/pattern
+    /// binding's type against the *right* import scope even when the enclosing
+    /// callable is a **free function** (whose owner is the module, not a type with
+    /// a file). For a method this is the same file as the owner class, so results
+    /// are unchanged.
+    pub fn receiver_type(&self, in_fqcn: &str, receiver: &str, file: &str) -> Option<String> {
+        self.receiver_type_inner(in_fqcn, receiver, file, 0)
     }
 
-    fn receiver_type_inner(&self, in_fqcn: &str, receiver: &str, depth: u8) -> Option<String> {
+    fn receiver_type_inner(
+        &self,
+        in_fqcn: &str,
+        receiver: &str,
+        file: &str,
+        depth: u8,
+    ) -> Option<String> {
         if depth > 8 {
             return None; // alias cycle guard
         }
@@ -412,7 +423,7 @@ impl ResolveIndex {
         // 1. param / local / pattern / alias / call-result in this callable.
         if let Some(bindings) = self.bindings.get(in_fqcn) {
             if let Some(tb) = pick_binding(bindings, receiver) {
-                return self.resolve_binding(tb, in_fqcn, depth);
+                return self.resolve_binding(tb, in_fqcn, file, depth);
             }
         }
 
@@ -420,16 +431,27 @@ impl ResolveIndex {
         self.field_type_in_hierarchy(owner_class, receiver)
     }
 
-    fn resolve_binding(&self, tb: &TypeBinding, in_fqcn: &str, depth: u8) -> Option<String> {
+    fn resolve_binding(
+        &self,
+        tb: &TypeBinding,
+        in_fqcn: &str,
+        file: &str,
+        depth: u8,
+    ) -> Option<String> {
         let owner_class = class_of(in_fqcn);
         match tb.kind {
-            BindingKind::Param
-            | BindingKind::Local
-            | BindingKind::Pattern
-            | BindingKind::Field
-            | BindingKind::Return => self.resolve_in_type(&tb.raw_type, owner_class),
+            // Params/locals/patterns live in the site's file — resolve their type
+            // against it, so free-function (module-owner) bindings resolve too.
+            BindingKind::Param | BindingKind::Local | BindingKind::Pattern => {
+                self.resolve_type(&tb.raw_type, file)
+            }
+            // Fields/returns resolve against the *declaring* type's file (inherited
+            // fields live in a supertype's file, not the access site's).
+            BindingKind::Field | BindingKind::Return => {
+                self.resolve_in_type(&tb.raw_type, owner_class)
+            }
             // `var y = x;` — raw_type is another bound name; chase it.
-            BindingKind::Alias => self.receiver_type_inner(in_fqcn, &tb.raw_type, depth + 1),
+            BindingKind::Alias => self.receiver_type_inner(in_fqcn, &tb.raw_type, file, depth + 1),
             // `var x = m(...);` — raw_type is the method name.
             // 1. Check the enclosing class hierarchy (self/free calls).
             // 2. Scan fields of the enclosing class for the method when step 1 fails

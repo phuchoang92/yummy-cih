@@ -541,7 +541,7 @@ impl<'a> EdgeEmitter<'a> {
                 .for_language(effective_lang(pf))
                 .is_self_receiver(receiver)
             {
-                return self.index.receiver_type(&site.in_fqcn, receiver);
+                return self.index.receiver_type(&site.in_fqcn, receiver, &pf.file);
             }
             if starts_uppercase(receiver) {
                 if let Some(fqcn) = self.resolve_type_cached(receiver, &pf.file) {
@@ -550,7 +550,7 @@ impl<'a> EdgeEmitter<'a> {
                     }
                 }
             }
-            return self.index.receiver_type(&site.in_fqcn, receiver);
+            return self.index.receiver_type(&site.in_fqcn, receiver, &pf.file);
         }
 
         if !receiver.contains('.') && receiver.ends_with(')') {

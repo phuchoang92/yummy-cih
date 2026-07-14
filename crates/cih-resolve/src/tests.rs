@@ -251,18 +251,24 @@ fn receiver_type_param_field_and_this() {
     let idx = ResolveIndex::build(&workspace(), &default_registry());
     let scope = "com.acme.OwnerController#handle/1";
     assert_eq!(
-        idx.receiver_type(scope, "svc").as_deref(),
+        idx.receiver_type(scope, "svc", "com/acme/OwnerController.java")
+            .as_deref(),
         Some("com.acme.OwnerService")
     );
     assert_eq!(
-        idx.receiver_type(scope, "service").as_deref(),
+        idx.receiver_type(scope, "service", "com/acme/OwnerController.java")
+            .as_deref(),
         Some("com.acme.OwnerService")
     );
     assert_eq!(
-        idx.receiver_type(scope, "this").as_deref(),
+        idx.receiver_type(scope, "this", "com/acme/OwnerController.java")
+            .as_deref(),
         Some("com.acme.OwnerController")
     );
-    assert_eq!(idx.receiver_type(scope, "unknown"), None);
+    assert_eq!(
+        idx.receiver_type(scope, "unknown", "com/acme/OwnerController.java"),
+        None
+    );
 }
 
 #[test]
@@ -277,8 +283,12 @@ fn local_param_shadows_field() {
     ));
     let idx = ResolveIndex::build(&files, &default_registry());
     assert_eq!(
-        idx.receiver_type("com.acme.OwnerController#handle/1", "service")
-            .as_deref(),
+        idx.receiver_type(
+            "com.acme.OwnerController#handle/1",
+            "service",
+            "com/acme/OwnerController.java"
+        )
+        .as_deref(),
         Some("com.acme.Owner"),
         "a local must shadow the field of the same name"
     );

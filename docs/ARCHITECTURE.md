@@ -164,12 +164,17 @@ resolved `this` to the module), **`type_bindings`** for typed params (`f(u: User
 OOP-TS pattern: `class C { m(u: User) { u.save() } }` → `C#m → User#save`, and `new User(…)` →
 `User#constructor`, including disambiguating same-named classes via the import map.
 
-**Remaining reach limits** (resolver-side, separate follow-ups): a **free-function** param/local does
-not resolve — `resolve_binding` → `resolve_in_type(raw, owner_class)` and a free function's owner is
-the *module* (not a type with a file), so the import map isn't consulted; and `new X()` on a class with
-**no explicit constructor** yields no edge (`resolve_constructor` needs a constructor member).
-`Extends`/`Implements` heritage refs, aliased imports (`X as Y`), namespace/wildcard imports, typed
-class *fields* (member receivers), and CommonJS `require()` binding remain unresolved.
+**Free-function** params/locals resolve too: `receiver_type`/`resolve_binding` take the reference
+site's *file*, and a `Param`/`Local`/`Pattern` binding resolves its type against that file (so a free
+function — whose owner is the module, not a type with a file — still consults the import map). Methods
+are unchanged (the site file == the owner class's file); `Field`/`Return` still resolve against the
+declaring type's file (inherited fields live in a supertype). This benefits every language with free
+functions (TS/Python/Go/…).
+
+**Remaining reach limits** (separate follow-ups): `new X()` on a class with **no explicit constructor**
+yields no edge (`resolve_constructor` needs a constructor member); `Extends`/`Implements` heritage refs,
+aliased imports (`X as Y`), namespace/wildcard imports, typed class *fields* (member receivers), and
+CommonJS `require()` binding remain unresolved.
 
 ### JS/TS DB & ORM access (`DbTable` / `DbQuery`)
 
