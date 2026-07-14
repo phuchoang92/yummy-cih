@@ -177,10 +177,15 @@ or `Generic<…>` base). The resolver resolves each via the import map and build
 `implementors` — so `Extends`/`Implements` graph edges, `super`, MRO, and **inherited-member dispatch**
 (`this.save()` where `save` is on the superclass) all work.
 
+Typed class **fields** resolve member receivers: `public_field_definition`s with a type annotation and
+constructor **parameter properties** (`constructor(private repo: Repo)`) emit `Field` nodes +
+`HasField` edges + `SymbolDef`s carrying `declared_type`, which `field_type_in_hierarchy` reads — so
+`this.repo.find()` (the dominant NestJS/Angular service pattern) resolves the receiver to the field's
+type (import-map-disambiguated), across the class hierarchy.
+
 **Remaining reach limits** (separate follow-ups): `new X()` on a class with **no explicit constructor**
 yields no edge (`resolve_constructor` needs a constructor member); aliased imports (`X as Y`),
-namespace/wildcard imports, typed class *fields* (member receivers), and CommonJS `require()` binding
-remain unresolved.
+namespace/wildcard imports, and CommonJS `require()` binding remain unresolved.
 
 ### JS/TS DB & ORM access (`DbTable` / `DbQuery`)
 

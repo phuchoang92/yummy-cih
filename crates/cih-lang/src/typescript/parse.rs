@@ -1,5 +1,6 @@
 use cih_core::{
-    db_query_inline_id, db_table_id, file_id, function_id, type_id, BindingKind, ContractKind,
+    db_query_inline_id, db_table_id, field_id, file_id, function_id, type_id, BindingKind,
+    ContractKind,
     ContractSite, Edge, EdgeKind, MessagingFramework, Node, NodeId, NodeKind, ParsedFile,
     ParsedUnit, Range, RawImport, RefKind, ReferenceSite, RouteSource, HttpWrapperDef,
     StringConstant, SymbolDef, TypeBinding, UrlPart,
@@ -1093,6 +1094,118 @@ impl Builder {
                     let mut c2 = child.walk();
                     for t in child.named_children(&mut c2) {
                         push(self, t, RefKind::Extends);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Emit a `Field` node + `HasField` edge + `SymbolDef` (with `declared_type`)
+    /// for a typed class field. The resolver's `field_type_in_hierarchy` reads the
+    /// def's `declared_type`, so `this.<field>.method()` resolves the receiver.
+    fn emit_field(
+        &mut self,
+        class_fqn: &str,
+        class_id: &NodeId,
+        name: &str,
+        declared_type: String,
+        range: Range,
+    ) {
+        let id = field_id(class_fqn, name);
+        self.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::Field,
+            name: name.to_string(),
+            qualified_name: Some(format!("{class_fqn}#{name}")),
+            file: self.rel.clone(),
+            range,
+            props: None,
+        });
+        self.edges.push(Edge {
+            src: class_id.clone(),
+            dst: id.clone(),
+            kind: EdgeKind::HasField,
+            confidence: 1.0,
+            reason: "member".into(),
+            props: None,
+        });
+        self.defs.push(SymbolDef {
+            id,
+            kind: NodeKind::Field,
+            fqcn: class_fqn.to_string(),
+            name: name.to_string(),
+            owner: Some(class_id.clone()),
+            range,
+            modifiers: Vec::new(),
+            param_types: Vec::new(),
+            return_type: None,
+            declared_type: Some(declared_type),
+            framework_role: None,
+            complexity: None,
+            body_fingerprint: None,
+            lang_meta: None,
+        });
+    }
+
+    /// Emit typed fields for a class: `public_field_definition` members with a
+    /// type annotation, and constructor **parameter properties**
+    /// (`constructor(private repo: Repo)`, detected by an accessibility modifier).
+    fn emit_class_fields(
+        &mut self,
+        class_node: TsNode<'_>,
+        src: &str,
+        class_fqn: &str,
+        class_id: &NodeId,
+    ) {
+        let Some(body) = class_node.child_by_field_name("body") else {
+            return;
+        };
+        let mut cursor = body.walk();
+        for member in body.named_children(&mut cursor) {
+            match member.kind() {
+                "public_field_definition" => {
+                    let (Some(nm), Some(ty)) = (
+                        member.child_by_field_name("name"),
+                        member
+                            .child_by_field_name("type")
+                            .and_then(|a| type_annotation_name(a, src)),
+                    ) else {
+                        continue;
+                    };
+                    self.emit_field(class_fqn, class_id, &text(nm, src), ty, range_of(member));
+                }
+                "method_definition"
+                    if member
+                        .child_by_field_name("name")
+                        .map(|n| text(n, src))
+                        .as_deref()
+                        == Some("constructor") =>
+                {
+                    let Some(params) = member.child_by_field_name("parameters") else {
+                        continue;
+                    };
+                    let mut pc = params.walk();
+                    for p in params.named_children(&mut pc) {
+                        if !matches!(p.kind(), "required_parameter" | "optional_parameter") {
+                            continue;
+                        }
+                        // A parameter property has an accessibility modifier
+                        // (`private`/`public`/`protected`) → becomes a field.
+                        let mut ic = p.walk();
+                        let is_property = p
+                            .children(&mut ic)
+                            .any(|c| c.kind() == "accessibility_modifier");
+                        let (Some(pat), Some(ty)) = (
+                            p.child_by_field_name("pattern").filter(|_| is_property),
+                            p.child_by_field_name("type")
+                                .and_then(|a| type_annotation_name(a, src)),
+                        ) else {
+                            continue;
+                        };
+                        if pat.kind() == "identifier" {
+                            self.emit_field(class_fqn, class_id, &text(pat, src), ty, range_of(p));
+                        }
                     }
                 }
                 _ => {}
@@ -2755,7 +2868,9 @@ fn walk(
 
             let stereotype = builder.class_stereotype(node, src, &decorators);
             let fqn = builder.emit_class(node, src, &class_name, stereotype.as_deref());
-            builder.emit_heritage(node, src, &fqn, &type_id(NodeKind::Class, &fqn));
+            let class_id = type_id(NodeKind::Class, &fqn);
+            builder.emit_heritage(node, src, &fqn, &class_id);
+            builder.emit_class_fields(node, src, &fqn, &class_id);
 
             // TypeORM / sequelize-typescript entity: `@Entity('t')` / `@Table('t')`
             // → DbTable (arg overrides the class name).
@@ -3286,6 +3401,37 @@ class UserService {
                 && calls.iter().any(|(m, u)| m == "POST" && u == "/api/users"),
             "angular HttpClient calls missing: {calls:?}"
         );
+    }
+
+    #[test]
+    fn typed_fields_and_ctor_param_properties() {
+        let src = r#"class Svc {
+  private field: Repo;
+  http: HttpClient;
+  x = 1;
+  constructor(private param: Mailer, plain: number) {}
+}
+"#;
+        let unit = parse_typescript_file("src/svc.ts", src).expect("parses");
+        let fields: Vec<(String, Option<String>)> = unit
+            .parsed_file
+            .defs
+            .iter()
+            .filter(|d| d.kind == cih_core::NodeKind::Field)
+            .map(|d| (d.name.clone(), d.declared_type.clone()))
+            .collect();
+        let has = |n: &str, t: &str| {
+            fields
+                .iter()
+                .any(|(fn_, ft)| fn_ == n && ft.as_deref() == Some(t))
+        };
+        assert!(has("field", "Repo"), "typed field: {fields:?}");
+        assert!(has("http", "HttpClient"), "typed field: {fields:?}");
+        assert!(has("param", "Mailer"), "ctor param property: {fields:?}");
+        // Untyped field `x = 1` → no field def (no resolvable type).
+        assert!(!fields.iter().any(|(n, _)| n == "x"), "{fields:?}");
+        // Plain ctor param `plain: number` (no accessibility modifier) → not a field.
+        assert!(!fields.iter().any(|(n, _)| n == "plain"), "{fields:?}");
     }
 
     #[test]
@@ -3848,6 +3994,7 @@ export const CREATE = gql`mutation { createPost(title: "x") { id } }`;
         );
     }
 }
+
 
 
 
