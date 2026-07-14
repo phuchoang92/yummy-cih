@@ -10,7 +10,7 @@
 //! the id is not concatenated ad-hoc into the match pattern. Bulk writes inline a
 //! generated `UNWIND` list literal (our own data, fully escaped).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -285,6 +285,34 @@ impl FalkorStore {
             nodes: nodes.len() as u64,
             edges: edges.len() as u64,
         })
+    }
+
+    /// Handlers that serve `route`, found via the **inverse** of the stored
+    /// handler→route `HANDLES_ROUTE` edge. Returns empty when `route` is not a
+    /// route node (nothing `HANDLES_ROUTE`s *to* a method), so this doubles as a
+    /// cheap route/non-route discriminator for `flow_downstream`.
+    async fn route_handler_nodes(&self, route: &NodeId) -> Result<Vec<FlowNode>> {
+        let q = format!(
+            "CYPHER id={id} \
+             MATCH (:Symbol {{id:$id}})<-[:HANDLES_ROUTE]-(h:Symbol) \
+             RETURN h.id, h.kind, h.name, h.qualifiedName, h.file \
+             ORDER BY h.name LIMIT 100",
+            id = cstr(route.as_str())
+        );
+        let rows = self.rows(&q).await?;
+        Ok(rows
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| FlowNode {
+                id: NodeId::new(r[0].clone()),
+                kind: NodeKind::from_label(r[1].as_str()),
+                name: r[2].clone(),
+                qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
+                file: r.get(4).cloned().unwrap_or_default(),
+                depth: 1,
+                parent_id: None,
+            })
+            .collect())
     }
 }
 
@@ -864,6 +892,63 @@ impl GraphStore for FalkorStore {
 
     async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowHop>> {
         let d = max_depth.clamp(1, 10);
+
+        // A Route node has no *outgoing* flow edges — `HANDLES_ROUTE` is stored
+        // handler→route. When the entry is a route, hop route→handler via the
+        // inverse `HANDLES_ROUTE` first, then trace downstream from each handler
+        // (recursion terminates: a handler is a method, so it has no inverse
+        // handlers and falls through to the plain method walk below).
+        let handlers = self.route_handler_nodes(entry).await?;
+        if !handlers.is_empty() {
+            let route_name = entry
+                .as_str()
+                .strip_prefix("Route:")
+                .unwrap_or(entry.as_str())
+                .to_string();
+            let mut hops: Vec<FlowHop> = vec![FlowHop {
+                node: FlowNode {
+                    id: entry.clone(),
+                    kind: NodeKind::Route,
+                    name: route_name,
+                    qualified_name: None,
+                    file: String::new(),
+                    depth: 0,
+                    parent_id: None,
+                },
+                via: None,
+            }];
+            let mut seen: HashSet<String> = HashSet::new();
+            seen.insert(entry.as_str().to_string());
+            for mut handler in handlers {
+                if !seen.insert(handler.id.as_str().to_string()) {
+                    continue;
+                }
+                handler.depth = 1;
+                handler.parent_id = Some(entry.clone());
+                let handler_id = handler.id.clone();
+                hops.push(FlowHop {
+                    node: handler,
+                    via: Some(FlowEdge {
+                        kind: "HANDLES_ROUTE".to_string(),
+                        call_sites: Vec::new(),
+                    }),
+                });
+                // Downstream from the handler; skip its own root hop (index 0 —
+                // already emitted as the depth-1 handler above) and shift each
+                // remaining hop one level past the route.
+                let sub = self.flow_downstream(&handler_id, d).await?;
+                for mut hop in sub.into_iter().skip(1) {
+                    if !seen.insert(hop.node.id.as_str().to_string()) {
+                        continue;
+                    }
+                    hop.node.depth += 1;
+                    hops.push(hop);
+                }
+            }
+            hops.truncate(100);
+            return Ok(hops);
+        }
+
         // Phase 1: BFS to get node order, depth, and parent relationships.
         let q = format!(
             "CYPHER id={id} \
