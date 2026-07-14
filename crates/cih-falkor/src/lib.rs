@@ -128,9 +128,14 @@ impl FalkorStore {
     }
 
     pub async fn drop_graph(&self) -> Result<()> {
-        self.graph_command("GRAPH.DELETE", &[&self.graph_key])
-            .await?;
-        Ok(())
+        match self.graph_command("GRAPH.DELETE", &[&self.graph_key]).await {
+            Ok(_) => Ok(()),
+            // GRAPH.DELETE on a nonexistent key errors "Invalid graph operation on
+            // empty key". Dropping an absent graph is a no-op success — this makes
+            // `drop_graph` idempotent (e.g. after `publish_to` RENAMEs staging away).
+            Err(GraphStoreError::Backend(msg)) if msg.contains("empty key") => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Result rows (the second element of a GRAPH.QUERY reply) as stringified
