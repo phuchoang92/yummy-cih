@@ -470,12 +470,17 @@ fn namespace_import_records_alias() {
         .iter()
         .map(|imp| (imp.raw.clone(), imp.alias.clone()))
         .collect();
+    // Each import keeps its module-path RawImport (namespace records the alias);
+    // relative default/named imports also emit a module-qualified RawImport
+    // (`<resolved-module>.<Local>`) so `build_import_map` can key the symbol.
     assert_eq!(
         pairs,
         vec![
             ("./apiClient".to_string(), Some("api".to_string())),
             ("./d".to_string(), None),
+            ("src/d.def".to_string(), None),
             ("./n".to_string(), None),
+            ("src/n.named".to_string(), None),
         ]
     );
 }

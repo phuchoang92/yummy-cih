@@ -1427,11 +1427,17 @@ impl Builder {
 
     fn emit_import(&mut self, node: TsNode<'_>, src: &str) {
         // import_statement → `from` "path" + named/namespace/default imports.
-        // The module path becomes the raw import; a namespace import's local
-        // binding (`import * as api from './m'`) is recorded as the alias —
-        // named and default bindings are not captured.
+        // The module-path `RawImport` (kept for framework detection + the
+        // namespace-alias wrapper path) is always emitted. Additionally, for a
+        // RELATIVE specifier, each *non-aliased* named import and the default
+        // import gets a resolvable module-qualified `RawImport`
+        // (`<resolved-module>.<Local>`) so `build_import_map` keys the local
+        // symbol to the target type's FQCN — the JS/TS analog of Java's qualified
+        // imports (aliased names are skipped; `build_import_map` can't key a local
+        // alias to a differently-named export).
         let mut from_path = None;
         let mut alias = None;
+        let mut locals: Vec<String> = Vec::new();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             match child.kind() {
@@ -1439,19 +1445,39 @@ impl Builder {
                 "import_clause" => {
                     let mut clause_cursor = child.walk();
                     for clause_child in child.named_children(&mut clause_cursor) {
-                        if clause_child.kind() == "namespace_import" {
-                            let mut ns_cursor = clause_child.walk();
-                            alias = clause_child
-                                .named_children(&mut ns_cursor)
-                                .find(|inner| inner.kind() == "identifier")
-                                .map(|inner| text(inner, src));
+                        match clause_child.kind() {
+                            // `import Foo from './m'` — default binding local name.
+                            "identifier" => locals.push(text(clause_child, src)),
+                            "namespace_import" => {
+                                let mut ns_cursor = clause_child.walk();
+                                alias = clause_child
+                                    .named_children(&mut ns_cursor)
+                                    .find(|inner| inner.kind() == "identifier")
+                                    .map(|inner| text(inner, src));
+                            }
+                            "named_imports" => {
+                                let mut ni = clause_child.walk();
+                                for spec in clause_child.named_children(&mut ni) {
+                                    if spec.kind() != "import_specifier" {
+                                        continue;
+                                    }
+                                    // Aliased (`X as Y`) can't be keyed cleanly — skip.
+                                    if spec.child_by_field_name("alias").is_some() {
+                                        continue;
+                                    }
+                                    if let Some(name) = spec.child_by_field_name("name") {
+                                        locals.push(text(name, src));
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
                 _ => {}
             }
         }
-        let raw = from_path.unwrap_or_else(|| text(node, src));
+        let raw = from_path.clone().unwrap_or_else(|| text(node, src));
         self.imports.push(RawImport {
             raw,
             is_static: false,
@@ -1459,6 +1485,25 @@ impl Builder {
             alias,
             range: range_of(node),
         });
+
+        // Resolvable per-symbol imports for relative specifiers only (external
+        // package symbols can't map to in-repo FQCNs).
+        if let Some(spec) = from_path.filter(|s| s.starts_with('.')) {
+            if let Some(module) = crate::constant_resolver::resolve_relative_module(
+                std::path::Path::new(&self.rel),
+                &spec,
+            ) {
+                for local in locals {
+                    self.imports.push(RawImport {
+                        raw: format!("{module}.{local}"),
+                        is_static: false,
+                        is_wildcard: false,
+                        alias: None,
+                        range: range_of(node),
+                    });
+                }
+            }
+        }
     }
 
     fn emit_call_reference(&mut self, node: TsNode<'_>, src: &str) {
@@ -3033,6 +3078,38 @@ class UserService {
     }
 
     #[test]
+    fn relative_named_imports_emit_resolvable_qualified_raws() {
+        let src = r#"import { OrderService, Foo as F } from './services/order';
+import def from './x';
+import ext from 'express';
+import * as api from './client';
+"#;
+        let unit = parse_typescript_file("src/app/caller.ts", src).expect("parses");
+        let raws: Vec<&str> = unit.parsed_file.imports.iter().map(|i| i.raw.as_str()).collect();
+        // Relative non-aliased named import → module-qualified FQCN (build_import_map
+        // then keys `OrderService` → this).
+        assert!(
+            raws.contains(&"src/app/services/order.OrderService"),
+            "named import not qualified: {raws:?}"
+        );
+        // Default import → qualified by local name.
+        assert!(raws.contains(&"src/app/x.def"), "default import not qualified: {raws:?}");
+        // Aliased (`Foo as F`) is skipped (can't key a local alias cleanly).
+        assert!(
+            !raws.iter().any(|r| r.ends_with(".F") || r.ends_with(".Foo")),
+            "aliased import should be skipped: {raws:?}"
+        );
+        // External package: module path kept, no synthetic symbol FQCN.
+        assert!(raws.contains(&"express"));
+        assert!(
+            !raws.iter().any(|r| r.starts_with("express.")),
+            "external symbols must not be qualified: {raws:?}"
+        );
+        // Namespace import stays a plain module path (alias handled separately).
+        assert!(raws.contains(&"./client"));
+    }
+
+    #[test]
     fn in_file_const_template_folds_param_stays_dynamic() {
         // `${apiBase}` (a same-file module const) → ConstRef (folds at resolve);
         // `${userId}` (a param) → Dynamic → stays `{*}`.
@@ -3480,6 +3557,7 @@ export const CREATE = gql`mutation { createPost(title: "x") { id } }`;
         );
     }
 }
+
 
 
 

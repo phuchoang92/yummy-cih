@@ -144,6 +144,25 @@ Deliberately tight recognizers — false positives poison cross-repo matching:
   to the **file id**. This degrades the *first leg* of cross-repo tracing
   (entry resolution), not just display granularity — pinned by test.
 
+### JS/TS import binding → type resolution
+
+`ResolveIndex.import_map` (the live import→FQCN table; the `LanguageResolver::resolve_import`
+trait method is currently unused/dead) keys on `RawImport.raw.rsplit('.')`, i.e. it expects a
+*qualified* name like Java's `import com.example.Order`. For TS/JS a `RawImport` used to carry only
+the module *path* (`./order`), so no symbol ever got a usable key. The parser now additionally emits,
+for each **non-aliased named import** and the **default import** of a *relative* specifier, a
+module-qualified `RawImport` (`<resolved-module>.<Local>`, e.g. `import { OrderService } from './order'`
+in `src/app/x.ts` → `src/app/order.OrderService`). `build_import_map` then keys `OrderService` → the
+target class FQCN, so imported types resolve **and disambiguate** (the fallback at
+`index.rs` resolve_type already handles *unique* simple names, so this mainly fixes **ambiguous**
+names and raises confidence to the explicit-import tier).
+
+**Reach is bounded by other parser gaps** (larger, separate levers): the TS parser emits no `Ctor`
+reference for `new X()`, no `type_bindings` for typed params (`u: User` → `u.save()`), and no
+`Extends`/`Implements` heritage refs — so today the binding fix mainly improves `Imports` edges and
+decorated-DI `TypeRef`s; deep call resolution needs those companion emitters. Aliased imports
+(`X as Y`), namespace/wildcard imports, and CommonJS `require()` binding remain unresolved.
+
 ### JS/TS DB & ORM access (`DbTable` / `DbQuery`)
 
 The parser emits `DbTable`/`DbQuery` nodes + `ExecutesQuery` (caller→query) and
