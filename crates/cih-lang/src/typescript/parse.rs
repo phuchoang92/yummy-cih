@@ -899,6 +899,24 @@ fn is_di_provider(stereotype: Option<&str>) -> bool {
     )
 }
 
+/// Simple type name from a heritage clause value: `A` → A, `React.Component` → B
+/// (last property), `Base<T>` → Base. The resolver keys on this name.
+fn heritage_type_name(node: TsNode<'_>, src: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" | "type_identifier" => Some(text(node, src)),
+        "member_expression" => node.child_by_field_name("property").map(|p| text(p, src)),
+        "generic_type" => {
+            let mut c = node.walk();
+            let base = node
+                .named_children(&mut c)
+                .find(|n| matches!(n.kind(), "type_identifier" | "identifier" | "member_expression"))
+                .and_then(|n| heritage_type_name(n, src));
+            base
+        }
+        _ => None,
+    }
+}
+
 /// Simple type name from a `type_annotation` node (`: User` → `User`,
 /// `: Repository<User>` → `Repository`); `None` for primitives/unions/etc.
 fn type_annotation_name(annotation: TsNode<'_>, src: &str) -> Option<String> {
@@ -1021,7 +1039,68 @@ impl Builder {
         fqn
     }
 
-    fn emit_interface(&mut self, node: TsNode<'_>, _src: &str, name: &str) {
+    /// Emit `Extends`/`Implements` reference sites for a class/interface's heritage
+    /// clauses (`class B extends A implements I, J`, `interface X extends Y`). The
+    /// resolver resolves each supertype name (via the import map) and builds the
+    /// `supertypes`/`implementors` index that powers inherited-member resolution,
+    /// `super`, and MRO. `subtype_id` is the edge source; `subtype_fqn` is `in_fqcn`.
+    fn emit_heritage(
+        &mut self,
+        node: TsNode<'_>,
+        src: &str,
+        subtype_fqn: &str,
+        subtype_id: &NodeId,
+    ) {
+        let push = |this: &mut Self, ty: TsNode<'_>, kind: RefKind| {
+            if let Some(name) = heritage_type_name(ty, src) {
+                this.reference_sites.push(ReferenceSite {
+                    name,
+                    receiver: None,
+                    kind,
+                    arity: None,
+                    range: range_of(ty),
+                    in_fqcn: subtype_fqn.to_string(),
+                    in_callable: subtype_id.clone(),
+                    arg_texts: Vec::new(),
+                });
+            }
+        };
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                // Class: `class_heritage` → extends_clause + implements_clause.
+                "class_heritage" => {
+                    let mut c2 = child.walk();
+                    for h in child.named_children(&mut c2) {
+                        match h.kind() {
+                            "extends_clause" => {
+                                if let Some(v) = h.child_by_field_name("value") {
+                                    push(self, v, RefKind::Extends);
+                                }
+                            }
+                            "implements_clause" => {
+                                let mut c3 = h.walk();
+                                for t in h.named_children(&mut c3) {
+                                    push(self, t, RefKind::Implements);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Interface: `extends_type_clause` → one or more `type` fields.
+                "extends_type_clause" => {
+                    let mut c2 = child.walk();
+                    for t in child.named_children(&mut c2) {
+                        push(self, t, RefKind::Extends);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn emit_interface(&mut self, node: TsNode<'_>, src: &str, name: &str) {
         let fqn = format!("{}.{}", self.module, name);
         let id = type_id(NodeKind::Interface, &fqn);
         let range = range_of(node);
@@ -1042,6 +1121,7 @@ impl Builder {
             reason: "file-type".into(),
             props: None,
         });
+        self.emit_heritage(node, src, &fqn, &id);
         self.defs.push(SymbolDef {
             id,
             kind: NodeKind::Interface,
@@ -2675,6 +2755,7 @@ fn walk(
 
             let stereotype = builder.class_stereotype(node, src, &decorators);
             let fqn = builder.emit_class(node, src, &class_name, stereotype.as_deref());
+            builder.emit_heritage(node, src, &fqn, &type_id(NodeKind::Class, &fqn));
 
             // TypeORM / sequelize-typescript entity: `@Entity('t')` / `@Table('t')`
             // → DbTable (arg overrides the class name).
@@ -3205,6 +3286,31 @@ class UserService {
                 && calls.iter().any(|(m, u)| m == "POST" && u == "/api/users"),
             "angular HttpClient calls missing: {calls:?}"
         );
+    }
+
+    #[test]
+    fn class_and_interface_heritage_refs() {
+        let src = r#"export class Admin extends User implements Named, Other {}
+interface I extends Base {}
+class W extends React.Component<P> {}
+"#;
+        let unit = parse_typescript_file("src/app.ts", src).expect("parses");
+        let refs: Vec<(cih_core::RefKind, String, String)> = unit
+            .parsed_file
+            .reference_sites
+            .iter()
+            .filter(|r| matches!(r.kind, cih_core::RefKind::Extends | cih_core::RefKind::Implements))
+            .map(|r| (r.kind, r.name.clone(), r.in_fqcn.clone()))
+            .collect();
+        let has = |k: cih_core::RefKind, n: &str, f: &str| {
+            refs.iter().any(|(rk, rn, rf)| *rk == k && rn == n && rf == f)
+        };
+        assert!(has(cih_core::RefKind::Extends, "User", "src/app.Admin"), "{refs:?}");
+        assert!(has(cih_core::RefKind::Implements, "Named", "src/app.Admin"), "{refs:?}");
+        assert!(has(cih_core::RefKind::Implements, "Other", "src/app.Admin"), "{refs:?}");
+        assert!(has(cih_core::RefKind::Extends, "Base", "src/app.I"), "{refs:?}");
+        // Member-expression + generic base → simple name.
+        assert!(has(cih_core::RefKind::Extends, "Component", "src/app.W"), "{refs:?}");
     }
 
     #[test]
@@ -3742,6 +3848,7 @@ export const CREATE = gql`mutation { createPost(title: "x") { id } }`;
         );
     }
 }
+
 
 
 

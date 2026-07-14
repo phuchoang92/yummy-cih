@@ -171,10 +171,16 @@ are unchanged (the site file == the owner class's file); `Field`/`Return` still 
 declaring type's file (inherited fields live in a supertype). This benefits every language with free
 functions (TS/Python/Go/…).
 
+Class/interface **heritage** is emitted too: `class B extends A implements I, J` / `interface X extends Y`
+→ `Extends`/`Implements` reference sites (supertype name from an identifier, `member.Expr` last-property,
+or `Generic<…>` base). The resolver resolves each via the import map and builds `supertypes`/
+`implementors` — so `Extends`/`Implements` graph edges, `super`, MRO, and **inherited-member dispatch**
+(`this.save()` where `save` is on the superclass) all work.
+
 **Remaining reach limits** (separate follow-ups): `new X()` on a class with **no explicit constructor**
-yields no edge (`resolve_constructor` needs a constructor member); `Extends`/`Implements` heritage refs,
-aliased imports (`X as Y`), namespace/wildcard imports, typed class *fields* (member receivers), and
-CommonJS `require()` binding remain unresolved.
+yields no edge (`resolve_constructor` needs a constructor member); aliased imports (`X as Y`),
+namespace/wildcard imports, typed class *fields* (member receivers), and CommonJS `require()` binding
+remain unresolved.
 
 ### JS/TS DB & ORM access (`DbTable` / `DbQuery`)
 
