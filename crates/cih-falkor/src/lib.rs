@@ -916,10 +916,11 @@ impl GraphStore for FalkorStore {
             "CYPHER id={id} \
              MATCH p=(start:Symbol {{id:$id}})\
              -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO*1..{d}]->(m:Symbol) \
-             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode \
+             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode, \
+                  type(relationships(p)[length(p)-1]) AS etype \
              ORDER BY m.id, len \
-             WITH m, collect(pnode)[0] AS parent, min(len) AS depth \
-             RETURN m.id, m.kind, m.name, m.qualifiedName, m.file, depth, parent.id \
+             WITH m, collect(pnode)[0] AS parent, collect(etype)[0] AS etype, min(len) AS depth \
+             RETURN m.id, m.kind, m.name, m.qualifiedName, m.file, depth, parent.id, etype \
              ORDER BY depth, m.name LIMIT 100",
             id = cstr(entry.as_str())
         );
@@ -939,6 +940,17 @@ impl GraphStore for FalkorStore {
                     .get(6)
                     .filter(|s| !s.is_empty())
                     .map(|s| NodeId::new(s.clone())),
+            })
+            .collect();
+
+        // The relationship type of each node's incoming (min-depth) edge, so the
+        // trace labels the real hop kind (EXTERNAL_CALL / PUBLISHES_EVENT / …)
+        // instead of a blanket "CALLS".
+        let edge_kind: HashMap<String, String> = rows
+            .iter()
+            .filter_map(|r| {
+                let etype = r.get(7).filter(|s| !s.is_empty())?;
+                Some((r[0].clone(), etype.clone()))
             })
             .collect();
 
@@ -1011,10 +1023,11 @@ impl GraphStore for FalkorStore {
             let via = if let Some(ref parent_id) = node.parent_id {
                 let key = (parent_id.as_str().to_string(), node.id.as_str().to_string());
                 let call_sites = call_sites_map.remove(&key).unwrap_or_default();
-                Some(FlowEdge {
-                    kind: "CALLS".to_string(),
-                    call_sites,
-                })
+                let kind = edge_kind
+                    .get(node.id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| "CALLS".to_string());
+                Some(FlowEdge { kind, call_sites })
             } else {
                 None
             };
