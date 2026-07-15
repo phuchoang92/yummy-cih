@@ -13,9 +13,10 @@ use tree_sitter::Node as TsNode;
 
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_typescript};
 
+use super::helpers::{call_arity, range_of, text, unquote};
 use super::parse::{
-    call_arity, class_extends_react_component, heritage_type_name, param_type_name, range_of,
-    route_source_label, text, type_annotation_name, unquote,
+    class_extends_react_component, heritage_type_name, param_type_name, route_source_label,
+    type_annotation_name,
 };
 
 #[derive(Default)]
