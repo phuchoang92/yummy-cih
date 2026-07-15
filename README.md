@@ -5,6 +5,10 @@ architecture questions about structure, call chains, routes, DB access, communit
 It also generates a role-based wiki (PO / BA / Dev pages) from those artifacts — with optional
 LLM enrichment.
 
+> **Contributing / want to understand the code?** Start with
+> [docs/DEVELOPERS.md](docs/DEVELOPERS.md) (how it works + which crate owns what),
+> then [CONTRIBUTING.md](CONTRIBUTING.md). This README is the *user* guide.
+
 ---
 
 ## Prerequisites

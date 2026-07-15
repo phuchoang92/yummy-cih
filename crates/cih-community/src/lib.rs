@@ -1,3 +1,12 @@
+//! Community detection — the `discover` stage that groups symbols into feature
+//! modules.
+//!
+//! Given the graph's nodes + edges, [`detect_communities`] runs Leiden clustering
+//! (with a package-based fallback for very large graphs) to partition symbols into
+//! cohesive communities, and traces named execution processes. The output feeds
+//! the wiki (feature pages) and the `communities` MCP tool. Pure compute over
+//! `cih-core` types — no graph-store dependency.
+
 pub mod bfs;
 mod cohesion;
 mod constants;
