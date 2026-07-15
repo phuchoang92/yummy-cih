@@ -100,3 +100,79 @@ fn demand_driven_include_emits_only_requested_classes() {
     ));
     assert_eq!(out.classes, 1);
 }
+
+// ── Robustness: bad input must skip, never panic or abort the whole JAR ──────
+
+use std::io::Write;
+
+fn unique_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "cih-jar-robust-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Write a jar (zip) with the given entries to a temp path and return it.
+fn write_jar(entries: &[(&str, &[u8])]) -> (PathBuf, PathBuf) {
+    let dir = unique_dir();
+    let path = dir.join("test.jar");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zw = zip::ZipWriter::new(file);
+    for (name, bytes) in entries {
+        zw.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(bytes).unwrap();
+    }
+    zw.finish().unwrap();
+    (path, dir)
+}
+
+#[test]
+fn nonexistent_jar_path_errors() {
+    let err = JarApiExtractor::all()
+        .extract(&PathBuf::from("/no/such/file.jar"))
+        .unwrap_err();
+    assert!(err.to_string().contains("failed to open jar"), "{err}");
+}
+
+#[test]
+fn non_zip_file_errors() {
+    let dir = unique_dir();
+    let path = dir.join("garbage.jar");
+    std::fs::write(&path, b"this is not a zip archive").unwrap();
+    let err = JarApiExtractor::all().extract(&path).unwrap_err();
+    assert!(err.to_string().contains("failed to read jar"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn malformed_class_is_skipped_not_fatal() {
+    // A .class entry that is not a valid class file must be recorded as skipped,
+    // and extraction must still succeed (the documented "never fatal" contract).
+    let (path, dir) = write_jar(&[("com/acme/Bad.class", b"\xca\xfe\xba\xbe not really")]);
+    let out = JarApiExtractor::all().extract(&path).unwrap();
+    assert_eq!(out.nodes.len(), 0, "no nodes from a bad class");
+    assert_eq!(out.classes, 0);
+    assert_eq!(out.skipped.len(), 1, "the bad class is recorded as skipped");
+    assert_eq!(out.skipped[0].entry, "com/acme/Bad.class");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn non_class_entries_are_ignored() {
+    // Non-`.class` entries are silently ignored — not emitted, not skipped.
+    let (path, dir) = write_jar(&[
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0"),
+        ("com/acme/readme.txt", b"hello"),
+    ]);
+    let out = JarApiExtractor::all().extract(&path).unwrap();
+    assert!(out.nodes.is_empty());
+    assert!(out.skipped.is_empty(), "non-class entries are not skips");
+    std::fs::remove_dir_all(&dir).ok();
+}

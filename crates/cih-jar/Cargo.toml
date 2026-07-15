@@ -11,3 +11,6 @@ cafebabe.workspace = true
 zip.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+zip.workspace = true
