@@ -1,5 +1,5 @@
-use super::cstr;
 use super::{FalkorStore, GraphStoreError};
+use crate::serialize::cstr;
 use std::time::Duration;
 
 #[test]
@@ -90,7 +90,9 @@ fn load_wait_budget_defaults_to_600s() {
 // `flow_downstream` fix: given a route id and its handlers (each already paired
 // with its own downstream walk), it prepends the reversed `HANDLES_ROUTE` hop.
 // It touches no I/O, so these stay hermetic.
-use super::{assemble_route_flow, FlowEdge, FlowHop, FlowNode, NodeId, NodeKind};
+use crate::query::assemble_route_flow;
+use cih_core::{NodeId, NodeKind};
+use cih_graph_store::{FlowEdge, FlowHop, FlowNode};
 
 fn fnode(id: &str, name: &str, depth: u32, parent: Option<&str>) -> FlowNode {
     FlowNode {

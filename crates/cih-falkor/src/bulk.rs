@@ -21,7 +21,7 @@ use std::io;
 
 use cih_core::{Edge, EdgeKind, Node};
 
-use super::{prop_f64, prop_str, prop_u64};
+use crate::serialize::{prop_f64, prop_str, prop_u64};
 
 const T_NULL: u8 = 0;
 const T_DOUBLE: u8 = 2;
