@@ -6,6 +6,9 @@ use tree_sitter::{Language, Node as TsNode, Query};
 use crate::{LanguageProvider, SourceScan, Stereotype};
 
 pub mod parse;
+mod builder;
+mod helpers;
+mod http_clients;
 
 pub const PY_SCOPE_QUERY: &str = include_str!("query.scm");
 
