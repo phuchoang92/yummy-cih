@@ -2401,3 +2401,146 @@ fn aliased_requests_dotted_callee_drops() {
         .iter()
         .all(|n| n.kind != NodeKind::ExternalEndpoint));
 }
+
+// ── CommonJS `require()` resolution ───────────────────────────────────────────
+
+/// Build a JS `ParsedFile` mirroring what the TS/JS parser emits for a CommonJS
+/// module: top-level functions keyed by (module-path container, name).
+fn js_file(
+    rel: &str,
+    defs: Vec<SymbolDef>,
+    imports: Vec<RawImport>,
+    reference_sites: Vec<ReferenceSite>,
+    type_bindings: Vec<TypeBinding>,
+) -> ParsedFile {
+    ParsedFile {
+        file: rel.into(),
+        language: String::new(),
+        package: None,
+        defs,
+        imports,
+        reference_sites,
+        type_bindings,
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: Vec::new(),
+    }
+}
+
+fn static_import(raw: &str) -> RawImport {
+    RawImport {
+        raw: raw.into(),
+        is_static: true,
+        is_wildcard: false,
+        alias: None,
+        range: Range::default(),
+    }
+}
+
+#[test]
+fn commonjs_require_namespace_and_free_calls_emit_calls_edges() {
+    // Callee module `services/users` with two top-level functions.
+    let service = js_file(
+        "services/users.js",
+        vec![
+            method_def("services/users", "register", &["Object"], None),
+            method_def("services/users", "fetchUserBy", &["Object"], None),
+        ],
+        vec![],
+        vec![],
+        vec![],
+    );
+
+    let handle = method_id("controllers/userController", "handle", 1);
+    let controller = js_file(
+        "controllers/userController.js",
+        vec![method_def(
+            "controllers/userController",
+            "handle",
+            &["Object"],
+            None,
+        )],
+        // `const { fetchUserBy } = require('./users')` → static per-symbol import.
+        vec![static_import("services/users.fetchUserBy")],
+        vec![
+            // Form 1 — `const svc = require('./users'); svc.register(x)`.
+            ref_site(
+                "controllers/userController#handle/1",
+                handle.clone(),
+                RefKind::Call,
+                Some("svc"),
+                "register",
+                Some(1),
+            ),
+            // Form 2 free call — `fetchUserBy(x)`.
+            ref_site(
+                "controllers/userController#handle/1",
+                handle.clone(),
+                RefKind::Call,
+                None,
+                "fetchUserBy",
+                Some(1),
+            ),
+        ],
+        // Module-scoped `ModuleRef` binding — visible file-wide via the fallback.
+        vec![binding(
+            "svc",
+            "services/users",
+            BindingKind::ModuleRef,
+            "controllers/userController",
+            1,
+        )],
+    );
+
+    let out = resolve_edges(&[service, controller]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == handle
+            && e.dst == method_id("services/users", "register", 1)),
+        "svc.register(x) should resolve to services/users.register via the ModuleRef binding"
+    );
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == handle
+            && e.dst == method_id("services/users", "fetchUserBy", 1)),
+        "fetchUserBy(x) free call should resolve via the static per-symbol import"
+    );
+}
+
+#[test]
+fn es_named_import_free_call_resolves_via_static_twin() {
+    // ES `import { greet } from './lib'; greet()` — the free call resolves via the
+    // static-import twin that `emit_import` now synthesizes alongside the type copy.
+    let lib = js_file(
+        "src/lib.js",
+        vec![method_def("src/lib", "greet", &[], None)],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let caller = method_id("src/app", "main", 0);
+    let app = js_file(
+        "src/app.js",
+        vec![method_def("src/app", "main", &[], None)],
+        vec![static_import("src/lib.greet")],
+        vec![ref_site(
+            "src/app#main/0",
+            caller.clone(),
+            RefKind::Call,
+            None,
+            "greet",
+            Some(0),
+        )],
+        vec![],
+    );
+
+    let out = resolve_edges(&[lib, app]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == caller
+            && e.dst == method_id("src/lib", "greet", 0)),
+        "greet() should resolve to src/lib.greet via the static import twin"
+    );
+}

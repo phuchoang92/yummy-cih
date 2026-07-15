@@ -60,6 +60,8 @@ fn binding_rank(kind: BindingKind) -> u8 {
     match kind {
         BindingKind::Param => 6,
         BindingKind::Local => 5,
+        // `const x = require(...)` — same tier as an explicit local.
+        BindingKind::ModuleRef => 5,
         BindingKind::Pattern => 4,
         BindingKind::Field => 3,
         BindingKind::CallResult => 2,

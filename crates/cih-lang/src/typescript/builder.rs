@@ -767,9 +767,21 @@ impl Builder {
                 &spec,
             ) {
                 for local in locals {
+                    let raw = format!("{module}.{local}");
+                    // Non-static copy: keys `build_import_map` so the local resolves
+                    // as a *type* (`new Foo()`, `x: Foo`, `extends Foo`).
                     self.imports.push(RawImport {
-                        raw: format!("{module}.{local}"),
+                        raw: raw.clone(),
                         is_static: false,
+                        is_wildcard: false,
+                        alias: None,
+                        range: range_of(node),
+                    });
+                    // Static copy: feeds `find_static_imported_member` so a bare
+                    // *free call* `foo()` to a named import also emits a CALLS edge.
+                    self.imports.push(RawImport {
+                        raw,
+                        is_static: true,
                         is_wildcard: false,
                         alias: None,
                         range: range_of(node),
@@ -777,6 +789,120 @@ impl Builder {
                 }
             }
         }
+    }
+
+    /// Emit resolver hints for CommonJS `require()` binding forms in a
+    /// `variable_declarator`, so cross-module calls through `require` resolve to
+    /// CALLS edges — the JS analog of `emit_import`'s per-symbol synthesis:
+    ///   * `const x = require('./m')`        → `ModuleRef` binding; `x.method()`
+    ///     resolves via the module path (the callee's function-container FQCN).
+    ///   * `const { a, b } = require('./m')`  → a static `RawImport` `<m>.<name>`
+    ///     per shorthand key; free call `a()` resolves via `find_static_imported_member`.
+    ///   * `const f = require('./m').foo`      → a static `RawImport` `<m>.foo`; free
+    ///     call `f()` resolves when the local name matches the member (`f == foo`).
+    ///
+    /// Only relative specifiers resolve — external packages can't map to in-repo FQCNs.
+    pub(super) fn emit_require_binding(
+        &mut self,
+        declarator: TsNode<'_>,
+        enclosing_fn: Option<&NodeId>,
+        src: &str,
+    ) {
+        let Some(value) = declarator.child_by_field_name("value") else {
+            return;
+        };
+        // `require('./m')` directly, or `require('./m').member`.
+        let (module, member): (String, Option<String>) = match value.kind() {
+            "call_expression" => match self.require_module(value, src) {
+                Some(m) => (m, None),
+                None => return,
+            },
+            "member_expression" => {
+                let Some(obj) = value.child_by_field_name("object") else {
+                    return;
+                };
+                if obj.kind() != "call_expression" {
+                    return;
+                }
+                match self.require_module(obj, src) {
+                    Some(m) => (
+                        m,
+                        value
+                            .child_by_field_name("property")
+                            .map(|p| text(p, src)),
+                    ),
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+
+        let range = range_of(declarator);
+        let Some(name_node) = declarator.child_by_field_name("name") else {
+            return;
+        };
+        match name_node.kind() {
+            "identifier" => {
+                if let Some(member) = member {
+                    // Form 3: `const f = require('./m').foo`.
+                    self.imports.push(RawImport {
+                        raw: format!("{module}.{member}"),
+                        is_static: true,
+                        is_wildcard: false,
+                        alias: None,
+                        range,
+                    });
+                } else {
+                    // Form 1: `const x = require('./m')` — namespace binding.
+                    let (_, sig) = self.call_scope(enclosing_fn);
+                    self.type_bindings.push(TypeBinding {
+                        name: text(name_node, src),
+                        raw_type: module,
+                        kind: BindingKind::ModuleRef,
+                        in_fqcn: sig,
+                        range,
+                    });
+                }
+            }
+            // Form 2: `const { a, b } = require('./m')`. A trailing `.member` on a
+            // destructure is nonsensical, so only the bare-call form applies.
+            "object_pattern" if member.is_none() => {
+                let mut cursor = name_node.walk();
+                for prop in name_node.named_children(&mut cursor) {
+                    // Non-aliased shorthand only (`{ a }`); `{ a: b }` renames can't
+                    // be keyed cleanly, matching `emit_import`'s aliased-skip rule.
+                    if prop.kind() == "shorthand_property_identifier_pattern" {
+                        let local = text(prop, src);
+                        self.imports.push(RawImport {
+                            raw: format!("{module}.{local}"),
+                            is_static: true,
+                            is_wildcard: false,
+                            alias: None,
+                            range,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// If `call` is `require('<relative-spec>')`, resolve the specifier to a
+    /// repo-relative, extensionless module path (the owner-FQCN scheme). Returns
+    /// `None` for non-`require` calls, non-string args, or non-relative specifiers.
+    fn require_module(&self, call: TsNode<'_>, src: &str) -> Option<String> {
+        let func = call.child_by_field_name("function")?;
+        if func.kind() != "identifier" || text(func, src) != "require" {
+            return None;
+        }
+        let args = call.child_by_field_name("arguments")?;
+        let mut cursor = args.walk();
+        let arg = args.named_children(&mut cursor).next()?;
+        if arg.kind() != "string" {
+            return None;
+        }
+        let spec = unquote(&text(arg, src));
+        crate::constant_resolver::resolve_relative_module(std::path::Path::new(&self.rel), &spec)
     }
 
     /// Resolve the enclosing scope for a reference site: the enclosing function's

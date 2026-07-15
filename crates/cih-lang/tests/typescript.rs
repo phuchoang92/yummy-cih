@@ -466,21 +466,24 @@ fn namespace_import_records_alias() {
         .expect("should parse")
         .parsed_file
         .imports;
-    let pairs: Vec<(String, Option<String>)> = imports
+    let pairs: Vec<(String, Option<String>, bool)> = imports
         .iter()
-        .map(|imp| (imp.raw.clone(), imp.alias.clone()))
+        .map(|imp| (imp.raw.clone(), imp.alias.clone(), imp.is_static))
         .collect();
     // Each import keeps its module-path RawImport (namespace records the alias);
     // relative default/named imports also emit a module-qualified RawImport
-    // (`<resolved-module>.<Local>`) so `build_import_map` can key the symbol.
+    // (`<resolved-module>.<Local>`) so `build_import_map` can key the symbol as a
+    // type — plus a static-flagged twin so a bare free call to it also resolves.
     assert_eq!(
         pairs,
         vec![
-            ("./apiClient".to_string(), Some("api".to_string())),
-            ("./d".to_string(), None),
-            ("src/d.def".to_string(), None),
-            ("./n".to_string(), None),
-            ("src/n.named".to_string(), None),
+            ("./apiClient".to_string(), Some("api".to_string()), false),
+            ("./d".to_string(), None, false),
+            ("src/d.def".to_string(), None, false),
+            ("src/d.def".to_string(), None, true),
+            ("./n".to_string(), None, false),
+            ("src/n.named".to_string(), None, false),
+            ("src/n.named".to_string(), None, true),
         ]
     );
 }

@@ -169,6 +169,10 @@ fn walk(
                     });
                 }
 
+                // CommonJS `const x = require('./m')` / `const { a } = require('./m')`
+                // / `const f = require('./m').foo` → binding + free-call hints.
+                builder.emit_require_binding(declarator, enclosing_fn, src);
+
                 // `export const apiFetch = async (endpoint, …) => …` wrapper shape.
                 if class_fqn.is_none() && enclosing_fn.is_none() {
                     if let (Some(nn), Some(v)) = (name_node, value) {
@@ -406,6 +410,30 @@ fn walk(
                 walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
             }
         }
+        "assignment_expression" => {
+            // CommonJS export-assignment defs: `exports.foo = async () => …` /
+            // `module.exports.foo = function () {…}` → a module-level Function node
+            // named `foo`, so `require('./m').foo` / `x.foo()` have a callee to
+            // resolve against. Attribute the body's calls to the new function.
+            let emitted = if class_fqn.is_none() {
+                try_emit_exports_function(node, src, builder)
+            } else {
+                None
+            };
+            if let Some(fn_id) = emitted {
+                if let Some(body) = node
+                    .child_by_field_name("right")
+                    .and_then(|rhs| rhs.child_by_field_name("body"))
+                {
+                    walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
+                }
+            } else {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
+                }
+            }
+        }
         _ => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
@@ -413,6 +441,50 @@ fn walk(
             }
         }
     }
+}
+
+/// `exports.NAME = <fn>` or `module.exports.NAME = <fn>` at module scope → emit a
+/// module-level Function node named `NAME` (CommonJS export-assignment defs, the
+/// dominant handler-definition style in `require`-based backends). Returns the new
+/// function's `NodeId` when one was emitted.
+fn try_emit_exports_function(
+    assign: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+) -> Option<NodeId> {
+    let left = assign.child_by_field_name("left")?;
+    if left.kind() != "member_expression" {
+        return None;
+    }
+    let obj = left.child_by_field_name("object")?;
+    let is_exports_target = match obj.kind() {
+        // `exports.NAME`
+        "identifier" => text(obj, src) == "exports",
+        // `module.exports.NAME`
+        "member_expression" => {
+            obj.child_by_field_name("object").map(|o| text(o, src)).as_deref() == Some("module")
+                && obj
+                    .child_by_field_name("property")
+                    .map(|p| text(p, src))
+                    .as_deref()
+                    == Some("exports")
+        }
+        _ => false,
+    };
+    if !is_exports_target {
+        return None;
+    }
+    let rhs = assign.child_by_field_name("right")?;
+    if !matches!(
+        rhs.kind(),
+        "arrow_function" | "function" | "function_expression"
+    ) {
+        return None;
+    }
+    let name_node = left.child_by_field_name("property")?;
+    let name = text(name_node, src);
+    let arity = parameter_count(rhs);
+    Some(builder.emit_function(rhs, src, &name, arity, None, None))
 }
 
 fn join_paths(prefix: &str, suffix: &str) -> String {
@@ -546,6 +618,90 @@ module.exports = app;
         ] {
             assert_eq!(module_path(input), want, "module_path({input})");
         }
+    }
+
+    // ── CommonJS `require()` binding forms ────────────────────────────────────
+
+    #[test]
+    fn require_namespace_emits_module_ref_binding() {
+        // `const svc = require('./service')` → ModuleRef binding whose raw_type is
+        // the resolved module path, so `svc.method()` resolves against that module.
+        let src = "const svc = require('./service');\nexports.h = async () => { await svc.register(x); };\n";
+        let unit = parse_typescript_file("controllers/userController.js", src).expect("parses");
+        let pf = &unit.parsed_file;
+        let tb = pf
+            .type_bindings
+            .iter()
+            .find(|b| b.name == "svc")
+            .expect("svc binding missing");
+        assert_eq!(tb.kind, cih_core::BindingKind::ModuleRef);
+        assert_eq!(tb.raw_type, "controllers/service");
+    }
+
+    #[test]
+    fn require_destructure_emits_static_imports() {
+        // `const { a, b } = require('./m')` → static RawImport `<m>.a`, `<m>.b`.
+        let src = "const { register, fetchUserBy } = require('../services/users');\n";
+        let unit = parse_typescript_file("controllers/userController.js", src).expect("parses");
+        let statics: Vec<&str> = unit
+            .parsed_file
+            .imports
+            .iter()
+            .filter(|i| i.is_static)
+            .map(|i| i.raw.as_str())
+            .collect();
+        assert!(statics.contains(&"services/users.register"), "{statics:?}");
+        assert!(statics.contains(&"services/users.fetchUserBy"), "{statics:?}");
+    }
+
+    #[test]
+    fn require_member_capture_emits_static_import() {
+        // `const extractToken = require('../utils').extractToken` → static `utils.extractToken`.
+        let src = "const extractToken = require('../utils').extractToken;\n";
+        let unit = parse_typescript_file("controllers/userController.js", src).expect("parses");
+        assert!(
+            unit.parsed_file
+                .imports
+                .iter()
+                .any(|i| i.is_static && i.raw == "utils.extractToken"),
+            "{:?}",
+            unit.parsed_file.imports
+        );
+    }
+
+    #[test]
+    fn require_external_package_emits_no_binding() {
+        // Non-relative specifiers can't map to in-repo FQCNs — no binding/import.
+        let src = "const express = require('express');\nconst app = express();\n";
+        let unit = parse_typescript_file("src/server.js", src).expect("parses");
+        assert!(unit
+            .parsed_file
+            .type_bindings
+            .iter()
+            .all(|b| b.kind != cih_core::BindingKind::ModuleRef));
+        assert!(unit
+            .parsed_file
+            .imports
+            .iter()
+            .all(|i| !i.raw.contains("express.")));
+    }
+
+    #[test]
+    fn exports_assignment_emits_function_defs() {
+        // CommonJS `exports.foo = () => {}` / `module.exports.bar = function(){}` →
+        // module-level Function defs keyed by the module path, so require-based
+        // callers have a callee node to resolve against.
+        let src = "exports.register = async (req, res) => { return 1; };\nmodule.exports.fetchUserBy = function (id) { return null; };\n";
+        let unit = parse_typescript_file("services/users.js", src).expect("parses");
+        let fns: Vec<(&str, &str)> = unit
+            .parsed_file
+            .defs
+            .iter()
+            .filter(|d| d.kind == cih_core::NodeKind::Function)
+            .map(|d| (d.fqcn.as_str(), d.name.as_str()))
+            .collect();
+        assert!(fns.contains(&("services/users", "register")), "{fns:?}");
+        assert!(fns.contains(&("services/users", "fetchUserBy")), "{fns:?}");
     }
 
     // ── P1: additional backend route frameworks ──────────────────────────────

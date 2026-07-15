@@ -462,4 +462,8 @@ pub enum BindingKind {
     Pattern,
     /// Method return-type binding.
     Return,
+    /// `const x = require('./m')` — `raw_type` is the pre-resolved module path
+    /// (the container FQCN of that module's top-level functions). The resolver
+    /// returns it verbatim, so `x.method()` resolves against that module's members.
+    ModuleRef,
 }

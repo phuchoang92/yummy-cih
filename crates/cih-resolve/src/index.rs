@@ -38,6 +38,10 @@ pub struct ResolveIndex {
     pub(crate) language_of_type: HashMap<String, String>,
     /// package QN → all type FQCNs declared in that package (for 0.72 wildcard tier).
     package_to_fqcns: HashMap<String, Vec<String>>,
+    /// file path → module-scoped `ModuleRef` bindings (`const x = require(...)` at
+    /// module top level). These are visible file-wide, not just in the callable
+    /// where they're declared — a receiver-type fallback consults them.
+    module_bindings: HashMap<String, Vec<TypeBinding>>,
 }
 
 #[derive(Debug, Default)]
@@ -128,11 +132,23 @@ impl ResolveIndex {
                         .insert((def.fqcn.clone(), def.name.clone()), def.clone());
                 }
             }
+            let module_scope =
+                cih_lang::strip_source_extension(&pf.file).unwrap_or(pf.file.as_str());
             for tb in &pf.type_bindings {
                 idx.bindings
                     .entry(tb.in_fqcn.clone())
                     .or_default()
                     .push(tb.clone());
+                // Module-top `const x = require(...)` binds at module scope but is
+                // called inside functions — index it file-wide for the receiver
+                // fallback. Function-scoped requires (scope ≠ module) resolve via
+                // the exact-scope step and are excluded here (no cross-fn bleed).
+                if tb.kind == BindingKind::ModuleRef && tb.in_fqcn == module_scope {
+                    idx.module_bindings
+                        .entry(pf.file.clone())
+                        .or_default()
+                        .push(tb.clone());
+                }
             }
         }
 
@@ -427,7 +443,15 @@ impl ResolveIndex {
             }
         }
 
-        // 2. field on the enclosing class or a supertype.
+        // 2. module-scoped `const x = require(...)` in this file (visible file-wide,
+        //    after callable-scoped bindings so a function-local shadows it).
+        if let Some(bindings) = self.module_bindings.get(file) {
+            if let Some(tb) = pick_binding(bindings, receiver) {
+                return self.resolve_binding(tb, in_fqcn, file, depth);
+            }
+        }
+
+        // 3. field on the enclosing class or a supertype.
         self.field_type_in_hierarchy(owner_class, receiver)
     }
 
@@ -459,6 +483,10 @@ impl ResolveIndex {
             BindingKind::CallResult => self
                 .member_return_type_in_hierarchy(owner_class, &tb.raw_type, None)
                 .or_else(|| self.callresult_via_field_types(owner_class, &tb.raw_type)),
+            // `const x = require('./m')` — raw_type already holds the resolved
+            // module path (the callee module's container FQCN); return it verbatim
+            // (no resolve_type — module paths aren't registered types).
+            BindingKind::ModuleRef => Some(tb.raw_type.clone()),
         }
     }
 
