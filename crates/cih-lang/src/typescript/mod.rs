@@ -7,6 +7,7 @@ use crate::{LanguageProvider, SourceScan, Stereotype};
 
 mod builder;
 mod helpers;
+mod http_clients;
 mod parse;
 
 pub const TS_SCOPE_QUERY: &str = include_str!("query.scm");
