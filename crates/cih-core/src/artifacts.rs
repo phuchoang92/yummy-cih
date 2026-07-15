@@ -44,6 +44,17 @@ impl GraphArtifacts {
         read_jsonl(&self.edges_path)
     }
 
+    /// Stream `nodes.jsonl` one `Node` per line without holding the whole file —
+    /// used by the bulk loader to keep peak memory low on very large graphs.
+    pub fn stream_nodes(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<Node>>> {
+        stream_jsonl(&self.nodes_path)
+    }
+
+    /// Stream `edges.jsonl` one `Edge` per line. See [`Self::stream_nodes`].
+    pub fn stream_edges(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<Edge>>> {
+        stream_jsonl(&self.edges_path)
+    }
+
     /// Return the most-recent `GraphArtifacts` found directly under `parent`.
     ///
     /// Walks `parent`, keeps every immediate subdirectory that contains both
@@ -131,17 +142,22 @@ fn serialize_jsonl<T: Serialize + Sync>(items: &[T]) -> std::io::Result<Vec<u8>>
     Ok(out)
 }
 
-fn read_jsonl<T: DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
+/// Lazily deserialize a JSONL file, one `T` per non-blank line. Opens the file
+/// eagerly (so an open error surfaces immediately), then yields items without
+/// holding the whole file in memory.
+fn stream_jsonl<T: DeserializeOwned>(
+    path: &Path,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<T>>> {
     let r = BufReader::new(File::open(path)?);
-    let mut out = Vec::new();
-    for line in r.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        out.push(serde_json::from_str(&line).map_err(io_err)?);
-    }
-    Ok(out)
+    Ok(r.lines().filter_map(|line| match line {
+        Ok(l) if l.trim().is_empty() => None,
+        Ok(l) => Some(serde_json::from_str(&l).map_err(io_err)),
+        Err(e) => Some(Err(e)),
+    }))
+}
+
+fn read_jsonl<T: DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
+    stream_jsonl(path)?.collect()
 }
 
 fn io_err(e: serde_json::Error) -> std::io::Error {

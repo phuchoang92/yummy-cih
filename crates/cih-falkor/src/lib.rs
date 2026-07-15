@@ -314,36 +314,37 @@ impl FalkorStore {
 
     /// Load a fresh graph via FalkorDB's native binary bulk-insert protocol
     /// (`GRAPH.BULK`). Skips the Cypher parser and per-edge `MATCH`; produces the
-    /// same graph as the Cypher path (see `bulk::build_batches` for parity). The
-    /// payload is split into byte-budgeted batches (each a separate call — `BEGIN`
-    /// on the first only) so no single call approaches the 512 MB / 1 GB limits,
-    /// which lets it scale to arbitrarily large repos. The `id`/`kind` indexes are
-    /// created *after* the insert — `BEGIN` requires an unused key.
-    async fn bulk_insert(&self, nodes: &[Node], edges: &[Edge]) -> Result<LoadStats> {
+    /// same graph as the Cypher path (see `bulk::build_node_batches` /
+    /// `build_edge_batches` for parity). Artifacts are **streamed** line-by-line
+    /// and encoded into byte-budgeted batches — the node pass is sent and freed
+    /// before the edge pass, so struct `Vec`s never exist and no single call
+    /// approaches the 512 MB / 1 GB limits. The `id`/`kind` indexes are created
+    /// *after* the insert — `BEGIN` requires an unused key.
+    async fn bulk_insert(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
         // `GRAPH.BULK BEGIN` requires an unused key. The readiness probe and the
         // emptiness check both auto-create an empty graph key, so drop it first.
         let _ = self.drop_graph().await;
-        let t_build = std::time::Instant::now();
-        let batches = bulk::build_batches(nodes, edges, bulk::batch_budget());
-        let build_ms = t_build.elapsed().as_millis();
-        if batches.total_nodes == 0 {
+        let budget = bulk::batch_budget();
+        let read_err = |e: std::io::Error| GraphStoreError::Backend(format!("read artifacts: {e}"));
+
+        // Node pass: stream + encode, keeping only the id→ordinal map.
+        let t_load = std::time::Instant::now();
+        let node_stream = artifacts.stream_nodes().map_err(read_err)?;
+        let (node_batches, ordinal) =
+            bulk::build_node_batches(node_stream, budget).map_err(read_err)?;
+        let total_nodes = node_batches.iter().map(|(n, _)| n).sum::<u64>();
+        if total_nodes == 0 {
             return Ok(LoadStats { nodes: 0, edges: 0 });
         }
-        let payload_bytes: usize = batches
-            .node_batches
-            .iter()
-            .chain(batches.edge_batches.iter())
-            .map(|(_, b)| b.len())
-            .sum();
-        let call_count = batches.node_batches.len() + batches.edge_batches.len();
+        let mut payload_bytes: usize = node_batches.iter().map(|(_, b)| b.len()).sum();
+        let mut call_count = node_batches.len();
 
-        let t_send = std::time::Instant::now();
-        {
+        let mut con = {
             let _permit = self.acquire_permit().await?;
             let mut con = self.conn().await?;
-            let mut first = true;
             // Node batches first — they assign ordinals 0..N in send order.
-            for (nc, blob) in &batches.node_batches {
+            let mut first = true;
+            for (nc, blob) in &node_batches {
                 let mut cmd = redis::cmd("GRAPH.BULK");
                 cmd.arg(&self.graph_key);
                 if std::mem::take(&mut first) {
@@ -355,8 +356,20 @@ impl FalkorStore {
                     .await
                     .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK nodes: {e}")))?;
             }
-            // Edge batches reference the ordinals established above.
-            for (ec, blob) in &batches.edge_batches {
+            con
+        };
+        drop(node_batches); // free node payload before encoding edges
+
+        // Edge pass: stream + encode against the ordinal map, then send.
+        let edge_stream = artifacts.stream_edges().map_err(read_err)?;
+        let edge_batches =
+            bulk::build_edge_batches(edge_stream, &ordinal, budget).map_err(read_err)?;
+        let total_edges = edge_batches.iter().map(|(n, _)| n).sum::<u64>();
+        payload_bytes += edge_batches.iter().map(|(_, b)| b.len()).sum::<usize>();
+        call_count += edge_batches.len();
+        {
+            let _permit = self.acquire_permit().await?;
+            for (ec, blob) in &edge_batches {
                 let mut cmd = redis::cmd("GRAPH.BULK");
                 cmd.arg(&self.graph_key)
                     .arg(0)
@@ -370,24 +383,24 @@ impl FalkorStore {
                     .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK edges: {e}")))?;
             }
         }
-        let send_ms = t_send.elapsed().as_millis();
+        let load_ms = t_load.elapsed().as_millis();
+
         // Indexes must be built after the bulk insert (see doc above).
         let t_idx = std::time::Instant::now();
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
         tracing::info!(
-            nodes = batches.total_nodes,
-            edges = batches.total_edges,
+            nodes = total_nodes,
+            edges = total_edges,
             payload_mb = payload_bytes / 1_048_576,
             calls = call_count,
-            build_ms,
-            send_ms,
+            load_ms,
             index_ms = t_idx.elapsed().as_millis(),
             "falkor GRAPH.BULK load timings"
         );
         Ok(LoadStats {
-            nodes: batches.total_nodes,
-            edges: batches.total_edges,
+            nodes: total_nodes,
+            edges: total_edges,
         })
     }
 
@@ -432,19 +445,20 @@ impl GraphStore for FalkorStore {
         // Wait out a `BusyLoadingError` window before writing, so a FalkorDB that
         // is still loading a large persisted dataset doesn't cause a partial write.
         self.wait_until_ready(Self::load_wait_budget()).await?;
-        let nodes = artifacts
-            .read_nodes()
-            .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;
-        let edges = artifacts
-            .read_edges()
-            .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
-        // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path;
-        // a populated one (e.g. the community set loaded after analyze) falls
-        // back to the Cypher upsert. `GRAPH.BULK BEGIN` requires an unused key,
-        // so this routing also honors that constraint.
+        // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path,
+        // which streams the artifacts (no `Vec` read). A populated one (e.g. the
+        // community set loaded after analyze) falls back to the Cypher upsert,
+        // which reads the small set into memory. `GRAPH.BULK BEGIN` also requires
+        // an unused key, so this routing honors that constraint.
         if self.graph_is_empty().await? {
-            self.bulk_insert(&nodes, &edges).await
+            self.bulk_insert(artifacts).await
         } else {
+            let nodes = artifacts
+                .read_nodes()
+                .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;
+            let edges = artifacts
+                .read_edges()
+                .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
             self.load_nodes_edges(&nodes, &edges).await
         }
     }
