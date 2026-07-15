@@ -6,6 +6,7 @@
 //! Everything else is crate-private wiring.
 
 mod app;
+mod startup;
 
 pub mod args;
 pub mod browser;
@@ -30,4 +31,4 @@ pub(crate) mod symbol;
 pub(crate) mod taint;
 pub(crate) mod xflow;
 
-pub use app::run;
+pub use startup::run;
