@@ -136,46 +136,78 @@ fn encode_node(buf: &mut Vec<u8>, n: &Node) {
 
 // ── payload assembly ─────────────────────────────────────────────────────────
 
-/// The encoded `GRAPH.BULK` payload: entity counts plus the ordered binary blobs
-/// (one `:Symbol` node blob, then one blob per non-empty relationship type).
-pub(crate) struct BulkPayload {
-    pub node_count: u64,
-    pub edge_count: u64,
-    pub node_blobs: Vec<Vec<u8>>,
-    pub rel_blobs: Vec<Vec<u8>>,
+/// Default per-`GRAPH.BULK`-call payload budget: 128 MiB, well under the 512 MB
+/// per-bulk-string limit and Redis's ~1 GB command limit.
+const BULK_BATCH_BYTES: usize = 128 * 1024 * 1024;
+
+/// Per-call byte budget for batching, overridable via `CIH_BULK_BATCH_BYTES`
+/// (tests force a tiny value to exercise the multi-call path deterministically).
+pub(crate) fn batch_budget() -> usize {
+    std::env::var("CIH_BULK_BATCH_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&b| b > 0)
+        .unwrap_or(BULK_BATCH_BYTES)
 }
 
-/// Build the bulk payload from artifact nodes/edges, reproducing the Cypher
-/// load's graph exactly (dedup + dangling drop).
-pub(crate) fn build_payload(nodes: &[Node], edges: &[Edge]) -> BulkPayload {
-    // Node blob: dedup by id (first wins), ordinal = insertion index.
+/// The encoded `GRAPH.BULK` payload split into calls: node batches first (they
+/// define ordinals 0..N in send order), then edge batches (which reference those
+/// ordinals). Each blob is a self-contained header + rows and is bounded by the
+/// byte budget, so no single call approaches the 512 MB / 1 GB limits.
+pub(crate) struct Batches {
+    /// `(nodes_in_batch, blob)` — send in order; the first call carries `BEGIN`.
+    pub node_batches: Vec<(u64, Vec<u8>)>,
+    /// `(edges_in_batch, blob)`.
+    pub edge_batches: Vec<(u64, Vec<u8>)>,
+    pub total_nodes: u64,
+    pub total_edges: u64,
+}
+
+/// Encode artifact nodes/edges into byte-budgeted `GRAPH.BULK` batches,
+/// reproducing the Cypher load's graph exactly (dedup + dangling drop). Ordinals
+/// are assigned over all deduped nodes and preserved by sending node batches in
+/// ordinal order.
+pub(crate) fn build_batches(nodes: &[Node], edges: &[Edge], budget: usize) -> Batches {
+    // Node batches: dedup by id (first wins), ordinal = global insertion index.
     let mut ordinal: HashMap<&str, u64> = HashMap::with_capacity(nodes.len());
-    let mut node_blob = Vec::new();
-    write_header(&mut node_blob, "Symbol", &NODE_PROPS);
-    let mut node_count = 0u64;
+    let mut node_batches: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut blob = Vec::new();
+    write_header(&mut blob, "Symbol", &NODE_PROPS);
+    let mut in_batch = 0u64;
+    let mut total_nodes = 0u64;
     for n in nodes {
         let id = n.id.as_str();
         if ordinal.contains_key(id) {
             continue;
         }
-        ordinal.insert(id, node_count);
-        encode_node(&mut node_blob, n);
-        node_count += 1;
+        ordinal.insert(id, total_nodes);
+        encode_node(&mut blob, n);
+        in_batch += 1;
+        total_nodes += 1;
+        if blob.len() >= budget {
+            node_batches.push((in_batch, std::mem::take(&mut blob)));
+            write_header(&mut blob, "Symbol", &NODE_PROPS);
+            in_batch = 0;
+        }
+    }
+    if in_batch > 0 {
+        node_batches.push((in_batch, std::mem::take(&mut blob)));
     }
 
-    // Group edges by kind; each kind is one reltype blob. Dedup by (src,dst) and
-    // drop edges whose endpoints are not in the node set.
+    // Edge batches: group by kind (each blob repeats the reltype header), dedup by
+    // (src,dst), drop edges whose endpoints are not in the node set.
     let mut by_kind: HashMap<EdgeKind, Vec<&Edge>> = HashMap::new();
     for e in edges {
         by_kind.entry(e.kind).or_default().push(e);
     }
-    let mut edge_count = 0u64;
-    let mut rel_blobs = Vec::new();
+    let mut edge_batches: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut total_edges = 0u64;
     for (kind, es) in by_kind {
+        let label = kind.cypher_label();
         let mut blob = Vec::new();
-        write_header(&mut blob, kind.cypher_label(), &EDGE_PROPS);
+        write_header(&mut blob, label, &EDGE_PROPS);
+        let mut in_batch = 0u64;
         let mut seen: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
-        let mut wrote = false;
         for e in es {
             let (src, dst) = match (ordinal.get(e.src.as_str()), ordinal.get(e.dst.as_str())) {
                 (Some(&s), Some(&d)) => (s, d),
@@ -194,19 +226,24 @@ pub(crate) fn build_payload(nodes: &[Node], edges: &[Edge]) -> BulkPayload {
                 .and_then(|p| p.get("call_sites"))
                 .map(|v| v.to_string());
             push_opt_string(&mut blob, call_sites.as_deref());
-            edge_count += 1;
-            wrote = true;
+            in_batch += 1;
+            total_edges += 1;
+            if blob.len() >= budget {
+                edge_batches.push((in_batch, std::mem::take(&mut blob)));
+                write_header(&mut blob, label, &EDGE_PROPS);
+                in_batch = 0;
+            }
         }
-        if wrote {
-            rel_blobs.push(blob);
+        if in_batch > 0 {
+            edge_batches.push((in_batch, std::mem::take(&mut blob)));
         }
     }
 
-    BulkPayload {
-        node_count,
-        edge_count,
-        node_blobs: vec![node_blob],
-        rel_blobs,
+    Batches {
+        node_batches,
+        edge_batches,
+        total_nodes,
+        total_edges,
     }
 }
 
@@ -269,6 +306,8 @@ mod tests {
         );
     }
 
+    const BIG: usize = 1 << 30; // 1 GiB — one batch
+
     #[test]
     fn dedup_nodes_and_dangling_edges() {
         // Two nodes, one a duplicate id; one valid edge, one dangling.
@@ -278,23 +317,46 @@ mod tests {
             edge("A", "X", EdgeKind::Calls), // X absent → dropped
             edge("A", "B", EdgeKind::Calls), // duplicate → dropped
         ];
-        let p = build_payload(&nodes, &edges);
-        assert_eq!(p.node_count, 2, "duplicate id collapsed");
-        assert_eq!(p.edge_count, 1, "dangling + duplicate dropped");
-        assert_eq!(p.node_blobs.len(), 1);
-        assert_eq!(p.rel_blobs.len(), 1);
+        let b = build_batches(&nodes, &edges, BIG);
+        assert_eq!(b.total_nodes, 2, "duplicate id collapsed");
+        assert_eq!(b.total_edges, 1, "dangling + duplicate dropped");
+        assert_eq!(b.node_batches.len(), 1);
+        assert_eq!(b.edge_batches.len(), 1);
     }
 
     #[test]
     fn edge_row_references_ordinals() {
         let nodes = vec![node("A"), node("B")]; // A=0, B=1
         let edges = vec![edge("A", "B", EdgeKind::Calls)];
-        let p = build_payload(&nodes, &edges);
-        let blob = &p.rel_blobs[0];
+        let b = build_batches(&nodes, &edges, BIG);
+        let blob = &b.edge_batches[0].1;
         // header = "CALLS\0" + u32(3) + "confidence\0reason\0callSites\0"
         let header_len = 6 + 4 + "confidence\0reason\0callSites\0".len();
         let row = &blob[header_len..];
         assert_eq!(&row[0..8], &0u64.to_le_bytes()); // src ordinal
         assert_eq!(&row[8..16], &1u64.to_le_bytes()); // dst ordinal
+    }
+
+    #[test]
+    fn tiny_budget_splits_into_multiple_batches_preserving_ordinals() {
+        // 6 nodes A..F, chained edges A->B->C->D->E->F, all CALLS. A tiny budget
+        // forces several node + edge batches.
+        let ids = ["A", "B", "C", "D", "E", "F"];
+        let nodes: Vec<_> = ids.iter().map(|i| node(i)).collect();
+        let edges: Vec<_> = ids
+            .windows(2)
+            .map(|w| edge(w[0], w[1], EdgeKind::Calls))
+            .collect();
+        // Budget below one node's encoded size → one entity per batch.
+        let b = build_batches(&nodes, &edges, 1);
+        assert_eq!(b.total_nodes, 6);
+        assert_eq!(b.total_edges, 5);
+        assert!(b.node_batches.len() > 1, "nodes split across batches");
+        assert!(b.edge_batches.len() > 1, "edges split across batches");
+        // Every node accounted for exactly once across batches.
+        let batched: u64 = b.node_batches.iter().map(|(n, _)| n).sum();
+        assert_eq!(batched, 6);
+        let batched_e: u64 = b.edge_batches.iter().map(|(n, _)| n).sum();
+        assert_eq!(batched_e, 5);
     }
 }

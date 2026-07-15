@@ -314,39 +314,61 @@ impl FalkorStore {
 
     /// Load a fresh graph via FalkorDB's native binary bulk-insert protocol
     /// (`GRAPH.BULK`). Skips the Cypher parser and per-edge `MATCH`; produces the
-    /// same graph as the Cypher path (see `bulk::build_payload` for parity). The
-    /// `id`/`kind` indexes are created *after* the insert — `BEGIN` requires an
-    /// unused key, so no index may exist beforehand.
+    /// same graph as the Cypher path (see `bulk::build_batches` for parity). The
+    /// payload is split into byte-budgeted batches (each a separate call — `BEGIN`
+    /// on the first only) so no single call approaches the 512 MB / 1 GB limits,
+    /// which lets it scale to arbitrarily large repos. The `id`/`kind` indexes are
+    /// created *after* the insert — `BEGIN` requires an unused key.
     async fn bulk_insert(&self, nodes: &[Node], edges: &[Edge]) -> Result<LoadStats> {
         // `GRAPH.BULK BEGIN` requires an unused key. The readiness probe and the
         // emptiness check both auto-create an empty graph key, so drop it first.
         let _ = self.drop_graph().await;
         let t_build = std::time::Instant::now();
-        let payload = bulk::build_payload(nodes, edges);
+        let batches = bulk::build_batches(nodes, edges, bulk::batch_budget());
         let build_ms = t_build.elapsed().as_millis();
-        let payload_bytes: usize = payload.node_blobs.iter().map(Vec::len).sum::<usize>()
-            + payload.rel_blobs.iter().map(Vec::len).sum::<usize>();
+        if batches.total_nodes == 0 {
+            return Ok(LoadStats { nodes: 0, edges: 0 });
+        }
+        let payload_bytes: usize = batches
+            .node_batches
+            .iter()
+            .chain(batches.edge_batches.iter())
+            .map(|(_, b)| b.len())
+            .sum();
+        let call_count = batches.node_batches.len() + batches.edge_batches.len();
+
         let t_send = std::time::Instant::now();
-        let mut cmd = redis::cmd("GRAPH.BULK");
-        cmd.arg(&self.graph_key)
-            .arg("BEGIN")
-            .arg(payload.node_count)
-            .arg(payload.edge_count)
-            .arg(payload.node_blobs.len())
-            .arg(payload.rel_blobs.len());
-        for blob in &payload.node_blobs {
-            cmd.arg(blob.as_slice());
-        }
-        for blob in &payload.rel_blobs {
-            cmd.arg(blob.as_slice());
-        }
         {
             let _permit = self.acquire_permit().await?;
             let mut con = self.conn().await?;
-            let _reply: Value = cmd
-                .query_async(&mut con)
-                .await
-                .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK: {e}")))?;
+            let mut first = true;
+            // Node batches first — they assign ordinals 0..N in send order.
+            for (nc, blob) in &batches.node_batches {
+                let mut cmd = redis::cmd("GRAPH.BULK");
+                cmd.arg(&self.graph_key);
+                if std::mem::take(&mut first) {
+                    cmd.arg("BEGIN");
+                }
+                cmd.arg(*nc).arg(0).arg(1).arg(0).arg(blob.as_slice());
+                let _reply: Value = cmd
+                    .query_async(&mut con)
+                    .await
+                    .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK nodes: {e}")))?;
+            }
+            // Edge batches reference the ordinals established above.
+            for (ec, blob) in &batches.edge_batches {
+                let mut cmd = redis::cmd("GRAPH.BULK");
+                cmd.arg(&self.graph_key)
+                    .arg(0)
+                    .arg(*ec)
+                    .arg(0)
+                    .arg(1)
+                    .arg(blob.as_slice());
+                let _reply: Value = cmd
+                    .query_async(&mut con)
+                    .await
+                    .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK edges: {e}")))?;
+            }
         }
         let send_ms = t_send.elapsed().as_millis();
         // Indexes must be built after the bulk insert (see doc above).
@@ -354,17 +376,18 @@ impl FalkorStore {
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
         tracing::info!(
-            nodes = payload.node_count,
-            edges = payload.edge_count,
+            nodes = batches.total_nodes,
+            edges = batches.total_edges,
             payload_mb = payload_bytes / 1_048_576,
+            calls = call_count,
             build_ms,
             send_ms,
             index_ms = t_idx.elapsed().as_millis(),
             "falkor GRAPH.BULK load timings"
         );
         Ok(LoadStats {
-            nodes: payload.node_count,
-            edges: payload.edge_count,
+            nodes: batches.total_nodes,
+            edges: batches.total_edges,
         })
     }
 
