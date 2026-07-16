@@ -241,6 +241,7 @@ pub fn parse_kotlin_file(rel: &str, src: &str) -> Result<ParsedUnit> {
 
     Ok(ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables: 0,
         nodes: builder.nodes,
         edges: builder.edges,
         parsed_file: ParsedFile {

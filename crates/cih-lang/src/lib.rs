@@ -31,7 +31,7 @@ pub use contracts_common::normalize_external_url;
 /// `parse_schema_guard` test in cih-engine fails when parser output changes
 /// without a bump. Starts at 2: the flat pre-versioning cache layout is
 /// implicitly v1 and is pruned on first contact.
-pub const PARSE_CACHE_SCHEMA: u32 = 24;
+pub const PARSE_CACHE_SCHEMA: u32 = 25;
 
 /// Declares all language modules and generates `all_providers()`.
 /// To add a new language: add one line here (plus the implementation files).
@@ -146,6 +146,17 @@ pub trait LanguageProvider: Send + Sync {
     /// Cheap per-file scan: LOC, package/namespace, framework hints.
     /// Called during the scan phase — no tree-sitter, just string matching.
     fn scan_file(&self, rel: &str, src: &str) -> anyhow::Result<SourceScan>;
+
+    /// Tree-sitter node kinds that represent a callable in this language
+    /// (`function_declaration`, `arrow_function`, `method_definition`, …).
+    ///
+    /// Used to count what the AST *contains* so it can be compared against the
+    /// `Function`/`Method` nodes we actually emitted — the extraction-coverage
+    /// signal that catches idioms nobody thought to enumerate. Opt-in: the default
+    /// is empty, which reports coverage as "unknown" rather than as zero.
+    fn callable_kinds(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     /// Single-line comment prefix. Default: `"//"`. Override for `"#"` languages.
     fn comment_prefix(&self) -> &'static str {

@@ -29,6 +29,12 @@ pub(crate) fn entry_from_analyze(emit: &EmitOutcome, graph_key: &str) -> Registr
             routes: 0, // filled in by discover
             communities: 0,
             processes: 0,
+            resolved_edges: emit.resolved_edge_count,
+            unresolved_refs: emit.unresolved_reference_count,
+            callable_coverage: crate::analyze::callable_coverage(
+                emit.callable_node_count,
+                emit.syntactic_callables,
+            ),
         },
         path,
     }
@@ -43,9 +49,19 @@ pub(crate) fn update_entry_from_discover(entry: &mut RegistryEntry, disc: &Disco
 
 /// Persist an `EmitOutcome` to the global registry.  Silently logs on failure.
 pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) {
-    let entry = entry_from_analyze(emit, graph_key);
+    let mut entry = entry_from_analyze(emit, graph_key);
     let repo = entry.name.clone();
     let mut reg = Registry::load();
+    // A reused no-op run re-measures nothing and reports zeros for the resolve/
+    // coverage fields. Carry the previous values forward instead of overwriting a
+    // perfectly good index with zeros the next time someone re-runs analyze.
+    if emit.reused_artifacts {
+        if let Some(prev) = reg.find(&entry.path) {
+            entry.stats.resolved_edges = prev.stats.resolved_edges;
+            entry.stats.unresolved_refs = prev.stats.unresolved_refs;
+            entry.stats.callable_coverage = prev.stats.callable_coverage;
+        }
+    }
     reg.upsert(entry);
     if let Err(e) = reg.save() {
         tracing::warn!(error = %e, "failed to update registry");

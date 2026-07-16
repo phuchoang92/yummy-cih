@@ -76,6 +76,15 @@ pub struct ParseOutput {
     /// Files that could not be read/parsed. The rest of the run still succeeds —
     /// on a large repo one bad file must not abort indexing.
     pub skipped: Vec<SkippedFile>,
+    /// Total callables present in the ASTs across all units (see
+    /// `LanguageProvider::callable_kinds`). Denominator of the extraction-coverage
+    /// ratio; `0` when no provider in scope measures it.
+    ///
+    /// Note this counts *every* callable, including anonymous inline callbacks
+    /// (`arr.map(x => x * 2)`) that rightly never become nodes — so the ratio has a
+    /// natural ceiling below 1.0. It is a floor/regression signal, not a target:
+    /// a near-zero ratio means a real idiom is being dropped on the floor.
+    pub syntactic_callables: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -181,9 +190,11 @@ pub fn parse_output_from_units(
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeMap::new();
     let mut parsed_files = Vec::new();
+    let mut syntactic_callables = 0u32;
 
     for unit in units {
         add_structure_path(&unit.rel, &mut nodes, &mut edges);
+        syntactic_callables = syntactic_callables.saturating_add(unit.syntactic_callables);
         for node in unit.nodes {
             insert_node(&mut nodes, node);
         }
@@ -198,6 +209,7 @@ pub fn parse_output_from_units(
         edges: edges.into_values().collect(),
         parsed_files,
         skipped,
+        syntactic_callables,
     }
 }
 

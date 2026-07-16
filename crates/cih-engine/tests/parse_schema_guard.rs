@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (24, "bd8c20862f34632b");
+const GOLDEN: (u32, &str) = (25, "96602c0b9e617fd0");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -293,6 +293,29 @@ fn parser_output_changes_require_schema_bump() {
         output.skipped.is_empty(),
         "guard corpus must parse cleanly: {:?}",
         output.skipped
+    );
+
+    // Absence check. The hash below detects *change*, not *silence*: a fixture whose
+    // idiom the parser ignores produces nothing, hashes stably, and passes forever —
+    // which is precisely how the CommonJS gap survived. Requiring every fixture to
+    // yield at least one node makes "we extracted nothing from this file" fail loudly
+    // instead of being pinned as correct.
+    //
+    // Nodes, not defs: a file can legitimately define no symbols and still be fully
+    // extracted (e.g. `fastify-app.ts` is route registrations with inline callbacks —
+    // Route nodes, no defs). Nodes is the weakest honest invariant.
+    let barren: Vec<&str> = output
+        .units
+        .iter()
+        .filter(|u| u.nodes.is_empty())
+        .map(|u| u.rel.as_str())
+        .collect();
+    assert!(
+        barren.is_empty(),
+        "these fixtures produced NO nodes — the parser extracted nothing from them. \
+         Either extraction broke, or the fixture uses an idiom we don't support \
+         (in which case fix the parser, don't delete the fixture):\n  {}",
+        barren.join("\n  ")
     );
 
     // serde_json's default map is sorted and unit order follows `rels` order,

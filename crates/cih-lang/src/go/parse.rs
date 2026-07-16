@@ -178,6 +178,7 @@ pub fn parse_go_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
 
     Ok(ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables: 0,
         nodes,
         edges,
         parsed_file,

@@ -436,12 +436,20 @@ pub struct TypeBinding {
 
 /// Per-file parse output: graph nodes/edges produced for this file, plus the
 /// unresolved IR that the resolution phase consumes.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ParsedUnit {
     pub rel: String,
     pub nodes: Vec<crate::Node>,
     pub edges: Vec<crate::Edge>,
     pub parsed_file: ParsedFile,
+    /// How many callables the AST actually contains (functions, arrows, methods —
+    /// see `LanguageProvider::callable_kinds`). Compared against the `Function`/
+    /// `Method` nodes we emitted, this is the extraction-coverage signal: a ratio
+    /// well below 1 means the parser is silently skipping an idiom. `0` means the
+    /// provider doesn't measure (opt-in), so callers must treat it as "unknown",
+    /// not as "no callables".
+    #[serde(default)]
+    pub syntactic_callables: u32,
 }
 
 /// Origin of a [`TypeBinding`] — determines resolution precedence (nearest
@@ -465,5 +473,12 @@ pub enum BindingKind {
     /// `const x = require('./m')` — `raw_type` is the pre-resolved module path
     /// (the container FQCN of that module's top-level functions). The resolver
     /// returns it verbatim, so `x.method()` resolves against that module's members.
+    ///
+    /// Also used for a barrel re-export (`module.exports.svc = require('./svc')`),
+    /// scoped to the barrel's module: that export *is* the target module.
     ModuleRef,
+    /// `const { svc } = require('./m')` — `raw_type` is `<module>#<member>`. The
+    /// resolver follows `member` through `<module>`'s exports (chasing a barrel
+    /// re-export when there is one) to whatever module it denotes.
+    ModuleMember,
 }

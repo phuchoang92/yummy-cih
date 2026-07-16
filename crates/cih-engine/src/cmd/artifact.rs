@@ -162,14 +162,8 @@ fn register_repo_in_registry(
         community_artifacts_dir: None,
         indexed_at: cih_core::registry::now_rfc3339(),
         last_git_head: None,
-        stats: RegistryStats {
-            nodes: 0,
-            edges: 0,
-            files: 0,
-            routes: 0,
-            communities: 0,
-            processes: 0,
-        },
+        // Placeholder entry — real counts land on the next analyze.
+        stats: RegistryStats::default(),
     };
     registry.entries.retain(|r| r.path != root_str);
     registry.entries.push(entry);

@@ -22,6 +22,32 @@ pub fn text<'a>(node: TsNode<'_>, src: &'a str) -> &'a str {
     node.utf8_text(src.as_bytes()).unwrap_or("").trim()
 }
 
+/// Count nodes in the tree whose kind is one of `kinds` — i.e. how many callables
+/// the source *actually contains*, per `LanguageProvider::callable_kinds`.
+///
+/// Providers call this from `parse_file`, where the tree is already in hand, so it
+/// costs one extra walk and no re-parse. The result feeds the extraction-coverage
+/// ratio: emitted `Function`/`Method` nodes vs. this. A ratio well below 1 is the
+/// alarm that a real idiom is being silently dropped — the signal that catches
+/// blind spots nobody enumerated in a fixture.
+pub fn count_callables(root: TsNode<'_>, kinds: &[&str]) -> u32 {
+    if kinds.is_empty() {
+        return 0;
+    }
+    let mut count = 0u32;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if kinds.contains(&node.kind()) {
+            count = count.saturating_add(1);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    count
+}
+
 /// Emit a Function node + Contains edge and SymbolDef.
 #[allow(clippy::too_many_arguments)] // flat emitter signature shared by all providers
 pub fn emit_function(
@@ -243,6 +269,7 @@ pub fn build_unit(
     };
     ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables: 0,
         nodes,
         edges,
         parsed_file,

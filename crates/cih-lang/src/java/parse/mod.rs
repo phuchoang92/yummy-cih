@@ -92,6 +92,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
 
     Ok(ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables: 0,
         nodes: builder.nodes,
         edges: builder.edges,
         parsed_file: ParsedFile {

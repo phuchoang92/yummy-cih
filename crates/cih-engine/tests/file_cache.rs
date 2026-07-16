@@ -89,6 +89,7 @@ fn unit(parsed_file: ParsedFile) -> ParsedUnit {
         nodes: Vec::new(),
         edges: Vec::new(),
         parsed_file,
+        syntactic_callables: 0,
     }
 }
 

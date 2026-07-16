@@ -42,6 +42,11 @@ pub struct ResolveIndex {
     /// module top level). These are visible file-wide, not just in the callable
     /// where they're declared — a receiver-type fallback consults them.
     module_bindings: HashMap<String, Vec<TypeBinding>>,
+    /// Every module path in scope (each file, extension stripped). Lets a require
+    /// specifier be normalized to a real module — notably `./services` →
+    /// `./services/index`, which the parser cannot do because it is per-file and
+    /// never sees its siblings.
+    known_modules: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -134,16 +139,20 @@ impl ResolveIndex {
             }
             let module_scope =
                 cih_lang::strip_source_extension(&pf.file).unwrap_or(pf.file.as_str());
+            idx.known_modules.insert(module_scope.to_string());
             for tb in &pf.type_bindings {
                 idx.bindings
                     .entry(tb.in_fqcn.clone())
                     .or_default()
                     .push(tb.clone());
-                // Module-top `const x = require(...)` binds at module scope but is
-                // called inside functions — index it file-wide for the receiver
-                // fallback. Function-scoped requires (scope ≠ module) resolve via
-                // the exact-scope step and are excluded here (no cross-fn bleed).
-                if tb.kind == BindingKind::ModuleRef && tb.in_fqcn == module_scope {
+                // Module-top `const x = require(...)` / `const { x } = require(...)`
+                // bind at module scope but are called inside functions — index them
+                // file-wide for the receiver fallback. Function-scoped requires
+                // (scope ≠ module) resolve via the exact-scope step and are excluded
+                // here (no cross-fn bleed).
+                if matches!(tb.kind, BindingKind::ModuleRef | BindingKind::ModuleMember)
+                    && tb.in_fqcn == module_scope
+                {
                     idx.module_bindings
                         .entry(pf.file.clone())
                         .or_default()
@@ -486,8 +495,49 @@ impl ResolveIndex {
             // `const x = require('./m')` — raw_type already holds the resolved
             // module path (the callee module's container FQCN); return it verbatim
             // (no resolve_type — module paths aren't registered types).
-            BindingKind::ModuleRef => Some(tb.raw_type.clone()),
+            BindingKind::ModuleRef => self.normalize_module(&tb.raw_type),
+            // `const { svc } = require('./m')` — raw_type is `<module>#<member>`.
+            BindingKind::ModuleMember => self.resolve_module_member(&tb.raw_type),
         }
+    }
+
+    /// A require specifier as written → a module that actually exists in scope.
+    /// Falls back to `<m>/index`, since `require('./services')` means
+    /// `./services/index.js`. Returns `None` for modules outside the scope
+    /// (external packages), which correctly leaves the receiver unresolved.
+    fn normalize_module(&self, m: &str) -> Option<String> {
+        if self.known_modules.contains(m) {
+            return Some(m.to_string());
+        }
+        let idx = format!("{m}/index");
+        self.known_modules.contains(&idx).then_some(idx)
+    }
+
+    /// [`Self::normalize_module`] for the emit passes.
+    pub fn normalize_module_path(&self, m: &str) -> Option<String> {
+        self.normalize_module(m)
+    }
+
+    /// Resolve a `<module>#<member>` binding to the module that `member` denotes.
+    ///
+    /// This is the barrel chase: `const { userService } = require('../services')`
+    /// where `services/index.js` says `module.exports.userService =
+    /// require('./user.service')`. The barrel's re-export is itself a module-scope
+    /// `ModuleRef` binding, so resolving is a lookup in that module's scope.
+    fn resolve_module_member(&self, raw: &str) -> Option<String> {
+        let (module, member) = raw.rsplit_once('#')?;
+        let module = self.normalize_module(module)?;
+        if let Some(bindings) = self.bindings.get(&module) {
+            if let Some(tb) = bindings
+                .iter()
+                .find(|b| b.name == member && b.kind == BindingKind::ModuleRef)
+            {
+                return self.normalize_module(&tb.raw_type);
+            }
+        }
+        // Not a re-exported module — maybe `member` is a type declared in `module`.
+        let fqcn = format!("{module}.{member}");
+        self.types_by_fqcn.contains_key(&fqcn).then_some(fqcn)
     }
 
     pub fn field_type_in_hierarchy(&self, owner_class: &str, name: &str) -> Option<String> {

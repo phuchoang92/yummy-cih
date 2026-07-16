@@ -430,6 +430,7 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
         None => {
             return Ok(ParsedUnit {
                 rel: rel.to_string(),
+                syntactic_callables: 0,
                 nodes: Vec::new(),
                 edges: Vec::new(),
                 parsed_file: ParsedFile {
@@ -463,6 +464,7 @@ pub fn parse_python_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
 
     Ok(ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables: 0,
         nodes: builder.nodes,
         edges: builder.edges,
         parsed_file: ParsedFile {

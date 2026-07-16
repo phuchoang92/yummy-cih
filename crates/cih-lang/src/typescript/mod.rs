@@ -17,6 +17,19 @@ mod parse;
 
 pub const TS_SCOPE_QUERY: &str = include_str!("query.scm");
 
+/// Tree-sitter kinds that represent a callable in TS/JS — the *denominator* of the
+/// extraction-coverage ratio (see `LanguageProvider::callable_kinds`). Every kind
+/// here is something a reader would call "a function"; if one of them routinely
+/// fails to become a `Function`/`Method` node, we have a silent parser gap.
+pub(super) const CALLABLE_KINDS: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "function_expression",
+    "function",
+    "arrow_function",
+    "method_definition",
+];
+
 static QUERY: Lazy<Query> = Lazy::new(|| {
     Query::new(&language(), TS_SCOPE_QUERY).expect("TypeScript scope query must compile")
 });
@@ -70,6 +83,10 @@ impl LanguageProvider for TypescriptProvider {
 
     fn parse_file(&self, rel: &str, src: &str) -> anyhow::Result<cih_core::ParsedUnit> {
         parse::parse_typescript_file(rel, src)
+    }
+
+    fn callable_kinds(&self) -> &'static [&'static str] {
+        CALLABLE_KINDS
     }
 
     fn scan_file(&self, _rel: &str, src: &str) -> anyhow::Result<SourceScan> {

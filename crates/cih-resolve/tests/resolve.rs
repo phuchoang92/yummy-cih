@@ -2544,3 +2544,117 @@ fn es_named_import_free_call_resolves_via_static_twin() {
         "greet() should resolve to src/lib.greet via the static import twin"
     );
 }
+
+#[test]
+fn barrel_reexport_destructure_resolves_through_index_module() {
+    // The full CommonJS chain a real Express app uses, and the one that produced
+    // zero edges before:
+    //   controllers/user.controller.js: const { userService } = require('../services')
+    //                                   userService.createUser(body)
+    //   services/index.js:              module.exports.userService = require('./user.service')
+    //   services/user.service.js:       const createUser = async (body) => {…}
+    // It needs all three: the ModuleMember binding, `../services` → `services/index`
+    // normalization, and the barrel chase to `services/user.service`.
+    let service = js_file(
+        "services/user.service.js",
+        vec![method_def(
+            "services/user.service",
+            "createUser",
+            &["Object"],
+            None,
+        )],
+        vec![],
+        vec![],
+        vec![],
+    );
+    // The barrel: its export IS the target module (a module-scope ModuleRef).
+    let barrel = js_file(
+        "services/index.js",
+        vec![],
+        vec![],
+        vec![],
+        vec![binding(
+            "userService",
+            "services/user.service",
+            BindingKind::ModuleRef,
+            "services/index",
+            1,
+        )],
+    );
+    let handler = method_id("controllers/user.controller", "createUser", 2);
+    let controller = js_file(
+        "controllers/user.controller.js",
+        vec![method_def(
+            "controllers/user.controller",
+            "createUser",
+            &["Req", "Res"],
+            None,
+        )],
+        vec![],
+        vec![ref_site(
+            "controllers/user.controller#createUser/2",
+            handler.clone(),
+            RefKind::Call,
+            Some("userService"),
+            "createUser",
+            Some(1),
+        )],
+        // `../services` — a directory; only the resolver knows it means `.../index`.
+        vec![binding(
+            "userService",
+            "services#userService",
+            BindingKind::ModuleMember,
+            "controllers/user.controller",
+            1,
+        )],
+    );
+
+    let out = resolve_edges(&[service, barrel, controller]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == handler
+            && e.dst == method_id("services/user.service", "createUser", 1)),
+        "userService.createUser() should resolve through the barrel to services/user.service"
+    );
+}
+
+#[test]
+fn module_member_without_barrel_does_not_resolve_to_a_bogus_module() {
+    // `const { nope } = require('./m')` where `m` re-exports nothing by that name:
+    // the receiver must stay unresolved rather than inventing a module.
+    let m = js_file(
+        "m.js",
+        vec![method_def("m", "other", &[], None)],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let caller = method_id("app", "main", 0);
+    let app = js_file(
+        "app.js",
+        vec![method_def("app", "main", &[], None)],
+        vec![],
+        vec![ref_site(
+            "app#main/0",
+            caller.clone(),
+            RefKind::Call,
+            Some("nope"),
+            "whatever",
+            Some(0),
+        )],
+        vec![binding(
+            "nope",
+            "m#nope",
+            BindingKind::ModuleMember,
+            "app",
+            1,
+        )],
+    );
+    let out = resolve_edges(&[m, app]);
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::Calls && e.src == caller),
+        "unknown barrel member must not resolve"
+    );
+}

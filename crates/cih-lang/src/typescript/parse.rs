@@ -182,28 +182,26 @@ fn walk(
                     }
                 }
 
-                // React component/hook defined as an arrow/function const
-                // (`const Card = () => …`, `const useAuth = () => …`). These are
-                // not otherwise emitted as nodes, so the P4 stereotype missed
-                // them; emit the Function node and walk its body attributed to it.
-                let component = name_node.zip(value).and_then(|(nn, v)| {
-                    if class_fqn.is_none()
-                        && nn.kind() == "identifier"
-                        && matches!(
-                            v.kind(),
-                            "arrow_function" | "function" | "function_expression"
-                        )
-                    {
-                        let name = text(nn, src);
-                        react_function_stereotype(&name, builder).map(|s| (name, v, s))
-                    } else {
-                        None
-                    }
-                });
+                // A callable bound to a const IS a function — emit it, whatever it's
+                // named. `const getUser = async () => …`, `const Card = () => …`,
+                // and `const h = catchAsync(async (req, res) => …)` are the dominant
+                // way modern JS/TS declares functions; before this, only React-named
+                // consts became nodes, so most repos had almost no callee nodes at
+                // all (a 38-file Express app: 49 arrow consts, 0 `function` decls).
+                // React names still get their stereotype — it decorates, it no longer
+                // gates. Single emission site: `emit_function` has no dedup guard.
+                let callable = name_node
+                    .zip(value)
+                    .filter(|(nn, _)| class_fqn.is_none() && nn.kind() == "identifier")
+                    .and_then(|(nn, v)| {
+                        let inner = callable_value(v)?;
+                        Some((text(nn, src), inner))
+                    });
 
-                if let Some((name, v, stereo)) = component {
+                if let Some((name, v)) = callable {
+                    let stereo = react_function_stereotype(&name, builder);
                     let arity = parameter_count(v);
-                    let fn_id = builder.emit_function(v, src, &name, arity, None, Some(&stereo));
+                    let fn_id = builder.emit_function(v, src, &name, arity, None, stereo.as_deref());
                     if let Some(body) = v.child_by_field_name("body") {
                         walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
                     }
@@ -421,13 +419,22 @@ fn walk(
                 None
             };
             if let Some(fn_id) = emitted {
+                // Body comes off the *unwrapped* function — `right` may be the
+                // wrapper call (`catchAsync(fn)`), which has no `body` field, and
+                // missing that would drop every call inside the handler.
                 if let Some(body) = node
                     .child_by_field_name("right")
-                    .and_then(|rhs| rhs.child_by_field_name("body"))
+                    .and_then(callable_value)
+                    .and_then(|f| f.child_by_field_name("body"))
                 {
                     walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
                 }
             } else {
+                // Not a function export — it may be a barrel re-export
+                // (`module.exports.svc = require('./svc')`).
+                if class_fqn.is_none() {
+                    try_emit_exports_reexport(node, src, builder);
+                }
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
                     walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
@@ -443,6 +450,43 @@ fn walk(
     }
 }
 
+/// The function a declarator value ultimately denotes, unwrapping one layer of
+/// higher-order wrapper.
+///
+/// - `async () => {}` / `function () {}` → itself.
+/// - `catchAsync(async (req, res) => {})` → the inner arrow. Express/Koa handlers,
+///   `React.memo(fn)` and `forwardRef(fn)` all take this shape, and without it an
+///   entire controller layer has no function nodes.
+///
+/// The wrapper rule requires **exactly one** argument, and that it be a function.
+/// That single condition is what keeps it honest: it excludes `useMemo(() => v,
+/// [deps])` and `useCallback(fn, [deps])` (two args — they yield a *value*, not a
+/// named function), and `require('./m')` (its argument is a string). Anything else
+/// returns `None` and is walked normally.
+fn callable_value(value: TsNode<'_>) -> Option<TsNode<'_>> {
+    if is_callable_node(value) {
+        return Some(value);
+    }
+    if value.kind() != "call_expression" {
+        return None;
+    }
+    let args = value.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let mut named = args.named_children(&mut cursor);
+    let first = named.next()?;
+    if named.next().is_some() {
+        return None; // more than one argument — a value-producing call, not a wrapper
+    }
+    is_callable_node(first).then_some(first)
+}
+
+fn is_callable_node(node: TsNode<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "arrow_function" | "function" | "function_expression"
+    )
+}
+
 /// `exports.NAME = <fn>` or `module.exports.NAME = <fn>` at module scope → emit a
 /// module-level Function node named `NAME` (CommonJS export-assignment defs, the
 /// dominant handler-definition style in `require`-based backends). Returns the new
@@ -452,6 +496,16 @@ fn try_emit_exports_function(
     src: &str,
     builder: &mut Builder,
 ) -> Option<NodeId> {
+    let name = exports_target_name(assign, src)?;
+    // Unwraps a wrapper too: `exports.register = catchAsync(async (req, res) => …)`.
+    let rhs = callable_value(assign.child_by_field_name("right")?)?;
+    let arity = parameter_count(rhs);
+    Some(builder.emit_function(rhs, src, &name, arity, None, None))
+}
+
+/// The exported name in `exports.NAME = …` / `module.exports.NAME = …`, or `None`
+/// if this assignment doesn't target an `exports` member.
+fn exports_target_name(assign: TsNode<'_>, src: &str) -> Option<String> {
     let left = assign.child_by_field_name("left")?;
     if left.kind() != "member_expression" {
         return None;
@@ -474,17 +528,35 @@ fn try_emit_exports_function(
     if !is_exports_target {
         return None;
     }
-    let rhs = assign.child_by_field_name("right")?;
-    if !matches!(
-        rhs.kind(),
-        "arrow_function" | "function" | "function_expression"
-    ) {
-        return None;
-    }
-    let name_node = left.child_by_field_name("property")?;
-    let name = text(name_node, src);
-    let arity = parameter_count(rhs);
-    Some(builder.emit_function(rhs, src, &name, arity, None, None))
+    left.child_by_field_name("property").map(|p| text(p, src))
+}
+
+/// Barrel re-export: `module.exports.userService = require('./user.service')` — an
+/// `index.js` that re-publishes sibling modules under names.
+///
+/// The export *is* the target module, so it's recorded as a module-scope `ModuleRef`
+/// binding. A consumer's `const { userService } = require('../services')` then
+/// resolves by looking up `userService` in the barrel module's scope. Without this,
+/// every call through a barrel dead-ends — and barrels are the norm in this layout.
+fn try_emit_exports_reexport(assign: TsNode<'_>, src: &str, builder: &mut Builder) -> bool {
+    let Some(name) = exports_target_name(assign, src) else {
+        return false;
+    };
+    let Some(rhs) = assign.child_by_field_name("right") else {
+        return false;
+    };
+    let Some(module) = builder.require_module_of(rhs, src) else {
+        return false;
+    };
+    let (_, sig) = builder.call_scope(None); // module scope — a barrel is top-level
+    builder.type_bindings.push(TypeBinding {
+        name,
+        raw_type: module,
+        kind: BindingKind::ModuleRef,
+        in_fqcn: sig,
+        range: range_of(assign),
+    });
+    true
 }
 
 fn join_paths(prefix: &str, suffix: &str) -> String {
@@ -510,6 +582,7 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
         None => {
             return Ok(ParsedUnit {
                 rel: rel.to_string(),
+                syntactic_callables: 0,
                 nodes: Vec::new(),
                 edges: Vec::new(),
                 parsed_file: ParsedFile {
@@ -549,8 +622,12 @@ pub fn parse_typescript_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit>
     // detect after the walk so exported handler names are available.
     detect_file_based_routes(rel, tree.root_node(), src, &mut builder);
 
+    let syntactic_callables =
+        crate::generic_parse::count_callables(tree.root_node(), super::CALLABLE_KINDS);
+
     Ok(ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables,
         nodes: builder.nodes,
         edges: builder.edges,
         parsed_file: ParsedFile {
@@ -620,6 +697,90 @@ module.exports = app;
         }
     }
 
+    // ── Arrow-const / higher-order function defs ──────────────────────────────
+
+    fn fn_defs(unit: &cih_core::ParsedUnit) -> Vec<(String, String, u16)> {
+        unit.parsed_file
+            .defs
+            .iter()
+            .filter(|d| d.kind == cih_core::NodeKind::Function)
+            .map(|d| {
+                let arity = d
+                    .id
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
+                (d.fqcn.clone(), d.name.clone(), arity)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_arrow_consts_become_function_defs() {
+        // The dominant modern JS/TS shape — and the one that produced NO node before.
+        let src = "const createUser = async (body) => { return body; };\nconst getAll = function () { return []; };\n";
+        let unit = parse_typescript_file("src/services/user.service.js", src).expect("parses");
+        let defs = fn_defs(&unit);
+        assert!(
+            defs.contains(&("src/services/user.service".into(), "createUser".into(), 1)),
+            "{defs:?}"
+        );
+        assert!(
+            defs.contains(&("src/services/user.service".into(), "getAll".into(), 0)),
+            "{defs:?}"
+        );
+    }
+
+    #[test]
+    fn higher_order_wrapped_const_becomes_function_def() {
+        // `catchAsync(fn)` — an entire Express controller layer looks like this.
+        // Arity comes from the INNER arrow, and the body's calls are attributed to it.
+        let src = "const createUser = catchAsync(async (req, res) => { helper(req); });\n";
+        let unit = parse_typescript_file("src/controllers/user.controller.js", src).expect("parses");
+        let defs = fn_defs(&unit);
+        assert!(
+            defs.contains(&("src/controllers/user.controller".into(), "createUser".into(), 2)),
+            "wrapped handler missing or wrong arity: {defs:?}"
+        );
+        // The inner body's call must belong to createUser, not the module.
+        let site = unit
+            .parsed_file
+            .reference_sites
+            .iter()
+            .find(|s| s.name == "helper")
+            .expect("inner call site missing");
+        assert!(
+            site.in_callable.as_str().contains("createUser"),
+            "inner call attributed to {:?}, expected createUser",
+            site.in_callable
+        );
+    }
+
+    #[test]
+    fn value_producing_call_is_not_a_function_def() {
+        // Two args → a value, not a wrapper. `require()` → its arg is a string.
+        // Neither may masquerade as a function definition.
+        let src = "const memo = useMemo(() => compute(), [dep]);\nconst cb = useCallback(() => {}, [dep]);\nconst mod = require('./m');\nconst app = express();\n";
+        let unit = parse_typescript_file("src/ui.tsx", src).expect("parses");
+        let names: Vec<String> = fn_defs(&unit).into_iter().map(|(_, n, _)| n).collect();
+        for n in ["memo", "cb", "mod", "app"] {
+            assert!(!names.contains(&n.to_string()), "{n} wrongly emitted: {names:?}");
+        }
+    }
+
+    #[test]
+    fn single_param_arrow_without_parens_has_arity_one() {
+        let src = "const double = x => x * 2;\n";
+        let unit = parse_typescript_file("src/util.js", src).expect("parses");
+        assert!(
+            fn_defs(&unit).contains(&("src/util".into(), "double".into(), 1)),
+            "{:?}",
+            fn_defs(&unit)
+        );
+    }
+
     // ── CommonJS `require()` binding forms ────────────────────────────────────
 
     #[test]
@@ -667,6 +828,59 @@ module.exports = app;
             "{:?}",
             unit.parsed_file.imports
         );
+    }
+
+    #[test]
+    fn barrel_reexport_emits_module_ref_binding() {
+        // `services/index.js` re-publishing siblings — the export IS the module.
+        let src = "module.exports.userService = require('./user.service');\nexports.authService = require('./auth.service');\n";
+        let unit = parse_typescript_file("src/services/index.js", src).expect("parses");
+        let bindings: Vec<(&str, &str, &str)> = unit
+            .parsed_file
+            .type_bindings
+            .iter()
+            .map(|b| (b.name.as_str(), b.raw_type.as_str(), b.in_fqcn.as_str()))
+            .collect();
+        assert!(
+            bindings.contains(&("userService", "src/services/user.service", "src/services/index")),
+            "{bindings:?}"
+        );
+        assert!(
+            bindings.contains(&("authService", "src/services/auth.service", "src/services/index")),
+            "{bindings:?}"
+        );
+        assert!(unit
+            .parsed_file
+            .type_bindings
+            .iter()
+            .all(|b| b.kind == cih_core::BindingKind::ModuleRef));
+    }
+
+    #[test]
+    fn require_destructure_emits_module_member_bindings() {
+        // Destructured names are used as receivers (`userService.createUser()`), so
+        // they need a binding, not just the static import that serves free calls.
+        let src = "const { userService, tokenService: tok } = require('../services');\n";
+        let unit = parse_typescript_file("src/controllers/user.controller.js", src).expect("parses");
+        let b: Vec<(&str, &str)> = unit
+            .parsed_file
+            .type_bindings
+            .iter()
+            .filter(|b| b.kind == cih_core::BindingKind::ModuleMember)
+            .map(|b| (b.name.as_str(), b.raw_type.as_str()))
+            .collect();
+        assert!(b.contains(&("userService", "src/services#userService")), "{b:?}");
+        // Renamed: local `tok` → member `tokenService`.
+        assert!(b.contains(&("tok", "src/services#tokenService")), "{b:?}");
+        // The static import only makes sense when local == member.
+        let statics: Vec<&str> = unit
+            .parsed_file
+            .imports
+            .iter()
+            .filter(|i| i.is_static)
+            .map(|i| i.raw.as_str())
+            .collect();
+        assert_eq!(statics, vec!["src/services.userService"], "{statics:?}");
     }
 
     #[test]
@@ -1281,10 +1495,18 @@ const helper = () => 1;
             Some("react_hook"),
             "arrow-const hook not labeled"
         );
-        // lowercase non-component arrow const is NOT emitted as a node.
+        // A lowercase arrow const is still a function: it IS emitted as a node, it
+        // just carries no React stereotype. (This assertion used to be the inverse —
+        // it pinned the blind spot that left non-React arrow consts out of the graph
+        // entirely.)
         assert!(
-            !unit.nodes.iter().any(|n| n.name == "helper"),
-            "lowercase arrow const should not be emitted"
+            unit.nodes.iter().any(|n| n.name == "helper"),
+            "plain arrow const should be emitted as a Function node"
+        );
+        assert_eq!(
+            stereotype_of(&unit, "helper"),
+            None,
+            "plain arrow const must not be labeled a React component"
         );
     }
 

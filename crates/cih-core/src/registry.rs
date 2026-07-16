@@ -10,6 +10,18 @@ pub struct RegistryStats {
     pub routes: usize,
     pub communities: usize,
     pub processes: usize,
+    /// Index *quality*, not just size — persisted so `status` can answer "is this
+    /// graph any good?". Previously computed by analyze and then dropped on the
+    /// floor, which is part of why a near-zero-coverage index looked healthy.
+    /// `#[serde(default)]`: entries written before these existed still load.
+    #[serde(default)]
+    pub resolved_edges: usize,
+    #[serde(default)]
+    pub unresolved_refs: u64,
+    /// Emitted callable nodes ÷ callables in the AST. `None` when unmeasured (no
+    /// provider in scope opts in, or the run was a cached no-op).
+    #[serde(default)]
+    pub callable_coverage: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -517,6 +517,13 @@ impl<'a> EdgeEmitter<'a> {
                     if let Some(dst) = self.index.find_member(owner, name, arity) {
                         return Some(dst);
                     }
+                    // `require('./services')` names a directory — the module is
+                    // actually `./services/index`.
+                    if let Some(owner) = self.index.normalize_module_path(owner) {
+                        if let Some(dst) = self.index.find_member(&owner, name, arity) {
+                            return Some(dst);
+                        }
+                    }
                 }
             }
         }

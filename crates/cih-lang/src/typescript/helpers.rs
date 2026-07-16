@@ -48,7 +48,11 @@ pub(super) fn module_path(rel: &str) -> String {
 pub(super) fn parameter_count(node: TsNode<'_>) -> u16 {
     let params = node.child_by_field_name("parameters");
     let Some(params) = params else {
-        return 0;
+        // A single-param arrow without parens (`x => x`) has no `parameters` list —
+        // tree-sitter gives it a singular `parameter` field. Without this it reports
+        // arity 0, which lands in the node id (`#name/0`) and breaks `find_member`'s
+        // arity match.
+        return node.child_by_field_name("parameter").map_or(0, |_| 1);
     };
     let mut count = 0u16;
     let mut cursor = params.walk();

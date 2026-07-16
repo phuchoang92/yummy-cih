@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{GraphArtifacts, JarInfo, VersionId};
+use cih_core::{GraphArtifacts, JarInfo, NodeKind, VersionId};
 use serde::Serialize;
 
 use crate::db::{load_to_falkor, LoadOutcome};
@@ -340,6 +340,10 @@ pub fn analyze_from_scope_with_options(
             jar_failed: 0,
             reused_artifacts: true,
             cache_stats,
+            // A reused no-op run re-measures nothing; 0/0 reports coverage as
+            // `None` ("unknown") rather than falsely claiming zero coverage.
+            syntactic_callables: 0,
+            callable_node_count: 0,
         });
     }
 
@@ -554,6 +558,13 @@ pub fn analyze_from_scope_with_options(
 
     let cache_stats = cache_stats.with_version(version.clone());
 
+    // Extraction-coverage inputs: what the ASTs contained vs. what we emitted.
+    let syntactic_callables = parse_output.syntactic_callables;
+    let callable_node_count = all_nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .count();
+
     Ok(EmitOutcome {
         scope_file,
         scope_path,
@@ -572,6 +583,8 @@ pub fn analyze_from_scope_with_options(
         jar_failed,
         reused_artifacts: false,
         cache_stats,
+        syntactic_callables,
+        callable_node_count,
     })
 }
 
@@ -681,6 +694,22 @@ pub struct EmitOutcome {
     pub skipped_count: usize,
     pub reused_artifacts: bool,
     pub cache_stats: CacheStats,
+    /// Callables present in the source ASTs (denominator of extraction coverage).
+    pub syntactic_callables: u32,
+    /// `Function`/`Method` nodes we actually emitted (numerator).
+    pub callable_node_count: usize,
+}
+
+/// Extraction coverage: emitted callable nodes ÷ callables the AST contains.
+///
+/// `None` when nothing in scope measures it (no provider opted into
+/// `callable_kinds`). The ratio never reaches 1.0 on real code — anonymous inline
+/// callbacks (`arr.map(x => x * 2)`) are callables that rightly never become nodes
+/// — so read it as a floor/regression signal: a near-zero value means an idiom is
+/// being silently dropped, which is exactly how the CommonJS blind spot survived a
+/// green test suite.
+pub fn callable_coverage(callable_nodes: usize, syntactic_callables: u32) -> Option<f64> {
+    (syntactic_callables > 0).then(|| callable_nodes as f64 / syntactic_callables as f64)
 }
 
 impl EmitOutcome {
@@ -700,6 +729,12 @@ impl EmitOutcome {
             skipped_count: self.skipped_count,
             jar_node_count: self.jar_node_count,
             jar_failed: self.jar_failed,
+            syntactic_callables: self.syntactic_callables,
+            callable_node_count: self.callable_node_count,
+            callable_coverage: callable_coverage(
+                self.callable_node_count,
+                self.syntactic_callables,
+            ),
             reused_artifacts: self.reused_artifacts,
             cache: &self.cache_stats,
             falkor_status: load.status(),
@@ -739,7 +774,37 @@ impl EmitOutcome {
         if self.resolved_edge_count > 0 {
             crate::ui::print_row(
                 "Resolve",
-                &format!("{}  edges", crate::ui::fmt_count(self.resolved_edge_count)),
+                &format!(
+                    "{}  edges{}",
+                    crate::ui::fmt_count(self.resolved_edge_count),
+                    if self.unresolved_reference_count > 0 {
+                        format!(
+                            "  \x1b[2m({} unresolved refs)\x1b[0m",
+                            crate::ui::fmt_count(self.unresolved_reference_count as usize)
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }
+        // Extraction coverage: what the ASTs contained vs. what we pulled out of
+        // them. Printing it makes a parser blind spot visible on every run instead
+        // of only when someone thinks to go looking for it.
+        if let Some(cov) = callable_coverage(self.callable_node_count, self.syntactic_callables) {
+            let warn = cov < 0.4;
+            crate::ui::print_row(
+                "Coverage",
+                &format!(
+                    "{:.0}%  \x1b[2mof {} callables extracted\x1b[0m{}",
+                    cov * 100.0,
+                    crate::ui::fmt_count(self.syntactic_callables as usize),
+                    if warn {
+                        "  \x1b[33m← low: an idiom may be unparsed\x1b[0m"
+                    } else {
+                        ""
+                    }
+                ),
             );
         }
         if self.jar_node_count > 0 {
@@ -782,6 +847,13 @@ pub struct AnalyzeSummary<'a> {
     pub skipped_count: usize,
     pub jar_node_count: usize,
     pub jar_failed: usize,
+    /// Callables the ASTs contain vs. `Function`/`Method` nodes emitted, plus the
+    /// ratio (absent when no provider in scope measures it). A near-zero ratio means
+    /// the parser is silently skipping a real idiom.
+    pub syntactic_callables: u32,
+    pub callable_node_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callable_coverage: Option<f64>,
     pub reused_artifacts: bool,
     pub cache: &'a CacheStats,
     pub falkor_status: &'static str,

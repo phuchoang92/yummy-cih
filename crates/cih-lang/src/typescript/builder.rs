@@ -867,12 +867,41 @@ impl Builder {
             // Form 2: `const { a, b } = require('./m')`. A trailing `.member` on a
             // destructure is nonsensical, so only the bare-call form applies.
             "object_pattern" if member.is_none() => {
+                let (_, sig) = self.call_scope(enclosing_fn);
                 let mut cursor = name_node.walk();
                 for prop in name_node.named_children(&mut cursor) {
-                    // Non-aliased shorthand only (`{ a }`); `{ a: b }` renames can't
-                    // be keyed cleanly, matching `emit_import`'s aliased-skip rule.
-                    if prop.kind() == "shorthand_property_identifier_pattern" {
-                        let local = text(prop, src);
+                    // `{ a }` → local == member; `{ a: b }` → local `b`, member `a`.
+                    let (local, member) = match prop.kind() {
+                        "shorthand_property_identifier_pattern" => {
+                            let n = text(prop, src);
+                            (n.clone(), n)
+                        }
+                        "pair_pattern" => {
+                            let key = prop.child_by_field_name("key");
+                            let val = prop.child_by_field_name("value");
+                            match (key, val) {
+                                (Some(k), Some(v)) if v.kind() == "identifier" => {
+                                    (text(v, src), text(k, src))
+                                }
+                                _ => continue,
+                            }
+                        }
+                        _ => continue,
+                    };
+                    // Receiver use (`a.method()`): bind the local to the member of
+                    // the required module, so the resolver can chase it (through a
+                    // barrel re-export if there is one).
+                    self.type_bindings.push(TypeBinding {
+                        name: local.clone(),
+                        raw_type: format!("{module}#{member}"),
+                        kind: BindingKind::ModuleMember,
+                        in_fqcn: sig.clone(),
+                        range,
+                    });
+                    // Free-call use (`a()`): the static import feeds
+                    // `find_static_imported_member`. Only when the local name matches
+                    // the member — that lookup keys on the member name.
+                    if local == member {
                         self.imports.push(RawImport {
                             raw: format!("{module}.{local}"),
                             is_static: true,
@@ -885,6 +914,12 @@ impl Builder {
             }
             _ => {}
         }
+    }
+
+    /// [`Self::require_module`] for callers outside this module (the barrel
+    /// re-export path in `parse.rs`).
+    pub(super) fn require_module_of(&self, call: TsNode<'_>, src: &str) -> Option<String> {
+        self.require_module(call, src)
     }
 
     /// If `call` is `require('<relative-spec>')`, resolve the specifier to a

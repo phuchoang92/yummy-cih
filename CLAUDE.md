@@ -104,6 +104,26 @@ when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgr
 --all-targets -- -D warnings` plus `cargo test --workspace` — keep the whole tree
 warning-clean, and `cargo fmt --all --check` (the tree is fmt-normalized).
 
+**Parser/resolver changes: measure on the corpus, don't trust the suite.** A green
+test run is not evidence that an extraction or resolution fix works. It has already
+happened here that a *correct* CommonJS resolver fix passed every unit test and
+moved a real repo by exactly zero edges — because hand-written fixtures only contain
+idioms their author already had in mind, so the parser and its tests shared one blind
+spot. Before claiming any parser/resolver change works, report a before/after A/B:
+
+```
+cih-engine analyze crates/cih-engine/tests/corpus/js-cjs-express --all --no-load --json
+# compare: resolved_edge_count, unresolved_reference_count, callable_coverage
+```
+
+A change that doesn't move those numbers didn't do anything, whatever the tests say.
+The floors live in `crates/cih-engine/tests/corpus_coverage.rs`; when you improve
+them, raise the floors. `callable_coverage` (emitted `Function`/`Method` nodes ÷
+callables in the AST, per `LanguageProvider::callable_kinds`) is the blind-spot
+alarm: near-zero means an idiom is being silently dropped. Supported vs. known-gap
+idioms are enumerated in `crates/cih-lang/tests/typescript_idioms.rs` — that matrix
+ratchets both ways, so closing a gap means moving its row, not editing prose.
+
 **Parse-cache schema.** Bump `cih_lang::PARSE_CACHE_SCHEMA` whenever any
 parser/extractor changes the shape or content of `ParsedUnit` output — the
 per-file parse cache (`.cih/parse-cache/v<N>/`) and the analyze no-op gate both

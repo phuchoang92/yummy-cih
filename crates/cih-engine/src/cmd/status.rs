@@ -58,6 +58,24 @@ pub fn run(name: String, json: bool) -> Result<()> {
             println!("routes:        {}", entry.stats.routes);
             println!("communities:   {}", entry.stats.communities);
             println!("processes:     {}", entry.stats.processes);
+            println!(
+                "resolved:      {} edges ({} unresolved refs)",
+                entry.stats.resolved_edges, entry.stats.unresolved_refs
+            );
+            // Index quality, not just size: a graph can look big and still have
+            // barely any of its functions extracted.
+            match entry.stats.callable_coverage {
+                Some(cov) => println!(
+                    "coverage:      {:.0}% of callables extracted{}",
+                    cov * 100.0,
+                    if cov < 0.4 {
+                        "  ← low: an idiom may be unparsed"
+                    } else {
+                        ""
+                    }
+                ),
+                None => println!("coverage:      (unmeasured)"),
+            }
             if let Some(fs) = feat_status {
                 println!(
                     "features:      {} ({} nodes, strategy: {})",
