@@ -106,13 +106,15 @@ fn demand_driven_include_emits_only_requested_classes() {
 use std::io::Write;
 
 fn unique_dir() -> PathBuf {
+    // pid keeps this unique across processes; the counter keeps it unique within
+    // one test binary. A wall-clock timestamp is not collision-proof — parallel
+    // tests can read the same tick and share a dir, then race on teardown.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "cih-jar-robust-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        COUNTER.fetch_add(1, Ordering::Relaxed),
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
