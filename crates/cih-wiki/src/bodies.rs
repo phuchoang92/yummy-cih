@@ -201,7 +201,7 @@ fn redact_pattern_value(src: &str, patterns: &[&str], terminators: &str, tag: &s
                 .unwrap_or(out.len());
             let value = out[abs..end].trim_matches(|c| c == '"' || c == '\'' || c == '`');
             if value.len() >= 4 {
-                let replacement = format!("{}[{}]", &pat, tag);
+                let replacement = format!("{}[{}]", pat, tag);
                 out.replace_range(abs..end, &format!("[{}]", tag));
                 pos = abs + replacement.len();
             } else {

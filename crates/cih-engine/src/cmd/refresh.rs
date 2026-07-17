@@ -130,7 +130,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
         } else {
             format!(
                 "up to date (HEAD {})",
-                &short_sha(state.analyze_head.as_deref())
+                short_sha(state.analyze_head.as_deref())
             )
         };
         StageOutcome::skipped(reason)
@@ -186,7 +186,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
         } else {
             format!(
                 "up to date (graph {})",
-                &short_sha(current_graph_version.as_deref())
+                short_sha(current_graph_version.as_deref())
             )
         };
         StageOutcome::skipped(reason)
