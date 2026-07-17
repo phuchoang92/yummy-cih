@@ -4,9 +4,10 @@ use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind, Registry};
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
+use crate::artifact_cache::ArtifactCache;
 use crate::utils::{
-    json_result, load_artifact_edges, load_artifact_nodes, node_prop_str_owned,
-    parse_contract_kind_filter, short_class_name, strip_response_wrapper,
+    json_result, node_prop_str_owned, parse_contract_kind_filter, short_class_name,
+    strip_response_wrapper,
 };
 use crate::xflow::{self, XflowState};
 
@@ -325,7 +326,10 @@ pub async fn trace_flow_x(
     }))
 }
 
-pub async fn shape_check(args: ShapeCheckArgs) -> Result<CallToolResult, McpError> {
+pub async fn shape_check(
+    args: ShapeCheckArgs,
+    artifacts: &ArtifactCache,
+) -> Result<CallToolResult, McpError> {
     let contracts_file = cih_core::contracts_path(&args.group).ok_or_else(|| {
         McpError::internal_error("cannot determine HOME for group contracts path", None)
     })?;
@@ -378,12 +382,15 @@ pub async fn shape_check(args: ShapeCheckArgs) -> Result<CallToolResult, McpErro
         )
     })?;
 
-    let provider_nodes = load_artifact_nodes(&provider_entry.artifacts_dir)
+    let provider_bundle = artifacts
+        .bundle(&provider_entry.artifacts_dir)
         .map_err(|e| McpError::internal_error(format!("provider artifacts: {e}"), None))?;
-    let consumer_nodes = load_artifact_nodes(&consumer_entry.artifacts_dir)
+    let consumer_bundle = artifacts
+        .bundle(&consumer_entry.artifacts_dir)
         .map_err(|e| McpError::internal_error(format!("consumer artifacts: {e}"), None))?;
-    let consumer_edges = load_artifact_edges(&consumer_entry.artifacts_dir)
-        .map_err(|e| McpError::internal_error(format!("consumer edges: {e}"), None))?;
+    let provider_nodes = &provider_bundle.nodes;
+    let consumer_nodes = &consumer_bundle.nodes;
+    let consumer_edges = &consumer_bundle.edges;
 
     let provider_by_id: std::collections::BTreeMap<String, &cih_core::Node> = provider_nodes
         .iter()
@@ -398,7 +405,7 @@ pub async fn shape_check(args: ShapeCheckArgs) -> Result<CallToolResult, McpErro
         std::collections::BTreeMap::new();
     let mut method_accesses: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
-    for edge in &consumer_edges {
+    for edge in consumer_edges {
         match edge.kind {
             EdgeKind::ExternalCall => {
                 ext_call_callers

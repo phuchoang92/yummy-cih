@@ -1,0 +1,28 @@
+{
+  "_about": "Read-path (MCP tool) latency baseline. Regenerate with: FALKOR_URL=redis://127.0.0.1:6380 CIH_BENCH_GRAPH=fineract CIH_BENCH_NAME=disburseLoan cargo run -p cih-falkor --example query_bench. See docs/plans/read-path-latency.md.",
+  "fixture": "fineract",
+  "graph_nodes": 87739,
+  "machine": "native macOS (dev)",
+  "date": "2026-07-16",
+  "bench_name": "disburseLoan",
+  "iters": 50,
+  "notes": {
+    "name_lookup": "candidates_by_name — n.name index added (item 1). Unindexed full label scan measured ~6-8ms warm before the index; index scan ~0.9ms.",
+    "context": "concurrent try_join of 4 sub-queries (item 5).",
+    "context_sequential": "same 4 sub-queries awaited one-by-one — the pre-item-5 shape; the gap vs context is the concurrency win (~2.2x here)."
+  },
+  "tools": [
+    {"tool": "name_lookup",        "median_ms": 0.886, "p95_ms": 2.386},
+    {"tool": "context",            "median_ms": 1.889, "p95_ms": 4.701},
+    {"tool": "context_sequential", "median_ms": 4.233, "p95_ms": 6.578},
+    {"tool": "impact_upstream_d4", "median_ms": 3.113, "p95_ms": 7.116},
+    {"tool": "route_map",          "median_ms": 4.129, "p95_ms": 5.031}
+  ],
+  "artifact_load": {
+    "_about": "Cost of parsing nodes.jsonl+edges.jsonl, paid per call by taint_paths/shape_check before item 4, now served from ArtifactCache (Arc clone) after the first call. Measure with: cargo run -p cih-server --example artifact_load_bench.",
+    "nodes_lines": 87280,
+    "edges_lines": 253144,
+    "cold_parse_ms": 1390,
+    "cache_hit_ms": "~0 (Arc clone)"
+  }
+}

@@ -33,7 +33,7 @@ pub(crate) struct QueryResult {
 
 #[derive(Clone)]
 struct CachedIndex {
-    index: SearchIndex,
+    index: Arc<SearchIndex>,
     version: String,
 }
 
@@ -82,7 +82,7 @@ impl SearchState {
         Ok(rrf_merge(lexical, semantic, limit))
     }
 
-    async fn bm25_index(&self) -> Result<Option<SearchIndex>> {
+    async fn bm25_index(&self) -> Result<Option<Arc<SearchIndex>>> {
         let Some(artifacts_dir) = &self.artifacts_dir else {
             return Ok(None);
         };
@@ -94,13 +94,15 @@ impl SearchState {
             let guard = self.bm25.read().await;
             if let Some(cached) = guard.as_ref() {
                 if cached.version == latest_version {
+                    // Cheap Arc clone — the index (all docs + postings) is shared,
+                    // not copied, on every query.
                     return Ok(Some(cached.index.clone()));
                 }
             }
         }
 
         let nodes = artifacts.read_nodes()?;
-        let index = SearchIndex::build(&nodes);
+        let index = Arc::new(SearchIndex::build(&nodes));
         let mut guard = self.bm25.write().await;
         *guard = Some(CachedIndex {
             index: index.clone(),

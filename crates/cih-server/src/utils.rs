@@ -50,7 +50,7 @@ pub fn load_artifact_edges(artifacts_dir: &str) -> std::io::Result<Vec<Edge>> {
 /// Resolve `repo` (name/path, or empty for the active graph key) to its full
 /// registry entry.
 pub fn resolve_repo_entry(repo: &str, graph_key: &str) -> Result<cih_core::RegistryEntry, String> {
-    let reg = cih_core::Registry::load();
+    let reg = cih_core::Registry::load_cached();
     if reg.entries.is_empty() {
         return Err("no repos in registry — run `cih-engine analyze <repo>` first".to_string());
     }

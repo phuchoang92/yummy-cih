@@ -38,8 +38,8 @@ use crate::jobs::Jobs;
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, parse_direction, text_result, to_mcp};
 use crate::{
-    changes, contracts, coverage, feature, files, indexing, patterns, resources, search, symbol,
-    taint, wiki, xflow,
+    artifact_cache, changes, contracts, coverage, feature, files, indexing, patterns, resources,
+    search, symbol, taint, wiki, xflow,
 };
 
 use crate::search::{QueryArgs, QueryResult, SearchState};
@@ -86,6 +86,9 @@ pub(crate) struct CihServer {
     /// Cross-call artifact-graph cache for cross-repo tools (trace_flow_x,
     /// api_impact caller walks).
     xflow: xflow::XflowState,
+    /// Cross-call cache of raw parsed artifacts for taint_paths / shape_check,
+    /// which reload nodes.jsonl+edges.jsonl on every call.
+    artifacts: artifact_cache::ArtifactCache,
     tool_router: ToolRouter<CihServer>,
 }
 
@@ -126,6 +129,7 @@ impl CihServer {
             read_file_limits,
             wiki,
             xflow: xflow::XflowState::new(),
+            artifacts: artifact_cache::ArtifactCache::new(),
             tool_router: Self::tool_router(),
         }
     }
@@ -504,7 +508,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ShapeCheckArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::shape_check(args).await
+        contracts::shape_check(args, &self.artifacts).await
     }
 
     #[tool(
@@ -691,7 +695,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TaintPathsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        taint::taint_paths(&self.graph_key, args).await
+        taint::taint_paths(&self.graph_key, args, &self.artifacts).await
     }
 
     #[tool(

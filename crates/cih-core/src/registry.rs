@@ -136,12 +136,47 @@ pub fn git_changed_files(repo_path: &Path, since_ref: &str) -> Vec<String> {
     }
 }
 
+struct RegistryCache {
+    mtime: Option<std::time::SystemTime>,
+    registry: std::sync::Arc<Registry>,
+}
+
+static REGISTRY_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<RegistryCache>>> =
+    std::sync::OnceLock::new();
+
 impl Registry {
     pub fn load() -> Self {
         registry_path()
             .and_then(|p| std::fs::read_to_string(&p).ok())
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default()
+    }
+
+    /// Like [`load`](Self::load), but returns a shared snapshot cached on the
+    /// registry file's mtime. The file is small yet read+parsed on every MCP tool
+    /// call (via `resolve`); this skips the re-parse when it hasn't changed. Any
+    /// [`save`](Self::save) bumps the mtime, so cached readers pick up writes.
+    /// Use this only on read-only paths; mutating callers must use `load` + `save`.
+    pub fn load_cached() -> std::sync::Arc<Registry> {
+        let cache = REGISTRY_CACHE.get_or_init(|| std::sync::RwLock::new(None));
+        let current_mtime = registry_path()
+            .and_then(|p| std::fs::metadata(&p).ok())
+            .and_then(|m| m.modified().ok());
+        if let Ok(guard) = cache.read() {
+            if let Some(cached) = guard.as_ref() {
+                if cached.mtime == current_mtime {
+                    return cached.registry.clone();
+                }
+            }
+        }
+        let registry = std::sync::Arc::new(Self::load());
+        if let Ok(mut guard) = cache.write() {
+            *guard = Some(RegistryCache {
+                mtime: current_mtime,
+                registry: registry.clone(),
+            });
+        }
+        registry
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

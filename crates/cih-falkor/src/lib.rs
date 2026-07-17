@@ -390,6 +390,7 @@ impl FalkorStore {
         let t_idx = std::time::Instant::now();
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
+        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.name)").await;
         tracing::info!(
             nodes = total_nodes,
             edges = total_edges,

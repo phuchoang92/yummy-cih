@@ -1,0 +1,69 @@
+# Minimal POC stack — FalkorDB + cih-server, built from source. Nothing else.
+#
+# Why this file exists instead of `docker-compose.yml`: that file declares
+# `${POSTGRES_PASSWORD:?...}`, and Compose interpolates the WHOLE file before it
+# decides which services to start — so it fails at parse time even when you never
+# start Postgres. This is the two-service subset a POC actually needs.
+#
+# Semantic search is intentionally absent: `CIH_PG_URL` is optional
+# (cih-server/src/config.rs), and search falls back to BM25 over the artifacts.
+#
+# Usage (see docs/runbooks/aws-poc.md):
+#   export CIH_API_TOKEN=$(openssl rand -hex 32)
+#   export REPO_PATH=$HOME/repos/myapp
+#   docker compose -f docker-compose.poc.yml build      # ~20-30 min, once
+#   docker compose -f docker-compose.poc.yml up -d
+
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    environment:
+      # AOF: the graph survives a hard power-off, not just a graceful shutdown.
+      REDIS_ARGS: "--appendonly yes"
+    volumes:
+      # This image's real data dir (`config get dir`) — NOT /data. Mounting the
+      # wrong path silently lands RDB/AOF on the ephemeral layer.
+      - falkordb-data:/var/lib/falkordb/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cih-server:
+    # Build from the working tree: the published :latest is hand-pushed (no CI),
+    # so it is both arch-specific and stale. Building here indexes the code you
+    # actually committed — and the arch always matches the host.
+    build:
+      context: .
+    ports:
+      # Host loopback only: unreachable from the internet even with a public IP.
+      # You reach it via SSM port-forwarding (no inbound SG rule, no SSH key).
+      - "127.0.0.1:8080:8080"
+    environment:
+      FALKOR_URL: redis://falkordb:6379
+      CIH_GRAPH_KEY: poc
+      CIH_BIND: 0.0.0.0:8080
+      # Points at the artifacts the engine writes into the repo — enables the
+      # BM25 half of `query`/`search_code`.
+      CIH_ARTIFACTS_DIR: /repo/.cih/artifacts
+      # Required. The server refuses to start on a non-loopback bind without it,
+      # and that guardrail is the point — do NOT add CIH_ALLOW_INSECURE.
+      CIH_API_TOKEN: "${CIH_API_TOKEN:?generate one with `openssl rand -hex 32` and export it}"
+      RUST_LOG: info,cih_server=debug
+    volumes:
+      - cih-home:/home/cih/.cih   # registry.json — maps repo -> artifacts_dir
+      - cih-data:/data
+      # RW, not :ro — `analyze` writes .cih/ here. Same mount is reused by the
+      # engine below, so the registry's absolute paths resolve for both.
+      - ${REPO_PATH:?set REPO_PATH to the repo you want indexed}:/repo
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  falkordb-data:
+  cih-home:
+  cih-data:
