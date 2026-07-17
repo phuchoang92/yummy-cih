@@ -421,7 +421,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                             ui_feat
                                 .lock()
                                 .expect("UI progress mutex poisoned")
-                                .tick_skipped(format!("{} (cached)", &group.feature));
+                                .tick_skipped(format!("{} (cached)", group.feature));
                             return Some((group.feature.clone(), cached, ev_hash));
                         }
 
@@ -767,7 +767,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 format!(
                     "{}{}{}",
                     &existing[..start],
-                    &block_core,
+                    block_core,
                     &existing[end_pos..]
                 )
             } else {
