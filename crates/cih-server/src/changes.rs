@@ -54,10 +54,19 @@ pub async fn detect_changes(
 
     let changed_nodes = store.nodes_in_files(&changed_files).await.map_err(to_mcp)?;
 
-    let mut affected_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Fan the per-node blast-radius traversals out concurrently instead of
+    // awaiting up to 20 in series; the FalkorStore query_limit semaphore
+    // backpressures, and results merge into a set so completion order is moot.
     let symbol_limit = changed_nodes.len().min(20);
+    let mut set = tokio::task::JoinSet::new();
     for node in &changed_nodes[..symbol_limit] {
-        if let Ok(impact) = store.impact(&node.id, Direction::Upstream, 4).await {
+        let store = store.clone();
+        let id = node.id.clone();
+        set.spawn(async move { store.impact(&id, Direction::Upstream, 4).await });
+    }
+    let mut affected_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Ok(impact)) = joined {
             for n in &impact.affected {
                 affected_set.insert(n.id.to_string());
             }

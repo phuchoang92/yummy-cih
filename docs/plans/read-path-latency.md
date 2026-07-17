@@ -15,8 +15,11 @@ baseline committed at `docs/perf/read-path-baseline.json`.
   frequency map on every query; `search.rs` caches the index behind `Arc` (no per-query
   clone). Byte-identical output guarded by a new parity test against a naive reference
   (`inverted_index_matches_naive_reference`).
-- **[DONE] Item 5 — concurrent `context`.** The 4 independent sub-queries now run under
-  `tokio::try_join!`. Measured **4.23ms → 1.89ms** median (~2.2×) on the same node.
+- **[DONE] Item 5 — concurrent `context` + `detect_changes`.** `context`'s 4 independent
+  sub-queries now run under `tokio::try_join!` (**4.23ms → 1.89ms**, ~2.2×). `detect_changes`'s
+  per-node `impact` fan-out (up to 20 changed nodes) now runs via a `tokio::task::JoinSet`
+  instead of a serial loop (**7.43ms → 2.28ms** for 20 nodes, ~3.3×; wider on larger blast
+  radii). Behavior preserved — same node selection, error-swallowing, and set-derived output.
 - **[DONE] Item 3 (core) — registry cache.** `Registry::load_cached()` (mtime-invalidated
   `Arc` snapshot) added in cih-core; the every-tool-call `resolve_repo_entry` path uses it.
   Remaining lower-frequency `Registry::load()`/`GroupRegistry::load()` sites in

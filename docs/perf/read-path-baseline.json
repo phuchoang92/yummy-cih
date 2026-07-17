@@ -16,7 +16,9 @@
     {"tool": "context",            "median_ms": 1.889, "p95_ms": 4.701},
     {"tool": "context_sequential", "median_ms": 4.233, "p95_ms": 6.578},
     {"tool": "impact_upstream_d4", "median_ms": 3.113, "p95_ms": 7.116},
-    {"tool": "route_map",          "median_ms": 4.129, "p95_ms": 5.031}
+    {"tool": "route_map",          "median_ms": 4.129, "p95_ms": 5.031},
+    {"tool": "detect_changes_seq_20nodes",        "median_ms": 7.434, "p95_ms": 9.908, "_note": "20 per-node impact traversals awaited serially (pre-change shape)"},
+    {"tool": "detect_changes_concurrent_20nodes", "median_ms": 2.282, "p95_ms": 3.186, "_note": "same 20 impacts fanned out via JoinSet (~3.3x); larger blast radii widen the gap"}
   ],
   "artifact_load": {
     "_about": "Cost of parsing nodes.jsonl+edges.jsonl, paid per call by taint_paths/shape_check before item 4, now served from ArtifactCache (Arc clone) after the first call. Measure with: cargo run -p cih-server --example artifact_load_bench.",

@@ -11,6 +11,7 @@
 //! `CIH_BENCH_NAME` should be a symbol name that exists in the graph; the bench
 //! resolves it to a node id for the context/impact measurements.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cih_falkor::FalkorStore;
@@ -25,7 +26,8 @@ async fn main() -> anyhow::Result<()> {
     let name = std::env::var("CIH_BENCH_NAME").unwrap_or_else(|_| "save".into());
     eprintln!("FalkorDB: {url}  graph: {graph}  name: {name}  iters: {ITERS}\n");
 
-    let store = FalkorStore::connect(&url, &graph)?.with_query_limit(64, Duration::from_secs(5));
+    let store =
+        Arc::new(FalkorStore::connect(&url, &graph)?.with_query_limit(64, Duration::from_secs(5)));
     store.graph_summary().await?; // warm up the connection
 
     let mut results: Vec<(String, Stats)> = Vec::new();
@@ -89,6 +91,46 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?,
     ));
+
+    // ── detect_changes fan-out: N per-node impact traversals, serial vs. the
+    //    concurrent JoinSet shape. Gather real ids from one impact's blast radius.
+    let seed = store.impact(&id, Direction::Upstream, 4).await?;
+    let ids: Vec<_> = seed
+        .affected
+        .iter()
+        .take(20)
+        .map(|n| n.id.clone())
+        .collect();
+    if ids.len() >= 2 {
+        let n = ids.len();
+        const FANOUT_ITERS: usize = 10;
+        results.push((
+            format!("detect_changes_seq_{n}nodes"),
+            bench(FANOUT_ITERS, || async {
+                for nid in &ids {
+                    store.impact(nid, Direction::Upstream, 4).await?;
+                }
+                Ok(())
+            })
+            .await?,
+        ));
+        results.push((
+            format!("detect_changes_concurrent_{n}nodes"),
+            bench(FANOUT_ITERS, || async {
+                let mut set = tokio::task::JoinSet::new();
+                for nid in &ids {
+                    let store = store.clone();
+                    let nid = nid.clone();
+                    set.spawn(async move { store.impact(&nid, Direction::Upstream, 4).await });
+                }
+                while let Some(joined) = set.join_next().await {
+                    let _ = joined;
+                }
+                Ok(())
+            })
+            .await?,
+        ));
+    }
 
     print_json(&results);
     Ok(())
