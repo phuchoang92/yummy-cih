@@ -23,6 +23,10 @@ impl GraphStore for FalkorStore {
     async fn ensure_schema(&self) -> Result<()> {
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
+        // Short-name symbol resolution (`candidates_by_name`) filters on n.name on
+        // nearly every context/impact/trace_flow call; without this index it is a
+        // full label scan over all Symbol nodes.
+        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.name)").await;
         Ok(())
     }
 
@@ -457,8 +461,6 @@ impl GraphStore for FalkorStore {
             .get_node(id)
             .await?
             .ok_or_else(|| GraphStoreError::NotFound(id.to_string()))?;
-        let callers = neighbor_nodes(self, id, Direction::Upstream).await?;
-        let callees = neighbor_nodes(self, id, Direction::Downstream).await?;
         let proc_query = format!(
             "CYPHER id={id} \
              MATCH (s:Symbol {{id:$id}})-[:STEP_IN_PROCESS]->(p:Symbol) \
@@ -466,17 +468,32 @@ impl GraphStore for FalkorStore {
              RETURN p.id ORDER BY p.name",
             id = cstr(id.as_str())
         );
-        let processes = self
-            .rows(&proc_query)
-            .await?
-            .into_iter()
-            .filter_map(|row| row.first().cloned())
-            .collect();
-        let community = self
-            .symbol_communities(std::slice::from_ref(id))
-            .await?
-            .into_iter()
-            .find_map(|(nid, info)| if &nid == id { Some(info) } else { None });
+        // callers / callees / processes / community are independent of one another;
+        // fire them concurrently over the multiplexed connection instead of paying
+        // four sequential round-trips.
+        let processes_fut = async {
+            Ok::<Vec<String>, GraphStoreError>(
+                self.rows(&proc_query)
+                    .await?
+                    .into_iter()
+                    .filter_map(|row| row.first().cloned())
+                    .collect(),
+            )
+        };
+        let community_fut = async {
+            Ok::<Option<CommunityInfo>, GraphStoreError>(
+                self.symbol_communities(std::slice::from_ref(id))
+                    .await?
+                    .into_iter()
+                    .find_map(|(nid, info)| if &nid == id { Some(info) } else { None }),
+            )
+        };
+        let (callers, callees, processes, community) = tokio::try_join!(
+            neighbor_nodes(self, id, Direction::Upstream),
+            neighbor_nodes(self, id, Direction::Downstream),
+            processes_fut,
+            community_fut,
+        )?;
         Ok(SymbolContext {
             node,
             callers,

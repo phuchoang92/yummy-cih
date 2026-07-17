@@ -16,6 +16,7 @@ pub mod utils;
 pub mod viz;
 pub mod wiki;
 
+pub(crate) mod artifact_cache;
 pub(crate) mod changes;
 pub(crate) mod config;
 pub(crate) mod contracts;

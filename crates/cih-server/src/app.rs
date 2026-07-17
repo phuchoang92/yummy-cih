@@ -30,7 +30,7 @@ use rmcp::{
         ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
-    tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
+    tool, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
 
 use crate::args::*;
@@ -38,8 +38,8 @@ use crate::jobs::Jobs;
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, parse_direction, text_result, to_mcp};
 use crate::{
-    changes, contracts, coverage, feature, files, indexing, patterns, resources, search, symbol,
-    taint, wiki, xflow,
+    artifact_cache, changes, contracts, coverage, feature, files, indexing, patterns, resources,
+    search, symbol, taint, wiki, xflow,
 };
 
 use crate::search::{QueryArgs, QueryResult, SearchState};
@@ -86,6 +86,9 @@ pub(crate) struct CihServer {
     /// Cross-call artifact-graph cache for cross-repo tools (trace_flow_x,
     /// api_impact caller walks).
     xflow: xflow::XflowState,
+    /// Cross-call cache of raw parsed artifacts for taint_paths / shape_check,
+    /// which reload nodes.jsonl+edges.jsonl on every call.
+    artifacts: artifact_cache::ArtifactCache,
     tool_router: ToolRouter<CihServer>,
 }
 
@@ -126,6 +129,7 @@ impl CihServer {
             read_file_limits,
             wiki,
             xflow: xflow::XflowState::new(),
+            artifacts: artifact_cache::ArtifactCache::new(),
             tool_router: Self::tool_router(),
         }
     }
@@ -366,12 +370,12 @@ impl CihServer {
 
     #[tool(description = "List all repos indexed in the CIH registry with their stats.")]
     async fn list_repos(&self, _: Parameters<ListReposArgs>) -> Result<CallToolResult, McpError> {
-        let reg = cih_core::Registry::load();
+        let reg = cih_core::Registry::load_cached();
         // Multi-repo serving: when the server fronts a group, scope the listing
         // to its members and flag the primary (the repo used when a tool's
         // `repo` arg is empty). Pass `repo` to any deep tool to target another.
         if let Some(group) = &self.group {
-            let groups = cih_core::GroupRegistry::load();
+            let groups = cih_core::GroupRegistry::load_cached();
             if let Some(g) = groups.find(group) {
                 let members: Vec<&cih_core::RegistryEntry> = reg
                     .entries
@@ -396,10 +400,10 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<StatusArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let reg = cih_core::Registry::load();
+        let reg = cih_core::Registry::load_cached();
         if let Some(entry) = reg.find(&args.name) {
             let stale = reg.is_stale(&args.name);
-            let group_registry = cih_core::GroupRegistry::load();
+            let group_registry = cih_core::GroupRegistry::load_cached();
             let groups: Vec<serde_json::Value> = group_registry
                 .groups_containing(&entry.name)
                 .map(|group| {
@@ -504,7 +508,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ShapeCheckArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::shape_check(args).await
+        contracts::shape_check(args, &self.artifacts).await
     }
 
     #[tool(
@@ -691,7 +695,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TaintPathsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        taint::taint_paths(&self.graph_key, args).await
+        taint::taint_paths(&self.graph_key, args, &self.artifacts).await
     }
 
     #[tool(
@@ -816,8 +820,54 @@ impl CihServer {
     }
 }
 
-#[tool_handler]
+/// Whether per-tool timing is logged. Read once from `CIH_TOOL_TIMING`
+/// (truthy = `1`/`true`); off by default, so the log is silent unless enabled.
+fn tool_timing_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("CIH_TOOL_TIMING").ok().as_deref(),
+            Some("1") | Some("true")
+        )
+    })
+}
+
 impl ServerHandler for CihServer {
+    // NOTE: this `call_tool` is the manual expansion of rmcp 0.7.0's
+    // `#[tool_handler]` (build a `ToolCallContext`, dispatch via `tool_router`),
+    // wrapped with optional timing. If an rmcp bump changes the macro output,
+    // reconcile it here the same way — see the version note at the top of this file.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let timing = tool_timing_enabled();
+        // Only pay the string/lookup work when timing is on.
+        let started = timing.then(|| {
+            let name = request.name.to_string();
+            let repo = request
+                .arguments
+                .as_ref()
+                .and_then(|m| m.get("repo"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            (name, repo, std::time::Instant::now())
+        });
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).await;
+        if let Some((name, repo, t0)) = started {
+            tracing::info!(
+                tool = %name,
+                repo = repo.as_deref().unwrap_or(""),
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                ok = result.is_ok(),
+                "tool_call"
+            );
+        }
+        result
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,

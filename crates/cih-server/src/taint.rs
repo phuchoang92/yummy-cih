@@ -12,7 +12,8 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 use serde::Serialize;
 
 use crate::args::TaintPathsArgs;
-use crate::utils::{json_result, load_artifact_edges, load_artifact_nodes, resolve_repo};
+use crate::artifact_cache::ArtifactCache;
+use crate::utils::{json_result, resolve_repo};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;
@@ -59,6 +60,7 @@ fn parse_category(s: &str) -> Result<Option<SinkCategory>, String> {
 pub async fn taint_paths(
     graph_key: &str,
     args: TaintPathsArgs,
+    artifacts: &ArtifactCache,
 ) -> Result<CallToolResult, McpError> {
     let category = parse_category(&args.category).map_err(|e| McpError::invalid_params(e, None))?;
     let min_confidence = args.min_confidence.clamp(0.0, 1.0);
@@ -73,11 +75,14 @@ pub async fn taint_paths(
         resolve_repo(&args.repo, graph_key).map_err(|e| McpError::invalid_params(e, None))?;
 
     // The analysis is synchronous and CPU-bound (and reads source files when
-    // refining) — keep it off the async runtime threads.
+    // refining) — keep it off the async runtime threads. The artifact load (a
+    // cache miss) also happens inside the blocking task.
+    let artifacts = artifacts.clone();
     let out = tokio::task::spawn_blocking(move || {
         run_and_shape(
             &repo_path,
             &artifacts_dir,
+            &artifacts,
             category,
             min_confidence,
             refine,
@@ -93,12 +98,13 @@ pub async fn taint_paths(
 fn run_and_shape(
     repo_path: &str,
     artifacts_dir: &str,
+    artifacts: &ArtifactCache,
     category: Option<SinkCategory>,
     min_confidence: f32,
     refine: bool,
     limit: usize,
 ) -> Result<TaintPathsOut, McpError> {
-    let nodes = load_artifact_nodes(artifacts_dir).map_err(|e| {
+    let bundle = artifacts.bundle(artifacts_dir).map_err(|e| {
         McpError::invalid_params(
             format!(
                 "cannot read graph artifacts at {artifacts_dir}: {e}. \
@@ -107,8 +113,8 @@ fn run_and_shape(
             None,
         )
     })?;
-    let edges = load_artifact_edges(artifacts_dir)
-        .map_err(|e| McpError::internal_error(format!("cannot read edges.jsonl: {e}"), None))?;
+    let nodes = &bundle.nodes;
+    let edges = &bundle.edges;
 
     let repo = std::path::Path::new(repo_path);
     let rules = cih_taint::load_taint_rules(repo);
@@ -119,8 +125,8 @@ fn run_and_shape(
         .collect();
 
     let result = run_taint_analysis(TaintAnalysisInput {
-        nodes: &nodes,
-        edges: &edges,
+        nodes,
+        edges,
         rules: &rules,
         resolve_source: Box::new(move |file| std::fs::read_to_string(repo.join(file)).ok()),
         node_file: Box::new(|id| {
@@ -293,7 +299,8 @@ mod tests {
         limit: usize,
     ) -> TaintPathsOut {
         let dir = dir.to_str().unwrap();
-        run_and_shape(dir, dir, category, min_confidence, false, limit).unwrap()
+        let cache = ArtifactCache::new();
+        run_and_shape(dir, dir, &cache, category, min_confidence, false, limit).unwrap()
     }
 
     #[test]
@@ -367,7 +374,8 @@ mod tests {
     fn missing_artifacts_is_an_error() {
         let dir = std::env::temp_dir().join("cih-server-taint-test-missing-nothing-here");
         let dir = dir.to_str().unwrap();
-        let err = run_and_shape(dir, dir, None, 0.0, false, 50).unwrap_err();
+        let cache = ArtifactCache::new();
+        let err = run_and_shape(dir, dir, &cache, None, 0.0, false, 50).unwrap_err();
         assert!(
             err.message.contains("cih-engine analyze"),
             "unexpected error: {}",
