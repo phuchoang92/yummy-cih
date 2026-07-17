@@ -41,15 +41,15 @@ fn load_group_contracts(group: &str) -> Result<Vec<ContractMatch>, McpError> {
 fn group_freshness(group_name: &str) -> (Option<String>, bool) {
     let state = cih_core::group_dir(group_name).and_then(|dir| cih_core::SyncState::load(&dir));
     let synced_at = state.as_ref().map(|s| s.synced_at.clone());
-    let group_registry = cih_core::GroupRegistry::load();
+    let group_registry = cih_core::GroupRegistry::load_cached();
     let Some(group) = group_registry.find(group_name) else {
         // Contracts were readable but the group is gone from groups.json —
         // freshness can't be verified against members, so flag it.
         return (synced_at, true);
     };
     let contracts_exist = cih_core::contracts_path(group_name).is_some_and(|path| path.exists());
-    let stale =
-        cih_core::group_contracts_stale(group, &Registry::load(), state.as_ref(), contracts_exist);
+    let registry = Registry::load_cached();
+    let stale = cih_core::group_contracts_stale(group, &registry, state.as_ref(), contracts_exist);
     (synced_at, stale)
 }
 
@@ -110,7 +110,7 @@ pub async fn api_impact(
     })
     .clamp(1, 6);
     let registry = if args.include_callers {
-        Some(Registry::load())
+        Some(Registry::load_cached())
     } else {
         None
     };
@@ -234,12 +234,12 @@ pub async fn trace_flow_x(
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
-    let registry = Registry::load();
+    let registry = Registry::load_cached();
     let entry = crate::utils::resolve_repo_entry(&args.repo, graph_key)
         .map_err(|e| McpError::invalid_params(e, None))?;
     let start_repo = entry.name.clone();
 
-    let groups = cih_core::GroupRegistry::load();
+    let groups = cih_core::GroupRegistry::load_cached();
     let group_entry = groups.find(&args.group).ok_or_else(|| {
         McpError::invalid_params(
             format!(
@@ -362,7 +362,7 @@ pub async fn shape_check(
         }));
     }
 
-    let reg = Registry::load();
+    let reg = Registry::load_cached();
     let provider_entry = reg.find(&args.provider).ok_or_else(|| {
         McpError::invalid_params(
             format!(

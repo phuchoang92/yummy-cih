@@ -29,10 +29,17 @@ baseline committed at `docs/perf/read-path-baseline.json`.
   `cargo run -p cih-server --example artifact_load_bench`). Correctness preserved — all
   taint + contract tests pass; node/edge ordering is unchanged (raw bundle, not the
   id-keyed `ArtifactGraph`).
-- **[TODO] Item 0 (optional) — env-gated per-tool timing log** in `app.rs` dispatch (the
-  committed `query_bench` + `artifact_load_bench` examples cover the baseline need).
-- **[TODO] Item 3 (remainder)** — route the lower-frequency `Registry::load()` /
-  `GroupRegistry::load()` sites (list_repos, status, contract tools) through the cache too.
+- **[DONE] Item 0 (timing log) — env-gated per-tool timing.** `#[tool_handler]` on
+  `impl ServerHandler for CihServer` replaced with a hand-written `call_tool` (verbatim
+  rmcp-0.7 expansion + timing) that logs `tool_call { tool, repo, elapsed_ms, ok }` when
+  `CIH_TOOL_TIMING=1`/`true`, silent otherwise. Verified end-to-end over MCP Streamable
+  HTTP: enabled → one `tool_call` line per call (`tool=list_repos elapsed_ms=3 ok=true`),
+  disabled → none, dispatch unchanged in both.
+- **[DONE] Item 3 (remainder) — cache remaining registry reads.** Added
+  `GroupRegistry::load_cached()` (twin of `Registry::load_cached()`) and routed the
+  read-only `list_repos` / `status` / `group_freshness` / `api_impact` / `trace_flow_x` /
+  `shape_check` sites through the cached snapshots. Mutating engine/CLI paths stay on
+  `load()` + `save()`.
 
 ---
 
