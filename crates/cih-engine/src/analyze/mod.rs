@@ -75,6 +75,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
             allow_noop: !flags.no_cache,
             skip_xml_integration: flags.skip_xml_integration,
             route_base_path: flags.route_base_path.clone(),
+            quiet: flags.json,
         },
     )?;
 
@@ -163,6 +164,7 @@ pub fn run_resolve(
             allow_noop: false,
             skip_xml_integration: false,
             route_base_path,
+            quiet: json,
         },
     )?;
 
@@ -210,6 +212,7 @@ pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<Em
             allow_noop: true,
             skip_xml_integration: false,
             route_base_path: None,
+            quiet: false,
         },
     )
 }
@@ -239,6 +242,7 @@ pub fn analyze_from_scope(
             allow_noop: true,
             skip_xml_integration: false,
             route_base_path: None,
+            quiet: false,
         },
     )
 }
@@ -252,6 +256,9 @@ pub fn analyze_from_scope_with_options(
     let repo_root = PathBuf::from(&scope_file.repo_root);
     let cih_dir = repo_root.join(".cih");
     let mut ui = crate::ui::PhaseProgress::new();
+    if cache.quiet {
+        ui.hide();
+    }
 
     let bundle_path = cih_dir.join("graph.db.zst");
     let hashes_path = cih_dir.join("file-hashes.json");
@@ -599,6 +606,11 @@ pub struct AnalyzeCacheOptions {
     /// `~/.cih/config.toml`); `None` falls back to auto-detection. Flows into
     /// `PostProcessOptions.route_base_path` for the framework resolver to apply.
     pub route_base_path: Option<String>,
+    /// Suppress the interactive `PhaseProgress` UI (spinner + `◆` phase lines).
+    /// Set under `--json` so machine-readable stdout isn't shadowed by a live bar
+    /// on stderr — matching `wiki`/`taint`. Display-only: intentionally excluded
+    /// from `analyze_config_fingerprint`, so it never affects the no-op cache.
+    pub quiet: bool,
 }
 
 /// Fingerprint of the analyze inputs that affect graph output but are **not** source-file
@@ -878,6 +890,7 @@ mod tests {
             allow_noop: true,
             skip_xml_integration: false,
             route_base_path: None,
+            quiet: false,
         };
 
         let v1 = analyze_config_fingerprint_with(&dir, &cache, 1);

@@ -291,6 +291,7 @@ mod tests {
             allow_noop: true,
             skip_xml_integration: skip_xml,
             route_base_path: cxf.map(String::from),
+            quiet: false,
         }
     }
 
