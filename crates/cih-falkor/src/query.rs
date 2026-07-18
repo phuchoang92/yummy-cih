@@ -10,8 +10,8 @@ use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKin
 use cih_graph_store::{
     risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge, FlowHop,
     FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError,
-    GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadStats, Path, Result, RouteInfo,
-    SimilarMethod, Subgraph, SymbolContext,
+    GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadStats, NoopObserver, Path,
+    Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
 };
 
 use crate::neighbor_nodes;
@@ -31,25 +31,7 @@ impl GraphStore for FalkorStore {
     }
 
     async fn bulk_load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
-        // Wait out a `BusyLoadingError` window before writing, so a FalkorDB that
-        // is still loading a large persisted dataset doesn't cause a partial write.
-        self.wait_until_ready(Self::load_wait_budget()).await?;
-        // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path,
-        // which streams the artifacts (no `Vec` read). A populated one (e.g. the
-        // community set loaded after analyze) falls back to the Cypher upsert,
-        // which reads the small set into memory. `GRAPH.BULK BEGIN` also requires
-        // an unused key, so this routing honors that constraint.
-        if self.graph_is_empty().await? {
-            self.bulk_insert(artifacts).await
-        } else {
-            let nodes = artifacts
-                .read_nodes()
-                .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;
-            let edges = artifacts
-                .read_edges()
-                .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
-            self.load_nodes_edges(&nodes, &edges).await
-        }
+        self.bulk_load_observed(artifacts, &NoopObserver).await
     }
 
     async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()> {
@@ -66,7 +48,8 @@ impl GraphStore for FalkorStore {
             ))
             .await?;
         }
-        self.load_nodes_edges(&delta.nodes, &delta.edges).await?;
+        self.load_nodes_edges(&delta.nodes, &delta.edges, &NoopObserver)
+            .await?;
         Ok(())
     }
 

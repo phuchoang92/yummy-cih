@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use cih_core::{GraphArtifacts, JarInfo, NodeKind, VersionId};
 use serde::Serialize;
 
-use crate::db::{load_to_falkor, LoadOutcome};
+use crate::db::{load_to_falkor_with_progress, LoadOutcome};
 use crate::scope::{self, ScopeFile, ScopeRequest};
 use crate::versioning::{content_version, prune_other_versions};
 use crate::{scan, DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
@@ -88,7 +88,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
     } else {
         let falkor_url = flags.falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
         let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_to_falkor(falkor_url, graph_key, &emit.artifacts) {
+        match load_to_falkor_with_progress(falkor_url, graph_key, &emit.artifacts, flags.json) {
             Ok(stats) => {
                 tracing::info!(
                     nodes = stats.nodes,
@@ -174,7 +174,7 @@ pub fn run_resolve(
     } else {
         let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
         let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_to_falkor(url, key, &emit.artifacts) {
+        match load_to_falkor_with_progress(url, key, &emit.artifacts, json) {
             Ok(stats) => {
                 tracing::info!(
                     nodes = stats.nodes,

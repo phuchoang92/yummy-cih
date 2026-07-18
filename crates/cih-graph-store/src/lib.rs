@@ -307,6 +307,26 @@ pub trait BulkLoader: Send + Sync {
     async fn load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats>;
 }
 
+/// Coarse load-phase callbacks so a CLI can render multi-phase progress while a
+/// bulk load runs. Every method defaults to a no-op, so an adapter only fires the
+/// phases it actually has and a caller only overrides the ones it displays. The
+/// FalkorDB adapter fires `nodes_loaded`/`edges_loaded`/`indexes_built` from
+/// inside the bulk insert; connect/staging/publish are engine-orchestrated.
+///
+/// `Send + Sync` (not `Send`-future) is sufficient: the load runs on a
+/// current-thread runtime, and a `&dyn LoadObserver` is `Send` because the trait
+/// is `Sync`.
+pub trait LoadObserver: Send + Sync {
+    fn nodes_loaded(&self, _count: u64) {}
+    fn edges_loaded(&self, _count: u64) {}
+    fn indexes_built(&self) {}
+}
+
+/// A `LoadObserver` that ignores every event — the default when no progress
+/// display is wanted (tests, `discover`/`taint`/`artifact`, non-observed loads).
+pub struct NoopObserver;
+impl LoadObserver for NoopObserver {}
+
 /// Derive a coarse risk label from upstream fan-out — shared helper so every
 /// adapter reports risk consistently.
 pub fn risk_from_fanout(affected: usize) -> &'static str {

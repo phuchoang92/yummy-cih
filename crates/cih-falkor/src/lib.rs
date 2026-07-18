@@ -17,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, Node, NodeId, NodeKind};
 use cih_graph_store::{
-    BulkLoader, Direction, FlowNode, GraphStore, GraphStoreError, LoadStats, Result,
+    BulkLoader, Direction, FlowNode, GraphStore, GraphStoreError, LoadObserver, LoadStats, Result,
 };
 use redis::Value;
 
@@ -75,10 +75,59 @@ impl FalkorStore {
         self
     }
 
+    /// Per-connection-attempt timeout for establishing the FalkorDB connection,
+    /// overridable via `CIH_FALKOR_CONNECT_TIMEOUT_SECS` (default 5s). Bounds the
+    /// initial connect so a **down or firewalled** FalkorDB fails fast instead of
+    /// blocking on the OS TCP timeout; distinct from `load_wait_budget` (600s),
+    /// which waits out a reachable-but-still-loading instance at the query level.
+    fn connect_timeout() -> Duration {
+        Duration::from_secs(
+            std::env::var("CIH_FALKOR_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&s| s > 0)
+                .unwrap_or(5),
+        )
+    }
+
     /// A clone of the shared, reconnecting connection, building it on first use.
+    ///
+    /// A down/firewalled host would otherwise block for ~a minute: `new_with_config`
+    /// feeds redis's default retry `factor` (100) into an exponential backoff, so
+    /// even a couple of retries sleep far longer than the per-attempt
+    /// `connection_timeout`. We therefore (a) tighten the backoff (`factor`/`max_delay`)
+    /// and cap each attempt, and (b) wrap the **initial** establishment in a total
+    /// `connect_timeout()` so a truly-down instance surfaces an error in seconds.
+    /// Only the first connect is time-boxed here — the manager's later transparent
+    /// reconnects (which the long-running server depends on) keep their own logic.
+    /// A reachable-but-loading instance is unaffected: TCP connect succeeds while
+    /// queries return `BusyLoadingError`, which `wait_until_ready` handles.
     async fn conn(&self) -> Result<redis::aio::ConnectionManager> {
         self.conn
-            .get_or_try_init(|| redis::aio::ConnectionManager::new(self.client.clone()))
+            .get_or_try_init(|| async {
+                let budget = Self::connect_timeout();
+                let config = redis::aio::ConnectionManagerConfig::new()
+                    .set_connection_timeout(budget)
+                    .set_factor(2)
+                    .set_max_delay(500);
+                match tokio::time::timeout(
+                    budget,
+                    redis::aio::ConnectionManager::new_with_config(self.client.clone(), config),
+                )
+                .await
+                {
+                    Ok(res) => res,
+                    Err(_) => Err(redis::RedisError::from((
+                        redis::ErrorKind::IoError,
+                        "FalkorDB connection timed out",
+                        format!(
+                            "could not connect within {}s — is FalkorDB running? \
+                             (raise CIH_FALKOR_CONNECT_TIMEOUT_SECS to wait longer)",
+                            budget.as_secs()
+                        ),
+                    ))),
+                }
+            })
             .await
             .cloned()
             .map_err(|e| GraphStoreError::Backend(e.to_string()))
@@ -221,7 +270,12 @@ impl FalkorStore {
 
     /// Core write path: MERGE nodes then edges in UNWIND batches. Idempotent
     /// (re-running the same artifact is a no-op), so it doubles as upsert.
-    async fn load_nodes_edges(&self, nodes: &[Node], edges: &[Edge]) -> Result<LoadStats> {
+    async fn load_nodes_edges(
+        &self,
+        nodes: &[Node],
+        edges: &[Edge],
+        obs: &dyn LoadObserver,
+    ) -> Result<LoadStats> {
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await; // idempotent
 
         let node_chunks: Vec<_> = nodes.chunks(BATCH).collect();
@@ -258,6 +312,8 @@ impl FalkorStore {
             })?;
         }
 
+        obs.nodes_loaded(nodes.len() as u64);
+
         // Relationship types can't be parameterized in MERGE → one batch per kind.
         let mut by_kind: HashMap<EdgeKind, Vec<&Edge>> = HashMap::new();
         for e in edges {
@@ -288,6 +344,11 @@ impl FalkorStore {
                 })?;
             }
         }
+        obs.edges_loaded(edges.len() as u64);
+        // The id index is created up front on this path (see top), so the
+        // "indexes built" milestone is already satisfied — signal it to close the
+        // observer's phase state machine consistently with the fast path.
+        obs.indexes_built();
 
         Ok(LoadStats {
             nodes: nodes.len() as u64,
@@ -321,7 +382,42 @@ impl FalkorStore {
     /// before the edge pass, so struct `Vec`s never exist and no single call
     /// approaches the 512 MB / 1 GB limits. The `id`/`kind` indexes are created
     /// *after* the insert — `BEGIN` requires an unused key.
-    async fn bulk_insert(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
+    /// `bulk_load` with a progress observer. The trait `GraphStore::bulk_load`
+    /// delegates here with a `NoopObserver`; a CLI passes an observer that renders
+    /// per-phase progress. Routing is identical to the trait method: a fresh
+    /// (unused) key takes the native `GRAPH.BULK` fast path; a populated one falls
+    /// back to the Cypher upsert.
+    pub async fn bulk_load_observed(
+        &self,
+        artifacts: &GraphArtifacts,
+        obs: &dyn LoadObserver,
+    ) -> Result<LoadStats> {
+        // Wait out a `BusyLoadingError` window before writing, so a FalkorDB that
+        // is still loading a large persisted dataset doesn't cause a partial write.
+        self.wait_until_ready(Self::load_wait_budget()).await?;
+        // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path,
+        // which streams the artifacts (no `Vec` read). A populated one (e.g. the
+        // community set loaded after analyze) falls back to the Cypher upsert,
+        // which reads the small set into memory. `GRAPH.BULK BEGIN` also requires
+        // an unused key, so this routing honors that constraint.
+        if self.graph_is_empty().await? {
+            self.bulk_insert(artifacts, obs).await
+        } else {
+            let nodes = artifacts
+                .read_nodes()
+                .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;
+            let edges = artifacts
+                .read_edges()
+                .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
+            self.load_nodes_edges(&nodes, &edges, obs).await
+        }
+    }
+
+    async fn bulk_insert(
+        &self,
+        artifacts: &GraphArtifacts,
+        obs: &dyn LoadObserver,
+    ) -> Result<LoadStats> {
         // `GRAPH.BULK BEGIN` requires an unused key. The readiness probe and the
         // emptiness check both auto-create an empty graph key, so drop it first.
         let _ = self.drop_graph().await;
@@ -360,6 +456,7 @@ impl FalkorStore {
             con
         };
         drop(node_batches); // free node payload before encoding edges
+        obs.nodes_loaded(total_nodes);
 
         // Edge pass: stream + encode against the ordinal map, then send.
         let edge_stream = artifacts.stream_edges().map_err(read_err)?;
@@ -385,12 +482,14 @@ impl FalkorStore {
             }
         }
         let load_ms = t_load.elapsed().as_millis();
+        obs.edges_loaded(total_edges);
 
         // Indexes must be built after the bulk insert (see doc above).
         let t_idx = std::time::Instant::now();
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
         let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.name)").await;
+        obs.indexes_built();
         tracing::info!(
             nodes = total_nodes,
             edges = total_edges,
