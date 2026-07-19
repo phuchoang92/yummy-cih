@@ -1170,10 +1170,50 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         sink.path_set().into_iter().map(String::from).collect();
     let flush_stats = sink.flush(out_dir)?;
 
-    // Remove stale dev-class .md/.json files left over from a prior run with a different
-    // community assignment. Only runs for features that were actually rendered this pass.
-    for group in &feature_groups {
-        if let Some(ref af) = affected_features {
+    prune_stale_dev_files(
+        &feature_groups,
+        &affected_features,
+        out_dir,
+        &rendered_paths,
+    );
+
+    let manifest_path = out_dir.join("manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    if input.generation.html_viewer {
+        html::write_html_viewer(out_dir, &manifest)?;
+    }
+
+    // ── Agent index ──────────────────────────────────────────────────────────
+    // Emit agent-index.json: two lookup maps for coding agents.
+    //   fqn_to_page   — class node-id  → dev page path (relative to wiki out_dir)
+    //   file_to_pages — source file     → [dev page paths]
+    let agent_index_path = out_dir.join("agent-index.json");
+    write_agent_index(&dev_entries, out_dir, &agent_index_path)?;
+
+    Ok(WikiOutcome {
+        out_dir: out_dir.to_path_buf(),
+        manifest_path,
+        agent_index_path,
+        page_count,
+        community_count: graph.community_nodes.len(),
+        route_count: graph.routes.len(),
+        llm_enriched,
+        pages_written: flush_stats.written,
+        pages_unchanged: flush_stats.unchanged,
+    })
+}
+
+/// Remove stale dev-class `.md`/`.json` files left over from a prior run with a
+/// different community assignment. Only touches features rendered this pass
+/// (those in `affected_features`, or all when `None`).
+fn prune_stale_dev_files(
+    feature_groups: &[FeatureGroup],
+    affected_features: &Option<std::collections::HashSet<String>>,
+    out_dir: &Path,
+    rendered_paths: &std::collections::HashSet<String>,
+) {
+    for group in feature_groups {
+        if let Some(af) = affected_features {
             if !af.contains(&group.feature) {
                 continue;
             }
@@ -1199,52 +1239,37 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
             }
         }
     }
+}
 
-    let manifest_path = out_dir.join("manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
-    if input.generation.html_viewer {
-        html::write_html_viewer(out_dir, &manifest)?;
+/// Emit `agent-index.json` at `agent_index_path`: `fqn_to_page` (class node-id →
+/// dev page path) and `file_to_pages` (source file → dev page paths), the two
+/// lookup maps coding agents use to jump from code to the generated wiki.
+fn write_agent_index(
+    dev_entries: &[(String, String, String)],
+    out_dir: &Path,
+    agent_index_path: &Path,
+) -> Result<()> {
+    let mut fqn_to_page: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut file_to_pages: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (class_id, file, page_path) in dev_entries {
+        fqn_to_page.insert(class_id.clone(), page_path.clone());
+        file_to_pages
+            .entry(file.clone())
+            .or_default()
+            .push(page_path.clone());
     }
-
-    // ── Agent index ──────────────────────────────────────────────────────────
-    // Emit agent-index.json: two lookup maps for coding agents.
-    //   fqn_to_page   — class node-id  → dev page path (relative to wiki out_dir)
-    //   file_to_pages — source file     → [dev page paths]
-    let agent_index_path = out_dir.join("agent-index.json");
-    {
-        let mut fqn_to_page: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
-        let mut file_to_pages: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for (class_id, file, page_path) in &dev_entries {
-            fqn_to_page.insert(class_id.clone(), page_path.clone());
-            file_to_pages
-                .entry(file.clone())
-                .or_default()
-                .push(page_path.clone());
-        }
-        let index_json = serde_json::to_string_pretty(&serde_json::json!({
-            "schema_version": 1,
-            "wiki_dir": out_dir.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("wiki"),
-            "fqn_to_page": fqn_to_page,
-            "file_to_pages": file_to_pages,
-        }))?;
-        std::fs::write(&agent_index_path, index_json)?;
-    }
-
-    Ok(WikiOutcome {
-        out_dir: out_dir.to_path_buf(),
-        manifest_path,
-        agent_index_path,
-        page_count,
-        community_count: graph.community_nodes.len(),
-        route_count: graph.routes.len(),
-        llm_enriched,
-        pages_written: flush_stats.written,
-        pages_unchanged: flush_stats.unchanged,
-    })
+    let index_json = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "wiki_dir": out_dir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("wiki"),
+        "fqn_to_page": fqn_to_page,
+        "file_to_pages": file_to_pages,
+    }))?;
+    std::fs::write(agent_index_path, index_json)?;
+    Ok(())
 }
 
 pub(crate) fn capitalize(s: &str) -> String {
