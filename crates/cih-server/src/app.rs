@@ -49,6 +49,9 @@ mod tools_files;
 mod tools_testing;
 mod tools_wiki;
 
+#[cfg(test)]
+mod dispatch_tests;
+
 /// Map a registry `artifacts_dir` (the versioned `.cih/artifacts/<hash>` dir,
 /// which cross-repo readers use directly) to the unversioned parent that
 /// `SearchState`/`GraphArtifacts::latest_in_dir` expect for BM25.
