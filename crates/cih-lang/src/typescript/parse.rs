@@ -137,78 +137,7 @@ fn walk(
             }
         }
         "lexical_declaration" => {
-            // Module-level `const X = '…'` (incl. env-default initializers)
-            // becomes a StringConstant for cross-file URL folding.
-            if class_fqn.is_none() && enclosing_fn.is_none() {
-                collect_module_string_constants(node, src, builder);
-            }
-            let mut cursor = node.walk();
-            for declarator in node.named_children(&mut cursor) {
-                if declarator.kind() != "variable_declarator" {
-                    walk(declarator, src, builder, class_fqn, controller_prefix, enclosing_fn);
-                    continue;
-                }
-                let name_node = declarator.child_by_field_name("name");
-                let value = declarator.child_by_field_name("value");
-
-                // Typed local (`const x: Order = …`) → type_binding scoped to the
-                // enclosing callable, so `x.method()` resolves its receiver type.
-                if let (Some(nn), Some(ty)) = (
-                    name_node.filter(|n| n.kind() == "identifier"),
-                    declarator
-                        .child_by_field_name("type")
-                        .and_then(|a| type_annotation_name(a, src)),
-                ) {
-                    let (_, sig) = builder.call_scope(enclosing_fn);
-                    builder.type_bindings.push(TypeBinding {
-                        name: text(nn, src),
-                        raw_type: ty,
-                        kind: BindingKind::Local,
-                        in_fqcn: sig,
-                        range: range_of(declarator),
-                    });
-                }
-
-                // CommonJS `const x = require('./m')` / `const { a } = require('./m')`
-                // / `const f = require('./m').foo` → binding + free-call hints.
-                builder.emit_require_binding(declarator, enclosing_fn, src);
-
-                // `export const apiFetch = async (endpoint, …) => …` wrapper shape.
-                if class_fqn.is_none() && enclosing_fn.is_none() {
-                    if let (Some(nn), Some(v)) = (name_node, value) {
-                        if nn.kind() == "identifier" && v.kind() == "arrow_function" {
-                            try_collect_http_wrapper(&text(nn, src), v, src, builder);
-                        }
-                    }
-                }
-
-                // A callable bound to a const IS a function — emit it, whatever it's
-                // named. `const getUser = async () => …`, `const Card = () => …`,
-                // and `const h = catchAsync(async (req, res) => …)` are the dominant
-                // way modern JS/TS declares functions; before this, only React-named
-                // consts became nodes, so most repos had almost no callee nodes at
-                // all (a 38-file Express app: 49 arrow consts, 0 `function` decls).
-                // React names still get their stereotype — it decorates, it no longer
-                // gates. Single emission site: `emit_function` has no dedup guard.
-                let callable = name_node
-                    .zip(value)
-                    .filter(|(nn, _)| class_fqn.is_none() && nn.kind() == "identifier")
-                    .and_then(|(nn, v)| {
-                        let inner = callable_value(v)?;
-                        Some((text(nn, src), inner))
-                    });
-
-                if let Some((name, v)) = callable {
-                    let stereo = react_function_stereotype(&name, builder);
-                    let arity = parameter_count(v);
-                    let fn_id = builder.emit_function(v, src, &name, arity, None, stereo.as_deref());
-                    if let Some(body) = v.child_by_field_name("body") {
-                        walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
-                    }
-                } else {
-                    walk(declarator, src, builder, class_fqn, controller_prefix, enclosing_fn);
-                }
-            }
+            walk_lexical_declaration(node, src, builder, class_fqn, controller_prefix, enclosing_fn)
         }
         "class_declaration" | "abstract_class_declaration" => {
             let Some(name_node) = node.child_by_field_name("name") else {
@@ -264,122 +193,10 @@ fn walk(
             }
         }
         "function_declaration" => {
-            let Some(name_node) = node.child_by_field_name("name") else {
-                return;
-            };
-            let name = text(name_node, src);
-            if name.is_empty() {
-                return;
-            }
-            let arity = parameter_count(node);
-            let decorators = collect_sibling_decorators(node, src);
-            if class_fqn.is_none() {
-                try_collect_http_wrapper(&name, node, src, builder);
-            }
-            // React component/hook stereotype (top-level functions only).
-            let stereotype = if class_fqn.is_none() {
-                react_function_stereotype(&name, builder)
-            } else {
-                None
-            };
-            let fn_id =
-                builder.emit_function(node, src, &name, arity, class_fqn, stereotype.as_deref());
-
-            // Check NestJS decorators
-            let ctrl_prefix = controller_prefix.unwrap_or("");
-            for (dname, dpath) in &decorators {
-                if let Some(http_method) = nestjs_http_method(dname) {
-                    let method_path = dpath.as_deref().unwrap_or("");
-                    let full_path = join_paths(ctrl_prefix, method_path);
-                    builder.emit_nestjs_route(node, &fn_id, http_method, &full_path, dname);
-                }
-                if let Some(op) = graphql_operation(dname) {
-                    let opname = dpath.clone().unwrap_or_else(|| name.clone());
-                    builder.emit_operation_route(
-                        node,
-                        RouteSource::GraphQl,
-                        op,
-                        &opname,
-                        Some(&fn_id),
-                    );
-                }
-                // NestJS microservice / WebSocket message handlers → EventListen.
-                if matches!(
-                    dname.as_str(),
-                    "MessagePattern" | "EventPattern" | "SubscribeMessage"
-                ) {
-                    let topic = dpath.clone().unwrap_or_else(|| name.clone());
-                    builder.emit_event_contract(
-                        node,
-                        topic,
-                        MessagingFramework::NestMicroservice,
-                        false,
-                        fn_id.clone(),
-                    );
-                }
-            }
-
-            // Walk body for call references
-            if let Some(body) = node.child_by_field_name("body") {
-                let mut cursor = body.walk();
-                for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, class_fqn, controller_prefix, Some(&fn_id));
-                }
-            }
+            walk_function_declaration(node, src, builder, class_fqn, controller_prefix)
         }
         "method_definition" => {
-            let Some(name_node) = node.child_by_field_name("name") else {
-                return;
-            };
-            let name = text(name_node, src);
-            if name.is_empty() {
-                return;
-            }
-            let arity = parameter_count(node);
-            let decorators = collect_sibling_decorators(node, src);
-            let fn_id = builder.emit_function(node, src, &name, arity, class_fqn, None);
-
-            // Check NestJS method decorators
-            let ctrl_prefix = controller_prefix.unwrap_or("");
-            for (dname, dpath) in &decorators {
-                if let Some(http_method) = nestjs_http_method(dname) {
-                    let method_path = dpath.as_deref().unwrap_or("");
-                    let full_path = join_paths(ctrl_prefix, method_path);
-                    builder.emit_nestjs_route(node, &fn_id, http_method, &full_path, dname);
-                }
-                if let Some(op) = graphql_operation(dname) {
-                    let opname = dpath.clone().unwrap_or_else(|| name.clone());
-                    builder.emit_operation_route(
-                        node,
-                        RouteSource::GraphQl,
-                        op,
-                        &opname,
-                        Some(&fn_id),
-                    );
-                }
-                // NestJS microservice / WebSocket message handlers → EventListen.
-                if matches!(
-                    dname.as_str(),
-                    "MessagePattern" | "EventPattern" | "SubscribeMessage"
-                ) {
-                    let topic = dpath.clone().unwrap_or_else(|| name.clone());
-                    builder.emit_event_contract(
-                        node,
-                        topic,
-                        MessagingFramework::NestMicroservice,
-                        false,
-                        fn_id.clone(),
-                    );
-                }
-            }
-
-            // Walk body
-            if let Some(body) = node.child_by_field_name("body") {
-                let mut cursor = body.walk();
-                for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, class_fqn, controller_prefix, Some(&fn_id));
-                }
-            }
+            walk_method_definition(node, src, builder, class_fqn, controller_prefix)
         }
         "import_statement" => {
             builder.emit_import(node, src);
@@ -446,6 +263,204 @@ fn walk(
             for child in node.named_children(&mut cursor) {
                 walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
             }
+        }
+    }
+}
+
+/// `lexical_declaration` arm of [`walk`]: module string constants, typed-local
+/// type bindings, CommonJS `require` bindings, HTTP-wrapper shapes, and — the
+/// dominant modern idiom — callables bound to a `const` (arrow/function-expr).
+fn walk_lexical_declaration(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    class_fqn: Option<&str>,
+    controller_prefix: Option<&str>,
+    enclosing_fn: Option<&NodeId>,
+) {
+    // Module-level `const X = '…'` (incl. env-default initializers)
+    // becomes a StringConstant for cross-file URL folding.
+    if class_fqn.is_none() && enclosing_fn.is_none() {
+        collect_module_string_constants(node, src, builder);
+    }
+    let mut cursor = node.walk();
+    for declarator in node.named_children(&mut cursor) {
+        if declarator.kind() != "variable_declarator" {
+            walk(declarator, src, builder, class_fqn, controller_prefix, enclosing_fn);
+            continue;
+        }
+        let name_node = declarator.child_by_field_name("name");
+        let value = declarator.child_by_field_name("value");
+
+        // Typed local (`const x: Order = …`) → type_binding scoped to the
+        // enclosing callable, so `x.method()` resolves its receiver type.
+        if let (Some(nn), Some(ty)) = (
+            name_node.filter(|n| n.kind() == "identifier"),
+            declarator
+                .child_by_field_name("type")
+                .and_then(|a| type_annotation_name(a, src)),
+        ) {
+            let (_, sig) = builder.call_scope(enclosing_fn);
+            builder.type_bindings.push(TypeBinding {
+                name: text(nn, src),
+                raw_type: ty,
+                kind: BindingKind::Local,
+                in_fqcn: sig,
+                range: range_of(declarator),
+            });
+        }
+
+        // CommonJS `const x = require('./m')` / `const { a } = require('./m')`
+        // / `const f = require('./m').foo` → binding + free-call hints.
+        builder.emit_require_binding(declarator, enclosing_fn, src);
+
+        // `export const apiFetch = async (endpoint, …) => …` wrapper shape.
+        if class_fqn.is_none() && enclosing_fn.is_none() {
+            if let (Some(nn), Some(v)) = (name_node, value) {
+                if nn.kind() == "identifier" && v.kind() == "arrow_function" {
+                    try_collect_http_wrapper(&text(nn, src), v, src, builder);
+                }
+            }
+        }
+
+        // A callable bound to a const IS a function — emit it, whatever it's
+        // named. `const getUser = async () => …`, `const Card = () => …`,
+        // and `const h = catchAsync(async (req, res) => …)` are the dominant
+        // way modern JS/TS declares functions; before this, only React-named
+        // consts became nodes, so most repos had almost no callee nodes at
+        // all (a 38-file Express app: 49 arrow consts, 0 `function` decls).
+        // React names still get their stereotype — it decorates, it no longer
+        // gates. Single emission site: `emit_function` has no dedup guard.
+        let callable = name_node
+            .zip(value)
+            .filter(|(nn, _)| class_fqn.is_none() && nn.kind() == "identifier")
+            .and_then(|(nn, v)| {
+                let inner = callable_value(v)?;
+                Some((text(nn, src), inner))
+            });
+
+        if let Some((name, v)) = callable {
+            let stereo = react_function_stereotype(&name, builder);
+            let arity = parameter_count(v);
+            let fn_id = builder.emit_function(v, src, &name, arity, None, stereo.as_deref());
+            if let Some(body) = v.child_by_field_name("body") {
+                walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
+            }
+        } else {
+            walk(declarator, src, builder, class_fqn, controller_prefix, enclosing_fn);
+        }
+    }
+}
+
+/// `function_declaration` arm of [`walk`]: emit the function node (+ HTTP-wrapper
+/// / React stereotype for top-level), its NestJS/GraphQL decorator routes, then
+/// walk the body attributing calls to it.
+fn walk_function_declaration(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    class_fqn: Option<&str>,
+    controller_prefix: Option<&str>,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = text(name_node, src);
+    if name.is_empty() {
+        return;
+    }
+    let arity = parameter_count(node);
+    let decorators = collect_sibling_decorators(node, src);
+    if class_fqn.is_none() {
+        try_collect_http_wrapper(&name, node, src, builder);
+    }
+    // React component/hook stereotype (top-level functions only).
+    let stereotype = if class_fqn.is_none() {
+        react_function_stereotype(&name, builder)
+    } else {
+        None
+    };
+    let fn_id = builder.emit_function(node, src, &name, arity, class_fqn, stereotype.as_deref());
+
+    let ctrl_prefix = controller_prefix.unwrap_or("");
+    emit_callable_decorators(node, &decorators, &fn_id, &name, ctrl_prefix, builder);
+
+    // Walk body for call references
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            walk(child, src, builder, class_fqn, controller_prefix, Some(&fn_id));
+        }
+    }
+}
+
+/// `method_definition` arm of [`walk`]: emit the method node, its NestJS/GraphQL
+/// decorator routes, then walk the body attributing calls to it.
+fn walk_method_definition(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    class_fqn: Option<&str>,
+    controller_prefix: Option<&str>,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = text(name_node, src);
+    if name.is_empty() {
+        return;
+    }
+    let arity = parameter_count(node);
+    let decorators = collect_sibling_decorators(node, src);
+    let fn_id = builder.emit_function(node, src, &name, arity, class_fqn, None);
+
+    let ctrl_prefix = controller_prefix.unwrap_or("");
+    emit_callable_decorators(node, &decorators, &fn_id, &name, ctrl_prefix, builder);
+
+    // Walk body
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            walk(child, src, builder, class_fqn, controller_prefix, Some(&fn_id));
+        }
+    }
+}
+
+/// Emit routes/contracts declared by a callable's NestJS/GraphQL decorators:
+/// `@Get/@Post/…` HTTP routes, `@Query/@Mutation/…` GraphQL operations, and
+/// `@MessagePattern/@EventPattern/@SubscribeMessage` event listeners. Shared
+/// verbatim by [`walk_function_declaration`] and [`walk_method_definition`].
+fn emit_callable_decorators(
+    node: TsNode<'_>,
+    decorators: &[(String, Option<String>)],
+    fn_id: &NodeId,
+    name: &str,
+    ctrl_prefix: &str,
+    builder: &mut Builder,
+) {
+    for (dname, dpath) in decorators {
+        if let Some(http_method) = nestjs_http_method(dname) {
+            let method_path = dpath.as_deref().unwrap_or("");
+            let full_path = join_paths(ctrl_prefix, method_path);
+            builder.emit_nestjs_route(node, fn_id, http_method, &full_path, dname);
+        }
+        if let Some(op) = graphql_operation(dname) {
+            let opname = dpath.clone().unwrap_or_else(|| name.to_string());
+            builder.emit_operation_route(node, RouteSource::GraphQl, op, &opname, Some(fn_id));
+        }
+        // NestJS microservice / WebSocket message handlers → EventListen.
+        if matches!(
+            dname.as_str(),
+            "MessagePattern" | "EventPattern" | "SubscribeMessage"
+        ) {
+            let topic = dpath.clone().unwrap_or_else(|| name.to_string());
+            builder.emit_event_contract(
+                node,
+                topic,
+                MessagingFramework::NestMicroservice,
+                false,
+                fn_id.clone(),
+            );
         }
     }
 }
