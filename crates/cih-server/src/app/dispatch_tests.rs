@@ -67,6 +67,41 @@ fn empty_args() -> serde_json::Map<String, serde_json::Value> {
 }
 
 #[tokio::test]
+async fn tools_list_returns_full_surface_with_schemas() {
+    // Regression guard: the hand-expanded `call_tool` in `app.rs` must be paired
+    // with a `list_tools` override, or `tools/list` falls back to the trait
+    // default (an empty list) and discovery-based clients see zero tools.
+    let client = serve_test_server().await;
+    let tools = client
+        .list_all_tools()
+        .await
+        .expect("tools/list should dispatch");
+
+    let names: std::collections::HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    for expected in ["list_repos", "search_code", "read_file", "search_wiki"] {
+        assert!(
+            names.contains(expected),
+            "tools/list is missing {expected}; got {names:?}"
+        );
+    }
+    assert_eq!(
+        tools.len(),
+        29,
+        "tool count drifted from the registered surface"
+    );
+
+    // Schemas present, not just names — clients validate arguments against these.
+    for tool in &tools {
+        assert!(
+            !tool.input_schema.is_empty(),
+            "tool {} has an empty input schema",
+            tool.name
+        );
+    }
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn dispatch_unknown_tool_returns_error() {
     let client = serve_test_server().await;
     let res = client

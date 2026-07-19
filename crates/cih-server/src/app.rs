@@ -26,8 +26,8 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, Implementation, ListResourceTemplatesResult, ListResourcesResult,
-        PaginatedRequestParam, ProtocolVersion, ReadResourceRequestParam, ReadResourceResult,
-        ServerCapabilities, ServerInfo,
+        ListToolsResult, PaginatedRequestParam, ProtocolVersion, ReadResourceRequestParam,
+        ReadResourceResult, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     tool, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
@@ -655,6 +655,18 @@ impl ServerHandler for CihServer {
             );
         }
         result
+    }
+
+    // `#[tool_handler]` generates BOTH `call_tool` and `list_tools`; since we
+    // hand-expand `call_tool` (above), we must provide `list_tools` too, or
+    // discovery falls back to the trait default (an empty list) and clients that
+    // rely on `tools/list` see no tools. This mirrors the macro output verbatim.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
     }
 
     fn get_info(&self) -> ServerInfo {

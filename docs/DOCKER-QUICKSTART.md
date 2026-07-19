@@ -252,9 +252,14 @@ The MCP server is running at `http://localhost:8080/mcp`.
 
 ### Test with curl
 
+Streamable HTTP requires the `Accept: application/json, text/event-stream` header.
+`tools/list` is the key compatibility check — the result must be a **non-empty**
+`tools` array (an empty list means discovery-based clients see no tools):
+
 ```bash
 curl -s -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 

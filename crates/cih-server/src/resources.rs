@@ -21,9 +21,13 @@ fn annotated_resource(uri: &str, name: &str, description: &str) -> rmcp::model::
     .no_annotation()
 }
 
-/// Build the static list of resources from the registry.
+/// Page size for `resources/list`. The full set is small (repos × 4), but honor
+/// pagination so discovery clients that page never miss entries.
+const RESOURCE_PAGE_SIZE: usize = 100;
+
+/// Build the static list of resources from the registry, paginated by `request`.
 pub fn list_resources(
-    _request: Option<PaginatedRequestParam>,
+    request: Option<PaginatedRequestParam>,
 ) -> Result<ListResourcesResult, McpError> {
     let reg = Registry::load();
     let mut resources = Vec::new();
@@ -50,7 +54,35 @@ pub fn list_resources(
             "Graph schema: node kinds and edge kinds",
         ));
     }
-    Ok(ListResourcesResult::with_all_items(resources))
+    paginate_resources(resources, request.and_then(|r| r.cursor))
+}
+
+/// Page a stable-ordered resource list. The cursor is a decimal offset into the
+/// list; `next_cursor` is set only when more resources remain. A non-numeric
+/// cursor is an invalid-params error; an offset at/after the end yields an empty
+/// final page (a client that paged to the end and asked again gets `[]`).
+fn paginate_resources(
+    all: Vec<rmcp::model::Resource>,
+    cursor: Option<String>,
+) -> Result<ListResourcesResult, McpError> {
+    let total = all.len();
+    let offset = match cursor {
+        Some(c) => c.parse::<usize>().map_err(|_| {
+            McpError::invalid_params(format!("invalid resources/list cursor: {c:?}"), None)
+        })?,
+        None => 0,
+    };
+    let resources: Vec<_> = all
+        .into_iter()
+        .skip(offset)
+        .take(RESOURCE_PAGE_SIZE)
+        .collect();
+    let next = offset.saturating_add(resources.len());
+    let next_cursor = (next < total).then(|| next.to_string());
+    Ok(ListResourcesResult {
+        next_cursor,
+        resources,
+    })
 }
 
 /// Build resource templates (URI patterns) for dynamic lookup.
@@ -267,7 +299,44 @@ fn schema_json() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::split_wiki_uri;
+    use super::{annotated_resource, paginate_resources, split_wiki_uri, RESOURCE_PAGE_SIZE};
+
+    fn sample(n: usize) -> Vec<rmcp::model::Resource> {
+        (0..n)
+            .map(|i| annotated_resource(&format!("cih://r/{i}"), &format!("r{i}"), "d"))
+            .collect()
+    }
+
+    #[test]
+    fn first_page_caps_at_page_size_and_sets_next_cursor() {
+        let res = paginate_resources(sample(250), None).unwrap();
+        assert_eq!(res.resources.len(), RESOURCE_PAGE_SIZE);
+        assert_eq!(res.next_cursor.as_deref(), Some("100"));
+    }
+
+    #[test]
+    fn cursor_advances_through_every_page_once() {
+        let p1 = paginate_resources(sample(250), None).unwrap();
+        let p2 = paginate_resources(sample(250), p1.next_cursor).unwrap();
+        assert_eq!(p2.resources.len(), 100);
+        assert_eq!(p2.next_cursor.as_deref(), Some("200"));
+        let p3 = paginate_resources(sample(250), p2.next_cursor).unwrap();
+        assert_eq!(p3.resources.len(), 50);
+        assert_eq!(p3.next_cursor, None, "last page has no next cursor");
+    }
+
+    #[test]
+    fn small_list_returns_one_page_without_cursor() {
+        let res = paginate_resources(sample(5), None).unwrap();
+        assert_eq!(res.resources.len(), 5);
+        assert_eq!(res.next_cursor, None);
+    }
+
+    #[test]
+    fn invalid_cursor_is_invalid_params() {
+        let err = paginate_resources(sample(10), Some("not-a-number".into())).unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
 
     #[test]
     fn wiki_uri_splits_on_first_wiki_segment() {
