@@ -247,6 +247,78 @@ pub fn analyze_from_scope(
     )
 }
 
+/// JVM-only JAR API-surface extraction phase. Returns `(nodes, edges, node_count,
+/// failed_count)`; a no-op (all zeros) when the scope has no JARs. Owns the JAR
+/// summary metadata (`node_count`/`failed`) the caller records.
+fn run_jar_api_phase(
+    jars: &[JarInfo],
+    unresolved_external_fqcns: &[String],
+    ui: &mut crate::ui::PhaseProgress,
+) -> (Vec<cih_core::Node>, Vec<cih_core::Edge>, usize, usize) {
+    if jars.is_empty() {
+        return (Vec::new(), Vec::new(), 0, 0);
+    }
+    ui.spin(format!("JAR API ({} JARs)", jars.len()));
+    tracing::info!(
+        jars = jars.len(),
+        unresolved_fqcns = unresolved_external_fqcns.len(),
+        "starting JAR API extraction"
+    );
+    let (jar_nodes, jar_edges, jar_failed) = extract_jar_api(jars, unresolved_external_fqcns);
+    let jar_node_count = jar_nodes.len();
+    tracing::info!(
+        jar_nodes = jar_node_count,
+        jar_edges = jar_edges.len(),
+        jar_failed,
+        "JAR API extraction complete"
+    );
+    ui.finish_with(format!("{} nodes", crate::ui::fmt_count(jar_node_count)));
+    (jar_nodes, jar_edges, jar_node_count, jar_failed)
+}
+
+/// Language/framework graph augmentation (DB access + JPA, integration XML, DI),
+/// driven by the language-agnostic augmentor registry — each augmentor self-gates
+/// via `applies`, so a non-JVM scope skips the Java/Spring phases automatically.
+/// `order()` reproduces the historical concat order (db → integration-xml → di),
+/// which `content_version` hashes. Returns the augmentation nodes + edges.
+fn run_graph_augmentation(
+    repo_root: &std::path::Path,
+    scope_files: &[String],
+    parse_output: &cih_parse::ParseOutput,
+    unresolved_external_fqcns: &[String],
+    skip_xml_integration: bool,
+    resolvers: &cih_resolve::ResolverRegistry,
+) -> (Vec<cih_core::Node>, Vec<cih_core::Edge>) {
+    let languages_in_scope = cih_lang::language_ids_for_paths(scope_files);
+    let ctx = cih_resolve::AugmentCtx {
+        repo_root: Some(repo_root),
+        parsed: &parse_output.parsed_files,
+        nodes: &parse_output.nodes,
+        unresolved_external_fqcns,
+        languages_in_scope: &languages_in_scope,
+        skip_xml_integration,
+        resolvers,
+    };
+    let mut augs = cih_resolve::language_augmentors();
+    augs.sort_by_key(|a| a.order());
+    let mut aug_nodes: Vec<cih_core::Node> = Vec::new();
+    let mut aug_edges: Vec<cih_core::Edge> = Vec::new();
+    for aug in &augs {
+        if aug.applies(&ctx) {
+            let out = aug.augment(&ctx);
+            tracing::info!(
+                phase = aug.id(),
+                nodes = out.nodes.len(),
+                edges = out.edges.len(),
+                "graph augmentation phase complete"
+            );
+            aug_nodes.extend(out.nodes);
+            aug_edges.extend(out.edges);
+        }
+    }
+    (aug_nodes, aug_edges)
+}
+
 pub fn analyze_from_scope_with_options(
     scope_file: ScopeFile,
     scope_path: PathBuf,
@@ -407,65 +479,22 @@ pub fn analyze_from_scope_with_options(
     // JAR API extraction is JVM-only: JARs come solely from Maven/Gradle repo-maps.
     // A non-JVM repo (JS/TS/Python) has no JARs, so skip the phase and its logs
     // entirely rather than running/logging a no-op.
-    let (jar_nodes, jar_edges, jar_node_count, jar_failed) = if jars.is_empty() {
-        (Vec::new(), Vec::new(), 0, 0)
-    } else {
-        ui.spin(format!("JAR API ({} JARs)", jars.len()));
-        tracing::info!(
-            jars = jars.len(),
-            unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
-            "starting JAR API extraction"
-        );
-        let (jar_nodes, jar_edges, jar_failed) =
-            extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
-        let jar_node_count = jar_nodes.len();
-        tracing::info!(
-            jar_nodes = jar_node_count,
-            jar_edges = jar_edges.len(),
-            jar_failed,
-            "JAR API extraction complete"
-        );
-        ui.finish_with(format!("{} nodes", crate::ui::fmt_count(jar_node_count)));
-        (jar_nodes, jar_edges, jar_node_count, jar_failed)
-    };
+    let (jar_nodes, jar_edges, jar_node_count, jar_failed) =
+        run_jar_api_phase(jars, &resolve_output.unresolved_external_fqcns, &mut ui);
 
     ui.spin("Writing artifacts");
 
-    // Language/framework graph augmentation (DB access + JPA, integration XML, DI)
-    // runs behind a language-agnostic augmentor registry: the core iterates the set
-    // generically and each augmentor self-gates via `applies`, so a non-JVM scope
-    // skips (and doesn't log) the Java/Spring phases automatically — the core never
-    // names a language. `order()` reproduces the historical concat order
-    // (db → integration-xml → di), which `content_version` hashes. The JAR phase
-    // above stays inline because it owns summary metadata (jar_node_count /
-    // jar_failed); it is already gated on JVM artifacts, not a language name.
-    let languages_in_scope = cih_lang::language_ids_for_paths(&scope_file.files);
-    let ctx = cih_resolve::AugmentCtx {
-        repo_root: Some(&repo_root),
-        parsed: &parse_output.parsed_files,
-        nodes: &parse_output.nodes,
-        unresolved_external_fqcns: &resolve_output.unresolved_external_fqcns,
-        languages_in_scope: &languages_in_scope,
-        skip_xml_integration: cache.skip_xml_integration,
-        resolvers: &resolvers,
-    };
-    let mut augs = cih_resolve::language_augmentors();
-    augs.sort_by_key(|a| a.order());
-    let mut aug_nodes: Vec<cih_core::Node> = Vec::new();
-    let mut aug_edges: Vec<cih_core::Edge> = Vec::new();
-    for aug in &augs {
-        if aug.applies(&ctx) {
-            let out = aug.augment(&ctx);
-            tracing::info!(
-                phase = aug.id(),
-                nodes = out.nodes.len(),
-                edges = out.edges.len(),
-                "graph augmentation phase complete"
-            );
-            aug_nodes.extend(out.nodes);
-            aug_edges.extend(out.edges);
-        }
-    }
+    // Graph augmentation runs behind the augmentor registry; the JAR phase above
+    // stays a dedicated helper because it owns summary metadata (jar_node_count /
+    // jar_failed) that feeds the analyze outcome.
+    let (aug_nodes, aug_edges) = run_graph_augmentation(
+        &repo_root,
+        &scope_file.files,
+        &parse_output,
+        &resolve_output.unresolved_external_fqcns,
+        cache.skip_xml_integration,
+        &resolvers,
+    );
 
     let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
     edges.extend(jar_edges);

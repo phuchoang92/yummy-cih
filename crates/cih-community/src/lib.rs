@@ -600,64 +600,14 @@ pub fn detect_communities_from_packages(
 ) -> CommunityOutput {
     let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
-    // Build the same edge-lookup maps used by detect_communities.
-    let mut route_nodes_by_handler: FxHashMap<NodeId, Vec<&Node>> = FxHashMap::default();
-    let mut queries_by_method: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
-    let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
-    let mut write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
-    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
-        FxHashMap::default();
-    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
-        FxHashMap::default();
-    for e in edges {
-        match e.kind {
-            EdgeKind::HandlesRoute => {
-                if let Some(rn) = source_by_id.get(&e.dst) {
-                    route_nodes_by_handler
-                        .entry(e.src.clone())
-                        .or_default()
-                        .push(rn);
-                }
-            }
-            EdgeKind::ExecutesQuery => {
-                queries_by_method
-                    .entry(e.src.clone())
-                    .or_default()
-                    .push(e.dst.clone());
-            }
-            EdgeKind::ReadsTable => {
-                read_tables_by_query
-                    .entry(e.src.clone())
-                    .or_default()
-                    .push(e.dst.clone());
-            }
-            EdgeKind::WritesTable => {
-                write_tables_by_query
-                    .entry(e.src.clone())
-                    .or_default()
-                    .push(e.dst.clone());
-            }
-            EdgeKind::PublishesEvent => {
-                if let Some(tn) = source_by_id.get(&e.dst) {
-                    let kind_str = topic_kind_str(tn);
-                    publishes_by_member
-                        .entry(e.src.clone())
-                        .or_default()
-                        .push((tn, kind_str));
-                }
-            }
-            EdgeKind::ListensTo => {
-                if let Some(tn) = source_by_id.get(&e.dst) {
-                    let kind_str = topic_kind_str(tn);
-                    consumes_by_member
-                        .entry(e.src.clone())
-                        .or_default()
-                        .push((tn, kind_str));
-                }
-            }
-            _ => {}
-        }
-    }
+    let EnrichmentIndex {
+        route_nodes_by_handler,
+        queries_by_method,
+        read_tables_by_query,
+        write_tables_by_query,
+        publishes_by_member,
+        consumes_by_member,
+    } = build_enrichment_index(edges, &source_by_id);
 
     // Group eligible symbol nodes by package feature.
     let mut groups: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
