@@ -40,6 +40,9 @@ struct CachedIndex {
 #[derive(Clone)]
 pub struct SearchState {
     bm25: Arc<RwLock<Option<CachedIndex>>>,
+    /// Single-flight gate: the BM25 index is a single slot, so one gate
+    /// serializes its (expensive) rebuild across concurrent misses.
+    bm25_gate: Arc<tokio::sync::Mutex<()>>,
     embed_store: Option<Arc<EmbedStore>>,
     artifacts_dir: Option<PathBuf>,
 }
@@ -51,6 +54,7 @@ impl SearchState {
     ) -> Self {
         Self {
             bm25: Arc::new(RwLock::new(None)),
+            bm25_gate: Arc::new(tokio::sync::Mutex::new(())),
             embed_store,
             artifacts_dir,
         }
@@ -90,20 +94,21 @@ impl SearchState {
         let artifacts = cih_core::GraphArtifacts::latest_in_dir(artifacts_dir)?;
         let latest_version = artifacts.version.to_string();
 
-        {
-            let guard = self.bm25.read().await;
-            if let Some(cached) = guard.as_ref() {
-                if cached.version == latest_version {
-                    // Cheap Arc clone — the index (all docs + postings) is shared,
-                    // not copied, on every query.
-                    return Ok(Some(cached.index.clone()));
-                }
-            }
+        if let Some(hit) = self.peek_bm25(&latest_version).await {
+            return Ok(Some(hit));
+        }
+
+        // Single-flight: only one build runs at a time; concurrent callers wait
+        // on the gate and re-check, reusing the fresh build instead of each
+        // rebuilding the (CPU-heavy) index.
+        let _held = self.bm25_gate.lock().await;
+        if let Some(hit) = self.peek_bm25(&latest_version).await {
+            return Ok(Some(hit));
         }
 
         // Read + build off the async runtime: on a large repo (~87k nodes) this is
-        // CPU-heavy and would otherwise stall a tokio worker thread. The read guard
-        // above is already dropped, so no lock is held across the blocking call.
+        // CPU-heavy and would otherwise stall a tokio worker thread. No cache lock
+        // is held across the blocking call (only the single-flight gate).
         let index = tokio::task::spawn_blocking(move || -> Result<Arc<SearchIndex>> {
             let nodes = artifacts.read_nodes()?;
             Ok(Arc::new(SearchIndex::build(&nodes)))
@@ -116,6 +121,14 @@ impl SearchState {
             version: latest_version,
         });
         Ok(Some(index))
+    }
+
+    /// The cached BM25 index iff it matches `version` (a cheap Arc clone — the
+    /// index's docs + postings are shared, not copied, on every query).
+    async fn peek_bm25(&self, version: &str) -> Option<Arc<SearchIndex>> {
+        let guard = self.bm25.read().await;
+        let cached = guard.as_ref()?;
+        (cached.version == version).then(|| cached.index.clone())
     }
 }
 

@@ -11,12 +11,13 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use cih_core::{ContractMatch, ContractMatchKind, Edge, EdgeKind, Node};
 use serde::Serialize;
 
+use crate::mtime_cache::MtimeCache;
 use crate::utils::{load_artifact_edges, load_artifact_nodes, node_prop_str_owned};
 
 // ── Artifact graph ───────────────────────────────────────────────────────────
@@ -86,10 +87,11 @@ impl ArtifactGraph {
     }
 }
 
-/// Process-wide artifact-graph cache with nodes.jsonl-mtime invalidation.
+/// Process-wide artifact-graph cache with nodes.jsonl-mtime invalidation and
+/// single-flight coalescing of concurrent misses (see [`crate::mtime_cache`]).
 #[derive(Clone, Default)]
 pub(crate) struct XflowState {
-    cache: Arc<RwLock<HashMap<PathBuf, Arc<ArtifactGraph>>>>,
+    cache: Arc<MtimeCache<ArtifactGraph>>,
 }
 
 impl XflowState {
@@ -98,26 +100,14 @@ impl XflowState {
     }
 
     pub(crate) fn graph_for(&self, artifacts_dir: &str) -> std::io::Result<Arc<ArtifactGraph>> {
-        let key = PathBuf::from(artifacts_dir);
-        let mtime = std::fs::metadata(key.join("nodes.jsonl"))
+        let mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("nodes.jsonl"))
             .and_then(|meta| meta.modified())
             .ok();
-        if let Some(cached) = self
-            .cache
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-        {
-            if cached.nodes_mtime == mtime && mtime.is_some() {
-                return Ok(cached.clone());
-            }
-        }
-        let loaded = Arc::new(ArtifactGraph::load(artifacts_dir)?);
-        self.cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, loaded.clone());
-        Ok(loaded)
+        self.cache.get_or_load(
+            artifacts_dir,
+            |graph| graph.nodes_mtime == mtime && mtime.is_some(),
+            || ArtifactGraph::load(artifacts_dir),
+        )
     }
 }
 

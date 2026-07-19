@@ -14,20 +14,12 @@ use crate::constant_resolver::{
 /// Index key: `(owner_fqcn, const_name)` → folded value + provenance.
 type ConstantIndex = HashMap<(String, String), ResolvedConstant>;
 
-/// Index of static imports: `(file_path, imported_name)` → owner_fqcn.
-type StaticImportIndex = HashMap<(String, String), String>;
-
 /// Index of superclass chains: `owner_fqcn` → parent_fqcn (one level).
 type SuperIndex = HashMap<String, String>;
 
 pub struct JavaConstantResolver {
     /// (owner_fqcn, const_name) → value
     index: ConstantIndex,
-    /// For static imports: map from (owner_fqcn, member_name) → const_name → value.
-    /// We reuse `index` for this; static imports just resolve owner_fqcn from imports.
-    /// simple_name → owner_fqcn (for single-class imports `import static pkg.Cls.NAME`)
-    #[allow(dead_code)]
-    static_import_owners: StaticImportIndex,
     /// owner_fqcn → parent_fqcn (one level, for inheritance)
     super_index: SuperIndex,
     /// type simple_name → fqcn (from imports)
@@ -72,7 +64,6 @@ impl JavaConstantResolver {
 
         Self {
             index,
-            static_import_owners: StaticImportIndex::new(),
             super_index,
             type_index,
             unique_by_name,

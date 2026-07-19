@@ -28,7 +28,6 @@ fn parse_decorator(node: TsNode<'_>, src: &str) -> Option<DecoratorInfo> {
                 let first_arg = first_string_arg_in_call(child, src);
                 let methods_arg = methods_kwarg_in_call(child, src);
                 DecoratorInfo {
-                    full: text(func, src),
                     obj,
                     attr,
                     path_arg: first_arg,
@@ -38,7 +37,6 @@ fn parse_decorator(node: TsNode<'_>, src: &str) -> Option<DecoratorInfo> {
             "attribute" => {
                 let (obj, attr) = parse_attribute_or_identifier(child, src);
                 DecoratorInfo {
-                    full: text(child, src),
                     obj,
                     attr,
                     path_arg: None,
@@ -46,7 +44,6 @@ fn parse_decorator(node: TsNode<'_>, src: &str) -> Option<DecoratorInfo> {
                 }
             }
             "identifier" => DecoratorInfo {
-                full: text(child, src),
                 obj: None,
                 attr: Some(text(child, src)),
                 path_arg: None,
@@ -59,8 +56,6 @@ fn parse_decorator(node: TsNode<'_>, src: &str) -> Option<DecoratorInfo> {
 }
 
 struct DecoratorInfo {
-    #[allow(dead_code)]
-    full: String,
     obj: Option<String>,
     attr: Option<String>,
     path_arg: Option<String>,

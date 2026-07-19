@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cih_core::{Edge, EdgeKind, Node, NodeId};
+use cih_core::{Edge, EdgeKind, Node};
 
 const TLD_CAP: u8 = 20;
 
@@ -134,10 +134,4 @@ fn dfs(
     in_flight.remove(id);
     memo.insert(id.to_string(), tld);
     tld
-}
-
-/// Convert a raw `NodeId` string reference to a plain `&str` for map lookup.
-#[allow(dead_code)]
-fn nid_str(id: &NodeId) -> &str {
-    id.as_str()
 }

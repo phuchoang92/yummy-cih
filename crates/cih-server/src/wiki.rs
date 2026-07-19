@@ -414,6 +414,9 @@ pub(crate) struct WikiSearchState {
     render_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, ResidentEntry>>>,
     /// Live search indexes (built by rendering all resident pages), same keying.
     live_search_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, LiveSearchEntry>>>,
+    /// Single-flight gates for `get_or_load` — one per wiki dir. A std `Mutex`
+    /// is fine: it's only held to clone the per-key async gate out (no `.await`).
+    wiki_gates: Arc<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl WikiSearchState {
@@ -423,6 +426,7 @@ impl WikiSearchState {
             cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             render_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             live_search_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            wiki_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -520,19 +524,41 @@ impl WikiSearchState {
     /// mtime differs from the cached snapshot.
     async fn get_or_load(&self, wiki_dir: &Path) -> anyhow::Result<Arc<WikiIndex>> {
         let manifest_mtime = std::fs::metadata(wiki_dir.join("manifest.json"))?.modified()?;
-        if let Some(cached) = self.cache.read().await.get(wiki_dir) {
-            if cached.manifest_mtime == manifest_mtime {
-                return Ok(cached.clone());
-            }
+        if let Some(hit) = self.peek_index(wiki_dir, manifest_mtime).await {
+            return Ok(hit);
+        }
+        // Single-flight: serialize concurrent first-time loads of the same wiki
+        // dir behind a per-key gate, then re-check — a racing caller may have
+        // loaded (and cached) while we waited for the gate.
+        let gate = self
+            .wiki_gates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(wiki_dir.to_path_buf())
+            .or_default()
+            .clone();
+        let _held = gate.lock().await;
+        if let Some(hit) = self.peek_index(wiki_dir, manifest_mtime).await {
+            return Ok(hit);
         }
         let dir = wiki_dir.to_path_buf();
-        let loaded = tokio::task::spawn_blocking(move || load_wiki_index(&dir)).await??;
-        let loaded = Arc::new(loaded);
+        let loaded = Arc::new(tokio::task::spawn_blocking(move || load_wiki_index(&dir)).await??);
         self.cache
             .write()
             .await
             .insert(wiki_dir.to_path_buf(), loaded.clone());
         Ok(loaded)
+    }
+
+    /// Cached index for `wiki_dir` iff its manifest mtime still matches.
+    async fn peek_index(
+        &self,
+        wiki_dir: &Path,
+        manifest_mtime: SystemTime,
+    ) -> Option<Arc<WikiIndex>> {
+        let cache = self.cache.read().await;
+        let cached = cache.get(wiki_dir)?;
+        (cached.manifest_mtime == manifest_mtime).then(|| cached.clone())
     }
 }
 
