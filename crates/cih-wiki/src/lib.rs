@@ -391,6 +391,38 @@ fn emit_global_pages(
 
 /// Write all pages for one feature: index, PO, BA, per-class dev, and per-route API flow.
 /// `class_dev_slugs` is populated during dev-class generation and read by API-flow generation.
+/// Register one generated page in a feature section: its sidebar nav entry plus
+/// its manifest `PageEntry`. Both share `slug`/`title`/`kind`; `role` is the
+/// feature. Extracted because the D1–D5 blocks below repeat this push verbatim.
+fn register_page(
+    batch: &mut PageBatch,
+    feature: &str,
+    slug: String,
+    title: String,
+    kind: &str,
+    path: String,
+    json_path: Option<String>,
+) {
+    batch
+        .nav
+        .entry(feature.to_string())
+        .or_default()
+        .push(NavEntry {
+            slug: slug.clone(),
+            title: title.clone(),
+            kind: kind.into(),
+        });
+    batch.pages.push(PageEntry {
+        slug,
+        role: feature.to_string(),
+        title,
+        kind: kind.into(),
+        path,
+        json_path,
+        community_id: None,
+    });
+}
+
 fn emit_feature_section(
     group: &FeatureGroup,
     graph: &WikiGraph,
@@ -440,24 +472,15 @@ fn emit_feature_section(
         &page_meta,
     );
     sink.push(format!("pages/{}/index.md", feature), idx_md);
-    batch
-        .nav
-        .entry(feature.clone())
-        .or_default()
-        .push(NavEntry {
-            slug: format!("{}/index", feature),
-            title: format!("{} Overview", capitalize(feature)),
-            kind: "index".into(),
-        });
-    batch.pages.push(PageEntry {
-        slug: format!("{}/index", feature),
-        role: feature.clone(),
-        title: format!("{} Overview", capitalize(feature)),
-        kind: "index".into(),
-        path: format!("pages/{}/index.md", feature),
-        json_path: None,
-        community_id: None,
-    });
+    register_page(
+        &mut batch,
+        feature,
+        format!("{}/index", feature),
+        format!("{} Overview", capitalize(feature)),
+        "index",
+        format!("pages/{}/index.md", feature),
+        None,
+    );
 
     // D2 — Feature PO (feature_llm, enrichment_tier, page_meta computed above)
     let po_md = pages::feature_po::render_feature_po(
@@ -479,24 +502,15 @@ fn emit_feature_section(
         &page_meta,
     );
     sink.push(format!("pages/{}/po.md", feature), po_md);
-    batch
-        .nav
-        .entry(feature.clone())
-        .or_default()
-        .push(NavEntry {
-            slug: format!("{}/po", feature),
-            title: format!("{} — Business Overview", capitalize(feature)),
-            kind: "po".into(),
-        });
-    batch.pages.push(PageEntry {
-        slug: format!("{}/po", feature),
-        role: feature.clone(),
-        title: format!("{} — Business Overview", capitalize(feature)),
-        kind: "po".into(),
-        path: format!("pages/{}/po.md", feature),
-        json_path: None,
-        community_id: None,
-    });
+    register_page(
+        &mut batch,
+        feature,
+        format!("{}/po", feature),
+        format!("{} — Business Overview", capitalize(feature)),
+        "po",
+        format!("pages/{}/po.md", feature),
+        None,
+    );
 
     // D3 — Feature BA
     let ba_md = pages::feature_ba::render_feature_ba(
@@ -510,24 +524,15 @@ fn emit_feature_section(
         &page_meta,
     );
     sink.push(format!("pages/{}/ba.md", feature), ba_md);
-    batch
-        .nav
-        .entry(feature.clone())
-        .or_default()
-        .push(NavEntry {
-            slug: format!("{}/ba", feature),
-            title: format!("{} — Business Analysis", capitalize(feature)),
-            kind: "ba".into(),
-        });
-    batch.pages.push(PageEntry {
-        slug: format!("{}/ba", feature),
-        role: feature.clone(),
-        title: format!("{} — Business Analysis", capitalize(feature)),
-        kind: "ba".into(),
-        path: format!("pages/{}/ba.md", feature),
-        json_path: None,
-        community_id: None,
-    });
+    register_page(
+        &mut batch,
+        feature,
+        format!("{}/ba", feature),
+        format!("{} — Business Analysis", capitalize(feature)),
+        "ba",
+        format!("pages/{}/ba.md", feature),
+        None,
+    );
 
     // D4 — Per-class dev pages (feature_class_set and slug_for pre-computed above)
     for class_id in feature_class_set {
@@ -585,24 +590,15 @@ fn emit_feature_section(
             format!("pages/{}.md", page_path),
         ));
         let dev_title = cls_node.name.clone();
-        batch
-            .nav
-            .entry(feature.clone())
-            .or_default()
-            .push(NavEntry {
-                slug: page_path.clone(),
-                title: dev_title.clone(),
-                kind: "dev".into(),
-            });
-        batch.pages.push(PageEntry {
-            slug: page_path.clone(),
-            role: feature.clone(),
-            title: dev_title,
-            kind: "dev".into(),
-            path: format!("pages/{}.md", page_path),
-            json_path: Some(format!("pages/{}.json", page_path)),
-            community_id: None,
-        });
+        register_page(
+            &mut batch,
+            feature,
+            page_path.clone(),
+            dev_title,
+            "dev",
+            format!("pages/{}.md", page_path),
+            Some(format!("pages/{}.json", page_path)),
+        );
     }
 
     // D5 — Per-route API-flow pages (controllers pre-resolved in FeatureContext)
@@ -683,24 +679,15 @@ fn emit_feature_section(
                 let page_path = format!("{}/api/{}/{}", feature, ctrl_slug, handler_slug);
                 sink.push(format!("pages/{}.md", page_path), flow_md);
                 let flow_title = pages::api_flow::handler_title(handler.id.as_str());
-                batch
-                    .nav
-                    .entry(feature.clone())
-                    .or_default()
-                    .push(NavEntry {
-                        slug: page_path.clone(),
-                        title: flow_title.clone(),
-                        kind: "api-flow".into(),
-                    });
-                batch.pages.push(PageEntry {
-                    slug: page_path.clone(),
-                    role: feature.clone(),
-                    title: flow_title,
-                    kind: "api-flow".into(),
-                    path: format!("pages/{}.md", page_path),
-                    json_path: None,
-                    community_id: None,
-                });
+                register_page(
+                    &mut batch,
+                    feature,
+                    page_path.clone(),
+                    flow_title,
+                    "api-flow",
+                    format!("pages/{}.md", page_path),
+                    None,
+                );
             }
         }
     }
