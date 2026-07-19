@@ -37,12 +37,17 @@ use crate::args::*;
 use crate::jobs::Jobs;
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, parse_direction, text_result, to_mcp};
-use crate::{
-    artifact_cache, changes, contracts, coverage, feature, files, indexing, patterns, resources,
-    search, symbol, taint, wiki, xflow,
-};
+use crate::{artifact_cache, changes, feature, files, resources, search, symbol, wiki, xflow};
 
 use crate::search::{QueryArgs, QueryResult, SearchState};
+
+/// Tool handlers split out of this god-module into per-theme `#[tool_router]`
+/// impl blocks; each emits a `*_router()` merged in [`CihServer::new`].
+mod tools_admin;
+mod tools_crossrepo;
+mod tools_files;
+mod tools_testing;
+mod tools_wiki;
 
 /// Map a registry `artifacts_dir` (the versioned `.cih/artifacts/<hash>` dir,
 /// which cross-repo readers use directly) to the unversioned parent that
@@ -130,7 +135,12 @@ impl CihServer {
             wiki,
             xflow: xflow::XflowState::new(),
             artifacts: artifact_cache::ArtifactCache::new(),
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router()
+                + Self::files_router()
+                + Self::crossrepo_router()
+                + Self::testing_router()
+                + Self::wiki_router()
+                + Self::admin_router(),
         }
     }
 
@@ -457,58 +467,6 @@ impl CihServer {
     }
 
     #[tool(
-        description = "Return cross-service contract matches for a repo group. \
-        Run `cih-engine group sync <group>` first. Optional kind filter: \
-        all, http/http_route, kafka/kafka_topic, spring/spring_event."
-    )]
-    async fn group_contracts(
-        &self,
-        Parameters(args): Parameters<GroupContractsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        contracts::group_contracts(args).await
-    }
-
-    #[tool(
-        description = "Return all services that consume a given HTTP route across a repo group. \
-        Path variables ({id}, :id) are normalized to wildcards for matching. \
-        Run `cih-engine group sync <group>` first."
-    )]
-    async fn api_impact(
-        &self,
-        Parameters(args): Parameters<ApiImpactArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        contracts::api_impact(args, &self.xflow).await
-    }
-
-    #[tool(
-        description = "Cross-repo downstream trace: like trace_flow, but hops between repos \
-        through the group's synced contract matches (HTTP consumer → provider route → handler; \
-        Kafka publisher → listener). Walks each repo's graph artifacts; the entry point resolves \
-        in the start repo — pass `repo` (a group member's registry name/path) to choose it, or \
-        leave empty for the server's active graph key. Run `cih-engine group sync <group>` \
-        first. Steps carry `repo` and `via.kind` (`CONTRACT` marks a cross-repo crossing)."
-    )]
-    async fn trace_flow_x(
-        &self,
-        Parameters(args): Parameters<TraceFlowXArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        contracts::trace_flow_x(args, &self.graph_key, &self.xflow).await
-    }
-
-    #[tool(
-        description = "Compare provider HTTP handler response DTO fields against consumer \
-        field accesses for all shared HTTP contracts between two repos. \
-        Re-run `cih-engine analyze` on both repos (to populate returnType), \
-        then `cih-engine group sync <group>` before calling this."
-    )]
-    async fn shape_check(
-        &self,
-        Parameters(args): Parameters<ShapeCheckArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        contracts::shape_check(args, &self.artifacts).await
-    }
-
-    #[tool(
         description = "Trace the downstream execution chain from an HTTP route or method: \
             controller → services → repos → external HTTP calls and events. \
             Traverses CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT, LISTENS_TO edges. \
@@ -646,179 +604,6 @@ impl CihServer {
         let rc = self.resolve(&args.repo).await?;
         feature::feature_map(&rc.store, &rc.search, args).await
     }
-
-    #[tool(
-        description = "Return all test methods/classes that cover a symbol (via TESTS edges). \
-            Helps a tester understand which tests exercise a given class or method."
-    )]
-    async fn test_coverage(
-        &self,
-        Parameters(args): Parameters<TestCoverageArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let rc = self.resolve(&args.repo).await?;
-        coverage::test_coverage(&rc.store, args).await
-    }
-
-    #[tool(
-        description = "Given a list of changed files, return all test classes that must be \
-            re-run. Follows TESTS edges (direct + one-hop via CALLS). Use after `git diff \
-            --name-only` to find the regression scope."
-    )]
-    async fn regression_scope(
-        &self,
-        Parameters(args): Parameters<RegressionScopeArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let rc = self.resolve(&args.repo).await?;
-        coverage::regression_scope(&rc.store, args).await
-    }
-
-    #[tool(
-        description = "Return production symbols (classes, methods) under a path prefix that \
-            have no test coverage (no inbound TESTS edge). Helps identify coverage gaps."
-    )]
-    async fn untested_paths(
-        &self,
-        Parameters(args): Parameters<UntestedPathsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let rc = self.resolve(&args.repo).await?;
-        coverage::untested_paths(&rc.store, args).await
-    }
-
-    #[tool(
-        description = "Find source→sink taint paths: user-controlled data entering through an \
-            HTTP handler or event listener that reaches a dangerous operation. Categories: \
-            `sql` (SQL injection), `exec` (OS command execution), `file` (unsafe file write), \
-            `html` (XSS). Runs inter-procedural BFS on the call graph; pass refine=true for \
-            slower flow-sensitive CFG/PDG confirmation with adjusted confidence. Sink rules \
-            can be extended via `cih.taint.toml` in the repo root."
-    )]
-    async fn taint_paths(
-        &self,
-        Parameters(args): Parameters<TaintPathsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        taint::taint_paths(&self.graph_key, args, &self.artifacts).await
-    }
-
-    #[tool(
-        description = "Search the generated wiki (role-based docs produced by `cih-engine wiki`). \
-            BM25 over page titles and bodies. Facets: kind (persona pages carry their persona \
-            as the kind — `po`, `ba`, `dev` — plus `index`, `routes`, `api-flow`), role (the \
-            feature/module grouping, e.g. `loan`, `system`), and feature (community id). \
-            Returns ranked hits with slug, title, snippet, and provenance (graph_version, \
-            generated_at). Use get_wiki_page(slug=...) to fetch a full page."
-    )]
-    async fn search_wiki(
-        &self,
-        Parameters(args): Parameters<SearchWikiArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        wiki::search_wiki(&self.wiki, args).await
-    }
-
-    #[tool(
-        description = "Fetch one generated wiki page's full markdown by slug (find slugs with \
-            search_wiki). The YAML front matter carries provenance: enrichment tier and \
-            graph_version."
-    )]
-    async fn get_wiki_page(
-        &self,
-        Parameters(args): Parameters<GetWikiPageArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        wiki::get_wiki_page(&self.wiki, args).await
-    }
-
-    #[tool(
-        description = "Index a repository so its code graph becomes queryable by the other tools. \
-            Runs scan → parse → resolve → load into the live FalkorDB graph. \
-            Returns immediately with a `job_id`; use index_status(job_id=...) to poll for completion. \
-            Typical time: 5–120 seconds depending on repo size. \
-            Example: index_repo(repo_path='/home/user/my-service')"
-    )]
-    async fn index_repo(
-        &self,
-        Parameters(args): Parameters<IndexRepoArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        indexing::index_repo(&self.falkor_url, &self.graph_key, &self.jobs, args).await
-    }
-
-    #[tool(
-        description = "Poll the status of a repo-indexing job started by index_repo. \
-            Returns status (running/done/failed), timing, and output or error message."
-    )]
-    async fn index_status(
-        &self,
-        Parameters(args): Parameters<IndexStatusArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let jobs = self.jobs.read().await;
-        match jobs.get(&args.job_id) {
-            Some(state) => json_result(state),
-            None => Err(McpError::invalid_params(
-                format!(
-                    "unknown job_id '{}' — use index_repo to start a job",
-                    args.job_id
-                ),
-                None,
-            )),
-        }
-    }
-
-    #[tool(
-        description = "Teach CIH a repository's own framework convention so its endpoints become \
-            visible without any code change. Writes a rule to <repo>/cih.patterns.toml and \
-            re-indexes. Use when route_map misses endpoints because the repo uses a custom/proprietary \
-            annotation (e.g. @BankEndpoint(\"/pay\")) that the built-in Spring/JAX-RS detectors don't \
-            know. First inspect the code (search_code/read_file) to find the annotation, its \
-            path attribute, and any class-level prefix annotation, then call this. \
-            kind=\"route\": annotation=the method annotation name (no @); path_attr=attribute holding \
-            the URL (default \"value\"); method=fixed verb OR method_attr=attribute holding the verb; \
-            class_prefix_annotation=optional class-level prefix annotation. Poll index_status with the \
-            returned reindex_job_id, then re-run route_map."
-    )]
-    async fn add_resolve_pattern(
-        &self,
-        Parameters(args): Parameters<AddResolvePatternArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        patterns::add_resolve_pattern(&self.falkor_url, &self.graph_key, &self.jobs, args).await
-    }
-
-    #[tool(
-        description = "List the custom resolve patterns (cih.patterns.toml) currently taught for a \
-            repo. Use before add_resolve_pattern to avoid duplicates and see what conventions are \
-            already recognized."
-    )]
-    async fn list_resolve_patterns(
-        &self,
-        Parameters(args): Parameters<ListResolvePatternsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        patterns::list_resolve_patterns(&self.graph_key, args).await
-    }
-
-    #[tool(
-        description = "Read the source of a file in the repo. Use the `file` field from \
-            search_code or context results as the `path`. Optionally slice with start_line / \
-            end_line (1-based, inclusive) to fetch only the relevant section. Files over the \
-            size limit are rejected, and un-ranged reads are capped; when capped the response \
-            sets `truncated: true` — pass start_line/end_line to read further."
-    )]
-    async fn read_file(
-        &self,
-        Parameters(args): Parameters<ReadFileArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        files::read_file(&self.graph_key, self.read_file_limits, args).await
-    }
-
-    #[tool(
-        description = "Search for a regex pattern across source files in the repo. \
-            Use this to find comments, TODOs, annotations, string literals, or any \
-            text not captured by the graph index. Prefix the pattern with (?i) for \
-            case-insensitive search. `glob` filters by file path \
-            (e.g. \"**/*.java\", \"src/**/*.rs\"). Returns up to `limit` matches (default 200)."
-    )]
-    async fn grep_files(
-        &self,
-        Parameters(args): Parameters<GrepFilesArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        files::grep_files(&self.graph_key, args).await
-    }
 }
 
 /// Whether per-tool timing is logged. Read once from `CIH_TOOL_TIMING`
@@ -948,7 +733,37 @@ impl ServerHandler for CihServer {
 #[cfg(test)]
 mod tests {
     use super::unversioned_artifacts_dir;
+    use super::CihServer;
     use std::path::PathBuf;
+
+    #[test]
+    fn split_routers_register_all_tools_without_dropping_any() {
+        // Guards the app.rs tool split: the per-theme `#[tool_router]` impls must
+        // merge into the same tool surface, with the moved tools still present.
+        // Keep the router list here in sync with `CihServer::new`.
+        let router = CihServer::tool_router()
+            + CihServer::files_router()
+            + CihServer::crossrepo_router()
+            + CihServer::testing_router()
+            + CihServer::wiki_router()
+            + CihServer::admin_router();
+        assert_eq!(
+            router.list_all().len(),
+            29,
+            "tool count changed after the split — a tool was dropped or duplicated"
+        );
+        for tool in [
+            "read_file",
+            "grep_files",
+            "group_contracts",
+            "taint_paths",
+            "search_wiki",
+            "index_repo",
+            "impact",
+        ] {
+            assert!(router.has_route(tool), "missing tool after split: {tool}");
+        }
+    }
 
     #[test]
     fn versioned_artifacts_dir_maps_to_unversioned_parent() {

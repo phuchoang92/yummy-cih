@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use super::config::{llm_cache_key, LlmRunParams};
 use super::flow_enrich::enrich_one_flow;
 use crate::llm::evidence::{build_evidence_pack, EvidenceCorpus};
-use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
+use crate::llm::{backoff_ms, LlmRequest};
 use crate::ui::PhaseProgress;
 
 type FullEnrichResult = (
@@ -75,17 +75,7 @@ pub(super) fn run_community_full_enrichment(
                 }
 
                 ui_full.tick(comm.name.as_str());
-                match enrich_one_community_full_with_evidence(
-                    comm,
-                    &evidence,
-                    llm.adapter,
-                    llm.api_key,
-                    llm.model,
-                    llm.max_tokens,
-                    llm.timeout_secs,
-                    llm.retries,
-                    llm.language,
-                ) {
+                match enrich_one_community_full_with_evidence(comm, &evidence, llm) {
                     Ok(full) => {
                         ui_full.inc_ok();
                         Some((comm.id.as_str().to_string(), ev_hash, full))
@@ -215,18 +205,21 @@ fn parse_llm_full(text: &str) -> Result<CommunityLlmFull> {
     )
 }
 
-#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 fn enrich_one_community_full_with_evidence(
     community: &cih_core::Node,
     evidence: &str,
-    adapter: &dyn LlmAdapter,
-    api_key: Option<&str>,
-    model: &str,
-    max_tokens: u32,
-    timeout_secs: u64,
-    retries: u32,
-    language: &str,
+    llm: &LlmRunParams<'_>,
 ) -> Result<CommunityLlmFull> {
+    let LlmRunParams {
+        adapter,
+        api_key,
+        model,
+        max_tokens,
+        timeout_secs,
+        retries,
+        language,
+        ..
+    } = *llm;
     let system = crate::llm::prompts::community_system(language);
     let user = build_full_prompt(&community.name, evidence);
     let request = LlmRequest {
