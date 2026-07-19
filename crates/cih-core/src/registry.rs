@@ -121,8 +121,13 @@ pub fn git_head(repo_path: &Path) -> Option<String> {
 /// Returns the list of files changed between `since_ref` and HEAD (`git diff --name-only <ref>`).
 /// Returns an empty vec when git is unavailable or the ref is invalid.
 pub fn git_changed_files(repo_path: &Path, since_ref: &str) -> Vec<String> {
+    // Refuse refs that could be parsed as git options (e.g. `--output=…`) and
+    // terminate the option list with `--` so the ref is always treated as a ref.
+    if since_ref.starts_with('-') {
+        return vec![];
+    }
     let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", since_ref])
+        .args(["diff", "--name-only", since_ref, "--"])
         .current_dir(repo_path)
         .output();
     match output {
@@ -221,5 +226,18 @@ impl Registry {
             (Some(saved), Some(cur)) => saved != &cur,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod git_arg_tests {
+    use super::git_changed_files;
+    use std::path::Path;
+
+    #[test]
+    fn git_changed_files_refuses_option_like_ref() {
+        // Leading-dash refs (e.g. `--output=…`) are refused so git can't be driven
+        // into writing a file; returns empty rather than shelling out.
+        assert!(git_changed_files(Path::new("."), "--output=/tmp/pwn").is_empty());
     }
 }

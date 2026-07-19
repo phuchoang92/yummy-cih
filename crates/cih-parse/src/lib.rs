@@ -157,10 +157,30 @@ pub fn parse_file_units(
     registry: &LanguageRegistry,
 ) -> Result<ParseUnitsOutput> {
     // Per-file failures are collected, not propagated: one unreadable/garbage file
-    // must not abort indexing of a 12k-file repo.
+    // must not abort indexing of a 12k-file repo. `catch_unwind` extends that to
+    // parser *panics* (e.g. a tree-sitter/extractor bug on pathological input) so
+    // a single bad file is recorded as skipped instead of aborting the rayon run.
     let results = files
         .par_iter()
-        .map(|rel| (rel.clone(), parse_one(registry, repo_root, rel)))
+        .map(|rel| {
+            let parsed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_one(registry, repo_root, rel)
+            })) {
+                Ok(res) => res,
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    Err(ParseError::Parse {
+                        rel: rel.clone(),
+                        source: anyhow::anyhow!("parser panicked: {msg}"),
+                    })
+                }
+            };
+            (rel.clone(), parsed)
+        })
         .collect::<Vec<_>>();
 
     let mut units = Vec::new();

@@ -33,7 +33,7 @@ ignore.workspace = true
 regex.workspace = true
 
 axum = { version = "0.8", features = ["macros"] }
-tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "trace", "timeout"] }
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "trace", "timeout", "catch-panic", "limit"] }
 # NOTE: rmcp iterates fast. Pin and verify the macro/transport API against
 # https://docs.rs/rmcp for the exact version you resolve. The tool LOGIC in
 # main.rs is SDK-agnostic; only the #[tool]/ServerHandler wiring is version-sensitive.

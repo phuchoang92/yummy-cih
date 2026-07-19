@@ -98,12 +98,20 @@ pub fn git_changed_files(
         "base_ref" => {
             let r = base_ref
                 .ok_or_else(|| "`base_ref` scope requires the `base_ref` argument".to_string())?;
+            // Reject refs that could be parsed as git options (e.g. `--output=…`),
+            // which would otherwise turn `git diff` into an arbitrary-file-write
+            // primitive.
+            if r.starts_with('-') {
+                return Err(format!("invalid `base_ref` '{r}': must not begin with '-'"));
+            }
             cmd.arg(r);
         }
         _ => {
             cmd.arg("HEAD");
         }
     }
+    // Terminate the option list so a following ref/path can never be read as a flag.
+    cmd.arg("--");
     cmd.current_dir(repo_path);
     let output = cmd.output().map_err(|e| format!("git diff failed: {e}"))?;
     if !output.status.success() {
@@ -117,4 +125,19 @@ pub fn git_changed_files(
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_changed_files;
+
+    #[test]
+    fn base_ref_rejects_option_like_ref() {
+        // A ref that could be parsed as a git option must be refused *before* git
+        // runs, so `detect_changes` can't be turned into an arbitrary-file write
+        // via e.g. `--output=`.
+        let err = git_changed_files(".", "base_ref", Some("--output=/tmp/pwn"))
+            .expect_err("option-like ref must be rejected");
+        assert!(err.contains("must not begin with '-'"), "unexpected: {err}");
+    }
 }

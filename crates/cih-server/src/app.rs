@@ -562,7 +562,11 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ComplexityHotspotsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = if args.limit == 0 { 20 } else { args.limit };
+        let limit = if args.limit == 0 {
+            20
+        } else {
+            args.limit.min(500)
+        };
         let rc = self.resolve(&args.repo).await?;
         let hotspots = rc
             .store

@@ -1,7 +1,7 @@
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::IndexRepoArgs;
-use crate::jobs::{find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs};
+use crate::jobs::{evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs};
 use crate::utils::json_result;
 
 pub async fn index_repo(
@@ -52,6 +52,7 @@ pub async fn start_index_job(
     {
         let mut jobs_lock = jobs.write().await;
         jobs_lock.insert(job_id.clone(), JobState::Running { started_at_secs });
+        evict_terminal(&mut jobs_lock);
     }
 
     let engine = find_engine_binary();

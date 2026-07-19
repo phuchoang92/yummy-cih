@@ -10,7 +10,15 @@ use axum::{middleware, routing::get};
 use cih_embed::{EmbedModelKind, EmbedStore};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::StreamableHttpService;
-use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    catch_panic::CatchPanicLayer, compression::CompressionLayer, limit::RequestBodyLimitLayer,
+    timeout::TimeoutLayer, trace::TraceLayer,
+};
+
+/// Max request body accepted on any route. MCP JSON-RPC payloads and tool
+/// arguments are small; this caps memory a large authed POST can force us to
+/// buffer.
+const MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 use crate::app::CihServer;
 use crate::config::{build_store, Config};
@@ -111,7 +119,11 @@ pub async fn run() -> Result<()> {
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(120),
-        ));
+        ))
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_BYTES))
+        // Outermost: turn a panic in any inner layer/handler into a 500 instead of
+        // dropping the client connection.
+        .layer(CatchPanicLayer::new());
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     tracing::info!("MCP (Streamable HTTP) listening on http://{}/mcp", cfg.bind);

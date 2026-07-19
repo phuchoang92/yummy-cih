@@ -147,7 +147,15 @@ pub(super) fn build_class_props(
 
     let table_name: Option<String> = if effective_stereotype == Some("entity") {
         let start = node.start_byte();
-        let header = &src[start..src.len().min(start + 512)];
+        // Clamp the 512-byte window down to a char boundary: `start + 512` is an
+        // arbitrary byte offset that can land inside a multibyte UTF-8 char (a
+        // non-ASCII identifier/comment), and slicing there would panic — which,
+        // under the rayon per-file parse, aborts the whole analyze.
+        let mut end = (start + 512).min(src.len());
+        while end > start && !src.is_char_boundary(end) {
+            end -= 1;
+        }
+        let header = &src[start..end];
         extract_table_annotation_name(header)
     } else {
         None

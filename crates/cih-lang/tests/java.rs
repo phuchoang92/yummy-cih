@@ -483,3 +483,36 @@ fn dynamic_kafka_topic_yields_parts() {
         Some(&[UrlPart::ConstRef("TOPIC".into())][..])
     );
 }
+
+/// Regression: a JPA `@Entity` whose 512-byte class-props header window ends
+/// inside a multibyte UTF-8 char must not panic — it previously sliced at a
+/// non-char-boundary, and under the rayon per-file parse that aborts the whole
+/// analyze. The `@Table` name is still extracted from the clamped window.
+#[test]
+fn entity_header_slice_clamps_to_char_boundary() {
+    let mut src = String::from("@Entity\n@Table(name = \"orders\")\npublic class Order {\n    // ");
+    // Pad (inside a line comment) so a 2-byte 'é' straddles byte 512 counted from
+    // the class-declaration start (byte 0): the old slice `src[0..512]` panics there.
+    while src.len() < 511 {
+        src.push('x');
+    }
+    src.push('é');
+    src.push_str("\n}\n");
+
+    let unit = JavaProvider::new()
+        .parse_file("Order.java", &src)
+        .expect("entity should parse");
+    let class = unit
+        .nodes
+        .iter()
+        .find(|n| n.kind == cih_core::NodeKind::Class)
+        .expect("class node");
+    assert_eq!(
+        class
+            .props
+            .as_ref()
+            .and_then(|p| p.get("tableName"))
+            .and_then(|v| v.as_str()),
+        Some("orders"),
+    );
+}

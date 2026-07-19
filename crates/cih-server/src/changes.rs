@@ -42,6 +42,8 @@ pub async fn detect_changes(
             affected_symbols: Vec<String>,
             affected_processes: Vec<String>,
             risk: &'static str,
+            partial: bool,
+            incomplete_symbols: usize,
         }
         return json_result(&Empty {
             changed_files,
@@ -49,6 +51,8 @@ pub async fn detect_changes(
             affected_symbols: vec![],
             affected_processes: vec![],
             risk: "none",
+            partial: false,
+            incomplete_symbols: 0,
         });
     }
 
@@ -65,11 +69,17 @@ pub async fn detect_changes(
         set.spawn(async move { store.impact(&id, Direction::Upstream, 4).await });
     }
     let mut affected_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Track sub-query failures so a partial FalkorDB failure is reported as
+    // degraded rather than silently under-counting the blast radius.
+    let mut failed_traversals = 0usize;
     while let Some(joined) = set.join_next().await {
-        if let Ok(Ok(impact)) = joined {
-            for n in &impact.affected {
-                affected_set.insert(n.id.to_string());
+        match joined {
+            Ok(Ok(impact)) => {
+                for n in &impact.affected {
+                    affected_set.insert(n.id.to_string());
+                }
             }
+            _ => failed_traversals += 1,
         }
     }
     for node in &changed_nodes {
@@ -110,6 +120,11 @@ pub async fn detect_changes(
         affected_symbols: Vec<String>,
         affected_processes: Vec<String>,
         risk: &'static str,
+        /// True when one or more blast-radius sub-queries failed, so
+        /// `affected_symbols`/`risk` may under-count.
+        partial: bool,
+        /// Number of changed symbols whose upstream traversal failed.
+        incomplete_symbols: usize,
     }
     json_result(&Out {
         changed_files,
@@ -117,5 +132,7 @@ pub async fn detect_changes(
         affected_symbols,
         affected_processes,
         risk,
+        partial: failed_traversals > 0,
+        incomplete_symbols: failed_traversals,
     })
 }
