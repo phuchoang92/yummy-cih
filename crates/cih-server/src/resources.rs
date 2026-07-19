@@ -127,7 +127,7 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
     let reg = Registry::load();
     let entry = reg
         .find(name)
-        .ok_or_else(|| McpError::invalid_params(format!("repo '{name}' not in registry"), None))?;
+        .ok_or_else(|| crate::utils::repo_not_found(name))?;
 
     let text = match section {
         "context" => serde_json::to_string_pretty(entry)
@@ -162,7 +162,7 @@ fn read_wiki_page(name: &str, slug: &str, uri: &str) -> Result<ReadResourceResul
     let reg = Registry::load();
     let entry = reg
         .find(name)
-        .ok_or_else(|| McpError::invalid_params(format!("repo '{name}' not in registry"), None))?;
+        .ok_or_else(|| crate::utils::repo_not_found(name))?;
     let wiki_dir = std::path::Path::new(&entry.path).join(".cih").join("wiki");
     let manifest_raw = std::fs::read_to_string(wiki_dir.join("manifest.json")).map_err(|_| {
         McpError::invalid_params(

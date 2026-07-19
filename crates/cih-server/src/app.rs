@@ -436,10 +436,7 @@ impl CihServer {
                 groups,
             })
         } else {
-            Err(McpError::invalid_params(
-                format!("repo '{}' not in registry", args.name),
-                None,
-            ))
+            Err(crate::utils::repo_not_found(&args.name))
         }
     }
 

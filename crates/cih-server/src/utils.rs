@@ -9,6 +9,13 @@ pub fn to_mcp(e: GraphStoreError) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
+/// Standard "unknown repo" error: the client named a `repo` that is not in the
+/// registry. This is client input, so it maps to `invalid_params` (not
+/// `internal_error`) — use this everywhere to keep the failure code consistent.
+pub fn repo_not_found(name: &str) -> McpError {
+    McpError::invalid_params(format!("repo '{name}' not in registry"), None)
+}
+
 pub fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let content =
         Content::json(value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
