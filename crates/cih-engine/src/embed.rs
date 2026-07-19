@@ -11,8 +11,7 @@ pub fn run_embed(repo: PathBuf, pg_url: Option<String>, model: String, json: boo
         .read_nodes()
         .with_context(|| format!("failed to read {}", source.nodes_path.display()))?;
     let model_kind = cih_embed::EmbedModelKind::parse(&model)?;
-    let pg_url = pg_url
-        .or_else(|| std::env::var("CIH_PG_URL").ok())
+    let pg_url = crate::resolve_pg_url(pg_url)
         .context("missing Postgres URL: pass --pg-url or set CIH_PG_URL")?;
 
     let embed = crate::runtime::block_on(async {

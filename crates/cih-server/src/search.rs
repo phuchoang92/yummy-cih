@@ -101,8 +101,15 @@ impl SearchState {
             }
         }
 
-        let nodes = artifacts.read_nodes()?;
-        let index = Arc::new(SearchIndex::build(&nodes));
+        // Read + build off the async runtime: on a large repo (~87k nodes) this is
+        // CPU-heavy and would otherwise stall a tokio worker thread. The read guard
+        // above is already dropped, so no lock is held across the blocking call.
+        let index = tokio::task::spawn_blocking(move || -> Result<Arc<SearchIndex>> {
+            let nodes = artifacts.read_nodes()?;
+            Ok(Arc::new(SearchIndex::build(&nodes)))
+        })
+        .await
+        .map_err(|e| anyhow!("bm25 index build task failed: {e}"))??;
         let mut guard = self.bm25.write().await;
         *guard = Some(CachedIndex {
             index: index.clone(),

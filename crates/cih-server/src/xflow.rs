@@ -102,7 +102,12 @@ impl XflowState {
         let mtime = std::fs::metadata(key.join("nodes.jsonl"))
             .and_then(|meta| meta.modified())
             .ok();
-        if let Some(cached) = self.cache.read().expect("xflow cache lock").get(&key) {
+        if let Some(cached) = self
+            .cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
             if cached.nodes_mtime == mtime && mtime.is_some() {
                 return Ok(cached.clone());
             }
@@ -110,7 +115,7 @@ impl XflowState {
         let loaded = Arc::new(ArtifactGraph::load(artifacts_dir)?);
         self.cache
             .write()
-            .expect("xflow cache lock")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(key, loaded.clone());
         Ok(loaded)
     }

@@ -19,8 +19,9 @@ pub use entrypoints::{
     EntrypointKind, EntrypointRegistry, ScoredEntrypoint,
 };
 pub use group::{
-    contracts_path, group_contracts_stale, group_dir, normalize_contract_path, sync_state_path,
-    ContractMatch, ContractMatchKind, GroupEntry, GroupRegistry, SyncRepoSnapshot, SyncState,
+    cih_home, contracts_path, group_contracts_stale, group_dir, normalize_contract_path,
+    sync_state_path, ContractMatch, ContractMatchKind, GroupEntry, GroupRegistry, SyncRepoSnapshot,
+    SyncState,
 };
 pub use ir::{
     BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind, ContractSite,

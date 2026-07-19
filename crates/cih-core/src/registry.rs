@@ -44,11 +44,7 @@ pub struct Registry {
 }
 
 fn registry_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| {
-        std::path::PathBuf::from(h)
-            .join(".cih")
-            .join("registry.json")
-    })
+    crate::cih_home().map(|dir| dir.join("registry.json"))
 }
 
 /// Current time as RFC-3339 UTC (no external dep required).
@@ -239,5 +235,14 @@ mod git_arg_tests {
         // Leading-dash refs (e.g. `--output=…`) are refused so git can't be driven
         // into writing a file; returns empty rather than shelling out.
         assert!(git_changed_files(Path::new("."), "--output=/tmp/pwn").is_empty());
+    }
+
+    #[test]
+    fn registry_path_composes_from_cih_home() {
+        // registry.json lives under ~/.cih; verify the composition without
+        // depending on HOME being set (skips when it isn't).
+        if let Some(home) = crate::cih_home() {
+            assert_eq!(super::registry_path(), Some(home.join("registry.json")));
+        }
     }
 }

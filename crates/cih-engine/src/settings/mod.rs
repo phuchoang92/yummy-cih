@@ -223,7 +223,7 @@ pub struct Layers {
 
 /// `~/.cih/config.toml`, if `HOME` is set.
 pub fn home_config_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cih").join("config.toml"))
+    cih_core::cih_home().map(|dir| dir.join("config.toml"))
 }
 
 /// `<repo>/cih.toml`.

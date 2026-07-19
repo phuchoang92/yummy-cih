@@ -77,10 +77,13 @@ fn redact_key_hides_key_in_message() {
 /// Integration test: verifies that the Bedrock Converse API adapter works end-to-end.
 /// Only runs when AWS_BEARER_TOKEN_BEDROCK is set in the environment.
 #[test]
+#[ignore = "requires AWS_BEARER_TOKEN_BEDROCK; run with --ignored"]
 fn integration_bedrock_community_full_prompt() {
     let api_key = match std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
         Ok(k) if !k.is_empty() => k,
-        _ => return, // skip when key not set
+        _ => panic!(
+            "AWS_BEARER_TOKEN_BEDROCK not set; required for this #[ignore]d integration test"
+        ),
     };
     let base_url = std::env::var("AWS_BEDROCK_BASE_URL")
         .unwrap_or_else(|_| "https://bedrock-runtime.us-east-1.amazonaws.com".to_string());
@@ -135,10 +138,11 @@ fn integration_bedrock_community_full_prompt() {
 /// Integration test: verifies that prompt constants produce valid JSON via DeepSeek.
 /// Only runs when DEEPSEEK_API_KEY is set in the environment.
 #[test]
+#[ignore = "requires DEEPSEEK_API_KEY; run with --ignored"]
 fn integration_deepseek_community_full_prompt() {
     let api_key = match std::env::var("DEEPSEEK_API_KEY") {
         Ok(k) if !k.is_empty() => k,
-        _ => return, // skip when key not set
+        _ => panic!("DEEPSEEK_API_KEY not set; required for this #[ignore]d integration test"),
     };
 
     use cih_engine::llm::prompts::{community_system, COMMUNITY_FULL_JSON_TEMPLATE};
@@ -191,10 +195,11 @@ fn integration_deepseek_community_full_prompt() {
 }
 
 #[test]
+#[ignore = "requires DEEPSEEK_API_KEY; run with --ignored"]
 fn integration_deepseek_http_flow_prompt() {
     let api_key = match std::env::var("DEEPSEEK_API_KEY") {
         Ok(k) if !k.is_empty() => k,
-        _ => return,
+        _ => panic!("DEEPSEEK_API_KEY not set; required for this #[ignore]d integration test"),
     };
 
     use cih_engine::llm::prompts::{http_flow_system, HTTP_FLOW_JSON_TEMPLATE};

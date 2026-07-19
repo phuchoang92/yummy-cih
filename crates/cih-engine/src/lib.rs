@@ -21,6 +21,25 @@ pub const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
 #[doc(hidden)]
 pub const DEFAULT_GRAPH_KEY: &str = "cih";
 
+/// Resolve the Postgres URL: an explicit flag value wins, else `$CIH_PG_URL`.
+/// Returns `None` when neither is set; callers add their own context message.
+pub fn resolve_pg_url(explicit: Option<String>) -> Option<String> {
+    explicit.or_else(|| std::env::var("CIH_PG_URL").ok())
+}
+
+#[cfg(test)]
+mod config_tests {
+    #[test]
+    fn resolve_pg_url_prefers_explicit_over_env() {
+        // Explicit Some short-circuits before the env lookup, so this is
+        // deterministic regardless of CIH_PG_URL in the environment.
+        assert_eq!(
+            super::resolve_pg_url(Some("postgres://explicit".into())).as_deref(),
+            Some("postgres://explicit"),
+        );
+    }
+}
+
 pub mod analyze;
 pub mod cmd;
 pub mod db;

@@ -40,7 +40,12 @@ impl ArtifactCache {
         let mtime = std::fs::metadata(key.join("nodes.jsonl"))
             .and_then(|meta| meta.modified())
             .ok();
-        if let Some(cached) = self.cache.read().expect("artifact cache lock").get(&key) {
+        if let Some(cached) = self
+            .cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
             if cached.nodes_mtime == mtime && mtime.is_some() {
                 return Ok(cached.clone());
             }
@@ -54,7 +59,7 @@ impl ArtifactCache {
         });
         self.cache
             .write()
-            .expect("artifact cache lock")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(key, bundle.clone());
         Ok(bundle)
     }

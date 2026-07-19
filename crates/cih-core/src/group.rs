@@ -49,7 +49,9 @@ pub struct ContractMatch {
     pub match_key: String,
 }
 
-fn cih_home() -> Option<PathBuf> {
+/// The `~/.cih` home directory (registry, groups, and `config.toml` live here),
+/// or `None` when `HOME` is unset. Single source of truth for this path.
+pub fn cih_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cih"))
 }
 

@@ -530,14 +530,10 @@ fn build_embed_cluster_strategy(
 ) -> Result<Box<dyn FeatureStrategy>> {
     use std::collections::{HashMap, HashSet};
 
-    let pg_url = overrides
-        .pg_url
-        .clone()
-        .or_else(|| std::env::var("CIH_PG_URL").ok())
-        .context(
-            "--feature-strategy embed requires Postgres: pass --pg-url or set CIH_PG_URL, \
-             and run `cih embed` first",
-        )?;
+    let pg_url = crate::resolve_pg_url(overrides.pg_url.clone()).context(
+        "--feature-strategy embed requires Postgres: pass --pg-url or set CIH_PG_URL, \
+         and run `cih embed` first",
+    )?;
 
     let mut cfg = cih_grouping::EmbedClusterConfig::default();
     if let Some(v) = overrides.embed_similarity_threshold {
