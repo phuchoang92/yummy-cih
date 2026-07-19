@@ -8,19 +8,15 @@ use cih_core::{
 };
 use tree_sitter::Node as TsNode;
 
-use crate::contracts_common::normalize_external_url;
+use crate::contracts_common::{
+    http_verb_from_method, normalize_external_url, parts_have_nonlit, parts_start_with_abs_path,
+    WrapperUrlPiece,
+};
 
 use super::builder::Builder;
 use super::helpers::*;
 
 // ── HTTP wrapper detection (python analog of the TS apiFetch pattern) ────────
-
-/// One piece of a candidate wrapper's URL expression: a regular part, or the
-/// pass-through parameter slot.
-pub(super) enum WrapperUrlPiece {
-    Part(UrlPart),
-    Param,
-}
 
 /// Detect a same-repo HTTP wrapper: a module-scope `def` whose FIRST param is
 /// a plain identifier and whose body calls `requests.<verb>` / `httpx.<verb>`
@@ -57,7 +53,7 @@ pub(super) fn try_collect_py_http_wrapper(name: &str, fn_node: TsNode<'_>, src: 
         };
         (verb.to_ascii_uppercase(), 1)
     } else {
-        let Some(verb) = python_http_verb(&attr) else {
+        let Some(verb) = http_verb_from_method(&attr) else {
             return;
         };
         (verb.to_string(), 0)
@@ -158,7 +154,7 @@ pub(super) fn find_inner_py_http_call<'a>(body: TsNode<'a>, src: &str) -> Option
                         .map(|n| text(n, src))
                         .unwrap_or_default();
                     if (object == "requests" || object == "httpx")
-                        && (python_http_verb(&attr).is_some() || attr == "request")
+                        && (http_verb_from_method(&attr).is_some() || attr == "request")
                     {
                         return Some(child);
                     }
@@ -300,7 +296,7 @@ pub(super) fn py_import_binds_module(imports: &[RawImport], obj_kind: &str, obj:
 pub(super) fn py_arg_is_url_ish(node: TsNode<'_>, src: &str) -> bool {
     let mut parts = Vec::new();
     fold_py_url_expr(node, src, &mut parts);
-    matches!(parts.first(), Some(UrlPart::Lit(lit)) if lit.starts_with('/'))
+    parts_start_with_abs_path(&parts)
 }
 
 
@@ -312,18 +308,6 @@ pub(super) fn py_arg_is_url_ish(node: TsNode<'_>, src: &str) -> bool {
 // module name `requests` or `httpx` — instance clients (`session.get`,
 // `client.get(...)`) are out of scope v1. URLs reuse the Phase B parts model:
 // f-string interpolations become `Dynamic` parts and fold to `{*}` at resolve.
-
-pub(super) fn python_http_verb(attr: &str) -> Option<&'static str> {
-    match attr {
-        "get" => Some("GET"),
-        "post" => Some("POST"),
-        "put" => Some("PUT"),
-        "delete" => Some("DELETE"),
-        "patch" => Some("PATCH"),
-        "head" => Some("HEAD"),
-        _ => None,
-    }
-}
 
 pub(super) fn try_emit_http_contract(
     node: TsNode<'_>,
@@ -422,7 +406,7 @@ pub(super) fn try_emit_http_contract(
         .map(|n| text(n, src))
         .unwrap_or_default();
 
-    let (http_method, url_node) = if let Some(verb) = python_http_verb(&attr) {
+    let (http_method, url_node) = if let Some(verb) = http_verb_from_method(&attr) {
         let Some(url) = positional_argument(node, 0) else {
             return;
         };
@@ -539,10 +523,7 @@ pub(super) fn collect_module_string_constant(node: TsNode<'_>, src: &str, builde
 pub(super) fn py_url_parts(node: TsNode<'_>, src: &str) -> Option<Vec<UrlPart>> {
     let mut parts = Vec::new();
     fold_py_url_expr(node, src, &mut parts);
-    parts
-        .iter()
-        .any(|part| !matches!(part, UrlPart::Lit(_)))
-        .then_some(parts)
+    parts_have_nonlit(&parts).then_some(parts)
 }
 
 pub(super) fn fold_py_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<UrlPart>) {

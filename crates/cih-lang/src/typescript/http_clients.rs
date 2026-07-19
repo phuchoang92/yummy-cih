@@ -9,7 +9,10 @@ use cih_core::{
 };
 use tree_sitter::Node as TsNode;
 
-use crate::contracts_common::normalize_external_url;
+use crate::contracts_common::{
+    http_verb_from_method, normalize_external_url, parts_have_nonlit, parts_start_with_abs_path,
+    WrapperUrlPiece,
+};
 
 use super::builder::Builder;
 use super::helpers::{
@@ -24,18 +27,6 @@ use super::helpers::{
 // clients (`this.http.get(...)`) are out of scope v1. URLs reuse the Phase B
 // parts model: template-string substitutions become `Dynamic` parts and fold
 // to `{*}` at resolve.
-
-pub(super) fn axios_http_verb(prop: &str) -> Option<&'static str> {
-    match prop {
-        "get" => Some("GET"),
-        "post" => Some("POST"),
-        "put" => Some("PUT"),
-        "delete" => Some("DELETE"),
-        "patch" => Some("PATCH"),
-        "head" => Some("HEAD"),
-        _ => None,
-    }
-}
 
 /// Fetch-like bare-identifier client whose method comes from the options object.
 /// `fetch`/`axios`/`$fetch`/`ofetch` are distinctive enough to match unconditionally;
@@ -80,7 +71,7 @@ pub(super) fn resolve_client_call(
         if matches!(recv.as_str(), "http" | "httpClient" | "httpService")
             && (builder.imports_pkg("@angular/common/http") || builder.imports_pkg("@nestjs/axios"))
         {
-            if let Some(v) = axios_http_verb(&prop) {
+            if let Some(v) = http_verb_from_method(&prop) {
                 return Some((v.to_string(), None));
             }
         }
@@ -90,15 +81,15 @@ pub(super) fn resolve_client_call(
     if object_node.kind() == "identifier" {
         let obj = text(object_node, src);
         if obj == "axios" {
-            return axios_http_verb(&prop).map(|v| (v.to_string(), None));
+            return http_verb_from_method(&prop).map(|v| (v.to_string(), None));
         }
         if let Some(base) = builder.axios_instances.get(&obj) {
-            return axios_http_verb(&prop).map(|v| (v.to_string(), base.clone()));
+            return http_verb_from_method(&prop).map(|v| (v.to_string(), base.clone()));
         }
         if (obj == "ky" && builder.imports_pkg("ky"))
             || (obj == "superagent" && builder.imports_pkg("superagent"))
         {
-            return axios_http_verb(&prop).map(|v| (v.to_string(), None));
+            return http_verb_from_method(&prop).map(|v| (v.to_string(), None));
         }
         // undici: `undici.request(url, { method })` (method from options).
         if obj == "undici" && builder.imports_pkg("undici") && prop == "request" {
@@ -471,7 +462,7 @@ pub(super) fn graphql_root_op(body: &str) -> Option<(&'static str, String)> {
 pub(super) fn ts_arg_is_url_ish(node: TsNode<'_>, src: &str, consts: &std::collections::HashSet<&str>) -> bool {
     let mut parts = Vec::new();
     fold_ts_url_expr(node, src, &mut parts, consts);
-    matches!(parts.first(), Some(UrlPart::Lit(lit)) if lit.starts_with('/'))
+    parts_start_with_abs_path(&parts)
 }
 
 
@@ -515,10 +506,7 @@ pub(super) fn ts_url_parts(
 ) -> Option<Vec<UrlPart>> {
     let mut parts = Vec::new();
     fold_ts_url_expr(node, src, &mut parts, consts);
-    parts
-        .iter()
-        .any(|part| !matches!(part, UrlPart::Lit(_)))
-        .then_some(parts)
+    parts_have_nonlit(&parts).then_some(parts)
 }
 
 pub(super) fn fold_ts_url_expr(
@@ -639,13 +627,6 @@ pub(super) fn collect_module_string_constants(node: TsNode<'_>, src: &str, build
 }
 
 // ── HTTP wrapper detection (apiFetch pattern) ────────────────────────────────
-
-/// One piece of a candidate wrapper's URL expression: a regular part, or the
-/// pass-through parameter slot.
-pub(super) enum WrapperUrlPiece {
-    Part(UrlPart),
-    Param,
-}
 
 /// Detect a same-repo HTTP wrapper: a module-scope function whose FIRST param
 /// is a plain identifier and whose body calls fetch/axios with a URL that is

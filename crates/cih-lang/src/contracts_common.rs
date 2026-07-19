@@ -3,6 +3,8 @@
 //! Kotlin (and later languages) reuse the exact same normalization — tree
 //! walking stays per-language (grammars differ), only string logic is shared.
 
+use cih_core::UrlPart;
+
 /// RestTemplate method name → HTTP verb.
 pub(crate) fn rest_template_http_method(method: &str) -> Option<&'static str> {
     match method {
@@ -126,4 +128,37 @@ pub(crate) fn is_screaming_snake(name: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
         && name.chars().any(|c| c.is_ascii_uppercase())
+}
+
+/// Outbound-client method name (`get`/`post`/…) → HTTP verb. Shared verbatim by
+/// the TypeScript (`axios`/`fetch`) and Python (`requests`/`httpx`) detectors.
+pub(crate) fn http_verb_from_method(method: &str) -> Option<&'static str> {
+    match method {
+        "get" => Some("GET"),
+        "post" => Some("POST"),
+        "put" => Some("PUT"),
+        "delete" => Some("DELETE"),
+        "patch" => Some("PATCH"),
+        "head" => Some("HEAD"),
+        _ => None,
+    }
+}
+
+/// One piece of a candidate HTTP-wrapper's URL expression: a regular part, or the
+/// pass-through parameter slot. Shared by the TS and Python wrapper detectors.
+pub(crate) enum WrapperUrlPiece {
+    Part(UrlPart),
+    Param,
+}
+
+/// True when a folded URL has any non-literal part (a `ConstRef`/`Dynamic`) — i.e.
+/// worth emitting as a templated contract rather than a plain literal.
+pub(crate) fn parts_have_nonlit(parts: &[UrlPart]) -> bool {
+    parts.iter().any(|part| !matches!(part, UrlPart::Lit(_)))
+}
+
+/// True when a folded URL's first part is an absolute-path literal (`/…`) — the
+/// URL-ish gate that keeps i18n / `helper(id)` calls out of contract emission.
+pub(crate) fn parts_start_with_abs_path(parts: &[UrlPart]) -> bool {
+    matches!(parts.first(), Some(UrlPart::Lit(lit)) if lit.starts_with('/'))
 }
