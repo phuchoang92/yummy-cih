@@ -95,6 +95,26 @@ pub(crate) const HINT_TOOLS: &[&str] = &[
     "architecture_overview",
 ];
 
+mod remedy {
+    use cih_core::RegistryEntry;
+
+    pub(super) fn analyze(entry: &RegistryEntry) -> String {
+        format!("cih-engine analyze {}", entry.path)
+    }
+
+    pub(super) fn discover(entry: &RegistryEntry) -> String {
+        format!("cih-engine discover {}", entry.path)
+    }
+
+    pub(super) fn load(entry: &RegistryEntry) -> String {
+        format!("cih-engine load {}", entry.path)
+    }
+
+    pub(super) fn wiki(entry: &RegistryEntry) -> String {
+        format!("cih-engine wiki {}", entry.path)
+    }
+}
+
 /// A section that is either served (with a one-word `source` label) or
 /// explicitly unavailable with a reason + remedy. A requested section always
 /// appears — `available: false` means "a pipeline step has not run" or "a query
@@ -314,8 +334,11 @@ struct Provenance {
 }
 
 /// The tool's full response (D5: a real struct from day one — it becomes the
-/// output schema when structured content lands at `json_result`). Field order
-/// is serialization order; `None` = not requested or dropped by the backstop.
+/// output schema when structured content lands at `json_result`). Keep this
+/// typed contract instead of a dynamic section registry: compile-time schema
+/// stability is more valuable here than runtime extension indirection. Field
+/// order is serialization order; `None` = not requested or dropped by the
+/// backstop.
 #[derive(Serialize)]
 pub(crate) struct OverviewResponse {
     repo: String,
@@ -350,6 +373,10 @@ impl OverviewResponse {
     }
 }
 
+/// Composition depends on the server's established `GraphStore` port rather
+/// than a private overview-only subtrait. A narrowed duplicate would add a
+/// second abstraction over the same backend boundary and diverge from every
+/// other tool; only the test fake pays for the wider interface.
 pub(crate) struct ComposeCtx<'a> {
     pub store: &'a dyn GraphStore,
     pub entry: &'a RegistryEntry,
@@ -468,7 +495,7 @@ fn load_scheduled(
             return (
                 Section::off(
                     "discover has not run for this index",
-                    Some(format!("cih-engine discover {}", entry.path)),
+                    Some(remedy::discover(entry)),
                 ),
                 None,
             );
@@ -494,7 +521,7 @@ fn load_scheduled(
             return (
                 Section::off(
                     format!("entrypoints sidecar unreadable: {e}"),
-                    Some(format!("re-run: cih-engine discover {}", entry.path)),
+                    Some(format!("re-run: {}", remedy::discover(entry))),
                 ),
                 mtime,
             );
@@ -612,25 +639,258 @@ pub(crate) fn group_sections(repo_name: &str, reg: &cih_core::Registry) -> Vec<G
         .collect()
 }
 
-pub(crate) async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, McpError> {
-    // Validate section selection up front — an unknown name is client input error.
-    let selected: Vec<String> = if ctx.sections.is_empty() {
-        DEFAULT_SECTIONS.iter().map(|s| s.to_string()).collect()
+fn validate_sections(sections: &[String]) -> Result<Vec<String>, McpError> {
+    if sections.is_empty() {
+        return Ok(DEFAULT_SECTIONS.iter().map(|s| s.to_string()).collect());
+    }
+    for section in sections {
+        if !VALID_SECTIONS.contains(&section.as_str()) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "unknown section '{}'; valid sections: {}",
+                    section,
+                    VALID_SECTIONS.join(", ")
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(sections.to_vec())
+}
+
+fn build_warnings(
+    ctx: &ComposeCtx<'_>,
+    summary: &GraphSummary,
+    artifacts_version: Option<&str>,
+) -> Vec<String> {
+    let entry = ctx.entry;
+    let mut warnings = Vec::new();
+    if ctx.registry_stale {
+        warnings.push(format!(
+            "repo has commits newer than the index (git HEAD changed since {}) — re-run: {}",
+            entry.indexed_at,
+            remedy::analyze(entry)
+        ));
+    }
+    if entry.stats.nodes == 0 {
+        warnings.push(
+            "registry stats for this repo are zero (discover has not run or stats were never recorded) — counts in this response come from the live graph"
+                .into(),
+        );
     } else {
-        for s in &ctx.sections {
-            if !VALID_SECTIONS.contains(&s.as_str()) {
-                return Err(McpError::invalid_params(
-                    format!(
-                        "unknown section '{}'; valid sections: {}",
-                        s,
-                        VALID_SECTIONS.join(", ")
-                    ),
-                    None,
-                ));
+        let live_nodes = summary.total_nodes as f64;
+        let registry_nodes = entry.stats.nodes as f64;
+        if (live_nodes - registry_nodes).abs() / live_nodes.max(registry_nodes).max(1.0) > 0.10 {
+            warnings.push(format!(
+                "graph store size ({} nodes) diverges from registry stats ({} nodes) — the loaded graph may not match the latest artifacts; reload: {}",
+                summary.total_nodes,
+                entry.stats.nodes,
+                remedy::load(entry)
+            ));
+        }
+    }
+
+    if let Some(wiki) = &ctx.wiki {
+        if wiki.source == "wiki-bundle" {
+            if let (Some(graph_version), Some(artifacts_version)) =
+                (wiki.graph_version.as_deref(), artifacts_version)
+            {
+                if !graph_version.is_empty() && graph_version != artifacts_version {
+                    warnings.push(format!(
+                        "wiki bundle describes an older index (graph_version {graph_version} ≠ current {artifacts_version}) — prefer graph-sourced data; regenerate: {}",
+                        remedy::wiki(entry)
+                    ));
+                }
             }
         }
-        ctx.sections.clone()
+    }
+    warnings
+}
+
+async fn build_modules(
+    store: &dyn GraphStore,
+    entry: &RegistryEntry,
+    fetched: StoreResult<Vec<CommunityInfo>>,
+    pool: Option<&StoreResult<GraphOverview>>,
+    item_cap: usize,
+    warnings: &mut Vec<String>,
+) -> Section<ModulesBody> {
+    match fetched {
+        Err(e) => Section::store_err(&e),
+        Ok(mut communities) if !communities.is_empty() => {
+            communities.sort_by(|a, b| {
+                b.symbol_count
+                    .cmp(&a.symbol_count)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let total = communities.len();
+            communities.truncate(item_cap);
+
+            // Anchor attribution is the only dependent query in this section.
+            let mut anchors: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+            if let Some(pool) = pool.and_then(|result| result.as_ref().ok()) {
+                let degrees: HashMap<&str, u64> = pool
+                    .nodes
+                    .iter()
+                    .map(|node| (node.node.id.as_str(), node.degree))
+                    .collect();
+                let ids: Vec<cih_core::NodeId> =
+                    pool.nodes.iter().map(|node| node.node.id.clone()).collect();
+                match store.symbol_communities(&ids).await {
+                    Ok(pairs) => {
+                        for (id, community) in pairs {
+                            let degree = degrees.get(id.as_str()).copied().unwrap_or(0);
+                            anchors
+                                .entry(community.id)
+                                .or_default()
+                                .push((degree, id.as_str().to_string()));
+                        }
+                    }
+                    Err(e) => warnings.push(format!(
+                        "anchor-symbol attribution unavailable (symbol_communities failed: {e}) — module rows carry no anchors"
+                    )),
+                }
+            }
+
+            let items = communities
+                .into_iter()
+                .map(|community| {
+                    let anchor_symbols = anchors
+                        .remove(&community.id)
+                        .map(|mut list| {
+                            list.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                            list.into_iter()
+                                .take(ANCHORS_PER_MODULE)
+                                .map(|(_, id)| id)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    ModuleEntry {
+                        id: community.id,
+                        name: community.name,
+                        symbol_count: community.symbol_count,
+                        cohesion: community.cohesion,
+                        anchor_symbols,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let truncated = total > items.len();
+            Section::ok(
+                "graph",
+                ModulesBody {
+                    total,
+                    truncated,
+                    next: truncated.then(|| "communities()".to_string()),
+                    items,
+                },
+            )
+        }
+        Ok(_) if entry.community_artifacts_dir.is_none() => Section::off(
+            "discover has not run for this index (no module clusters in the graph)",
+            Some(remedy::discover(entry)),
+        ),
+        Ok(_) => Section::off(
+            "graph contains no Community nodes although discover artifacts exist — the loaded graph may predate discover",
+            Some(remedy::load(entry)),
+        ),
+    }
+}
+
+fn build_entrypoints(
+    entry: &RegistryEntry,
+    pool: Option<&StoreResult<GraphOverview>>,
+    hub_cap: usize,
+    scheduled_cap: usize,
+) -> (Section<EntrypointsBody>, Option<String>) {
+    if let Some(Err(e)) = pool {
+        return (Section::store_err(e), None);
+    }
+
+    let mut hubs: Vec<HubEntry> = pool
+        .and_then(|result| result.as_ref().ok())
+        .map(|pool| {
+            pool.nodes
+                .iter()
+                .map(|node| HubEntry {
+                    id: node.node.id.as_str().to_string(),
+                    kind: node.node.kind.label().to_string(),
+                    name: node.node.name.clone(),
+                    degree: node.degree,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    hubs.sort_by(|a, b| b.degree.cmp(&a.degree).then_with(|| a.id.cmp(&b.id)));
+    hubs.truncate(hub_cap);
+    let (scheduled, sidecar_mtime) = load_scheduled(entry, scheduled_cap);
+    (
+        Section::ok("graph", EntrypointsBody { hubs, scheduled }),
+        sidecar_mtime,
+    )
+}
+
+fn build_hotspots(
+    fetched: StoreResult<Vec<HotspotNode>>,
+    item_cap: usize,
+) -> Section<HotspotsBody> {
+    match fetched {
+        Err(e) => Section::store_err(&e),
+        Ok(mut nodes) => {
+            nodes.sort_by(|a, b| {
+                (b.cyclomatic + b.cognitive)
+                    .cmp(&(a.cyclomatic + a.cognitive))
+                    .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+            });
+            let truncated = nodes.len() > item_cap;
+            nodes.truncate(item_cap);
+            Section::ok(
+                "graph",
+                HotspotsBody {
+                    truncated,
+                    next: truncated.then(|| "complexity_hotspots()".to_string()),
+                    items: nodes
+                        .into_iter()
+                        .map(|node| HotspotEntry {
+                            id: node.id.as_str().to_string(),
+                            name: node.name,
+                            file: node.file,
+                            cyclomatic: node.cyclomatic,
+                            cognitive: node.cognitive,
+                        })
+                        .collect(),
+                },
+            )
+        }
+    }
+}
+
+fn build_route_section(
+    fetched: Option<StoreResult<Vec<RouteInfo>>>,
+    route_total: usize,
+    item_cap: usize,
+) -> Section<RouteGroupsBody> {
+    let Some(fetched) = fetched else {
+        debug_assert_eq!(route_total, 0, "routes must be fetched when any exist");
+        return Section::ok(
+            "graph",
+            RouteGroupsBody {
+                total_routes: 0,
+                total_groups: 0,
+                truncated: false,
+                next: None,
+                items: vec![],
+            },
+        );
     };
+
+    match fetched {
+        Err(e) => Section::store_err(&e),
+        Ok(routes) => Section::ok("graph", build_route_groups(routes, route_total, item_cap)),
+    }
+}
+
+pub(crate) async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, McpError> {
+    let selected = validate_sections(&ctx.sections)?;
     let want = |name: &str| selected.iter().any(|s| s == name);
     let entry = ctx.entry;
 
@@ -647,62 +907,70 @@ pub(crate) async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, Mcp
         .map(|k| k.count as usize)
         .unwrap_or(0);
 
-    let mut warnings: Vec<String> = Vec::new();
-    if ctx.registry_stale {
-        warnings.push(format!(
-            "repo has commits newer than the index (git HEAD changed since {}) — re-run: cih-engine analyze {}",
-            entry.indexed_at, entry.path
-        ));
-    }
-    if entry.stats.nodes == 0 {
-        warnings.push(
-            "registry stats for this repo are zero (discover has not run or stats were never recorded) — counts in this response come from the live graph"
-                .into(),
-        );
-    } else {
-        let a = summary.total_nodes as f64;
-        let b = entry.stats.nodes as f64;
-        if (a - b).abs() / a.max(b).max(1.0) > 0.10 {
-            warnings.push(format!(
-                "graph store size ({} nodes) diverges from registry stats ({} nodes) — the loaded graph may not match the latest artifacts; reload: cih-engine load {}",
-                summary.total_nodes, entry.stats.nodes, entry.path
-            ));
-        }
-    }
-
     let artifacts_version = Path::new(&entry.artifacts_dir)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned());
-    if let Some(w) = &ctx.wiki {
-        if w.source == "wiki-bundle" {
-            if let (Some(gv), Some(av)) = (&w.graph_version, &artifacts_version) {
-                if !gv.is_empty() && gv != av {
-                    warnings.push(format!(
-                        "wiki bundle describes an older index (graph_version {gv} ≠ current {av}) — prefer graph-sourced data; regenerate: cih-engine wiki {}",
-                        entry.path
-                    ));
-                }
-            }
-        }
-    }
+    let mut warnings = build_warnings(&ctx, &summary, artifacts_version.as_deref());
 
-    // One graph_overview call feeds both module anchors and entrypoint hubs.
-    let need_pool = want("modules") || want("entrypoints");
+    let want_stats = want(SECTION_STATS);
+    let want_modules = want(SECTION_MODULES);
+    let want_route_groups = want(SECTION_ROUTE_GROUPS);
+    let want_entrypoints = want(SECTION_ENTRYPOINTS);
+    let want_wiki_pages = want(SECTION_WIKI_PAGES);
+    let want_hotspots = want(SECTION_HOTSPOTS);
+    let need_pool = want_modules || want_entrypoints;
     let symbol_kinds: Vec<String> = ["Class", "Interface", "Function", "Method"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let pool = if need_pool {
-        Some(
-            ctx.store
-                .graph_overview(OVERVIEW_NODE_POOL, 1, Some(&symbol_kinds))
-                .await,
-        )
-    } else {
-        None
-    };
 
-    let stats = want("stats").then(|| {
+    // These reads are independent. The backend's query semaphore remains the
+    // concurrency bound; symbol-community attribution runs later because it
+    // depends on the overview pool.
+    let (pool, fetched_communities, fetched_routes, fetched_hotspots) = tokio::join!(
+        async {
+            if need_pool {
+                Some(
+                    ctx.store
+                        .graph_overview(OVERVIEW_NODE_POOL, 1, Some(&symbol_kinds))
+                        .await,
+                )
+            } else {
+                None
+            }
+        },
+        async {
+            if want_modules {
+                Some(ctx.store.communities().await)
+            } else {
+                None
+            }
+        },
+        async {
+            if want_route_groups && route_total > 0 {
+                // The 1..1000 clamp is tool-level (`route_map` tool); the port
+                // takes a bare usize, so this enumerates the live Route count.
+                let fetch = route_total.clamp(1, MAX_ROUTE_FETCH);
+                Some(ctx.store.route_map(None, fetch).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if want_hotspots {
+                let item_cap = cap(ctx.limit, DEFAULT_HOTSPOTS);
+                Some(
+                    ctx.store
+                        .complexity_hotspots(None, None, None, item_cap + 1)
+                        .await,
+                )
+            } else {
+                None
+            }
+        }
+    );
+
+    let stats = want_stats.then(|| {
         Section::ok(
             "graph",
             StatsBody {
@@ -713,198 +981,59 @@ pub(crate) async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, Mcp
         )
     });
 
-    let modules = if want("modules") {
-        Some(match ctx.store.communities().await {
-            Err(e) => Section::store_err(&e),
-            Ok(mut communities) if !communities.is_empty() => {
-                communities.sort_by(|a, b| {
-                    b.symbol_count
-                        .cmp(&a.symbol_count)
-                        .then_with(|| a.id.cmp(&b.id))
-                });
-                let total = communities.len();
-                let item_cap = cap(ctx.limit, DEFAULT_MODULES);
-                communities.truncate(item_cap);
-                // Anchor symbols: attribute the top-degree pool to communities.
-                let mut anchors: HashMap<String, Vec<(u64, String)>> = HashMap::new();
-                if let Some(Ok(pool)) = &pool {
-                    let degrees: HashMap<&str, u64> = pool
-                        .nodes
-                        .iter()
-                        .map(|n| (n.node.id.as_str(), n.degree))
-                        .collect();
-                    let ids: Vec<cih_core::NodeId> =
-                        pool.nodes.iter().map(|n| n.node.id.clone()).collect();
-                    match ctx.store.symbol_communities(&ids).await {
-                        Ok(pairs) => {
-                            for (id, community) in pairs {
-                                let degree = degrees.get(id.as_str()).copied().unwrap_or(0);
-                                anchors
-                                    .entry(community.id)
-                                    .or_default()
-                                    .push((degree, id.as_str().to_string()));
-                            }
-                        }
-                        Err(e) => warnings.push(format!(
-                            "anchor-symbol attribution unavailable (symbol_communities failed: {e}) — module rows carry no anchors"
-                        )),
-                    }
-                }
-                let items = communities
-                    .into_iter()
-                    .map(|c| {
-                        let anchor_symbols = anchors
-                            .remove(&c.id)
-                            .map(|mut list| {
-                                list.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-                                list.into_iter()
-                                    .take(ANCHORS_PER_MODULE)
-                                    .map(|(_, id)| id)
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        ModuleEntry {
-                            id: c.id,
-                            name: c.name,
-                            symbol_count: c.symbol_count,
-                            cohesion: c.cohesion,
-                            anchor_symbols,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let truncated = total > items.len();
-                Section::ok(
-                    "graph",
-                    ModulesBody {
-                        total,
-                        truncated,
-                        next: truncated.then(|| "communities()".to_string()),
-                        items,
-                    },
-                )
-            }
-            Ok(_) if entry.community_artifacts_dir.is_none() => Section::off(
-                "discover has not run for this index (no module clusters in the graph)",
-                Some(format!("cih-engine discover {}", entry.path)),
-            ),
-            Ok(_) => Section::off(
-                "graph contains no Community nodes although discover artifacts exist — the loaded graph may predate discover",
-                Some(format!("cih-engine load {}", entry.path)),
-            ),
-        })
+    let modules = if want_modules {
+        let fetched = fetched_communities
+            .expect("communities are fetched whenever the modules section is selected");
+        Some(
+            build_modules(
+                ctx.store,
+                entry,
+                fetched,
+                pool.as_ref(),
+                cap(ctx.limit, DEFAULT_MODULES),
+                &mut warnings,
+            )
+            .await,
+        )
     } else {
         None
     };
 
-    let route_groups = if want("route_groups") {
-        if route_total == 0 {
-            Some(Section::ok(
-                "graph",
-                RouteGroupsBody {
-                    total_routes: 0,
-                    total_groups: 0,
-                    truncated: false,
-                    next: None,
-                    items: vec![],
-                },
-            ))
-        } else {
-            // The 1..1000 clamp is tool-level (`route_map` tool); the PORT takes a
-            // bare usize, so sizing from the live Route count enumerates fully.
-            let fetch = route_total.clamp(1, MAX_ROUTE_FETCH);
-            Some(match ctx.store.route_map(None, fetch).await {
-                Err(e) => Section::store_err(&e),
-                Ok(routes) => Section::ok(
-                    "graph",
-                    build_route_groups(routes, route_total, cap(ctx.limit, DEFAULT_ROUTE_GROUPS)),
-                ),
-            })
-        }
+    let route_groups = if want_route_groups {
+        Some(build_route_section(
+            fetched_routes,
+            route_total,
+            cap(ctx.limit, DEFAULT_ROUTE_GROUPS),
+        ))
     } else {
         None
     };
 
-    let mut sidecar_mtime = None;
-    let entrypoints = if want("entrypoints") {
-        Some(match &pool {
-            Some(Err(e)) => Section::store_err(e),
-            _ => {
-                let hub_cap = cap(ctx.limit, DEFAULT_HUBS);
-                let mut hubs: Vec<HubEntry> = pool
-                    .as_ref()
-                    .and_then(|p| p.as_ref().ok())
-                    .map(|p| {
-                        p.nodes
-                            .iter()
-                            .map(|n| HubEntry {
-                                id: n.node.id.as_str().to_string(),
-                                kind: n.node.kind.label().to_string(),
-                                name: n.node.name.clone(),
-                                degree: n.degree,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                hubs.sort_by(|a, b| b.degree.cmp(&a.degree).then_with(|| a.id.cmp(&b.id)));
-                hubs.truncate(hub_cap);
-                let (scheduled, mtime) = load_scheduled(entry, cap(ctx.limit, DEFAULT_SCHEDULED));
-                sidecar_mtime = mtime;
-                Section::ok("graph", EntrypointsBody { hubs, scheduled })
-            }
-        })
+    let (entrypoints, sidecar_mtime) = if want_entrypoints {
+        let (section, mtime) = build_entrypoints(
+            entry,
+            pool.as_ref(),
+            cap(ctx.limit, DEFAULT_HUBS),
+            cap(ctx.limit, DEFAULT_SCHEDULED),
+        );
+        (Some(section), mtime)
     } else {
-        None
+        (None, None)
     };
 
-    let wiki_pages = if want("wiki_pages") {
+    let wiki_pages = if want_wiki_pages {
         Some(match &ctx.wiki {
             Some(listing) => build_wiki_pages(listing, cap(ctx.limit, DEFAULT_WIKI_PAGES)),
-            None => Section::off(
-                "no generated wiki for this repo",
-                Some(format!("cih-engine wiki {}", entry.path)),
-            ),
+            None => Section::off("no generated wiki for this repo", Some(remedy::wiki(entry))),
         })
     } else {
         None
     };
 
-    let hotspots = if want("hotspots") {
-        let item_cap = cap(ctx.limit, DEFAULT_HOTSPOTS);
-        Some(
-            match ctx
-                .store
-                .complexity_hotspots(None, None, None, item_cap + 1)
-                .await
-            {
-                Err(e) => Section::store_err(&e),
-                Ok(mut nodes) => {
-                    nodes.sort_by(|a, b| {
-                        (b.cyclomatic + b.cognitive)
-                            .cmp(&(a.cyclomatic + a.cognitive))
-                            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-                    });
-                    let truncated = nodes.len() > item_cap;
-                    nodes.truncate(item_cap);
-                    Section::ok(
-                        "graph",
-                        HotspotsBody {
-                            truncated,
-                            next: truncated.then(|| "complexity_hotspots()".to_string()),
-                            items: nodes
-                                .into_iter()
-                                .map(|n| HotspotEntry {
-                                    id: n.id.as_str().to_string(),
-                                    name: n.name,
-                                    file: n.file,
-                                    cyclomatic: n.cyclomatic,
-                                    cognitive: n.cognitive,
-                                })
-                                .collect(),
-                        },
-                    )
-                }
-            },
-        )
+    let hotspots = if want_hotspots {
+        let fetched = fetched_hotspots
+            .expect("hotspots are fetched whenever the hotspots section is selected");
+        Some(build_hotspots(fetched, cap(ctx.limit, DEFAULT_HOTSPOTS)))
     } else {
         None
     };
@@ -1271,6 +1400,52 @@ mod tests {
     async fn compose_json(ctx: ComposeCtx<'_>) -> serde_json::Value {
         let resp = compose(ctx).await.expect("compose should succeed");
         serde_json::to_value(&resp).expect("serializable")
+    }
+
+    #[test]
+    fn section_wiring_is_consistent() {
+        for &section in DEFAULT_SECTIONS {
+            assert!(
+                VALID_SECTIONS.contains(&section),
+                "default section '{section}' must be valid"
+            );
+        }
+        for &section in DROP_ORDER {
+            assert!(
+                VALID_SECTIONS.contains(&section),
+                "droppable section '{section}' must be valid"
+            );
+        }
+        assert!(VALID_SECTIONS.contains(&SECTION_STATS));
+        assert!(
+            !DROP_ORDER.contains(&SECTION_STATS),
+            "stats must never be droppable"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_drop_order_entry_actually_drops() {
+        let store = populated_store();
+        let entry = entry("/nonexistent/demo", Some("/x"), 100);
+        let sections = VALID_SECTIONS
+            .iter()
+            .map(|section| (*section).to_string())
+            .collect();
+        let mut response = compose(ctx_with(&store, &entry, sections, 0))
+            .await
+            .expect("all sections should compose");
+
+        for &section in DROP_ORDER {
+            assert!(
+                response.drop_section(section),
+                "drop order entry '{section}' must map to a populated response field"
+            );
+        }
+        assert!(!response.drop_section(SECTION_STATS));
+        assert!(
+            response.stats.is_some(),
+            "stats must survive manual dropping"
+        );
     }
 
     #[tokio::test]
