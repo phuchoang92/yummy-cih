@@ -54,6 +54,7 @@ fn flow_graph_response_contains_d3_and_mermaid_shapes() {
             file: "src/main/java/com/acme/Service.java".into(),
             depth: 1,
             parent_id: Some(entry.clone()),
+            intercepted_by: Vec::new(),
         },
         via: None,
     }];

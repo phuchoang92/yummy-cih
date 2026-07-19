@@ -59,6 +59,32 @@ pub fn render_mermaid_flow(entry_id: &NodeId, hops: &[FlowHop]) -> String {
         }
     }
 
+    // AOP interception: advice methods are not flow hops (the proxy wraps the
+    // call invisibly), so draw them as dashed side-annotations on the methods
+    // they advise.
+    for hop in hops.iter() {
+        for adv in &hop.node.intercepted_by {
+            let advice_key = mermaid_key(adv.advice.as_str());
+            if declared.insert(advice_key.clone()) {
+                let label = truncate(
+                    &format!("Advice\n{}", short_label(adv.advice.as_str(), "advice")),
+                    60,
+                );
+                out.push_str(&format!(
+                    "    {}[\"{}\"]\n",
+                    advice_key,
+                    escape_mermaid(&label)
+                ));
+            }
+            out.push_str(&format!(
+                "    {} -.->|{}| {}\n",
+                advice_key,
+                escape_mermaid(&adv.advice_kind),
+                mermaid_key(hop.node.id.as_str())
+            ));
+        }
+    }
+
     out
 }
 
@@ -268,6 +294,7 @@ mod tests {
             file: String::new(),
             depth,
             parent_id: parent.map(|p| NodeId::new(p.to_string())),
+            intercepted_by: Vec::new(),
         }
     }
 

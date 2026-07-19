@@ -376,6 +376,39 @@ companion-object/`object` `val`s with literal initializers):
   implementors found in the indexed scope; implementors outside the indexed
   modules are not linked.
 
+## Spring AOP (`cih-resolve/src/lang/java/aop.rs`)
+
+- `@Aspect` classes are resolved in Java post-processing: pointcut expressions
+  on `@Around`/`@Before`/`@After`/`@AfterReturning`/`@AfterThrowing` advice are
+  parsed and matched against the assembled graph, emitting `ADVISES` edges
+  (advice method → advised method) with `advice_kind`/`pointcut` props
+  (`reason` = `aop-<kind>` in the stores).
+- **Supported designators:** `execution` (incl. modifiers, return/param types
+  checked against retained `returnType`/`paramTypes` by base simple name,
+  `+` subtype patterns via `Extends`/`Implements` closure), `within`,
+  `@within`, `@annotation`, `bean`, `&&`/`||`/`!`, named `@Pointcut` refs
+  **within the same aspect class**, and AspectJ parameter bindings
+  (`@annotation(withFlushMode)` → resolved through the advice method's
+  parameter types).
+- **Targets are restricted to methods of Spring-stereotyped bean classes**
+  (`@Component`/`@Service`/…): proxies only intercept beans, and the gate keeps
+  broad pointcuts from flooding the graph (plus a 2 000-match cap per advice).
+  Beans registered only via XML or `@Bean` factory methods are therefore
+  missed targets.
+- **Known gaps:** runtime designators (`args`/`this`/`target`/`@args`) are
+  undecidable — as an `&&` conjunct they are ignored and the edge is marked
+  `approximate` (confidence 0.8), anywhere else the advice is skipped;
+  cross-class named pointcut refs, XML `<aop:config>`, `@DeclareParents`;
+  `@Order(n)` int literals are not retained by the parser (edge prop
+  `aspect_order` only populates from string attrs). `@Transactional`/
+  `@Cacheable`/`@Async` proxy behavior is deliberately not modeled as edges.
+- Annotation-name matching is by **simple name** (retained metadata has no
+  package), so two same-named annotations from different packages could
+  cross-match.
+- `trace_flow` surfaces interception as an `intercepted_by` annotation on the
+  affected hops (both backends) instead of extra path hops; the wiki dev pages
+  render per-method **Intercepted by (AOP)** / **Advises (AOP)** sections.
+
 ## Flow traversal (`trace_flow`, `cih-falkor::flow_downstream`)
 
 - Single-repo `trace_flow` walks **outgoing** `CALLS` / `HANDLES_ROUTE` /

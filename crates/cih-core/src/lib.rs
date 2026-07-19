@@ -262,6 +262,12 @@ pub enum EdgeKind {
     /// Inter-procedural taint flow from an entry-point method to a sink method.
     /// Emitted by `cih-taint` Phase 0. Props: `hops`, `sink_category`, `hop_count`.
     TaintFlow,
+    /// Spring AOP advice method → the method its pointcut matches.
+    /// Emitted by `cih-resolve` Java post-processing. Props: `advice_kind`
+    /// (`around`/`before`/…), `pointcut` (inlined expression), optional
+    /// `aspect_order` (from `@Order`) and `approximate` (an unsupported
+    /// designator was ignored while matching).
+    Advises,
     #[strum(serialize = "REL")]
     Other,
 }

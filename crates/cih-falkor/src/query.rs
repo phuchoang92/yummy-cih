@@ -10,8 +10,8 @@ use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKin
 use cih_graph_store::{
     risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge, FlowHop,
     FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError,
-    GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadObserver, LoadStats,
-    NoopObserver, Path, Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+    GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice, KindCount, LoadObserver,
+    LoadStats, NoopObserver, Path, Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
 };
 
 use crate::neighbor_nodes;
@@ -663,7 +663,9 @@ impl GraphStore for FalkorStore {
                 let sub = self.flow_downstream(&handler.id, d).await?;
                 with_downstream.push((handler, sub));
             }
-            return Ok(assemble_route_flow(entry, with_downstream));
+            let mut hops = assemble_route_flow(entry, with_downstream);
+            self.annotate_interceptions(&mut hops).await?;
+            return Ok(hops);
         }
 
         // Phase 1: BFS to get node order, depth, and parent relationships.
@@ -695,6 +697,7 @@ impl GraphStore for FalkorStore {
                     .get(6)
                     .filter(|s| !s.is_empty())
                     .map(|s| NodeId::new(s.clone())),
+                intercepted_by: Vec::new(),
             })
             .collect();
 
@@ -769,6 +772,7 @@ impl GraphStore for FalkorStore {
             file: String::new(),
             depth: 0,
             parent_id: None,
+            intercepted_by: Vec::new(),
         };
         let mut hops: Vec<FlowHop> = vec![FlowHop {
             node: entry_node,
@@ -788,6 +792,7 @@ impl GraphStore for FalkorStore {
             };
             hops.push(FlowHop { node, via });
         }
+        self.annotate_interceptions(&mut hops).await?;
         Ok(hops)
     }
 
@@ -1012,6 +1017,58 @@ impl GraphStore for FalkorStore {
     }
 }
 
+impl FalkorStore {
+    /// Attach `intercepted_by` to traced hops: one batched query for `ADVISES`
+    /// edges into the hop methods. Advice wraps calls through the Spring proxy
+    /// — it is not a call-graph hop, so it annotates nodes rather than
+    /// extending the path. Idempotent: hops already annotated (route entries
+    /// assembled from recursively traced handlers) are left untouched.
+    pub(crate) async fn annotate_interceptions(&self, hops: &mut [FlowHop]) -> Result<()> {
+        let ids: Vec<&str> = hops
+            .iter()
+            .filter(|h| {
+                h.node.intercepted_by.is_empty()
+                    && matches!(h.node.kind, NodeKind::Method | NodeKind::Function)
+            })
+            .map(|h| h.node.id.as_str())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let list = ids.iter().map(|s| cstr(s)).collect::<Vec<_>>().join(", ");
+        let q = format!(
+            "UNWIND [{list}] AS mid \
+             MATCH (a:Symbol)-[r:ADVISES]->(m:Symbol {{id: mid}}) \
+             RETURN m.id, a.id, r.reason"
+        );
+        let mut by_target: HashMap<String, Vec<InterceptingAdvice>> = HashMap::new();
+        for row in self.rows(&q).await? {
+            if row.len() < 3 {
+                continue;
+            }
+            let kind = row[2].strip_prefix("aop-").unwrap_or(&row[2]).to_string();
+            by_target
+                .entry(row[0].clone())
+                .or_default()
+                .push(InterceptingAdvice {
+                    advice: NodeId::new(row[1].clone()),
+                    advice_kind: kind,
+                });
+        }
+        if by_target.is_empty() {
+            return Ok(());
+        }
+        for hop in hops.iter_mut() {
+            if let Some(advices) = by_target.get(hop.node.id.as_str()) {
+                if hop.node.intercepted_by.is_empty() {
+                    hop.node.intercepted_by = advices.clone();
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Assemble a route-entry flow: route at depth 0, handlers at depth 1 via
 /// HANDLES_ROUTE, downstream shifted one level, deduped by id, capped at 100.
 pub(crate) fn assemble_route_flow(
@@ -1032,6 +1089,7 @@ pub(crate) fn assemble_route_flow(
             file: String::new(),
             depth: 0,
             parent_id: None,
+            intercepted_by: Vec::new(),
         },
         via: None,
     }];

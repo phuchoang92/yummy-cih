@@ -486,6 +486,7 @@ impl FalkorStore {
                 file: r.get(4).cloned().unwrap_or_default(),
                 depth: 1,
                 parent_id: None,
+                intercepted_by: Vec::new(),
             })
             .collect())
     }

@@ -6,6 +6,7 @@ use crate::index::ResolveIndex;
 use crate::lang::{InheritanceModel, LanguageResolver, PostProcessOptions};
 use crate::types::class_of;
 
+mod aop;
 mod cxf;
 pub mod di;
 
@@ -81,6 +82,16 @@ impl LanguageResolver for JavaResolver {
         // Prepend CXF <jaxrs:server> base paths (+ servlet prefix) onto Java Route nodes.
         if let Some(root) = repo_root {
             cxf::stitch_route_prefixes(root, nodes, edges, options.route_base_path.as_deref());
+        }
+        // Spring AOP: pointcut expressions on @Aspect advice → ADVISES edges.
+        let aop = aop::emit_advises_edges(nodes, edges);
+        if aop.aspects > 0 {
+            tracing::info!(
+                aspects = aop.aspects,
+                advice_methods = aop.advice_methods,
+                advises_edges = aop.edges,
+                "Spring AOP pointcuts resolved"
+            );
         }
     }
 }

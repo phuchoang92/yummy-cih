@@ -47,6 +47,7 @@ const COMM_A_ID: &str = "Community:com.acme.a";
 const COMM_B_ID: &str = "Community:com.acme.b";
 const PROCESS_ID: &str = "Process:com.acme.OrderFlow";
 const WEIRD_ID: &str = "Method:com.acme.Weird#w/0";
+const ADVICE_ID: &str = "Method:com.acme.LogAspect#logCalls/1";
 /// Quote + backslash + newline: proves the bulk path's cell escaping
 /// round-trips (CSV COPY loaders are the usual victims).
 const WEIRD_NAME: &str = "wei\"rd\\na\nme";
@@ -59,8 +60,8 @@ const WEIRD_FILE: &str = "com/acme/Weird.java";
 
 /// Distinct nodes in the fixture (edges list below has one deliberate
 /// duplicate that adapters must collapse).
-const FIXTURE_NODES: u64 = 11;
-const FIXTURE_EDGES: u64 = 11;
+const FIXTURE_NODES: u64 = 12;
+const FIXTURE_EDGES: u64 = 12;
 
 fn node(id: &str, kind: NodeKind, name: &str, file: &str) -> Node {
     Node {
@@ -114,9 +115,14 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
     comm_b.props = Some(serde_json::json!({"symbolCount": 1, "cohesion": 0.25}));
     let process = node(PROCESS_ID, NodeKind::Process, "OrderFlow", "");
     let weird = node(WEIRD_ID, NodeKind::Method, WEIRD_NAME, WEIRD_FILE);
+    let advice = node(ADVICE_ID, NodeKind::Method, "logCalls", CALLER_FILE);
 
     let mut similar = edge(CALLER_ID, CALLEE_ID, EdgeKind::SimilarTo);
     similar.confidence = 0.9;
+    // AOP interception: reason carries the advice kind (`aop-<kind>`), the
+    // shape trace_flow's `intercepted_by` annotation reads back.
+    let mut advises = edge(ADVICE_ID, CALLER_ID, EdgeKind::Advises);
+    advises.reason = "aop-around".to_string();
 
     let edges = vec![
         edge(CALLER_ID, CALLEE_ID, EdgeKind::Calls),
@@ -133,6 +139,7 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
         edge(CALLEE_ID, COMM_B_ID, EdgeKind::MemberOf),
         edge(CALLER_ID, PROCESS_ID, EdgeKind::StepInProcess),
         similar,
+        advises,
     ];
     (
         vec![
@@ -147,6 +154,7 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
             comm_b,
             process,
             weird,
+            advice,
         ],
         edges,
     )
@@ -292,7 +300,7 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         .find(|k| k.kind == "Method")
         .map(|k| k.count)
         .unwrap_or(0);
-    check!(methods == 6, "summary Method count {methods} != 6");
+    check!(methods == 7, "summary Method count {methods} != 7");
 
     // -- get_node (incl. escaping round-trip) -------------------------------
     let n = store.get_node(&callee_id).await?.context("callee exists")?;
@@ -529,7 +537,7 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         .graph_overview(50, 100, Some(&["Method".to_string()]))
         .await?;
     check!(
-        mv.nodes.len() == 6 && mv.total_nodes == FIXTURE_NODES,
+        mv.nodes.len() == 7 && mv.total_nodes == FIXTURE_NODES,
         "kind-filtered overview: {} nodes, total {}",
         mv.nodes.len(),
         mv.total_nodes
@@ -597,6 +605,19 @@ async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result
             && caller.node.parent_id.as_ref().map(NodeId::as_str) == Some(HANDLER_ID)
             && caller.via.as_ref().map(|v| v.kind.as_str()) == Some("CALLS"),
         "caller at depth 2 from handler via CALLS: {caller:?}"
+    );
+    // AOP: the ADVISES edge into `caller` must surface as an intercepted_by
+    // annotation (advice id + kind), not as an extra path hop.
+    check!(
+        caller.node.intercepted_by.len() == 1
+            && caller.node.intercepted_by[0].advice.as_str() == ADVICE_ID
+            && caller.node.intercepted_by[0].advice_kind == "around",
+        "caller intercepted_by around-advice: {:?}",
+        caller.node.intercepted_by
+    );
+    check!(
+        !hops.iter().any(|h| h.node.id.as_str() == ADVICE_ID),
+        "the advice method is not a flow hop"
     );
     let callee = find(CALLEE_ID)?;
     check!(

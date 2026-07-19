@@ -60,6 +60,11 @@ pub struct WikiGraph {
     /// Used in `build_call_chain` to continue traversal through interface boundaries.
     pub impl_methods: BTreeMap<String, Vec<String>>,
 
+    /// method_id → [advice_method_ids] intercepting it (reverse of ADVISES edges)
+    pub advised_by: BTreeMap<String, Vec<String>>,
+    /// advice_method_id → [advised_method_ids] (forward ADVISES edges)
+    pub advises_out: BTreeMap<String, Vec<String>>,
+
     /// method_id → [dbquery_id]
     pub executes_query: BTreeMap<String, Vec<String>>,
     /// dbquery_id → [dbtable_id]
@@ -347,6 +352,8 @@ struct EdgeIndex {
     query_reads_table: BTreeMap<String, Vec<String>>,
     query_writes_table: BTreeMap<String, Vec<String>>,
     impl_methods: BTreeMap<String, Vec<String>>,
+    advised_by: BTreeMap<String, Vec<String>>,
+    advises_out: BTreeMap<String, Vec<String>>,
 }
 
 fn index_edges(edges: &[Edge], nodes_by_id: &BTreeMap<String, Node>) -> EdgeIndex {
@@ -363,6 +370,8 @@ fn index_edges(edges: &[Edge], nodes_by_id: &BTreeMap<String, Node>) -> EdgeInde
     let mut query_reads_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut query_writes_table: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut impl_methods: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut advised_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut advises_out: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for e in edges {
         let src = e.src.as_str().to_string();
@@ -413,6 +422,14 @@ fn index_edges(edges: &[Edge], nodes_by_id: &BTreeMap<String, Node>) -> EdgeInde
             EdgeKind::WritesTable => {
                 query_writes_table.entry(src).or_default().push(dst);
             }
+            // src = advice method, dst = advised method.
+            EdgeKind::Advises => {
+                advises_out
+                    .entry(src.clone())
+                    .or_default()
+                    .push(dst.clone());
+                advised_by.entry(dst).or_default().push(src);
+            }
             _ => {}
         }
     }
@@ -440,6 +457,8 @@ fn index_edges(edges: &[Edge], nodes_by_id: &BTreeMap<String, Node>) -> EdgeInde
         query_reads_table,
         query_writes_table,
         impl_methods,
+        advised_by,
+        advises_out,
     }
 }
 
@@ -765,6 +784,8 @@ impl WikiGraph {
             query_reads_table,
             query_writes_table,
             impl_methods,
+            advised_by,
+            advises_out,
         } = idx;
 
         WikiGraph {
@@ -790,6 +811,8 @@ impl WikiGraph {
             inter_community_calls: stats.inter_community_calls,
             methods_by_class,
             impl_methods,
+            advised_by,
+            advises_out,
             executes_query,
             query_reads_table,
             query_writes_table,
@@ -908,6 +931,8 @@ impl WikiGraph {
             query_reads_table,
             query_writes_table,
             impl_methods,
+            advised_by,
+            advises_out,
         } = idx;
 
         WikiGraph {
@@ -933,6 +958,8 @@ impl WikiGraph {
             inter_community_calls: stats.inter_community_calls,
             methods_by_class,
             impl_methods,
+            advised_by,
+            advises_out,
             executes_query,
             query_reads_table,
             query_writes_table,

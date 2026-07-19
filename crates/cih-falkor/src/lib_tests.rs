@@ -103,6 +103,7 @@ fn fnode(id: &str, name: &str, depth: u32, parent: Option<&str>) -> FlowNode {
         file: "f.ts".to_string(),
         depth,
         parent_id: parent.map(|p| NodeId::new(p.to_string())),
+        intercepted_by: Vec::new(),
     }
 }
 

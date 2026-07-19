@@ -125,6 +125,7 @@ pub(super) fn edge_from_label(label: &str) -> EdgeKind {
         "EXTERNAL_CALL" => EdgeKind::ExternalCall,
         "TESTS" => EdgeKind::Tests,
         "SIMILAR_TO" => EdgeKind::SimilarTo,
+        "ADVISES" => EdgeKind::Advises,
         _ => EdgeKind::Other,
     }
 }

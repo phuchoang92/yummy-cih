@@ -131,6 +131,20 @@ pub struct FlowNode {
     pub depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<NodeId>,
+    /// Spring AOP advice methods whose pointcut matches this hop (`ADVISES`
+    /// edges into it). Advice is not a call-graph hop — the proxy wraps the
+    /// call invisibly — so it annotates the node instead of extending the path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intercepted_by: Vec<InterceptingAdvice>,
+}
+
+/// One aspect advice intercepting a traced method.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InterceptingAdvice {
+    /// The advice method node (e.g. `Method:com.acme.LoggingAspect#log/1`).
+    pub advice: NodeId,
+    /// `around` / `before` / `after` / `after_returning` / `after_throwing`.
+    pub advice_kind: String,
 }
 
 /// One step in a trace_flow result: the symbol reached, and the edge used to reach it.

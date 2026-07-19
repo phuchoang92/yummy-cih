@@ -4,7 +4,7 @@ use crate::mermaid;
 use crate::pages::WikiPageMeta;
 use crate::{CommunityLlmFull, CommunityLlmSummary};
 use cih_core::{Node, NodeKind, RepoMap};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Strip a trailing `-N` numeric suffix from a slug, returning (base, suffix).
 /// E.g. `"admin-customer-service-2"` → `("admin-customer-service", Some(2))`.
@@ -733,6 +733,48 @@ pub fn render_dev_class(
                 md.push_str("**Calls**\n\n");
                 for call in &call_nodes {
                     md.push_str(&format!("- `{}`\n", call));
+                }
+                md.push('\n');
+            }
+
+            // Spring AOP: advice intercepting this method (invisible in the
+            // call graph — the proxy wraps the call), and, on advice methods,
+            // a summary of everything their pointcut reaches.
+            if let Some(advices) = graph.advised_by.get(method.id.as_str()) {
+                md.push_str("**Intercepted by (AOP)**\n\n");
+                for aid in advices {
+                    let display = graph
+                        .nodes_by_id
+                        .get(aid)
+                        .map(callee_display)
+                        .unwrap_or_else(|| aid.clone());
+                    md.push_str(&format!("- `{}`\n", display));
+                }
+                md.push('\n');
+            }
+            if let Some(targets) = graph.advises_out.get(method.id.as_str()) {
+                let classes: BTreeSet<&str> = targets
+                    .iter()
+                    .map(|t| {
+                        let qn = t.strip_prefix("Method:").unwrap_or(t);
+                        qn.split('#').next().unwrap_or(qn)
+                    })
+                    .collect();
+                md.push_str(&format!(
+                    "**Advises (AOP)** — {} method(s) across {} class(es)\n\n",
+                    targets.len(),
+                    classes.len()
+                ));
+                for t in targets.iter().take(10) {
+                    let display = graph
+                        .nodes_by_id
+                        .get(t)
+                        .map(callee_display)
+                        .unwrap_or_else(|| t.clone());
+                    md.push_str(&format!("- `{}`\n", display));
+                }
+                if targets.len() > 10 {
+                    md.push_str(&format!("- … and {} more\n", targets.len() - 10));
                 }
                 md.push('\n');
             }

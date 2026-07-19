@@ -13,8 +13,8 @@ use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKin
 use cih_graph_store::{
     risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge, FlowHop,
     FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError,
-    GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadObserver, LoadStats,
-    NoopObserver, Path, Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+    GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice, KindCount, LoadObserver,
+    LoadStats, NoopObserver, Path, Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
 };
 use lbug::{Connection, Value};
 
@@ -60,6 +60,7 @@ fn flow_node_from_row(r: &[Value], depth: u32) -> FlowNode {
         file: r.get(4).map(cell_str).unwrap_or_default(),
         depth,
         parent_id: None,
+        intercepted_by: Vec::new(),
     }
 }
 
@@ -81,6 +82,7 @@ fn assemble_route_flow(entry: &NodeId, handlers: Vec<(FlowNode, Vec<FlowHop>)>) 
             file: String::new(),
             depth: 0,
             parent_id: None,
+            intercepted_by: Vec::new(),
         },
         via: None,
     }];
@@ -753,7 +755,9 @@ impl GraphStore for LadybugStore {
                 let sub = self.flow_downstream(&handler.id, d).await?;
                 with_downstream.push((handler, sub));
             }
-            return Ok(assemble_route_flow(entry, with_downstream));
+            let mut hops = assemble_route_flow(entry, with_downstream);
+            self.annotate_interceptions(&mut hops).await?;
+            return Ok(hops);
         }
 
         // One shortest path per reachable node; depth, parent, and the
@@ -853,6 +857,7 @@ impl GraphStore for LadybugStore {
             file: String::new(),
             depth: 0,
             parent_id: None,
+            intercepted_by: Vec::new(),
         };
         let mut hops: Vec<FlowHop> = vec![FlowHop {
             node: entry_node,
@@ -871,6 +876,7 @@ impl GraphStore for LadybugStore {
             });
             hops.push(FlowHop { node: r.node, via });
         }
+        self.annotate_interceptions(&mut hops).await?;
         Ok(hops)
     }
 
@@ -1069,6 +1075,55 @@ impl GraphStore for LadybugStore {
                 weight: cell_u64(&r[2]),
             })
             .collect())
+    }
+}
+
+impl LadybugStore {
+    /// Attach `intercepted_by` to traced hops via one batched `ADVISES` query
+    /// (dialect port of the reference in `cih-falkor/src/query.rs` — advice
+    /// annotates nodes instead of extending the path). Idempotent on hops
+    /// already annotated by a recursive handler trace.
+    async fn annotate_interceptions(&self, hops: &mut [FlowHop]) -> Result<()> {
+        let ids: Vec<&str> = hops
+            .iter()
+            .filter(|h| {
+                h.node.intercepted_by.is_empty()
+                    && matches!(h.node.kind, NodeKind::Method | NodeKind::Function)
+            })
+            .map(|h| h.node.id.as_str())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let list = ids.iter().map(|s| cstr(s)).collect::<Vec<_>>().join(", ");
+        let q = format!(
+            "UNWIND [{list}] AS mid \
+             MATCH (a:Symbol)-[r:ADVISES]->(m:Symbol) WHERE m.id = mid \
+             RETURN m.id, a.id, r.reason"
+        );
+        let out = self
+            .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
+            .await?;
+        let mut by_target: HashMap<String, Vec<InterceptingAdvice>> = HashMap::new();
+        for row in out.iter().filter(|r| r.len() >= 3) {
+            let reason = cell_str(&row[2]);
+            let kind = reason.strip_prefix("aop-").unwrap_or(&reason).to_string();
+            by_target
+                .entry(cell_str(&row[0]))
+                .or_default()
+                .push(InterceptingAdvice {
+                    advice: NodeId::new(cell_str(&row[1])),
+                    advice_kind: kind,
+                });
+        }
+        for hop in hops.iter_mut() {
+            if let Some(advices) = by_target.get(hop.node.id.as_str()) {
+                if hop.node.intercepted_by.is_empty() {
+                    hop.node.intercepted_by = advices.clone();
+                }
+            }
+        }
+        Ok(())
     }
 }
 
