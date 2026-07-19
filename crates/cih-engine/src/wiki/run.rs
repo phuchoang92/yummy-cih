@@ -536,17 +536,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             let (route_flows, updates) = enrich_route_flows(
                 &wiki_graph,
                 route_flow_scope.as_ref(),
-                adapter
+                llm_params
                     .as_ref()
-                    .expect("LLM adapter set when run_llm is active")
-                    .as_ref(),
-                api_key.as_deref(),
-                llm_model,
-                llm_max_tokens,
-                llm_timeout_secs,
-                llm_retries,
-                wiki_language,
-                llm_dry_run,
+                    .expect("LLM params set when run_llm is active"),
                 &prev_flow_cache,
                 pool.as_ref()
                     .expect("thread pool set when run_llm is active"),
@@ -559,17 +551,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let (route_flows, updates) = enrich_route_flows(
             &wiki_graph,
             route_flow_scope.as_ref(),
-            adapter
+            llm_params
                 .as_ref()
-                .expect("LLM adapter set when run_llm is active")
-                .as_ref(),
-            api_key.as_deref(),
-            llm_model,
-            llm_max_tokens,
-            llm_timeout_secs,
-            llm_retries,
-            wiki_language,
-            llm_dry_run,
+                .expect("LLM params set when run_llm is active"),
             &prev_flow_cache,
             pool.as_ref()
                 .expect("thread pool set when run_llm is active"),

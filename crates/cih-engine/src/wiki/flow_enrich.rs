@@ -5,8 +5,8 @@ use cih_core::Node;
 use cih_wiki::{FlowCacheEntry, FlowLlmSummary, WikiGraph};
 use rayon::prelude::*;
 
-use super::config::llm_cache_key;
-use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
+use super::config::{llm_cache_key, LlmRunParams};
+use crate::llm::{backoff_ms, LlmRequest};
 use crate::ui::PhaseProgress;
 
 fn build_flow_evidence(process_node: &Node, graph: &WikiGraph) -> String {
@@ -161,24 +161,30 @@ fn chain_steps_text(chain: &[String], graph: &WikiGraph) -> String {
         .join("\n")
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)] // LLM-enrichment context bundle; refactor tracked with wiki rework
+/// (handler_id → flow summary, cache updates as `(handler_id, evidence_hash, summary)`).
+type RouteFlowEnrichment = (
+    HashMap<String, FlowLlmSummary>,
+    Vec<(String, String, FlowLlmSummary)>,
+);
+
 pub(super) fn enrich_route_flows(
     graph: &WikiGraph,
     scope: Option<&std::collections::HashSet<String>>,
-    adapter: &dyn LlmAdapter,
-    api_key: Option<&str>,
-    model: &str,
-    max_tokens: u32,
-    timeout_secs: u64,
-    retries: u32,
-    language: &str,
-    dry_run: bool,
+    llm: &LlmRunParams<'_>,
     flow_cache: &BTreeMap<String, FlowCacheEntry>,
     pool: &rayon::ThreadPool,
-) -> (
-    HashMap<String, FlowLlmSummary>,
-    Vec<(String, String, FlowLlmSummary)>,
-) {
+) -> RouteFlowEnrichment {
+    let LlmRunParams {
+        adapter,
+        api_key,
+        model,
+        max_tokens,
+        timeout_secs,
+        retries,
+        dry_run,
+        language,
+        ..
+    } = *llm;
     let handlers: Vec<(String, String)> = graph
         .routes_by_controller
         .values()
@@ -305,20 +311,22 @@ pub(super) fn enrich_route_flows(
     (result, cache_updates)
 }
 
-#[allow(clippy::too_many_arguments)] // LLM-enrichment context bundle; refactor tracked with wiki rework
 pub(super) fn enrich_one_flow(
     process_node: &Node,
     graph: &WikiGraph,
-    adapter: &dyn LlmAdapter,
-    api_key: Option<&str>,
-    model: &str,
-    max_tokens: u32,
-    timeout_secs: u64,
-    retries: u32,
-    language: &str,
-    debug_evidence: bool,
-    dry_run: bool,
+    llm: &LlmRunParams<'_>,
 ) -> Result<FlowLlmSummary> {
+    let LlmRunParams {
+        adapter,
+        api_key,
+        model,
+        max_tokens,
+        timeout_secs,
+        retries,
+        dry_run,
+        language,
+        debug_evidence,
+    } = *llm;
     let evidence = build_flow_evidence(process_node, graph);
     let step_count = graph
         .process_steps

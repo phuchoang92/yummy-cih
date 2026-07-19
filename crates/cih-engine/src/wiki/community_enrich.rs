@@ -146,19 +146,7 @@ pub(super) fn run_process_flow_enrichment(
     let mut map = HashMap::new();
     for proc in &graph.process_nodes {
         ui_flow.tick(proc.name.as_str());
-        match enrich_one_flow(
-            proc,
-            graph,
-            llm.adapter,
-            llm.api_key,
-            llm.model,
-            llm.max_tokens,
-            llm.timeout_secs,
-            llm.retries,
-            llm.language,
-            llm.debug_evidence,
-            llm.dry_run,
-        ) {
+        match enrich_one_flow(proc, graph, llm) {
             Ok(summary) => {
                 map.insert(proc.id.as_str().to_string(), summary);
                 ui_flow.inc_ok();
