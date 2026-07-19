@@ -27,28 +27,39 @@ Returns: `[{ name, path, indexed_at, stats: { nodes, edges, files, routes, commu
 Pick the repo whose `name` or `path` matches the user's question. If multiple repos are indexed,
 confirm which one is in scope before proceeding.
 
-### Step 2 — Read the repo context resource
+### Step 2 — Get the one-call orientation
 
 ```
-cih://repo/{name}/context
+architecture_overview(repo="<name>")
 ```
 
-Returns the `RegistryEntry` JSON: node/edge counts, artifact paths, last-indexed git HEAD.
-Use `stats.routes` to gauge if this is an HTTP service. Use `stats.communities` and
-`stats.processes` to know whether community detection has been run.
+One compact, size-capped response with everything the old multi-call orientation
+chained together:
 
-### Step 3 — Browse high-level module clusters
+- `stats` — per-kind node/edge counts (is this an HTTP service? how big?)
+- `modules` — detected module clusters, each with `anchor_symbols`: canonical
+  NodeIds ready to paste into `context(name=...)` / `impact(name=...)`
+- `route_groups` — endpoints bucketed by path prefix, with samples like
+  `Route:POST /api/v1/loans → Method:acme.LoanApi#create` (the left half is
+  `trace_flow`-ready, the right half is `context`-ready)
+- `entrypoints` — schedulers/event listeners (from discover) + high-degree hubs
+- `wiki_pages` — slugs for `get_wiki_page(slug=...)`
+- `provenance` + `warnings` — where each number came from and what is stale
 
-```
-communities({ limit: 10 })
-```
+Read the response like this:
 
-Returns: `[{ id, name, symbol_count, cohesion }]` sorted by size descending.
+- **`available: false` on a section is a pipeline fact, not a codebase fact** —
+  its `reason`/`remedy` say which `cih-engine` step to run. Never report it as
+  "this repo has no modules".
+- Truncated lists carry a copy-pasteable `next` call — use that narrow tool
+  instead of re-calling the overview with a bigger `limit`.
+- Call the overview **once per repo per session**; everything after this step is
+  drill-down.
+- `hotspots` (complexity) is opt-in: `architecture_overview(sections=["hotspots"])`.
+- If the server fronts a group, a `group` block lists members (exact `repo`
+  strings for targeting) and contract freshness.
 
-Each community is a detected module cluster (Louvain). `name` is the common package prefix.
-`cohesion` (0–1) measures how densely connected the cluster is. Start with the 3–5 largest.
-
-### Step 4 — Find symbols by keyword
+### Step 3 — Find symbols by keyword (when the overview didn't name them)
 
 ```
 query({ q: "<keyword>" })
@@ -67,7 +78,9 @@ query({ q: "<keyword>", expand: true })
 
 Returns a `subgraph` of the top-5 hits plus their 1-hop neighbours (nodes + edges).
 
-### Step 5 — Get 360° context for a key symbol
+### Step 4 — Get 360° context for a key symbol
+
+Seed this from a module's `anchor_symbols` or a route sample's handler id:
 
 ```
 context({ name: "Class:com.acme.OrderService" })
@@ -83,21 +96,23 @@ You can pass a short name like `"OrderService"` instead of a full NodeId. If mul
 match you will receive `{ status: "ambiguous", candidates: [...] }` — pick the right one and
 retry with the full id.
 
-### Step 6 — List HTTP entry points (for service APIs)
+### Step 5 — Drill into one route subsystem
 
-```
-route_map({ limit: 50 })
-```
-
-Returns: `[{ path, http_method, decorator, handler_id, handler_name, handler_qualified }]`
-
-Filter by prefix to focus on a subsystem:
+Take a `route_groups` prefix from the overview:
 
 ```
 route_map({ prefix: "/api/orders", limit: 20 })
 ```
 
-### Step 7 — Read process traces (optional, if discover has run)
+Returns: `[{ path, http_method, decorator, handler_id, handler_name, handler_qualified }]`
+
+Then follow one end-to-end with a sample route id from the overview:
+
+```
+trace_flow({ entry_point: "Route:POST /api/orders" })
+```
+
+### Step 6 — Read process traces (optional, if discover has run)
 
 ```
 cih://repo/{name}/processes
@@ -124,8 +139,11 @@ to see which symbols participate.
 
 ## Tips
 
-- Start broad (`communities`, `route_map`) before going deep (`context`, `impact`).
+- `architecture_overview` first, narrow tools after — the overview exists so you
+  don't chain `status` + `communities` + `route_map` + `search_wiki` by hand.
+- Trust the `warnings` block over any single count: registry, graph, and wiki are
+  differently-timestamped sources, and the overview reconciles them for you.
 - `query` with `expand: true` is the fastest way to surface unknown symbol names.
-- If `stats.routes == 0` this is a library, not a service — skip `route_map`.
-- If `stats.communities == 0`, discovery has not run; advise user to run
-  `cih-engine discover <repo>`.
+- If `route_groups.total_routes == 0` this is a library, not a service.
+- A section with `available: false` names its remedy (`cih-engine discover <repo>`,
+  `cih-engine wiki <repo>`) — relay that command to the user verbatim.

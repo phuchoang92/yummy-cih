@@ -403,3 +403,17 @@ pub struct GetWikiPageArgs {
     #[serde(default)]
     pub repo: String,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArchitectureOverviewArgs {
+    /// Sections to include. Empty = default set (`stats`, `modules`,
+    /// `route_groups`, `entrypoints`, `wiki_pages`). `hotspots` is opt-in.
+    #[serde(default)]
+    pub sections: Vec<String>,
+    /// Max items per list section (0 = per-section defaults; clamped to 100).
+    #[serde(default)]
+    pub limit: usize,
+    /// Target repo: a registry name from `list_repos`; empty = the server's primary repo.
+    #[serde(default)]
+    pub repo: String,
+}

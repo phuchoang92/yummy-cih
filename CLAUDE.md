@@ -24,6 +24,9 @@ There are two ways an agent works here — read the section that matches your ta
   function/class/method. Warn on HIGH/CRITICAL risk before proceeding.
 - **Run `detect_changes` before committing** to confirm the change only touches the
   expected symbols. For a branch: `detect_changes(scope="base_ref", base_ref="main")`.
+- **Orient with one call**: `architecture_overview(repo=...)` first in an unfamiliar repo —
+  modules with anchor symbols, route groups, entrypoints, wiki pointers, provenance.
+  A section with `available:false` names its remedy; it is not a fact about the codebase.
 - **Explore by query, not grep**: `search_code(query="concept")` or `query(...)` to find
   relevant symbols; `context(name="Symbol")` for callers/callees/processes;
   `trace_flow(entry_point="Route:POST /path")` to follow a request end-to-end.
@@ -47,6 +50,7 @@ Full: `Kind:fully.qualified.Name` (e.g. `Class:com.acme.OrderService`,
 
 | Task | Tool |
 |------|------|
+| One-call orientation (modules + anchors, route groups, entrypoints, wiki pointers) | `architecture_overview` |
 | Symbol context (callers/callees/processes) | `context` |
 | Blast radius of a change | `impact` |
 | End-to-end request/execution chain | `trace_flow` |

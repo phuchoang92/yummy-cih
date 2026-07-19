@@ -48,6 +48,11 @@ tempfile = "3"
 # `server` (a normal-dep feature) already enables transport-async-rw; only `client`
 # is added here, and only for test builds — production `cargo build` stays lean.
 rmcp = { version = "0.7", features = ["client"] }
+# Embedded LadybugDB for the hermetic architecture_overview end-to-end test
+# (overview.rs) — dev-only, so the release binary keeps ladybug opt-in via the
+# feature below. The workspace already builds cih-ladybug for its own contract
+# test, so this adds link time, not a new native build.
+cih-ladybug = { workspace = true }
 
 [features]
 # Opt-in embedded LadybugDB backend (adds the cih-ladybug adapter to the factory).

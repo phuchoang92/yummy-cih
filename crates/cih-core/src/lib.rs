@@ -30,7 +30,8 @@ pub use ir::{
     UrlPart,
 };
 pub use registry::{
-    git_changed_files, git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats,
+    git_changed_files, git_head, now_rfc3339, unix_secs_to_rfc3339, Registry, RegistryEntry,
+    RegistryStats,
 };
 pub use repo_map::{
     auto_detect_architecture, ArchitectureHint, BuildSystem, JarInfo, ModuleInfo, RepoMap,

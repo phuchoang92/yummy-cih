@@ -685,6 +685,51 @@ pub(crate) async fn search_wiki(
     }))
 }
 
+/// Wiki page listing for `architecture_overview`'s `wiki_pages` pointers:
+/// page metadata plus the provenance clock the overview surfaces (D4 —
+/// `wiki-live` is version-aligned by construction, so only the bundle carries
+/// `graph_version`/`generated_at`).
+pub(crate) struct WikiListing {
+    pub(crate) pages: Vec<PageMeta>,
+    pub(crate) page_count: usize,
+    pub(crate) source: &'static str,
+    pub(crate) graph_version: Option<String>,
+    pub(crate) generated_at: Option<String>,
+}
+
+/// List a repo's wiki pages — live index first, on-disk bundle as fallback,
+/// mirroring the `search_wiki`/`get_wiki_page` resolution order. `Ok(None)`
+/// when the repo has neither (the overview degrades the section explicitly).
+pub(crate) async fn list_pages(
+    state: &WikiSearchState,
+    repo: &str,
+) -> Result<Option<WikiListing>, McpError> {
+    match state.live_index_for(repo).await {
+        Ok(Some(live)) => {
+            return Ok(Some(WikiListing {
+                pages: live.pages.clone(),
+                page_count: live.page_count(),
+                source: "wiki-live",
+                graph_version: None,
+                generated_at: None,
+            }))
+        }
+        Ok(None) => {}
+        Err(e) => return Err(wiki_err_to_mcp(e)),
+    }
+    match state.index_for(repo).await {
+        Ok(index) => Ok(Some(WikiListing {
+            pages: index.pages.clone(),
+            page_count: index.page_count(),
+            source: "wiki-bundle",
+            graph_version: Some(index.graph_version.clone()),
+            generated_at: Some(index.generated_at.clone()),
+        })),
+        Err(WikiError::NotFound(_)) => Ok(None),
+        Err(e) => Err(wiki_err_to_mcp(e)),
+    }
+}
+
 /// MCP tool body for `get_wiki_page` — full page markdown by slug.
 ///
 /// P3.8: renders the page **live** from the resident graph (always fresh at the

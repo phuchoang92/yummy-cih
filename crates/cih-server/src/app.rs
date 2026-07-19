@@ -46,6 +46,7 @@ use crate::search::{QueryArgs, QueryResult, SearchState};
 mod tools_admin;
 mod tools_crossrepo;
 mod tools_files;
+mod tools_overview;
 mod tools_testing;
 mod tools_wiki;
 
@@ -148,6 +149,7 @@ impl CihServer {
                 + Self::crossrepo_router()
                 + Self::testing_router()
                 + Self::wiki_router()
+                + Self::overview_router()
                 + Self::admin_router(),
         }
     }
@@ -704,12 +706,13 @@ impl ServerHandler for CihServer {
                  \n\
                  ## Core workflow\n\
                  1. `list_repos` — see what is indexed\n\
-                 2. `search_code(query=...)` — find symbols by keyword\n\
-                 3. `context(name=...)` — callers, callees, which routes reach a symbol\n\
-                 4. `impact(name=..., direction=\"upstream\")` — blast radius before changing something; add format=\"diagram\" for a visual\n\
-                 5. `trace_flow(name=\"Route:METHOD /path\")` — follow an HTTP request end-to-end; add format=\"mermaid\" for a diagram\n\
-                 6. `route_map()` — all HTTP routes; add format=\"openapi\" for an OpenAPI spec\n\
-                 7. `communities()` — module/service groupings across the codebase\n\
+                 2. `architecture_overview(repo=...)` — one-call orientation: modules with anchor symbols, route groups, entrypoints, wiki pointers. Start here in an unfamiliar repo; it replaces chaining status/communities/route_map/search_wiki\n\
+                 3. `search_code(query=...)` — find symbols by keyword\n\
+                 4. `context(name=...)` — callers, callees, which routes reach a symbol\n\
+                 5. `impact(name=..., direction=\"upstream\")` — blast radius before changing something; add format=\"diagram\" for a visual\n\
+                 6. `trace_flow(name=\"Route:METHOD /path\")` — follow an HTTP request end-to-end; add format=\"mermaid\" for a diagram\n\
+                 7. `route_map()` — all HTTP routes; add format=\"openapi\" for an OpenAPI spec\n\
+                 8. `communities()` — module/service groupings across the codebase\n\
                  \n\
                  ## Indexing\n\
                  `index_repo(repo_path=\"/abs/path\")` → returns job_id → poll with `index_status(job_id=...)`.\n\
@@ -771,10 +774,11 @@ mod tests {
             + CihServer::crossrepo_router()
             + CihServer::testing_router()
             + CihServer::wiki_router()
+            + CihServer::overview_router()
             + CihServer::admin_router();
         assert_eq!(
             router.list_all().len(),
-            29,
+            30,
             "tool count changed after the split — a tool was dropped or duplicated"
         );
         for tool in [
@@ -785,8 +789,18 @@ mod tests {
             "search_wiki",
             "index_repo",
             "impact",
+            "architecture_overview",
         ] {
             assert!(router.has_route(tool), "missing tool after split: {tool}");
+        }
+        // Every tool an architecture_overview `next` hint can emit must be a
+        // real route — a hint that drifts from the tool surface teaches clients
+        // hallucinated calls.
+        for tool in crate::overview::HINT_TOOLS {
+            assert!(
+                router.has_route(tool),
+                "overview next-hint references unregistered tool: {tool}"
+            );
         }
     }
 

@@ -794,6 +794,7 @@ dependencies = [
  "cih-embed",
  "cih-graph-store",
  "cih-grouping",
+ "cih-ladybug",
  "cih-patterns",
  "cih-search",
  "cih-store-factory",

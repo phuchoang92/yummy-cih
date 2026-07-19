@@ -83,7 +83,13 @@ async fn tools_list_returns_full_surface_with_schemas() {
         .expect("tools/list should dispatch");
 
     let names: std::collections::HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-    for expected in ["list_repos", "search_code", "read_file", "search_wiki"] {
+    for expected in [
+        "list_repos",
+        "search_code",
+        "read_file",
+        "search_wiki",
+        "architecture_overview",
+    ] {
         assert!(
             names.contains(expected),
             "tools/list is missing {expected}; got {names:?}"
@@ -91,7 +97,7 @@ async fn tools_list_returns_full_surface_with_schemas() {
     }
     assert_eq!(
         tools.len(),
-        29,
+        30,
         "tool count drifted from the registered surface"
     );
 
