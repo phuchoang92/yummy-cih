@@ -107,6 +107,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
                 include_decompiled: false,
                 scope: None,
                 json: false,
+                backend: args.db.backend.clone(),
                 falkor_url: args.db.falkor_url.clone(),
                 graph_key: args.db.graph_key.clone(),
                 no_load: args.db.no_load,
@@ -154,6 +155,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
         let t = Instant::now();
         run_discover(
             repo.clone(),
+            args.db.backend.clone(),
             args.db.falkor_url.clone(),
             args.db.graph_key.clone(),
             args.db.no_load,

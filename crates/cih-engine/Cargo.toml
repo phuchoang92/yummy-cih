@@ -20,9 +20,9 @@ cih-community.workspace = true
 cih-lang.workspace = true
 cih-wiki.workspace = true
 cih-embed.workspace = true
-cih-falkor.workspace = true
 cih-jar.workspace = true
 cih-graph-store.workspace = true
+cih-store-factory.workspace = true
 cih-parse.workspace = true
 cih-resolve.workspace = true
 anyhow.workspace = true
@@ -49,3 +49,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+# Opt-in embedded LadybugDB backend (adds the cih-ladybug adapter to the factory).
+ladybug = ["cih-store-factory/ladybug"]

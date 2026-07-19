@@ -59,7 +59,7 @@ pub async fn detect_changes(
     let changed_nodes = store.nodes_in_files(&changed_files).await.map_err(to_mcp)?;
 
     // Fan the per-node blast-radius traversals out concurrently instead of
-    // awaiting up to 20 in series; the FalkorStore query_limit semaphore
+    // awaiting up to 20 in series; the store's query_limit semaphore
     // backpressures, and results merge into a set so completion order is moot.
     let symbol_limit = changed_nodes.len().min(20);
     let mut set = tokio::task::JoinSet::new();

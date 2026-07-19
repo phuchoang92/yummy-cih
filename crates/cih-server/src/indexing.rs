@@ -5,12 +5,14 @@ use crate::jobs::{evict_terminal, find_engine_binary, new_job_id, unix_now_secs,
 use crate::utils::json_result;
 
 pub async fn index_repo(
+    backend: &str,
     falkor_url: &str,
     graph_key: &str,
     jobs: &Jobs,
     args: IndexRepoArgs,
 ) -> Result<CallToolResult, McpError> {
     let (job_id, canonical) = start_index_job(
+        backend,
         falkor_url,
         graph_key,
         jobs,
@@ -29,6 +31,7 @@ pub async fn index_repo(
 /// Validate `repo_path`, spawn a background `cih-engine analyze`, and return `(job_id, canonical
 /// repo path)`. Shared by the `index_repo` tool and `add_resolve_pattern`'s reindex.
 pub async fn start_index_job(
+    backend: &str,
     falkor_url: &str,
     graph_key: &str,
     jobs: &Jobs,
@@ -56,6 +59,7 @@ pub async fn start_index_job(
     }
 
     let engine = find_engine_binary();
+    let backend = backend.to_string();
     let falkor_url = falkor_url.to_string();
     let graph_key = graph_key.to_string();
     let jobs = jobs.clone();
@@ -67,6 +71,7 @@ pub async fn start_index_job(
         cmd.arg("analyze")
             .arg(&repo_str)
             .arg("--all")
+            .env("CIH_GRAPH_BACKEND", &backend)
             .env("FALKOR_URL", &falkor_url)
             .env("CIH_GRAPH_KEY", &graph_key)
             .env("NO_COLOR", "1")

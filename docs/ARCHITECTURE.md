@@ -420,3 +420,43 @@ companion-object/`object` `val`s with literal initializers):
   cross-class dynamic SQL, expect the graph to under-report those specific edges.
   Custom sinks/sanitizers can be added via `cih.taint.toml` (see
   `docs/agent-workflows/security.md`).
+
+## Adding a graph-store backend (`cih-graph-store` port + `cih-store-factory`)
+
+The graph DB is pluggable. FalkorDB is *an* adapter, not *the* database; every
+consumer (engine load path, MCP tools, graph browser, background jobs) reaches
+storage through `Arc<dyn GraphStore>`. A new backend is:
+
+1. **A new crate implementing `GraphStore`** (`crates/cih-graph-store`).
+   Override `bulk_load_observed` only if the backend has phase events — the
+   trait default degrades to a plain `bulk_load`. Honor the port guarantee on
+   `publish_to(dest)`: after it returns, dropping the source (staging) graph
+   must not affect the published data — the engine drops staging right after
+   every publish.
+2. **A feature + match arm in `cih-store-factory`** — the single place adapter
+   dependencies live. Unknown backends must error listing the compiled-in ones.
+3. **A green contract run**: `cih_graph_store::contract::run_contract_suite`
+   (feature `test-support`), parameterized over a key-taking constructor
+   `mk(graph_key)`. It covers load round-trips, read/traversal semantics
+   (including stored-direction `src`/`dst` on `neighbors`), incremental upsert,
+   staging→publish→drop, and observed-load event ordering. See
+   `crates/cih-falkor/tests/falkor_integration.rs` for the wiring pattern.
+4. **Nothing else.** Backend selection is `--backend` / `CIH_GRAPH_BACKEND`
+   (default `falkor`); the URL flag stays `--falkor-url` / `FALKOR_URL` until
+   the packaging pass renames it with aliases.
+
+### Backend: `ladybug` (embedded, opt-in)
+
+`cih-ladybug` wraps LadybugDB (the Kùzu fork, crate `lbug`, pinned) — an
+embedded, in-process graph DB. Build with `--features ladybug` (cih-engine /
+cih-server); select with `--backend ladybug` / `CIH_GRAPH_BACKEND=ladybug`.
+The "url" is a filesystem root (default `~/.cih/ladybug`). Storage model:
+one wide `Symbol` node table + one rel table per `EdgeKind`; each graph key is
+a directory of immutable single-file versions plus a `CURRENT` pointer —
+publish = atomic file rename + pointer flip (satisfies the publish port
+guarantee structurally), readers reopen transparently when `CURRENT` moves,
+and old versions are GC'd after a grace window. Single-writer/multi-reader
+file locking means engine (writer) and server (reader) coexist because writers
+only ever touch brand-new version files. POSIX-only; macOS builds need
+Homebrew `openssl@3` (auto-detected by `build.rs`, or set `OPENSSL_LIB_DIR`).
+Its contract run is hermetic — no external DB, runs in `cargo test --workspace`.

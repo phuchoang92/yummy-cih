@@ -12,11 +12,12 @@ use anyhow::{Context, Result};
 use cih_core::{GraphArtifacts, Node, NodeId};
 use cih_taint::{find_taint_paths, TaintPath};
 
-use crate::db::{load_to_falkor, LoadOutcome};
+use crate::db::{load_to_store, LoadOutcome};
 use crate::versioning::latest_graph_artifacts;
-use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+use crate::DEFAULT_GRAPH_KEY;
 
 pub struct TaintFlags {
+    pub backend: Option<String>,
     pub falkor_url: Option<String>,
     pub graph_key: Option<String>,
     pub no_load: bool,
@@ -259,21 +260,26 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
         crate::ui::fmt_count(taint_edges.len())
     ));
 
-    // ── Load into FalkorDB ────────────────────────────────────────────────────
+    // ── Load into graph store ────────────────────────────────────────────────────
     let load = if flags.no_load {
-        tracing::info!("Skipping FalkorDB load (--no-load)");
+        tracing::info!("Skipping graph load (--no-load)");
         LoadOutcome::Skipped
     } else {
-        let url = flags.falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let be = flags.backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
+        let resolved_url = flags
+            .falkor_url
+            .clone()
+            .unwrap_or_else(|| crate::default_db_url(be));
+        let url = resolved_url.as_str();
         let key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        ui.spin("Loading into FalkorDB");
-        match load_to_falkor(url, key, &taint_artifacts) {
+        ui.spin("Loading into graph store");
+        match load_to_store(be, url, key, &taint_artifacts) {
             Ok(stats) => {
                 tracing::info!(
                     edges = stats.edges,
                     url,
                     graph = key,
-                    "TaintFlow edges loaded into FalkorDB"
+                    "TaintFlow edges loaded into graph store"
                 );
                 ui.finish_with(format!(
                     "{} edges loaded",
@@ -282,8 +288,8 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
                 LoadOutcome::Loaded(stats)
             }
             Err(err) => {
-                tracing::warn!(error = %err, "FalkorDB load failed — taint artifacts are on disk");
-                ui.finish_with(format!("FalkorDB load failed: {err}"));
+                tracing::warn!(error = %err, "graph load failed — taint artifacts are on disk");
+                ui.finish_with(format!("graph load failed: {err}"));
                 LoadOutcome::Failed(format!("{err:#}"))
             }
         }
@@ -370,7 +376,7 @@ fn print_human_report(
         LoadOutcome::Reused => "\x1b[2mreused\x1b[0m".to_string(),
         LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
     };
-    crate::ui::print_row("FalkorDB", &falkor_str);
+    crate::ui::print_row("Graph DB", &falkor_str);
     eprintln!();
 
     // Print top 20 paths.

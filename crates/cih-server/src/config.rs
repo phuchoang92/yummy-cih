@@ -69,10 +69,18 @@ impl std::fmt::Debug for Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        let backend = env("CIH_GRAPH_BACKEND", "falkor");
+        let default_url = match backend.as_str() {
+            // Embedded backend: the "url" is a filesystem root.
+            "ladybug" => std::env::var("HOME")
+                .map(|h| format!("{h}/.cih/ladybug"))
+                .unwrap_or_else(|_| ".cih-ladybug".to_string()),
+            _ => "redis://127.0.0.1:6379".to_string(),
+        };
         Self {
-            backend: env("CIH_GRAPH_BACKEND", "falkor"),
+            backend,
             bind: env("CIH_BIND", "127.0.0.1:8080"),
-            falkor_url: env("FALKOR_URL", "redis://127.0.0.1:6379"),
+            falkor_url: env("FALKOR_URL", &default_url),
             graph_key: env("CIH_GRAPH_KEY", "cih"),
             group: std::env::var("CIH_GROUP").ok().filter(|s| !s.is_empty()),
             artifacts_dir: std::env::var("CIH_ARTIFACTS_DIR").ok().map(PathBuf::from),
@@ -142,45 +150,46 @@ fn bind_is_loopback(bind: &str) -> bool {
     }
 }
 
-/// Build the configured `GraphStore`. This is the single place adapters are
-/// named — the rest of the engine/MCP layer depends only on `dyn GraphStore`.
-pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
-    match cfg.backend.as_str() {
-        "falkor" => {
-            let store = cih_falkor::FalkorStore::connect(&cfg.falkor_url, &cfg.graph_key)?
-                .with_query_limit(
-                    cfg.max_concurrent_queries,
-                    std::time::Duration::from_millis(cfg.query_queue_timeout_ms),
-                );
-            let mut last_err = None;
-            for attempt in 1u32..=5 {
-                match store.ensure_schema().await {
-                    Ok(_) => {
-                        last_err = None;
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::warn!(attempt, error = %e, "FalkorDB not ready, retrying in 2s");
-                        last_err = Some(e);
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    }
-                }
-            }
-            if let Some(e) = last_err {
-                return Err(anyhow::anyhow!("FalkorDB schema init failed: {e}"));
-            }
-            Ok(Arc::new(store))
-        }
-        "neptune" => Err(anyhow!(
-            "neptune adapter not implemented yet — go-live target (cih-neptune)"
-        )),
-        "postgres" => Err(anyhow!(
-            "postgres-cte adapter not implemented yet — ~$0 fallback (cih-postgres)"
-        )),
-        other => Err(anyhow!(
-            "unknown CIH_GRAPH_BACKEND='{other}' (use falkor|neptune|postgres)"
+/// The `StoreOptions` this server applies to every store it constructs
+/// (startup primary + per-graph-key stores), so tuning is uniform.
+pub fn store_options(cfg: &Config) -> cih_store_factory::StoreOptions {
+    cih_store_factory::StoreOptions {
+        query_limit: Some((
+            cfg.max_concurrent_queries,
+            std::time::Duration::from_millis(cfg.query_queue_timeout_ms),
         )),
     }
+}
+
+/// Build the configured `GraphStore` via the shared factory, then initialize
+/// its schema with a retry loop that rides out DB startup races. Schema init
+/// stays caller policy: per-key stores connected while serving traffic do a
+/// single-shot `ensure_schema` instead (`store_for`).
+pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
+    let store = cih_store_factory::connect_store(
+        &cfg.backend,
+        &cfg.falkor_url,
+        &cfg.graph_key,
+        &store_options(cfg),
+    )?;
+    let mut last_err = None;
+    for attempt in 1u32..=5 {
+        match store.ensure_schema().await {
+            Ok(_) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "graph store not ready, retrying in 2s");
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(anyhow::anyhow!("graph schema init failed: {e}"));
+    }
+    Ok(store)
 }
 
 #[cfg(test)]

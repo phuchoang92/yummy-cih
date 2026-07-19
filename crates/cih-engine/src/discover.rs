@@ -54,9 +54,9 @@ impl std::str::FromStr for FeatureStrategyKind {
 }
 use serde::Serialize;
 
-use crate::db::{load_many_to_falkor, LoadOutcome};
+use crate::db::{load_many, LoadOutcome};
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
-use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+use crate::DEFAULT_GRAPH_KEY;
 
 /// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
@@ -84,6 +84,7 @@ pub struct DiscoverOverrides {
 
 pub fn run_discover(
     repo: PathBuf,
+    backend: Option<String>,
     falkor_url: Option<String>,
     graph_key: Option<String>,
     no_load: bool,
@@ -98,23 +99,27 @@ pub fn run_discover(
     let emit = run_discover_core(&repo, &overrides)?;
 
     let load = if no_load {
-        tracing::info!("Skipping FalkorDB load (--no-load)");
+        tracing::info!("Skipping graph load (--no-load)");
         LoadOutcome::Skipped
     } else {
-        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let be = backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
+        let resolved_url = falkor_url
+            .clone()
+            .unwrap_or_else(|| crate::default_db_url(be));
+        let url = resolved_url.as_str();
         let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
         let artifact_sets = emit.artifact_sets_for_load();
-        match load_many_to_falkor(url, key, &artifact_sets) {
+        match load_many(be, url, key, &artifact_sets) {
             Ok(stats) => {
                 tracing::info!(
                     nodes = stats.nodes,
                     edges = stats.edges,
-                    "FalkorDB discover load complete"
+                    "graph discover load complete"
                 );
                 LoadOutcome::Loaded(stats)
             }
             Err(err) => {
-                tracing::warn!(error = %err, "FalkorDB discover load failed");
+                tracing::warn!(error = %err, "graph discover load failed");
                 LoadOutcome::Failed(format!("{err:#}"))
             }
         }
@@ -795,7 +800,7 @@ impl DiscoverOutcome {
             LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
             LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
         };
-        crate::ui::print_row("FalkorDB", &falkor_str);
+        crate::ui::print_row("Graph DB", &falkor_str);
         eprintln!();
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "cih-store-factory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cih-graph-store.workspace = true
+cih-falkor = { workspace = true, optional = true }
+cih-ladybug = { workspace = true, optional = true }
+anyhow.workspace = true
+
+[features]
+default = ["falkor"]
+falkor = ["dep:cih-falkor"]
+# Opt-in (not in defaults): embedded LadybugDB backend.
+ladybug = ["dep:cih-ladybug"]

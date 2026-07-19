@@ -106,11 +106,14 @@ Then pass `repo` to target a service:
 ## Smoke test (no MCP client needed)
 
 `GET /health` and `/ready` return 200. For tool calls, speak MCP Streamable HTTP
-directly (initialize → `notifications/initialized` → `tools/call`; each POST is
-one JSON-RPC message, `--data-raw`, `Accept: application/json,
+directly (initialize → `notifications/initialized` → `tools/list` → `tools/call`;
+each POST is one JSON-RPC message, `--data-raw`, `Accept: application/json,
 text/event-stream`, echo the `Mcp-Session-Id` response header on follow-ups).
 
 Representative checks (all against the one endpoint):
+- `tools/list` → the full tool surface. **Required compatibility check:** it must
+  be **non-empty** — a discovery-based client (Codex/Kiro/Claude) that sees `[]`
+  here concludes CIH has no tools and silently does nothing.
 - `list_repos` → the group's members (scoped by `CIH_GROUP`).
 - `route_map {"repo":"212ecom-ai"}` → the Python FastAPI routes; `route_map {}` → be Spring routes.
 - `context {"name":"AdminBrandService","repo":"212ecom-be"}` → resolves on be.

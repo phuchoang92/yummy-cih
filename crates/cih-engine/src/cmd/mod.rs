@@ -62,9 +62,14 @@ pub fn main() -> Result<()> {
     match cli.command {
         Command::Scan { repo, json } => crate::scan::run_scan(&repo, json),
         Command::Analyze(a) => analyze::run(a),
-        Command::Resolve { repo, db, json } => {
-            crate::analyze::run_resolve(repo, db.falkor_url, db.graph_key, db.no_load, json)
-        }
+        Command::Resolve { repo, db, json } => crate::analyze::run_resolve(
+            repo,
+            db.backend,
+            db.falkor_url,
+            db.graph_key,
+            db.no_load,
+            json,
+        ),
         Command::Discover(a) => discover::run(a),
         Command::Embed {
             repo,
@@ -125,6 +130,7 @@ pub fn main() -> Result<()> {
         Command::Taint(a) => taint::run_taint(
             a.repo,
             taint::TaintFlags {
+                backend: a.db.backend,
                 falkor_url: a.db.falkor_url,
                 graph_key: a.db.graph_key,
                 no_load: a.db.no_load,

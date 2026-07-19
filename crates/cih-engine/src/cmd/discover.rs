@@ -66,6 +66,7 @@ pub fn run(args: DiscoverArgs) -> Result<()> {
 
     run_discover(
         args.repo,
+        args.db.backend,
         args.db.falkor_url,
         args.db.graph_key,
         args.db.no_load,

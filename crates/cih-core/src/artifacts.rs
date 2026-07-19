@@ -1,7 +1,8 @@
 //! Canonical bulk-load artifacts (JSONL v1) and bundle archive (Gap 5).
 //!
-//! The engine emits `nodes.jsonl` + `edges.jsonl`; each `BulkLoader` reads these
-//! and transforms them into its backend's load format. JSONL keeps Phase 2
+//! The engine emits `nodes.jsonl` + `edges.jsonl`; each `GraphStore` adapter's
+//! `bulk_load` reads these and transforms them into its backend's load format.
+//! JSONL keeps Phase 2
 //! dependency-free (serde_json only); swap to Parquet when the Neptune S3 loader
 //! path needs columnar input (Phase 11).
 //!

@@ -222,7 +222,18 @@ pub fn message_destination_id(dest_type: &str, name: &str) -> NodeId {
 /// Cypher labels are SCREAMING_SNAKE_CASE of the variant name (except `Other`
 /// → `REL`); they are stored in FalkorDB, so renaming a variant is a breaking
 /// schema change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, strum::IntoStaticStr)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EdgeKind {
     Contains,
@@ -336,8 +347,9 @@ impl std::fmt::Display for VersionId {
     }
 }
 
-/// Canonical bulk-load artifact the engine always emits; each `BulkLoader`
-/// transforms it into its backend's required format (S3 CSV, COPY, etc.).
+/// Canonical bulk-load artifact the engine always emits; each `GraphStore`
+/// adapter's `bulk_load` transforms it into its backend's required format
+/// (S3 CSV, COPY, etc.).
 #[derive(Clone, Debug)]
 pub struct GraphArtifacts {
     pub nodes_path: PathBuf,

@@ -10,8 +10,8 @@ use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKin
 use cih_graph_store::{
     risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge, FlowHop,
     FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError,
-    GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadStats, NoopObserver, Path,
-    Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+    GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadObserver, LoadStats,
+    NoopObserver, Path, Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
 };
 
 use crate::neighbor_nodes;
@@ -32,6 +32,36 @@ impl GraphStore for FalkorStore {
 
     async fn bulk_load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
         self.bulk_load_observed(artifacts, &NoopObserver).await
+    }
+
+    /// `bulk_load` with a progress observer; a CLI passes an observer that
+    /// renders per-phase progress. Routing: a fresh (unused) key takes the
+    /// native `GRAPH.BULK` fast path; a populated one falls back to the Cypher
+    /// upsert.
+    async fn bulk_load_observed(
+        &self,
+        artifacts: &GraphArtifacts,
+        obs: &dyn LoadObserver,
+    ) -> Result<LoadStats> {
+        // Wait out a `BusyLoadingError` window before writing, so a FalkorDB that
+        // is still loading a large persisted dataset doesn't cause a partial write.
+        self.wait_until_ready(Self::load_wait_budget()).await?;
+        // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path,
+        // which streams the artifacts (no `Vec` read). A populated one (e.g. the
+        // community set loaded after analyze) falls back to the Cypher upsert,
+        // which reads the small set into memory. `GRAPH.BULK BEGIN` also requires
+        // an unused key, so this routing honors that constraint.
+        if self.graph_is_empty().await? {
+            self.bulk_insert(artifacts, obs).await
+        } else {
+            let nodes = artifacts
+                .read_nodes()
+                .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;
+            let edges = artifacts
+                .read_edges()
+                .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
+            self.load_nodes_edges(&nodes, &edges, obs).await
+        }
     }
 
     async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()> {
@@ -64,6 +94,17 @@ impl GraphStore for FalkorStore {
         Ok(())
     }
 
+    async fn drop_graph(&self) -> Result<()> {
+        match self.graph_command("GRAPH.DELETE", &[&self.graph_key]).await {
+            Ok(_) => Ok(()),
+            // GRAPH.DELETE on a nonexistent key errors "Invalid graph operation on
+            // empty key". Dropping an absent graph is a no-op success — this makes
+            // `drop_graph` idempotent (e.g. after `publish_to` RENAMEs staging away).
+            Err(GraphStoreError::Backend(msg)) if msg.contains("empty key") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
         let q = format!(
             "CYPHER id={id} \
@@ -87,8 +128,11 @@ impl GraphStore for FalkorStore {
             Direction::Downstream => format!("(n:Symbol {{id:$id}})-[r{rel}]->(m:Symbol)"),
             Direction::Both => format!("(n:Symbol {{id:$id}})-[r{rel}]-(m:Symbol)"),
         };
+        // startNode/endNode preserve the STORED edge direction — the contract
+        // suite asserts `src`/`dst` reflect the graph, not the query pattern
+        // (an Upstream query must still report the caller as `src`).
         let q = format!(
-            "CYPHER id={id} MATCH {pat} RETURN type(r), n.id, m.id",
+            "CYPHER id={id} MATCH {pat} RETURN type(r), startNode(r).id, endNode(r).id",
             id = cstr(id.as_str())
         );
         let rows = self.rows(&q).await?;

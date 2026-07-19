@@ -53,6 +53,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
             include_decompiled: resolved.include_decompiled,
             scope: args.scope,
             json: args.json,
+            backend: args.db.backend,
             falkor_url: args.db.falkor_url,
             graph_key: args.db.graph_key,
             no_load: args.db.no_load,

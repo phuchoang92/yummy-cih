@@ -14,10 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, Node, NodeId, NodeKind};
 use cih_graph_store::{
-    BulkLoader, Direction, FlowNode, GraphStore, GraphStoreError, LoadObserver, LoadStats, Result,
+    Direction, FlowNode, GraphStore, GraphStoreError, LoadObserver, LoadStats, Result,
 };
 use redis::Value;
 
@@ -175,17 +174,6 @@ impl FalkorStore {
         cmd.query_async(&mut con)
             .await
             .map_err(|e| GraphStoreError::Backend(e.to_string()))
-    }
-
-    pub async fn drop_graph(&self) -> Result<()> {
-        match self.graph_command("GRAPH.DELETE", &[&self.graph_key]).await {
-            Ok(_) => Ok(()),
-            // GRAPH.DELETE on a nonexistent key errors "Invalid graph operation on
-            // empty key". Dropping an absent graph is a no-op success — this makes
-            // `drop_graph` idempotent (e.g. after `publish_to` RENAMEs staging away).
-            Err(GraphStoreError::Backend(msg)) if msg.contains("empty key") => Ok(()),
-            Err(e) => Err(e),
-        }
     }
 
     /// Result rows (the second element of a GRAPH.QUERY reply) as stringified
@@ -382,37 +370,6 @@ impl FalkorStore {
     /// before the edge pass, so struct `Vec`s never exist and no single call
     /// approaches the 512 MB / 1 GB limits. The `id`/`kind` indexes are created
     /// *after* the insert — `BEGIN` requires an unused key.
-    /// `bulk_load` with a progress observer. The trait `GraphStore::bulk_load`
-    /// delegates here with a `NoopObserver`; a CLI passes an observer that renders
-    /// per-phase progress. Routing is identical to the trait method: a fresh
-    /// (unused) key takes the native `GRAPH.BULK` fast path; a populated one falls
-    /// back to the Cypher upsert.
-    pub async fn bulk_load_observed(
-        &self,
-        artifacts: &GraphArtifacts,
-        obs: &dyn LoadObserver,
-    ) -> Result<LoadStats> {
-        // Wait out a `BusyLoadingError` window before writing, so a FalkorDB that
-        // is still loading a large persisted dataset doesn't cause a partial write.
-        self.wait_until_ready(Self::load_wait_budget()).await?;
-        // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path,
-        // which streams the artifacts (no `Vec` read). A populated one (e.g. the
-        // community set loaded after analyze) falls back to the Cypher upsert,
-        // which reads the small set into memory. `GRAPH.BULK BEGIN` also requires
-        // an unused key, so this routing honors that constraint.
-        if self.graph_is_empty().await? {
-            self.bulk_insert(artifacts, obs).await
-        } else {
-            let nodes = artifacts
-                .read_nodes()
-                .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;
-            let edges = artifacts
-                .read_edges()
-                .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
-            self.load_nodes_edges(&nodes, &edges, obs).await
-        }
-    }
-
     async fn bulk_insert(
         &self,
         artifacts: &GraphArtifacts,
@@ -531,27 +488,6 @@ impl FalkorStore {
                 parent_id: None,
             })
             .collect())
-    }
-}
-
-/// Thin `BulkLoader` over a `FalkorStore` (ports & adapters: the engine depends
-/// on the `BulkLoader` trait, not on FalkorDB).
-pub struct FalkorBulkLoader {
-    store: FalkorStore,
-}
-
-impl FalkorBulkLoader {
-    pub fn connect(url: &str, graph_key: impl Into<String>) -> Result<Self> {
-        Ok(Self {
-            store: FalkorStore::connect(url, graph_key)?,
-        })
-    }
-}
-
-#[async_trait]
-impl BulkLoader for FalkorBulkLoader {
-    async fn load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
-        self.store.bulk_load(artifacts).await
     }
 }
 

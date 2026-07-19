@@ -4,10 +4,11 @@
 //! request → dispatch → response envelope that the registration guard in
 //! `app::tests` can't.
 //!
-//! Hermetic: `FalkorStore::connect` is lazy (connects on first query), and none
-//! of the tools dispatched here reach a graph query — they fail at
-//! router/arg-validation, or `list_repos` only reads the registry — so no live
-//! FalkorDB is required and this runs in the normal suite.
+//! Hermetic: store construction via `connect_store` is lazy (the adapter
+//! connects on first query), and none of the tools dispatched here reach a
+//! graph query — they fail at router/arg-validation, or `list_repos` only
+//! reads the registry — so no live DB is required and this runs in the normal
+//! suite.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,19 +31,23 @@ impl ClientHandler for DummyClient {
 
 type TestClient = rmcp::service::RunningService<rmcp::RoleClient, DummyClient>;
 
-/// Build a `CihServer` (lazy Falkor connection — no live DB) and serve it over an
+/// Build a `CihServer` (lazy store connection — no live DB) and serve it over an
 /// in-memory duplex pair; return a connected client.
 async fn serve_test_server() -> TestClient {
-    let store: Arc<dyn GraphStore> = Arc::new(
-        cih_falkor::FalkorStore::connect("redis://127.0.0.1:6380", "cih_dispatch_test")
-            .expect("lazy FalkorStore connect"),
-    );
+    let store: Arc<dyn GraphStore> = cih_store_factory::connect_store(
+        "falkor",
+        "redis://127.0.0.1:6380",
+        "cih_dispatch_test",
+        &cih_store_factory::StoreOptions::default(),
+    )
+    .expect("lazy store construction");
     let server = CihServer::new(
         store,
         None,
         None,
         "cih_dispatch_test".into(),
         None,
+        "falkor".into(),
         "redis://127.0.0.1:6380".into(),
         (4, Duration::from_secs(5)),
         files::ReadFileLimits {

@@ -14,8 +14,10 @@
 #               cih-search        BM25, RRF, tokenizer
 #               cih-embed         fastembed/ort embeddings + pgvector store
 #
-#  Storage      cih-graph-store   GraphStore + BulkLoader ports  (traits only — no impl)
+#  Storage      cih-graph-store   GraphStore port  (traits only — no impl)
 #               cih-falkor        FalkorDB adapter  (openCypher over redis protocol)
+#               cih-ladybug       LadybugDB adapter (embedded Kùzu fork; versioned dirs)
+#               cih-store-factory backend name → adapter construction (feature-gated)
 #
 #  Product      cih-engine        CLI orchestrator: scan/analyze/discover/embed/wiki/group
 #               cih-wiki          wiki page generation library
@@ -35,6 +37,8 @@ members = [
   "crates/cih-embed",
   "crates/cih-graph-store",
   "crates/cih-falkor",
+  "crates/cih-ladybug",
+  "crates/cih-store-factory",
   "crates/cih-taint",
   "crates/cih-patterns",
   "crates/cih-engine",
@@ -115,6 +119,8 @@ cih-search = { path = "crates/cih-search" }
 cih-embed = { path = "crates/cih-embed" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }
+cih-ladybug = { path = "crates/cih-ladybug" }
+cih-store-factory = { path = "crates/cih-store-factory" }
 cih-wiki = { path = "crates/cih-wiki" }
 
 # Full debuginfo balloons target/ into tens of GB across builds; line tables

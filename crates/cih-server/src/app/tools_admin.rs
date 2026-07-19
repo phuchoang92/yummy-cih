@@ -22,7 +22,14 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<IndexRepoArgs>,
     ) -> Result<CallToolResult, McpError> {
-        indexing::index_repo(&self.falkor_url, &self.graph_key, &self.jobs, args).await
+        indexing::index_repo(
+            &self.backend,
+            &self.falkor_url,
+            &self.graph_key,
+            &self.jobs,
+            args,
+        )
+        .await
     }
 
     #[tool(
@@ -62,7 +69,14 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<AddResolvePatternArgs>,
     ) -> Result<CallToolResult, McpError> {
-        patterns::add_resolve_pattern(&self.falkor_url, &self.graph_key, &self.jobs, args).await
+        patterns::add_resolve_pattern(
+            &self.backend,
+            &self.falkor_url,
+            &self.graph_key,
+            &self.jobs,
+            args,
+        )
+        .await
     }
 
     #[tool(

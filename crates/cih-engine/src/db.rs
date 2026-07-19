@@ -2,12 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use cih_core::GraphArtifacts;
-use cih_falkor::FalkorStore;
 use cih_graph_store::{GraphStore, LoadObserver, LoadStats};
+use cih_store_factory::{connect_store, StoreOptions};
 
 use crate::ui::PhaseProgress;
 
-/// Outcome of the FalkorDB load step — distinguishes a deliberate skip from a failure.
+/// Outcome of the graph load step — distinguishes a deliberate skip from a failure.
 pub enum LoadOutcome {
     Loaded(LoadStats),
     Reused,
@@ -40,21 +40,28 @@ impl LoadOutcome {
     }
 }
 
+/// Connect to the staging graph for `graph_key` on the configured backend.
+/// No query limit: engine loads are sequential.
+fn connect_staging(backend: &str, url: &str, staging_key: &str) -> Result<Arc<dyn GraphStore>> {
+    connect_store(backend, url, staging_key, &StoreOptions::default())
+}
+
 /// Load multiple artifact sets into one staging graph, then publish atomically.
 /// Callers supply artifacts in the order they should be merged (analyze first, community second).
-pub fn load_many_to_falkor(
+pub fn load_many(
+    backend: &str,
     url: &str,
     graph_key: &str,
     artifact_sets: &[&GraphArtifacts],
 ) -> Result<cih_graph_store::LoadStats> {
     crate::runtime::block_on(async {
         let staging_key = format!("{graph_key}-staging");
-        let store = FalkorStore::connect(url, &staging_key)
-            .map_err(|e| anyhow::anyhow!("FalkorDB connect: {e}"))?;
+        let store = connect_staging(backend, url, &staging_key)?;
         // No `ensure_schema` here: the first `bulk_load` into the freshly-dropped
-        // (unused) staging key takes the `GRAPH.BULK` fast path, which requires an
-        // unused key and creates the indexes itself afterward. The Cypher fallback
-        // (used for later sets, e.g. community) creates the id index idempotently.
+        // (unused) staging key lets an adapter take its fresh-graph fast path
+        // (FalkorDB: `GRAPH.BULK`, which requires an unused key and creates the
+        // indexes itself afterward). Later sets (e.g. community) go through the
+        // adapter's idempotent upsert path.
         let _ = store.drop_graph().await;
 
         let mut total_nodes = 0u64;
@@ -63,7 +70,7 @@ pub fn load_many_to_falkor(
             let stats = store
                 .bulk_load(artifacts)
                 .await
-                .map_err(|e| anyhow::anyhow!("FalkorDB bulk_load: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("graph bulk_load: {e}"))?;
             total_nodes += stats.nodes;
             total_edges += stats.edges;
         }
@@ -71,12 +78,12 @@ pub fn load_many_to_falkor(
         store
             .publish_to(graph_key)
             .await
-            .map_err(|e| anyhow::anyhow!("FalkorDB publish: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("graph publish: {e}"))?;
         if let Err(err) = store.drop_graph().await {
             tracing::warn!(
                 graph = staging_key,
                 error = %err,
-                "failed to drop FalkorDB staging graph"
+                "failed to drop staging graph"
             );
         }
         Ok(cih_graph_store::LoadStats {
@@ -86,12 +93,13 @@ pub fn load_many_to_falkor(
     })
 }
 
-pub fn load_to_falkor(
+pub fn load_to_store(
+    backend: &str,
     url: &str,
     graph_key: &str,
     artifacts: &GraphArtifacts,
 ) -> Result<cih_graph_store::LoadStats> {
-    load_many_to_falkor(url, graph_key, &[artifacts])
+    load_many(backend, url, graph_key, &[artifacts])
 }
 
 /// Drives the shared `PhaseProgress` UI: each bulk-load milestone finishes the
@@ -99,7 +107,7 @@ pub fn load_to_falkor(
 /// same pattern as `wiki/flow_enrich.rs`) so the orchestration below and these
 /// callbacks share one bar. Assumes a single artifact set — `nodes_loaded` etc.
 /// each fire once — which is why only `analyze`/`resolve` use it (multi-set
-/// `discover` keeps the plain `load_many_to_falkor`).
+/// `discover` keeps the plain `load_many`).
 struct PhaseObserver {
     ui: Arc<Mutex<PhaseProgress>>,
 }
@@ -125,13 +133,15 @@ impl LoadObserver for PhaseObserver {
     }
 }
 
-/// Single-set FalkorDB load that renders live multi-phase progress
+/// Single-set graph load that renders live multi-phase progress
 /// (Connecting → nodes → edges → indexes → Publishing). Mirrors
-/// [`load_many_to_falkor`]'s staging-then-publish flow but interleaves phase
+/// [`load_many`]'s staging-then-publish flow but interleaves phase
 /// transitions; `nodes/edges/indexes` are driven by [`PhaseObserver`] from inside
-/// the bulk insert. Pass `quiet = true` (e.g. under `--json`) to hide the UI; a
+/// the bulk insert (adapters without phase events degrade to a plain load).
+/// Pass `quiet = true` (e.g. under `--json`) to hide the UI; a
 /// non-TTY hides it automatically. Never holds the UI mutex across an `.await`.
-pub fn load_to_falkor_with_progress(
+pub fn load_with_progress(
+    backend: &str,
     url: &str,
     graph_key: &str,
     artifacts: &GraphArtifacts,
@@ -148,10 +158,9 @@ pub fn load_to_falkor_with_progress(
 
         ui.lock()
             .expect("UI progress mutex poisoned")
-            .spin("Connecting to FalkorDB");
-        let store = FalkorStore::connect(url, &staging_key)
-            .map_err(|e| anyhow::anyhow!("FalkorDB connect: {e}"))?;
-        // Fresh staging key → bulk_load takes the GRAPH.BULK fast path (see db docs).
+            .spin("Connecting to graph store");
+        let store = connect_staging(backend, url, &staging_key)?;
+        // Fresh staging key → the adapter takes its fresh-graph fast path (see load_many).
         let _ = store.drop_graph().await;
         ui.lock()
             .expect("UI progress mutex poisoned")
@@ -164,7 +173,7 @@ pub fn load_to_falkor_with_progress(
         let stats = store
             .bulk_load_observed(artifacts, &observer)
             .await
-            .map_err(|e| anyhow::anyhow!("FalkorDB bulk_load: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("graph bulk_load: {e}"))?;
 
         ui.lock()
             .expect("UI progress mutex poisoned")
@@ -172,7 +181,7 @@ pub fn load_to_falkor_with_progress(
         store
             .publish_to(graph_key)
             .await
-            .map_err(|e| anyhow::anyhow!("FalkorDB publish: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("graph publish: {e}"))?;
         ui.lock()
             .expect("UI progress mutex poisoned")
             .finish_with(format!("→ {graph_key}"));
@@ -181,7 +190,7 @@ pub fn load_to_falkor_with_progress(
             tracing::warn!(
                 graph = staging_key,
                 error = %err,
-                "failed to drop FalkorDB staging graph"
+                "failed to drop staging graph"
             );
         }
         Ok(stats)

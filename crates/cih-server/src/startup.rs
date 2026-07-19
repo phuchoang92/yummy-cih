@@ -60,6 +60,7 @@ pub async fn run() -> Result<()> {
         embed_store,
         graph_key,
         cfg.group.clone(),
+        cfg.backend.clone(),
         cfg.falkor_url.clone(),
         (
             cfg.max_concurrent_queries,

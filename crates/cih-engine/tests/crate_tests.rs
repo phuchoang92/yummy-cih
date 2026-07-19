@@ -434,6 +434,7 @@ fn refresh_command_runs_analyze_and_writes_fingerprint_state() {
     cih_engine::cmd::refresh::run(cih_engine::cmd::args::RefreshArgs {
         repo: root.clone(),
         db: cih_engine::cmd::args::DbArgs {
+            backend: None,
             falkor_url: None,
             graph_key: None,
             no_load: true,
@@ -477,6 +478,7 @@ fn refresh_command_skips_stages_when_no_flags_set() {
     cih_engine::cmd::refresh::run(cih_engine::cmd::args::RefreshArgs {
         repo: root.clone(),
         db: cih_engine::cmd::args::DbArgs {
+            backend: None,
             falkor_url: None,
             graph_key: None,
             no_load: true,

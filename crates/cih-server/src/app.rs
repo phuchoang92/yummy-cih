@@ -79,12 +79,15 @@ pub(crate) struct CihServer {
     graph_key: String,
     /// Home group (`CIH_GROUP`): when set, `list_repos` scopes to its members.
     group: Option<String>,
+    /// Graph backend name (`CIH_GRAPH_BACKEND`) — passed to the store factory
+    /// for lazily-connected member stores.
+    backend: String,
     falkor_url: String,
     /// (max_concurrent_queries, acquire_timeout) for lazily-connected member stores.
     store_limits: (usize, Duration),
     /// Shared pgvector handle, cloned into each member repo's `SearchState`.
     embed_store: Option<Arc<EmbedStore>>,
-    /// Lazily-connected `FalkorStore` per graph key — one server, many graphs.
+    /// Lazily-connected graph store per graph key — one server, many graphs.
     stores: Arc<RwLock<HashMap<String, Arc<dyn GraphStore>>>>,
     /// Per-repo BM25 search state, keyed by the unversioned artifacts dir.
     searches: Arc<RwLock<HashMap<String, SearchState>>>,
@@ -109,6 +112,7 @@ impl CihServer {
         embed_store: Option<Arc<EmbedStore>>,
         graph_key: String,
         group: Option<String>,
+        backend: String,
         falkor_url: String,
         store_limits: (usize, Duration),
         read_file_limits: files::ReadFileLimits,
@@ -128,6 +132,7 @@ impl CihServer {
             search,
             graph_key,
             group,
+            backend,
             falkor_url,
             store_limits,
             embed_store,
@@ -150,8 +155,8 @@ impl CihServer {
     /// Resolve a tool's `repo` arg (empty = the server's primary graph key) to
     /// its graph store + BM25 search, connecting/loading lazily and caching by
     /// graph key / artifacts dir. This is what turns one server into a
-    /// whole-group server: every member's graph lives in the same FalkorDB, so
-    /// a `FalkorStore` per key reaches them all.
+    /// whole-group server: every member's graph lives in the same backend, so
+    /// a store per key reaches them all.
     async fn resolve(&self, repo: &str) -> Result<RepoCtx, McpError> {
         let entry = crate::utils::resolve_repo_entry(repo, &self.graph_key)
             .map_err(|e| McpError::invalid_params(e, None))?;
@@ -164,20 +169,25 @@ impl CihServer {
         })
     }
 
-    /// Get-or-connect a `FalkorStore` for `graph_key` (cached across calls).
+    /// Get-or-connect a graph store for `graph_key` (cached across calls).
+    /// Single-shot `ensure_schema` (unlike startup's retry loop): per-key
+    /// connects happen while serving traffic, where failing fast is correct.
     async fn store_for(&self, graph_key: &str) -> Result<Arc<dyn GraphStore>, McpError> {
         if let Some(store) = self.stores.read().await.get(graph_key) {
             return Ok(store.clone());
         }
-        let store = cih_falkor::FalkorStore::connect(&self.falkor_url, graph_key)
-            .map_err(|e| {
-                McpError::internal_error(format!("connect graph '{graph_key}': {e}"), None)
-            })?
-            .with_query_limit(self.store_limits.0, self.store_limits.1);
+        let store = cih_store_factory::connect_store(
+            &self.backend,
+            &self.falkor_url,
+            graph_key,
+            &cih_store_factory::StoreOptions {
+                query_limit: Some(self.store_limits),
+            },
+        )
+        .map_err(|e| McpError::internal_error(format!("connect graph '{graph_key}': {e}"), None))?;
         store.ensure_schema().await.map_err(|e| {
             McpError::internal_error(format!("schema init for graph '{graph_key}': {e}"), None)
         })?;
-        let store: Arc<dyn GraphStore> = Arc::new(store);
         self.stores
             .write()
             .await

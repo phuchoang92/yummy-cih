@@ -6,9 +6,12 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// Shared FalkorDB connection + load options, used by Analyze, Resolve, and Discover.
+/// Shared graph-DB connection + load options, used by Analyze, Resolve, and Discover.
 #[derive(Debug, clap::Args)]
 pub struct DbArgs {
+    /// Graph backend to load into. Defaults to $CIH_GRAPH_BACKEND or "falkor".
+    #[arg(long, env = "CIH_GRAPH_BACKEND")]
+    pub backend: Option<String>,
     /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
     #[arg(long, env = "FALKOR_URL")]
     pub falkor_url: Option<String>,
@@ -145,6 +148,9 @@ pub enum ArtifactCommand {
         /// Bundle archive path.
         #[arg(long)]
         bundle: PathBuf,
+        /// Graph backend to load into. Defaults to $CIH_GRAPH_BACKEND or "falkor".
+        #[arg(long, env = "CIH_GRAPH_BACKEND")]
+        backend: Option<String>,
         /// FalkorDB URL.
         #[arg(long, env = "FALKOR_URL")]
         falkor_url: Option<String>,

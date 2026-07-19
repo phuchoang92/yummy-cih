@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::runtime;
-use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+use crate::DEFAULT_GRAPH_KEY;
 
 use super::args::ArtifactCommand;
 
@@ -55,6 +55,7 @@ pub fn run(command: ArtifactCommand) -> Result<()> {
         ArtifactCommand::Bootstrap {
             repo,
             bundle,
+            backend,
             falkor_url,
             graph_key,
         } => {
@@ -67,14 +68,17 @@ pub fn run(command: ArtifactCommand) -> Result<()> {
                 &manifest.artifact_version[..8.min(manifest.artifact_version.len())]
             );
 
-            // Bulk-load into FalkorDB.
-            let falkor_url = falkor_url.unwrap_or_else(|| DEFAULT_FALKOR_URL.to_string());
+            // Bulk-load into the configured graph backend.
+            let backend = backend.unwrap_or_else(|| crate::DEFAULT_BACKEND.to_string());
+            let falkor_url = falkor_url.unwrap_or_else(|| crate::default_db_url(&backend));
             let graph_key = graph_key.unwrap_or_else(|| DEFAULT_GRAPH_KEY.to_string());
             runtime::block_on(async {
-                use cih_falkor::FalkorStore;
-                use cih_graph_store::GraphStore;
-                let store = FalkorStore::connect(&falkor_url, &graph_key)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let store = cih_store_factory::connect_store(
+                    &backend,
+                    &falkor_url,
+                    &graph_key,
+                    &cih_store_factory::StoreOptions::default(),
+                )?;
                 store
                     .ensure_schema()
                     .await

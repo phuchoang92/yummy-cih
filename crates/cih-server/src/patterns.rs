@@ -41,6 +41,7 @@ fn repo_root(repo: &str, graph_key: &str) -> Result<String, McpError> {
 
 /// Add a resolve pattern to `<repo>/cih.patterns.toml`, de-duping, then optionally re-index.
 pub async fn add_resolve_pattern(
+    backend: &str,
     falkor_url: &str,
     graph_key: &str,
     jobs: &Jobs,
@@ -86,7 +87,8 @@ pub async fn add_resolve_pattern(
     // Trigger a background re-index so the live graph reflects the new pattern.
     let mut job_id = None;
     if args.reindex {
-        if let Ok((id, _)) = indexing::start_index_job(falkor_url, graph_key, jobs, &root, "").await
+        if let Ok((id, _)) =
+            indexing::start_index_job(backend, falkor_url, graph_key, jobs, &root, "").await
         {
             job_id = Some(id);
         }

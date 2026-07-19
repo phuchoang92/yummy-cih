@@ -11,6 +11,9 @@ use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "test-support")]
+pub mod contract;
+
 #[derive(thiserror::Error, Debug)]
 pub enum GraphStoreError {
     #[error("graph backend error: {0}")]
@@ -213,7 +216,25 @@ pub trait GraphStore: Send + Sync {
     async fn bulk_load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats>;
     async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()>;
     /// Copy this store's graph into `dest_key`, replacing the destination atomically.
+    ///
+    /// Port guarantee: after `publish_to` returns, dropping this (source/staging)
+    /// graph must not affect the published data — the engine drops staging right
+    /// after publishing, so publish may not alias storage with the source.
     async fn publish_to(&self, dest_key: &str) -> Result<()>;
+    /// Delete this store's graph entirely. Idempotent: succeeds when the graph
+    /// does not exist.
+    async fn drop_graph(&self) -> Result<()>;
+    /// Bulk load with phase callbacks. The default ignores the observer and
+    /// delegates to [`bulk_load`](GraphStore::bulk_load), so adapters without
+    /// phase events implement nothing extra.
+    async fn bulk_load_observed(
+        &self,
+        artifacts: &GraphArtifacts,
+        obs: &dyn LoadObserver,
+    ) -> Result<LoadStats> {
+        let _ = obs;
+        self.bulk_load(artifacts).await
+    }
 
     // ---- reads (domain queries) ----
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
@@ -298,13 +319,6 @@ pub trait GraphStore: Send + Sync {
     /// render the community service-map diagram. Returns empty if no discover run
     /// has been done (no Community nodes in graph).
     async fn community_graph(&self) -> Result<Vec<CommunityEdge>>;
-}
-
-/// Bulk loading is a SEPARATE port — mechanisms differ wildly across backends
-/// (Neptune S3 loader, Neo4j admin import, FalkorDB bulk tool, Postgres COPY).
-#[async_trait]
-pub trait BulkLoader: Send + Sync {
-    async fn load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats>;
 }
 
 /// Coarse load-phase callbacks so a CLI can render multi-phase progress while a

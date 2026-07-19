@@ -16,7 +16,7 @@ cih-core.workspace = true
 cih-embed.workspace = true
 cih-grouping.workspace = true
 cih-graph-store.workspace = true
-cih-falkor.workspace = true
+cih-store-factory.workspace = true
 cih-search.workspace = true
 cih-wiki.workspace = true
 cih-taint.workspace = true
@@ -48,3 +48,7 @@ tempfile = "3"
 # `server` (a normal-dep feature) already enables transport-async-rw; only `client`
 # is added here, and only for test builds — production `cargo build` stays lean.
 rmcp = { version = "0.7", features = ["client"] }
+
+[features]
+# Opt-in embedded LadybugDB backend (adds the cih-ladybug adapter to the factory).
+ladybug = ["cih-store-factory/ladybug"]

@@ -5,10 +5,10 @@ use anyhow::{Context, Result};
 use cih_core::{GraphArtifacts, JarInfo, NodeKind, VersionId};
 use serde::Serialize;
 
-use crate::db::{load_to_falkor_with_progress, LoadOutcome};
+use crate::db::{load_with_progress, LoadOutcome};
 use crate::scope::{self, ScopeFile, ScopeRequest};
 use crate::versioning::{content_version, prune_other_versions};
-use crate::{scan, DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+use crate::{scan, DEFAULT_GRAPH_KEY};
 
 use cache::{parse_scope, ParseScopeOutcome};
 use extract::{build_scope_request, load_jars_from_repo_map};
@@ -29,6 +29,7 @@ pub struct AnalyzeFlags {
     pub include_decompiled: bool,
     pub scope: Option<PathBuf>,
     pub json: bool,
+    pub backend: Option<String>,
     pub falkor_url: Option<String>,
     pub graph_key: Option<String>,
     pub no_load: bool,
@@ -83,27 +84,34 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         tracing::info!("No source changes detected; reusing existing artifacts and live graph");
         LoadOutcome::Reused
     } else if flags.no_load {
-        tracing::info!("Skipping FalkorDB load (--no-load)");
+        tracing::info!("Skipping graph load (--no-load)");
         LoadOutcome::Skipped
     } else {
-        let falkor_url = flags.falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let backend = flags.backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
+        let resolved_url = flags
+            .falkor_url
+            .clone()
+            .unwrap_or_else(|| crate::default_db_url(backend));
+        let falkor_url = resolved_url.as_str();
         let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_to_falkor_with_progress(falkor_url, graph_key, &emit.artifacts, flags.json) {
+        match load_with_progress(backend, falkor_url, graph_key, &emit.artifacts, flags.json) {
             Ok(stats) => {
                 tracing::info!(
                     nodes = stats.nodes,
                     edges = stats.edges,
+                    backend,
                     url = falkor_url,
                     graph = graph_key,
-                    "FalkorDB bulk load complete"
+                    "graph bulk load complete"
                 );
                 LoadOutcome::Loaded(stats)
             }
             Err(err) => {
                 tracing::warn!(
                     error = %err,
+                    backend,
                     url = falkor_url,
-                    "FalkorDB bulk load failed — artifacts are on disk, re-run or load manually"
+                    "graph bulk load failed — artifacts are on disk, re-run or load manually"
                 );
                 LoadOutcome::Failed(format!("{err:#}"))
             }
@@ -127,6 +135,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
 
 pub fn run_resolve(
     repo: PathBuf,
+    backend: Option<String>,
     falkor_url: Option<String>,
     graph_key: Option<String>,
     no_load: bool,
@@ -169,22 +178,26 @@ pub fn run_resolve(
     )?;
 
     let load = if no_load {
-        tracing::info!("Skipping FalkorDB load (--no-load)");
+        tracing::info!("Skipping graph load (--no-load)");
         LoadOutcome::Skipped
     } else {
-        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
+        let be = backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
+        let resolved_url = falkor_url
+            .clone()
+            .unwrap_or_else(|| crate::default_db_url(be));
+        let url = resolved_url.as_str();
         let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_to_falkor_with_progress(url, key, &emit.artifacts, json) {
+        match load_with_progress(be, url, key, &emit.artifacts, json) {
             Ok(stats) => {
                 tracing::info!(
                     nodes = stats.nodes,
                     edges = stats.edges,
-                    "FalkorDB resolve load complete"
+                    "graph resolve load complete"
                 );
                 LoadOutcome::Loaded(stats)
             }
             Err(err) => {
-                tracing::warn!(error = %err, "FalkorDB load failed after resolve");
+                tracing::warn!(error = %err, "graph load failed after resolve");
                 LoadOutcome::Failed(format!("{err:#}"))
             }
         }
@@ -867,7 +880,7 @@ impl EmitOutcome {
             LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
             LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
         };
-        crate::ui::print_row("FalkorDB", &falkor_str);
+        crate::ui::print_row("Graph DB", &falkor_str);
         eprintln!();
     }
 }

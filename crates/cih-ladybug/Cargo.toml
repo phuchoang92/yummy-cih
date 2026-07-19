@@ -1,5 +1,5 @@
 [package]
-name = "cih-falkor"
+name = "cih-ladybug"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,14 @@ license.workspace = true
 cih-core.workspace = true
 cih-graph-store.workspace = true
 async-trait.workspace = true
-redis.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
-tokio.workspace = true   # sync::{OnceCell, Semaphore} + time::timeout for pooling/backpressure
+tokio.workspace = true
+csv = "1"
+# Pinned: young fork of archived Kùzu; wrap all lbug types inside this crate.
+lbug = "=0.18.2"
+strum.workspace = true
 
 [dev-dependencies]
 cih-graph-store = { workspace = true, features = ["test-support"] }
