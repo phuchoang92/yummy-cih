@@ -20,6 +20,20 @@ pub struct StoreOptions {
     pub query_limit: Option<(usize, Duration)>,
 }
 
+/// Default DB url for a backend when no explicit url/env is given. THE single
+/// source of truth — engine and server both delegate here (they previously
+/// disagreed: server said 6379, engine and the docs said 6380; FalkorDB runs
+/// on 6380 locally because Homebrew redis squats 6379).
+pub fn default_url(backend: &str) -> String {
+    match backend {
+        // Embedded backend: the "url" is a filesystem root.
+        "ladybug" => std::env::var("HOME")
+            .map(|h| format!("{h}/.cih/ladybug"))
+            .unwrap_or_else(|_| ".cih-ladybug".to_string()),
+        _ => "redis://127.0.0.1:6380".to_string(),
+    }
+}
+
 /// Backend names that are compiled into this build, for error messages.
 pub fn compiled_backends() -> Vec<&'static str> {
     vec![

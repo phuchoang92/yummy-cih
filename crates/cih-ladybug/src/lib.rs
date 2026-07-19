@@ -131,14 +131,18 @@ impl LadybugStore {
             }
         }
         // Stale or absent: (re)open READ_ONLY on the current version. Retry
-        // once if GC removed the dir between reading CURRENT and opening.
-        for _ in 0..2 {
+        // if GC removed the file between reading CURRENT and opening, or if a
+        // just-renamed publish source still carries a lingering RW lock from
+        // an in-flight query on the publishing process (narrow window; the
+        // lock dies when that query's Arc drops).
+        let mut last_err = None;
+        for attempt in 0..3u32 {
             let current = match self.read_current() {
                 Some(v) => v,
                 None => return Ok(None),
             };
-            let dir = self.key_dir().join(&current);
-            match Self::open_db(&dir, true) {
+            let path = self.key_dir().join(&current);
+            match Self::open_db(&path, true) {
                 Ok(db) => {
                     *state = Some(OpenHandle {
                         version: current,
@@ -147,21 +151,37 @@ impl LadybugStore {
                     });
                     return Ok(Some(db));
                 }
-                Err(_) if !dir.exists() => continue,
-                Err(e) => return Err(e),
+                Err(_) if !path.exists() => continue,
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
             }
         }
-        Ok(None)
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(None),
+        }
     }
 
-    /// A read-write handle on a version dir owned by this store, creating the
-    /// next version (with schema) when none is open yet. Multi-set loads and
-    /// the delta path reuse the open handle.
-    pub(crate) async fn write_handle(&self) -> Result<Arc<Database>> {
+    /// A read-write handle on a version file owned by this store (returned as
+    /// `(version, db)`), creating the next version (with schema) when none is
+    /// open yet. Multi-set loads and the delta path reuse the open handle.
+    ///
+    /// Deliberately does NOT flip `CURRENT`: the new version is empty and
+    /// RW-locked, so pointing readers at it mid-build would break them and a
+    /// failed load would leave `CURRENT` on a partial graph. Callers flip
+    /// after their build step succeeds (`bulk_load_observed` post-checkpoint,
+    /// `ensure_schema` after creating the empty schema). Same-store reads
+    /// don't need the flip — `read_handle` short-circuits to the writable
+    /// handle.
+    pub(crate) async fn write_handle(&self) -> Result<(String, Arc<Database>)> {
         let mut state = self.state.lock().await;
         if let Some(h) = state.as_ref() {
             if h.writable {
-                return Ok(h.db.clone());
+                return Ok((h.version.clone(), h.db.clone()));
             }
             // A read handle is open — drop it; we're becoming the writer.
             *state = None;
@@ -179,16 +199,12 @@ impl LadybugStore {
                 .map_err(|e| GraphStoreError::Backend(format!("ladybug connection: {e}")))?;
             schema::apply_schema(&conn)?;
         }
-        // Point CURRENT at the version being built so reads on this key (same
-        // store or a later reader) see the load result without a publish —
-        // `bulk_load` alone must leave the graph queryable (contract suite).
-        self.flip_current(&version)?;
         *state = Some(OpenHandle {
-            version,
+            version: version.clone(),
             db: db.clone(),
             writable: true,
         });
-        Ok(db)
+        Ok((version, db))
     }
 
     /// Next `v<N>` under this key (existing versions + 1; `v1` for a fresh
@@ -220,9 +236,16 @@ impl LadybugStore {
     }
 
     fn flip_current_in(dir: &Path, version: &str) -> Result<()> {
+        // Unique per process AND per call: two stores in one process flipping
+        // the same key dir must not clobber each other's temp file.
+        static FLIP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::fs::create_dir_all(dir)
             .map_err(|e| GraphStoreError::Backend(format!("create {}: {e}", dir.display())))?;
-        let tmp = dir.join(format!("CURRENT.tmp-{}", std::process::id()));
+        let tmp = dir.join(format!(
+            "CURRENT.tmp-{}-{}",
+            std::process::id(),
+            FLIP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::write(&tmp, format!("{version}\n"))
             .map_err(|e| GraphStoreError::Backend(format!("write {}: {e}", tmp.display())))?;
         std::fs::rename(&tmp, dir.join("CURRENT"))
@@ -346,8 +369,17 @@ impl LadybugStore {
                 Some((n, name))
             })
             .collect();
-        versions.sort_unstable_by_key(|(n, _)| std::cmp::Reverse(*n));
-        // Keep the current version and the next-newest one (grace for readers).
+        // Keep the current version and the most RECENTLY MODIFIED other one
+        // (grace for readers) — recency by mtime, not version number, so a
+        // stale higher-numbered orphan can't shadow the real previous version.
+        versions.sort_unstable_by_key(|(_, name)| {
+            std::cmp::Reverse(
+                dir.join(name)
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+        });
         let keep: Vec<&str> = std::iter::once(current.as_str())
             .chain(
                 versions

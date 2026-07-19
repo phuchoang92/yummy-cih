@@ -23,16 +23,10 @@ pub const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
 #[doc(hidden)]
 pub const DEFAULT_GRAPH_KEY: &str = "cih";
 
-/// Default DB url for a backend when `--falkor-url`/`FALKOR_URL` is not set:
-/// Falkor gets the redis URL; the embedded ladybug backend gets a directory
-/// under the user's CIH home.
+/// Default DB url for a backend when `--falkor-url`/`FALKOR_URL` is not set.
+/// Single source of truth lives in the factory crate (shared with the server).
 pub fn default_db_url(backend: &str) -> String {
-    match backend {
-        "ladybug" => std::env::var("HOME")
-            .map(|h| format!("{h}/.cih/ladybug"))
-            .unwrap_or_else(|_| ".cih-ladybug".to_string()),
-        _ => DEFAULT_FALKOR_URL.to_string(),
-    }
+    cih_store_factory::default_url(backend)
 }
 
 /// Resolve the Postgres URL: an explicit flag value wins, else `$CIH_PG_URL`.

@@ -457,6 +457,8 @@ publish = atomic file rename + pointer flip (satisfies the publish port
 guarantee structurally), readers reopen transparently when `CURRENT` moves,
 and old versions are GC'd after a grace window. Single-writer/multi-reader
 file locking means engine (writer) and server (reader) coexist because writers
-only ever touch brand-new version files. POSIX-only; macOS builds need
-Homebrew `openssl@3` (auto-detected by `build.rs`, or set `OPENSSL_LIB_DIR`).
+only ever touch brand-new version files. POSIX-only; building the crate (a
+workspace member, so every `cargo build`/`test --workspace`) compiles the
+native `lbug` dep — needs a C++ toolchain + cmake, and on macOS Homebrew
+`openssl@3` (auto-detected by `build.rs`, or set `OPENSSL_LIB_DIR`).
 Its contract run is hermetic — no external DB, runs in `cargo test --workspace`.

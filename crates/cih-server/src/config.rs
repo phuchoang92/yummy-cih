@@ -70,13 +70,11 @@ impl std::fmt::Debug for Config {
 impl Config {
     pub fn from_env() -> Self {
         let backend = env("CIH_GRAPH_BACKEND", "falkor");
-        let default_url = match backend.as_str() {
-            // Embedded backend: the "url" is a filesystem root.
-            "ladybug" => std::env::var("HOME")
-                .map(|h| format!("{h}/.cih/ladybug"))
-                .unwrap_or_else(|_| ".cih-ladybug".to_string()),
-            _ => "redis://127.0.0.1:6379".to_string(),
-        };
+        // Shared default (factory crate): redis://…:6380 for falkor — the
+        // documented local port (Homebrew redis squats 6379) — or the
+        // ~/.cih/ladybug filesystem root for the embedded backend. Deployments
+        // set FALKOR_URL explicitly, so this only affects bare local runs.
+        let default_url = cih_store_factory::default_url(&backend);
         Self {
             backend,
             bind: env("CIH_BIND", "127.0.0.1:8080"),

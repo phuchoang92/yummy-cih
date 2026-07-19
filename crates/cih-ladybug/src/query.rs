@@ -166,19 +166,29 @@ impl GraphStore for LadybugStore {
         if self.read_current().is_some() {
             return Ok(());
         }
-        // Create the first version with the full DDL, then release the RW
-        // lock so other processes can read. Losing an ensure_schema race is
-        // fine as long as someone created the graph.
+        // Create the first version with the full DDL, flip CURRENT (schema
+        // creation is the one build step whose "loaded" state is just the
+        // empty schema), then release the RW lock so other processes can read.
         match self.write_handle().await {
-            Ok(_) => {
+            Ok((version, _db)) => {
                 self.close_handle().await?;
+                self.flip_current(&version)?;
                 Ok(())
             }
-            Err(e) if self.read_current().is_some() => {
-                tracing::debug!(error = %e, "lost ensure_schema race; graph exists");
-                Ok(())
+            Err(e) => {
+                // Two processes can race to create the same first version;
+                // the loser's RW open fails on the winner's lock — possibly
+                // BEFORE the winner has flipped CURRENT. Give the winner a
+                // moment to finish before treating the error as real.
+                for _ in 0..5 {
+                    if self.read_current().is_some() {
+                        tracing::debug!(error = %e, "lost ensure_schema race; graph exists");
+                        return Ok(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e)
             }
-            Err(e) => Err(e),
         }
     }
 
@@ -191,17 +201,31 @@ impl GraphStore for LadybugStore {
         artifacts: &GraphArtifacts,
         obs: &dyn LoadObserver,
     ) -> Result<LoadStats> {
-        let db = self.write_handle().await?;
-        let version = self
-            .read_current()
-            .ok_or_else(|| GraphStoreError::Backend("no current version after open".into()))?;
-        let version_dir = self.key_dir().join(version);
+        let (version, db) = self.write_handle().await?;
+        let version_path = self.key_dir().join(&version);
         // The lbug API is synchronous and the observer is a borrow — run the
-        // load inline. Engine loads run on a current-thread runtime where
+        // load inline. Both callers are CLI flows (engine analyze/discover
+        // and `artifact bootstrap`) on a current-thread runtime where
         // blocking is expected; the server never bulk-loads in-process.
         let conn = Connection::new(&db)
             .map_err(|e| GraphStoreError::Backend(format!("ladybug connection: {e}")))?;
-        crate::bulk::load_observed(&conn, &version_dir, artifacts, obs)
+        let result = crate::bulk::load_observed(&conn, &version_path, artifacts, obs);
+        drop(conn);
+        match result {
+            Ok(stats) => {
+                // Only now — data loaded and checkpointed — make this version
+                // the live one.
+                self.flip_current(&version)?;
+                Ok(stats)
+            }
+            Err(e) => {
+                // Discard the half-built version so this store's own reads
+                // fall back to CURRENT (the previous good version) instead of
+                // short-circuiting onto the partial build.
+                self.discard_handle().await;
+                Err(e)
+            }
+        }
     }
 
     async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()> {
@@ -214,7 +238,7 @@ impl GraphStore for LadybugStore {
         if !writable {
             self.begin_cow_version().await?;
         }
-        let db = self.write_handle().await?;
+        let (_version, db) = self.write_handle().await?;
         let mut files: Vec<&String> = delta.changed_files.iter().collect();
         files.extend(delta.removed_files.iter());
         let file_list = format!(

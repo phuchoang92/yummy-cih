@@ -893,14 +893,13 @@ impl GraphStore for FalkorStore {
 
     async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>> {
         let id_lit = cstr(id.as_str());
-        // Direct TESTS edges to this symbol, plus TESTS edges to its owner class.
+        // Direct TESTS edges to this symbol, plus TESTS edges to its owner
+        // class. Pattern predicate, not `EXISTS { MATCH … }` — FalkorDB
+        // rejects the braced-subquery form (contract-tested).
         let q = format!(
             "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
              WHERE target.id = {id_lit} \
-                OR EXISTS {{ \
-                      MATCH (owner:Symbol)-[:HAS_METHOD]->(target2:Symbol) \
-                      WHERE target2.id = {id_lit} AND owner.id = target.id \
-                   }} \
+                OR (target)-[:HAS_METHOD]->(:Symbol {{id: {id_lit}}}) \
              RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
              ORDER BY t.file, t.name \
              LIMIT 50"
@@ -966,12 +965,17 @@ impl GraphStore for FalkorStore {
     async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>> {
         let lim = limit.clamp(1, 500);
         let prefix_lit = cstr(file_prefix);
+        // Two fixes over the original (both contract-tested): pattern
+        // predicate instead of the rejected `EXISTS { MATCH … }` form, and
+        // explicit NULL handling — `NOT n.stereotype = 'test'` is three-valued
+        // NULL for nodes without a stereotype, which silently excluded every
+        // unannotated symbol (i.e. almost all of them).
         let q = format!(
             "MATCH (n:Symbol) \
              WHERE n.file STARTS WITH {prefix_lit} \
                AND n.kind IN ['Method', 'Class', 'Interface'] \
-               AND NOT n.stereotype = 'test' \
-               AND NOT EXISTS {{ MATCH (:Symbol)-[:TESTS]->(n) }} \
+               AND (n.stereotype IS NULL OR n.stereotype <> 'test') \
+               AND NOT (:Symbol)-[:TESTS]->(n) \
              RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
              ORDER BY n.file, n.name \
              LIMIT {lim}"

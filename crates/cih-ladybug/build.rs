@@ -10,11 +10,18 @@ fn main() {
         return;
     }
     #[cfg(target_os = "macos")]
-    for prefix in ["/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"] {
-        let lib = std::path::Path::new(prefix).join("lib");
-        if lib.exists() {
-            println!("cargo:rustc-link-search=native={}", lib.display());
-            return;
+    {
+        for prefix in ["/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"] {
+            let lib = std::path::Path::new(prefix).join("lib");
+            if lib.exists() {
+                println!("cargo:rustc-link-search=native={}", lib.display());
+                return;
+            }
         }
+        println!(
+            "cargo:warning=cih-ladybug: no OpenSSL found (lbug links -lssl). \
+             Install Homebrew openssl@3 or set OPENSSL_LIB_DIR, or the final \
+             link will fail with 'library ssl not found'."
+        );
     }
 }

@@ -140,8 +140,13 @@ fn copy_load(
         return Ok(LoadStats { nodes: 0, edges: 0 });
     }
 
-    // Edge pass: partition into one CSV per kind; skip dangling endpoints.
+    // Edge pass: partition into one CSV per kind; skip dangling endpoints and
+    // duplicates. Kùzu rel tables are multigraphs, so without the dedup a
+    // repeated artifact edge would double-count here while the Falkor
+    // GRAPH.BULK path (cih-falkor/src/bulk.rs) and our own MERGE fallback
+    // both collapse it — parity requires the same (src, dst, kind) identity.
     let mut writers: HashMap<&'static str, csv::Writer<std::fs::File>> = HashMap::new();
+    let mut seen_edges: HashSet<(String, String, cih_core::EdgeKind)> = HashSet::new();
     let mut total_edges = 0u64;
     let stream = artifacts
         .stream_edges()
@@ -149,6 +154,13 @@ fn copy_load(
     for edge in stream {
         let edge = edge.map_err(|e| io_err("read edges.jsonl", e))?;
         if !ids.contains(edge.src.as_str()) || !ids.contains(edge.dst.as_str()) {
+            continue;
+        }
+        if !seen_edges.insert((
+            edge.src.as_str().to_string(),
+            edge.dst.as_str().to_string(),
+            edge.kind,
+        )) {
             continue;
         }
         let label = edge.kind.cypher_label();
@@ -179,9 +191,11 @@ fn copy_load(
     }
 
     // COPY node table, then each rel table present in the artifacts.
+    // parallel=false: the parallel CSV reader rejects quoted newlines, which
+    // real node names/props can contain (contract-tested).
     let copy = |table: &str, file: &Path| -> Result<()> {
         let q = format!(
-            "COPY {table} FROM {} (header=true)",
+            "COPY {table} FROM {} (header=true, parallel=false)",
             cstr(&file.to_string_lossy())
         );
         conn.query(&q)

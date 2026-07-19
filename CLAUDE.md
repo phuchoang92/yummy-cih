@@ -92,13 +92,22 @@ library crates: `cih-engine` (CLI — the `scan → parse → resolve → load �
 → embed → wiki` pipeline, writes `.cih/` artifacts; clap surface + all command
 implementations live in `crates/cih-engine/src/cmd/`, per-command settings
 resolution in `settings.rs`) and `cih-server` (the MCP server, streamable HTTP via
-rmcp 0.7; tools in `crates/cih-server/src/app.rs`). The graph store trait is
-`cih-graph-store` with the `cih-falkor` adapter.
+rmcp 0.7; tools in `crates/cih-server/src/app.rs`). The graph store is pluggable:
+the `cih-graph-store` port, constructed only through `cih-store-factory`
+(`--backend` / `CIH_GRAPH_BACKEND`, default `falkor`), with two adapters —
+`cih-falkor` (FalkorDB) and `cih-ladybug` (embedded LadybugDB, opt-in
+`--features ladybug`). New backends follow the checklist in
+`docs/ARCHITECTURE.md` and must pass `cih_graph_store::contract` (the
+backend-neutral suite; ladybug runs it hermetically, falkor via
+`cargo test -p cih-falkor --test falkor_integration -- --ignored`).
 
 **Build/test.** `cargo build`, `cargo test --workspace`. Workspace tests are hermetic
-— no FalkorDB/Postgres needed (integration paths use artifact fixtures). Local services
-when you do need them: FalkorDB on **6380** (Homebrew redis squats 6379), Postgres on
-5433 → `FALKOR_URL=redis://127.0.0.1:6380`.
+— no FalkorDB/Postgres needed (integration paths use artifact fixtures; the ladybug
+contract runs against the embedded DB). Building the workspace compiles `lbug`
+(cih-ladybug's native Kùzu-fork dep): needs a C++ toolchain + cmake, and on macOS
+Homebrew `openssl@3` (auto-detected by cih-ladybug's build.rs, or set
+`OPENSSL_LIB_DIR`). Local services when you do need them: FalkorDB on **6380**
+(Homebrew redis squats 6379), Postgres on 5433 → `FALKOR_URL=redis://127.0.0.1:6380`.
 
 **Lint gate** (`.github/workflows/ci.yml`). Blocking: `cargo clippy --workspace
 --all-targets -- -D warnings` plus `cargo test --workspace` — keep the whole tree
