@@ -9,6 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::blocking::{blocking_timeout, run_blocking};
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct QueryArgs {
     /// Natural language or symbol keyword query.
@@ -109,12 +111,15 @@ impl SearchState {
         // Read + build off the async runtime: on a large repo (~87k nodes) this is
         // CPU-heavy and would otherwise stall a tokio worker thread. No cache lock
         // is held across the blocking call (only the single-flight gate).
-        let index = tokio::task::spawn_blocking(move || -> Result<Arc<SearchIndex>> {
-            let nodes = artifacts.read_nodes()?;
-            Ok(Arc::new(SearchIndex::build(&nodes)))
-        })
-        .await
-        .map_err(|e| anyhow!("bm25 index build task failed: {e}"))??;
+        let index = run_blocking(
+            blocking_timeout(),
+            "bm25 index build",
+            move || -> Result<Arc<SearchIndex>> {
+                let nodes = artifacts.read_nodes()?;
+                Ok(Arc::new(SearchIndex::build(&nodes)))
+            },
+        )
+        .await??;
         let mut guard = self.bm25.write().await;
         *guard = Some(CachedIndex {
             index: index.clone(),

@@ -1,6 +1,7 @@
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{GrepFilesArgs, ReadFileArgs};
+use crate::blocking::{blocking_timeout, run_blocking};
 use crate::symbol::find_repo_path;
 use crate::utils::json_result;
 
@@ -180,10 +181,10 @@ pub async fn grep_files(graph_key: &str, args: GrepFilesArgs) -> Result<CallTool
     // The walk is synchronous filesystem I/O over the whole repo — keep it off
     // the async workers.
     let root = std::path::PathBuf::from(&repo_root);
-    let (matches, truncated) =
-        tokio::task::spawn_blocking(move || grep_dir(&root, &regex, glob.as_ref(), limit))
-            .await
-            .map_err(|e| McpError::internal_error(format!("grep task failed: {e}"), None))?;
+    let (matches, truncated) = run_blocking(blocking_timeout(), "grep", move || {
+        grep_dir(&root, &regex, glob.as_ref(), limit)
+    })
+    .await?;
 
     json_result(&serde_json::json!({
         "pattern": args.pattern,

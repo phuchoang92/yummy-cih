@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::args::{GetWikiPageArgs, SearchWikiArgs};
+use crate::blocking::{blocking_timeout, run_blocking};
 use crate::utils::{json_result, resolve_repo, text_result};
 
 pub const DEFAULT_LIMIT: usize = 20;
@@ -447,9 +448,11 @@ impl WikiSearchState {
         let Some(owned) = self.resident_for(repo).await? else {
             return Ok(None);
         };
-        let index = tokio::task::spawn_blocking(move || LiveWikiIndex::build(&owned))
-            .await
-            .map_err(|e| WikiError::Internal(format!("live search build task failed: {e}")))?;
+        let index = run_blocking(blocking_timeout(), "wiki live index build", move || {
+            LiveWikiIndex::build(&owned)
+        })
+        .await
+        .map_err(|e| WikiError::Internal(e.to_string()))?;
         let index = Arc::new(index);
         self.live_search_cache.write().await.insert(
             repo_path,
@@ -486,11 +489,11 @@ impl WikiSearchState {
             .and_then(|n| n.to_str())
             .unwrap_or("repo")
             .to_string();
-        let owned = tokio::task::spawn_blocking(move || {
+        let owned = run_blocking(blocking_timeout(), "wiki resident load", move || {
             cih_wiki::OwnedWiki::load_package_mode(&load_repo, name)
         })
         .await
-        .map_err(|e| WikiError::Internal(format!("resident load task failed: {e}")))?
+        .map_err(|e| WikiError::Internal(e.to_string()))?
         .map_err(|e| WikiError::Internal(format!("failed to load resident wiki: {e}")))?;
         let owned = Arc::new(owned);
         self.render_cache.write().await.insert(
@@ -542,7 +545,12 @@ impl WikiSearchState {
             return Ok(hit);
         }
         let dir = wiki_dir.to_path_buf();
-        let loaded = Arc::new(tokio::task::spawn_blocking(move || load_wiki_index(&dir)).await??);
+        let loaded = Arc::new(
+            run_blocking(blocking_timeout(), "wiki index load", move || {
+                load_wiki_index(&dir)
+            })
+            .await??,
+        );
         self.cache
             .write()
             .await
@@ -694,9 +702,10 @@ pub(crate) async fn get_wiki_page(
         .map_err(wiki_err_to_mcp)?
     {
         let slug = args.slug.clone();
-        let rendered = tokio::task::spawn_blocking(move || owned.render_slug(&slug))
-            .await
-            .map_err(|e| McpError::internal_error(format!("render task failed: {e}"), None))?;
+        let rendered = run_blocking(blocking_timeout(), "wiki render", move || {
+            owned.render_slug(&slug)
+        })
+        .await?;
         if let Some(page) = rendered {
             return text_result(page.content);
         }

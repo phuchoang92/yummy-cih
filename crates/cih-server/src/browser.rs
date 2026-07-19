@@ -20,6 +20,7 @@ use cih_graph_store::{Direction, FlowHop, GraphStore, GraphStoreError, GraphSumm
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::blocking::{blocking_timeout, run_blocking};
 use crate::layout;
 use crate::search::{self, QueryResult, SearchState};
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
@@ -153,9 +154,11 @@ async fn graph_overview(
         .graph_overview(max_nodes, max_edges, kinds.as_deref())
         .await
         .map_err(BrowserError::from_store)?;
-    let positioned = tokio::task::spawn_blocking(move || layout::compute(overview))
-        .await
-        .map_err(|err| BrowserError::internal(format!("layout worker failed: {err}")))?;
+    let positioned = run_blocking(blocking_timeout(), "graph layout", move || {
+        layout::compute(overview)
+    })
+    .await
+    .map_err(|err| BrowserError::internal(err.to_string()))?;
     Ok(Json(positioned))
 }
 
