@@ -140,49 +140,7 @@ fn walk(
             walk_lexical_declaration(node, src, builder, class_fqn, controller_prefix, enclosing_fn)
         }
         "class_declaration" | "abstract_class_declaration" => {
-            let Some(name_node) = node.child_by_field_name("name") else {
-                return;
-            };
-            let class_name = text(name_node, src);
-            if class_name.is_empty() {
-                return;
-            }
-            let decorators = collect_sibling_decorators(node, src);
-            // Find @Controller prefix if present
-            let ctrl_prefix = decorators
-                .iter()
-                .find(|(n, _)| n == "Controller")
-                .and_then(|(_, path)| path.clone())
-                .unwrap_or_default();
-
-            let stereotype = builder.class_stereotype(node, src, &decorators);
-            let fqn = builder.emit_class(node, src, &class_name, stereotype.as_deref());
-            let class_id = type_id(NodeKind::Class, &fqn);
-            builder.emit_heritage(node, src, &fqn, &class_id);
-            builder.emit_class_fields(node, src, &fqn, &class_id);
-
-            // TypeORM / sequelize-typescript entity: `@Entity('t')` / `@Table('t')`
-            // → DbTable (arg overrides the class name).
-            if let Some((_, arg)) = decorators
-                .iter()
-                .find(|(n, _)| n == "Entity" || n == "Table")
-            {
-                let table = arg.clone().unwrap_or_else(|| class_name.clone());
-                builder.emit_db_table(&table, &builder.rel.clone(), range_of(node));
-            }
-
-            // Constructor DI: provider classes wire in their injected dependencies.
-            if is_di_provider(stereotype.as_deref()) {
-                builder.emit_constructor_di_refs(node, src, &fqn);
-            }
-
-            // Walk body
-            if let Some(body) = node.child_by_field_name("body") {
-                let mut cursor = body.walk();
-                for child in body.named_children(&mut cursor) {
-                    walk(child, src, builder, Some(&fqn), Some(&ctrl_prefix), None);
-                }
-            }
+            walk_class_declaration(node, src, builder)
         }
         "interface_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
@@ -225,44 +183,113 @@ fn walk(
                 walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
             }
         }
-        "assignment_expression" => {
-            // CommonJS export-assignment defs: `exports.foo = async () => …` /
-            // `module.exports.foo = function () {…}` → a module-level Function node
-            // named `foo`, so `require('./m').foo` / `x.foo()` have a callee to
-            // resolve against. Attribute the body's calls to the new function.
-            let emitted = if class_fqn.is_none() {
-                try_emit_exports_function(node, src, builder)
-            } else {
-                None
-            };
-            if let Some(fn_id) = emitted {
-                // Body comes off the *unwrapped* function — `right` may be the
-                // wrapper call (`catchAsync(fn)`), which has no `body` field, and
-                // missing that would drop every call inside the handler.
-                if let Some(body) = node
-                    .child_by_field_name("right")
-                    .and_then(callable_value)
-                    .and_then(|f| f.child_by_field_name("body"))
-                {
-                    walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
-                }
-            } else {
-                // Not a function export — it may be a barrel re-export
-                // (`module.exports.svc = require('./svc')`).
-                if class_fqn.is_none() {
-                    try_emit_exports_reexport(node, src, builder);
-                }
-                let mut cursor = node.walk();
-                for child in node.named_children(&mut cursor) {
-                    walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
-                }
-            }
-        }
+        "assignment_expression" => walk_assignment_expression(
+            node,
+            src,
+            builder,
+            class_fqn,
+            controller_prefix,
+            enclosing_fn,
+        ),
         _ => {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
             }
+        }
+    }
+}
+
+/// `class_declaration` / `abstract_class_declaration` arm of [`walk`]: emit the
+/// class node (+ heritage, fields, `@Entity`/`@Table` DbTable, constructor DI),
+/// then walk the body under the class's fqn and `@Controller` prefix.
+fn walk_class_declaration(node: TsNode<'_>, src: &str, builder: &mut Builder) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let class_name = text(name_node, src);
+    if class_name.is_empty() {
+        return;
+    }
+    let decorators = collect_sibling_decorators(node, src);
+    // Find @Controller prefix if present
+    let ctrl_prefix = decorators
+        .iter()
+        .find(|(n, _)| n == "Controller")
+        .and_then(|(_, path)| path.clone())
+        .unwrap_or_default();
+
+    let stereotype = builder.class_stereotype(node, src, &decorators);
+    let fqn = builder.emit_class(node, src, &class_name, stereotype.as_deref());
+    let class_id = type_id(NodeKind::Class, &fqn);
+    builder.emit_heritage(node, src, &fqn, &class_id);
+    builder.emit_class_fields(node, src, &fqn, &class_id);
+
+    // TypeORM / sequelize-typescript entity: `@Entity('t')` / `@Table('t')`
+    // → DbTable (arg overrides the class name).
+    if let Some((_, arg)) = decorators
+        .iter()
+        .find(|(n, _)| n == "Entity" || n == "Table")
+    {
+        let table = arg.clone().unwrap_or_else(|| class_name.clone());
+        builder.emit_db_table(&table, &builder.rel.clone(), range_of(node));
+    }
+
+    // Constructor DI: provider classes wire in their injected dependencies.
+    if is_di_provider(stereotype.as_deref()) {
+        builder.emit_constructor_di_refs(node, src, &fqn);
+    }
+
+    // Walk body
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            walk(child, src, builder, Some(&fqn), Some(&ctrl_prefix), None);
+        }
+    }
+}
+
+/// `assignment_expression` arm of [`walk`]: CommonJS export-assignment defs
+/// (`exports.foo = () => …` / `module.exports.foo = function …`) become a
+/// module-level Function; barrel re-exports (`module.exports.svc = require(...)`)
+/// are recorded; otherwise recurse into children.
+fn walk_assignment_expression(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    class_fqn: Option<&str>,
+    controller_prefix: Option<&str>,
+    enclosing_fn: Option<&NodeId>,
+) {
+    // CommonJS export-assignment defs: `exports.foo = async () => …` /
+    // `module.exports.foo = function () {…}` → a module-level Function node
+    // named `foo`, so `require('./m').foo` / `x.foo()` have a callee to
+    // resolve against. Attribute the body's calls to the new function.
+    let emitted = if class_fqn.is_none() {
+        try_emit_exports_function(node, src, builder)
+    } else {
+        None
+    };
+    if let Some(fn_id) = emitted {
+        // Body comes off the *unwrapped* function — `right` may be the
+        // wrapper call (`catchAsync(fn)`), which has no `body` field, and
+        // missing that would drop every call inside the handler.
+        if let Some(body) = node
+            .child_by_field_name("right")
+            .and_then(callable_value)
+            .and_then(|f| f.child_by_field_name("body"))
+        {
+            walk(body, src, builder, class_fqn, controller_prefix, Some(&fn_id));
+        }
+    } else {
+        // Not a function export — it may be a barrel re-export
+        // (`module.exports.svc = require('./svc')`).
+        if class_fqn.is_none() {
+            try_emit_exports_reexport(node, src, builder);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            walk(child, src, builder, class_fqn, controller_prefix, enclosing_fn);
         }
     }
 }

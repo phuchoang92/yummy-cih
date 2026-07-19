@@ -91,28 +91,23 @@ pub struct ProcessOutput {
     pub edges: Vec<Edge>,
 }
 
-pub fn detect_communities(
-    nodes: &[Node],
+/// Per-community enrichment lookups built once from the edge list, before the
+/// per-community loop: which routes a handler serves, which queries a method
+/// runs, which tables a query reads/writes, and which topics a member
+/// publishes/consumes (with the topic kind). Borrows nodes via `source_by_id`.
+struct EnrichmentIndex<'a> {
+    route_nodes_by_handler: FxHashMap<NodeId, Vec<&'a Node>>,
+    queries_by_method: FxHashMap<NodeId, Vec<NodeId>>,
+    read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>>,
+    write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>>,
+    publishes_by_member: FxHashMap<NodeId, Vec<(&'a Node, &'static str)>>,
+    consumes_by_member: FxHashMap<NodeId, Vec<(&'a Node, &'static str)>>,
+}
+
+fn build_enrichment_index<'a>(
     edges: &[Edge],
-    cfg: &CommunityConfig,
-) -> CommunityOutput {
-    let large = graph::symbol_node_count(nodes) > cfg.large_graph_threshold;
-    let (community_graph, _) =
-        graph::build_community_graph(nodes, edges, large, cfg.min_confidence_large);
-    if community_graph.node_count() == 0 {
-        return CommunityOutput::default();
-    }
-
-    let assignments = leiden::leiden(
-        &community_graph,
-        cfg.resolution,
-        cfg.max_iterations as usize,
-        cfg.seed as u64,
-    );
-
-    let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
-
-    // Edge lookups for community enrichment
+    source_by_id: &FxHashMap<&'a NodeId, &'a Node>,
+) -> EnrichmentIndex<'a> {
     let mut route_nodes_by_handler: FxHashMap<NodeId, Vec<&Node>> = FxHashMap::default();
     let mut queries_by_method: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
     let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
@@ -171,6 +166,45 @@ pub fn detect_communities(
             _ => {}
         }
     }
+    EnrichmentIndex {
+        route_nodes_by_handler,
+        queries_by_method,
+        read_tables_by_query,
+        write_tables_by_query,
+        publishes_by_member,
+        consumes_by_member,
+    }
+}
+
+pub fn detect_communities(
+    nodes: &[Node],
+    edges: &[Edge],
+    cfg: &CommunityConfig,
+) -> CommunityOutput {
+    let large = graph::symbol_node_count(nodes) > cfg.large_graph_threshold;
+    let (community_graph, _) =
+        graph::build_community_graph(nodes, edges, large, cfg.min_confidence_large);
+    if community_graph.node_count() == 0 {
+        return CommunityOutput::default();
+    }
+
+    let assignments = leiden::leiden(
+        &community_graph,
+        cfg.resolution,
+        cfg.max_iterations as usize,
+        cfg.seed as u64,
+    );
+
+    let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+
+    let EnrichmentIndex {
+        route_nodes_by_handler,
+        queries_by_method,
+        read_tables_by_query,
+        write_tables_by_query,
+        publishes_by_member,
+        consumes_by_member,
+    } = build_enrichment_index(edges, &source_by_id);
 
     let mut groups: BTreeMap<usize, Vec<NodeIndex>> = BTreeMap::new();
     for idx in community_graph.node_indices() {
