@@ -3,13 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmcp::{model::CallToolResult, ErrorData as McpError};
+use async_trait::async_trait;
 use tokio::sync::{watch, Mutex, Semaphore};
 
-use crate::args::IndexRepoArgs;
+use crate::app_error::AppError;
+use crate::application::indexing::{
+    IndexJobScheduler, IndexJobSnapshot, IndexJobSpec, IndexSchedulerReceipt, IndexTargetResolver,
+    ResolvedRepoTarget,
+};
 use crate::artifact_cache::ArtifactRepository;
+use crate::blocking::{blocking_timeout, run_blocking};
 use crate::jobs::{evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs};
-use crate::utils::json_result;
 
 /// Admission-controlled runner for `cih-engine analyze` jobs (S5): a global
 /// running-cap semaphore, a bounded admission queue, one active job per
@@ -32,6 +36,13 @@ pub struct IndexScheduler {
     job_timeout: Duration,
     output_cap: usize,
     artifacts: Arc<dyn ArtifactRepository>,
+    engine: IndexEngineConfig,
+}
+
+#[derive(Clone, Debug)]
+struct IndexEngineConfig {
+    backend: String,
+    falkor_url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,13 +53,7 @@ struct IndexCommandKey {
 }
 
 impl IndexCommandKey {
-    fn new(graph_key: String, languages: &str) -> Self {
-        let mut languages: Vec<String> = languages
-            .split(',')
-            .map(str::trim)
-            .filter(|language| !language.is_empty())
-            .map(str::to_string)
-            .collect();
+    fn new(graph_key: String, mut languages: Vec<String>) -> Self {
         languages.sort();
         languages.dedup();
         Self {
@@ -68,7 +73,12 @@ impl IndexScheduler {
     /// Limits from env: `CIH_INDEX_MAX_CONCURRENT` (default 1),
     /// `CIH_INDEX_QUEUE_CAPACITY` (default 16), `CIH_INDEX_TIMEOUT_SECS`
     /// (default 1800, 0 disables), `CIH_INDEX_OUTPUT_CAP_BYTES` (default 1 MiB).
-    pub(crate) fn new(jobs: Jobs, artifacts: Arc<dyn ArtifactRepository>) -> Self {
+    pub(crate) fn new(
+        jobs: Jobs,
+        artifacts: Arc<dyn ArtifactRepository>,
+        backend: String,
+        falkor_url: String,
+    ) -> Self {
         let usize_env = |name: &str, default: usize| {
             std::env::var(name)
                 .ok()
@@ -92,16 +102,21 @@ impl IndexScheduler {
             timeout,
             usize_env("CIH_INDEX_OUTPUT_CAP_BYTES", 1024 * 1024),
             artifacts,
+            IndexEngineConfig {
+                backend,
+                falkor_url,
+            },
         )
     }
 
-    pub(crate) fn with_limits(
+    fn with_limits(
         jobs: Jobs,
         max_concurrent: usize,
         queue_capacity: usize,
         job_timeout: Duration,
         output_cap: usize,
         artifacts: Arc<dyn ArtifactRepository>,
+        engine: IndexEngineConfig,
     ) -> Self {
         Self {
             jobs,
@@ -112,25 +127,30 @@ impl IndexScheduler {
             job_timeout,
             output_cap,
             artifacts,
+            engine,
         }
     }
 
     /// Signal cancellation for a queued or running job. The lifecycle task
     /// kills a running engine (`kill_on_drop`) and settles the job as
     /// `cancelled`; callers poll `index_status` for the final state.
-    pub async fn cancel(&self, job_id: &str) -> Result<(), String> {
+    async fn signal_cancel(&self, job_id: &str) -> Result<(), AppError> {
         if let Some(cancel) = self.cancels.lock().await.get(job_id) {
             let _ = cancel.send(true);
             return Ok(());
         }
         match self.jobs.read().await.get(job_id) {
-            Some(state) => Err(format!(
-                "job '{job_id}' already finished ({}) — nothing to cancel",
-                state.status_label()
-            )),
-            None => Err(format!(
-                "unknown job_id '{job_id}' — use index_repo to start a job"
-            )),
+            Some(state) => Err(AppError::InvalidInput {
+                field: "job_id",
+                message: format!(
+                    "job '{job_id}' already finished ({}) — nothing to cancel",
+                    state.status_label()
+                ),
+            }),
+            None => Err(AppError::NotFound {
+                entity: "index job",
+                key: job_id.to_string(),
+            }),
         }
     }
 
@@ -151,7 +171,7 @@ impl IndexScheduler {
     /// Register the job (state `queued`, cancel channel) and spawn its
     /// lifecycle: wait for a running slot → run the engine → settle a terminal
     /// state. The caller has already claimed the repo via [`admit`](Self::admit).
-    async fn submit(&self, job_id: String, canonical: PathBuf, cmd: tokio::process::Command) {
+    async fn spawn_job(&self, job_id: String, canonical: PathBuf, cmd: tokio::process::Command) {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         {
             let mut jobs = self.jobs.write().await;
@@ -308,42 +328,6 @@ enum Admission {
     Admitted,
 }
 
-/// Receipt for a submitted (or coalesced) index job.
-pub struct JobReceipt {
-    pub job_id: String,
-    pub repo: String,
-    /// True when the repo already had an active job and no new one was started.
-    pub deduped: bool,
-}
-
-pub async fn index_repo(
-    backend: &str,
-    falkor_url: &str,
-    scheduler: &IndexScheduler,
-    args: IndexRepoArgs,
-) -> Result<CallToolResult, McpError> {
-    let receipt = start_index_job(
-        backend,
-        falkor_url,
-        &args.graph_key,
-        scheduler,
-        &args.repo_path,
-        &args.languages,
-    )
-    .await?;
-    let job_id = &receipt.job_id;
-    json_result(&serde_json::json!({
-        "job_id": job_id,
-        "status": if receipt.deduped { "already_active" } else { "queued" },
-        "repo": receipt.repo,
-        "message": if receipt.deduped {
-            format!("This repo already has an active index job. Poll index_status(job_id=\"{job_id}\").")
-        } else {
-            format!("Indexing queued. Poll with index_status(job_id=\"{job_id}\").")
-        },
-    }))
-}
-
 /// Resolve the graph key an index job for `canonical` must target: a
 /// registered path always uses its own registry key, an unregistered path
 /// requires an explicit new key, and a key owned by a different repo is
@@ -391,86 +375,132 @@ fn resolve_target_graph_key(
     }
 }
 
-/// Validate `repo_path`, resolve the target graph key (see
-/// [`resolve_target_graph_key`]), and submit a `cih-engine analyze` job to the
-/// scheduler. Shared by the `index_repo` tool and `add_resolve_pattern`'s
-/// reindex. `requested_graph_key` is the caller's explicit key ("" = resolve
-/// from the registry).
-pub async fn start_index_job(
-    backend: &str,
-    falkor_url: &str,
-    requested_graph_key: &str,
-    scheduler: &IndexScheduler,
+#[derive(Clone, Default)]
+pub(crate) struct RegistryIndexTargetResolver;
+
+fn resolve_index_target(
     repo_path: &str,
-    languages: &str,
-) -> Result<JobReceipt, McpError> {
+    requested_graph_key: &str,
+) -> Result<ResolvedRepoTarget, AppError> {
     let repo = Path::new(repo_path);
     if !repo.is_dir() {
-        return Err(McpError::invalid_params(
-            format!("'{repo_path}' does not exist or is not a directory"),
-            None,
-        ));
+        return Err(AppError::InvalidInput {
+            field: "repo_path",
+            message: format!("'{repo_path}' does not exist or is not a directory"),
+        });
     }
-    let canonical = repo.canonicalize().map_err(|e| {
-        McpError::invalid_params(format!("cannot canonicalize repo_path: {e}"), None)
-    })?;
-    let repo_str = canonical.display().to_string();
-    // Fresh (non-cached) registry read: indexing is rare and a just-finished
-    // job may have added the entry this resolution depends on.
+    let canonical = repo
+        .canonicalize()
+        .map_err(|error| AppError::InvalidInput {
+            field: "repo_path",
+            message: format!("cannot canonicalize repository path: {error}"),
+        })?;
+    // Fresh registry read: a just-finished index job may have added the entry
+    // this resolution depends on.
     let graph_key =
         resolve_target_graph_key(&cih_core::Registry::load(), &canonical, requested_graph_key)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-    let command_key = IndexCommandKey::new(graph_key.clone(), languages);
-
-    let job_id = new_job_id();
-    match scheduler.admit(&canonical, &job_id, &command_key).await {
-        Admission::Duplicate(existing) => {
-            return Ok(JobReceipt {
-                job_id: existing,
-                repo: repo_str,
-                deduped: true,
-            });
-        }
-        Admission::Conflict { existing } => {
-            return Err(McpError::invalid_params(
-                format!(
-                    "repo already has a different active index job '{existing}'; \
-                     wait for it to finish or cancel it before changing graph_key/languages"
-                ),
-                None,
-            ));
-        }
-        Admission::QueueFull { active, capacity } => {
-            return Err(McpError::internal_error(
-                format!(
-                    "index queue full ({active} active jobs, capacity {capacity}) — \
-                     retry after a job finishes (poll index_status)"
-                ),
-                None,
-            ));
-        }
-        Admission::Admitted => {}
-    }
-
-    let mut cmd = tokio::process::Command::new(find_engine_binary());
-    cmd.arg("analyze")
-        .arg(canonical.display().to_string())
-        .arg("--all")
-        .env("CIH_GRAPH_BACKEND", backend)
-        .env("FALKOR_URL", falkor_url)
-        .env("CIH_GRAPH_KEY", &graph_key)
-        .env("NO_COLOR", "1")
-        .env("RUST_LOG", "warn,cih_engine=info");
-    for language in &command_key.languages {
-        cmd.arg("--language").arg(language);
-    }
-    scheduler.submit(job_id.clone(), canonical, cmd).await;
-
-    Ok(JobReceipt {
-        job_id,
-        repo: repo_str,
-        deduped: false,
+            .map_err(|message| AppError::InvalidInput {
+                field: "graph_key",
+                message,
+            })?;
+    Ok(ResolvedRepoTarget {
+        canonical_path: canonical,
+        graph_key,
     })
+}
+
+#[async_trait]
+impl IndexTargetResolver for RegistryIndexTargetResolver {
+    async fn resolve(
+        &self,
+        repo_path: &str,
+        requested_graph_key: &str,
+    ) -> Result<ResolvedRepoTarget, AppError> {
+        let repo_path = repo_path.to_string();
+        let requested_graph_key = requested_graph_key.to_string();
+        run_blocking(blocking_timeout(), "index target resolution", move || {
+            resolve_index_target(&repo_path, &requested_graph_key)
+        })
+        .await
+        .map_err(|error| AppError::Unavailable {
+            dependency: "index target resolver",
+            message: error.to_string(),
+            retryable: true,
+        })?
+    }
+}
+
+#[async_trait]
+impl IndexJobScheduler for IndexScheduler {
+    async fn submit(&self, spec: IndexJobSpec) -> Result<IndexSchedulerReceipt, AppError> {
+        let canonical = spec.target.canonical_path;
+        let command_key = IndexCommandKey::new(spec.target.graph_key, spec.languages);
+        let job_id = new_job_id();
+        match self.admit(&canonical, &job_id, &command_key).await {
+            Admission::Duplicate(existing) => {
+                return Ok(IndexSchedulerReceipt {
+                    job_id: existing,
+                    deduplicated: true,
+                });
+            }
+            Admission::Conflict { existing } => {
+                return Err(AppError::InvalidInput {
+                    field: "repo_path",
+                    message: format!(
+                        "repo already has a different active index job '{existing}'; \
+                         wait for it to finish or cancel it before changing graph_key/languages"
+                    ),
+                });
+            }
+            Admission::QueueFull { active, capacity } => {
+                return Err(AppError::Unavailable {
+                    dependency: "index queue",
+                    message: format!(
+                        "queue full ({active} active jobs, capacity {capacity}); \
+                         retry after a job finishes"
+                    ),
+                    retryable: true,
+                });
+            }
+            Admission::Admitted => {}
+        }
+
+        let mut command = tokio::process::Command::new(find_engine_binary());
+        command
+            .arg("analyze")
+            .arg(canonical.display().to_string())
+            .arg("--all")
+            .env("CIH_GRAPH_BACKEND", &self.engine.backend)
+            .env("FALKOR_URL", &self.engine.falkor_url)
+            .env("CIH_GRAPH_KEY", &command_key.graph_key)
+            .env("NO_COLOR", "1")
+            .env("RUST_LOG", "warn,cih_engine=info");
+        for language in &command_key.languages {
+            command.arg("--language").arg(language);
+        }
+        self.spawn_job(job_id.clone(), canonical, command).await;
+
+        Ok(IndexSchedulerReceipt {
+            job_id,
+            deduplicated: false,
+        })
+    }
+
+    async fn status(&self, job_id: &str) -> Result<IndexJobSnapshot, AppError> {
+        self.jobs
+            .read()
+            .await
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound {
+                entity: "index job",
+                key: job_id.to_string(),
+            })
+    }
+
+    async fn cancel(&self, job_id: &str) -> Result<(), AppError> {
+        self.signal_cancel(job_id).await
+    }
 }
 
 /// Resolves when the job's cancel signal fires; pends forever if the sender
@@ -603,10 +633,22 @@ mod tests {
             Duration::from_secs(60),
             64 * 1024,
             Arc::new(crate::artifact_cache::ArtifactCache::default()),
+            IndexEngineConfig {
+                backend: "memory".into(),
+                falkor_url: String::new(),
+            },
         )
     }
 
     fn command(languages: &str) -> IndexCommandKey {
+        let mut languages: Vec<String> = languages
+            .split(',')
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+            .map(str::to_string)
+            .collect();
+        languages.sort();
+        languages.dedup();
         IndexCommandKey::new("graph".into(), languages)
     }
 
@@ -847,10 +889,10 @@ mod tests {
         ));
         let start = std::time::Instant::now();
         sched
-            .submit("job-r".into(), repo.to_path_buf(), sleeper_cmd(30))
+            .spawn_job("job-r".into(), repo.to_path_buf(), sleeper_cmd(30))
             .await;
         wait_for(&sched, "job-r", |s| matches!(s, JobState::Running { .. })).await;
-        sched.cancel("job-r").await.unwrap();
+        sched.signal_cancel("job-r").await.unwrap();
         wait_for(&sched, "job-r", |s| matches!(s, JobState::Cancelled { .. })).await;
         assert!(
             start.elapsed() < Duration::from_secs(10),
@@ -877,10 +919,10 @@ mod tests {
             Admission::Admitted
         ));
         sched
-            .submit("job-q".into(), repo.to_path_buf(), sleeper_cmd(30))
+            .spawn_job("job-q".into(), repo.to_path_buf(), sleeper_cmd(30))
             .await;
         wait_for(&sched, "job-q", |s| matches!(s, JobState::Queued { .. })).await;
-        sched.cancel("job-q").await.unwrap();
+        sched.signal_cancel("job-q").await.unwrap();
         wait_for(&sched, "job-q", |s| matches!(s, JobState::Cancelled { .. })).await;
         assert!(sched.active.lock().await.is_empty());
     }
@@ -888,8 +930,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_unknown_or_finished_job_errors() {
         let sched = test_scheduler(1, 4);
-        let err = sched.cancel("nope").await.unwrap_err();
-        assert!(err.contains("unknown job_id"), "{err}");
+        let err = sched.signal_cancel("nope").await.unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
 
         // A finished job can't be cancelled — the error names its state.
         let repo = Path::new("/tmp/cancel-done");
@@ -900,11 +942,11 @@ mod tests {
         let mut quick = tokio::process::Command::new("sh");
         quick.arg("-c").arg("true");
         sched
-            .submit("job-d".into(), repo.to_path_buf(), quick)
+            .spawn_job("job-d".into(), repo.to_path_buf(), quick)
             .await;
         wait_for(&sched, "job-d", |s| matches!(s, JobState::Done { .. })).await;
-        let err = sched.cancel("job-d").await.unwrap_err();
-        assert!(err.contains("already finished (done)"), "{err}");
+        let err = sched.signal_cancel("job-d").await.unwrap_err();
+        assert!(err.to_string().contains("already finished (done)"), "{err}");
     }
 
     #[tokio::test]
@@ -938,6 +980,10 @@ mod tests {
             Duration::from_secs(5),
             1024,
             artifacts.clone(),
+            IndexEngineConfig {
+                backend: "memory".into(),
+                falkor_url: String::new(),
+            },
         );
         let canonical = dir.path().canonicalize().unwrap();
         assert!(matches!(
@@ -949,7 +995,7 @@ mod tests {
         let mut quick = tokio::process::Command::new("sh");
         quick.arg("-c").arg("true");
         sched
-            .submit("job-invalidate".into(), canonical, quick)
+            .spawn_job("job-invalidate".into(), canonical, quick)
             .await;
         wait_for(&sched, "job-invalidate", |state| {
             matches!(state, JobState::Done { .. })

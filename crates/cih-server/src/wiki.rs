@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use async_trait::async_trait;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -25,6 +26,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::app_error::AppError;
+use crate::application::architecture_overview::{
+    OverviewWikiListing, OverviewWikiPage, OverviewWikiRepository,
+};
 use crate::args::{GetWikiPageArgs, SearchWikiArgs};
 use crate::blocking::{blocking_timeout, run_blocking};
 use crate::repo_context::{RepoContextProvider, RepoSelector, ResolvedRepo};
@@ -914,48 +918,66 @@ pub(crate) async fn search_wiki(
     }))
 }
 
-/// Wiki page listing for `architecture_overview`'s `wiki_pages` pointers:
-/// page metadata plus the provenance clock the overview surfaces (D4 —
-/// `wiki-live` is version-aligned by construction, so only the bundle carries
-/// `graph_version`/`generated_at`).
-pub(crate) struct WikiListing {
-    pub(crate) pages: Vec<PageMeta>,
-    pub(crate) page_count: usize,
-    pub(crate) source: &'static str,
-    pub(crate) graph_version: Option<String>,
-    pub(crate) generated_at: Option<String>,
+#[derive(Clone)]
+pub(crate) struct WikiOverviewRepository {
+    state: WikiSearchState,
 }
 
-/// List a repo's wiki pages — live index first, on-disk bundle as fallback,
-/// mirroring the `search_wiki`/`get_wiki_page` resolution order. `Ok(None)`
-/// when the repo has neither (the overview degrades the section explicitly).
-pub(crate) async fn list_pages(
-    state: &WikiSearchState,
-    repo: &ResolvedRepo,
-) -> Result<Option<WikiListing>, McpError> {
-    match state.live_index_for(repo).await {
-        Ok(Some(live)) => {
-            return Ok(Some(WikiListing {
-                pages: live.pages.clone(),
-                page_count: live.page_count(),
-                source: "wiki-live",
-                graph_version: None,
-                generated_at: None,
-            }))
-        }
-        Ok(None) => {}
-        Err(e) => return Err(wiki_err_to_mcp(e)),
+impl WikiOverviewRepository {
+    pub(crate) fn new(state: WikiSearchState) -> Self {
+        Self { state }
     }
-    match state.index_for(repo).await {
-        Ok(index) => Ok(Some(WikiListing {
-            pages: index.pages.clone(),
-            page_count: index.page_count(),
-            source: "wiki-bundle",
-            graph_version: Some(index.graph_version.clone()),
-            generated_at: Some(index.generated_at.clone()),
-        })),
-        Err(WikiError::NotFound(_)) => Ok(None),
-        Err(e) => Err(wiki_err_to_mcp(e)),
+}
+
+fn overview_page(page: &PageMeta) -> OverviewWikiPage {
+    OverviewWikiPage {
+        slug: page.slug.clone(),
+        title: page.title.clone(),
+        kind: page.kind.clone(),
+    }
+}
+
+fn overview_wiki_error(error: WikiError) -> AppError {
+    let message = match error {
+        WikiError::NotFound(message) | WikiError::Internal(message) => message,
+    };
+    AppError::Unavailable {
+        dependency: "wiki repository",
+        message,
+        retryable: false,
+    }
+}
+
+#[async_trait]
+impl OverviewWikiRepository for WikiOverviewRepository {
+    async fn list_pages(
+        &self,
+        repo: &ResolvedRepo,
+    ) -> Result<Option<OverviewWikiListing>, AppError> {
+        match self.state.live_index_for(repo).await {
+            Ok(Some(live)) => {
+                return Ok(Some(OverviewWikiListing {
+                    pages: live.pages.iter().map(overview_page).collect(),
+                    page_count: live.page_count(),
+                    source: "wiki-live",
+                    graph_version: None,
+                    generated_at: None,
+                }));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(overview_wiki_error(error)),
+        }
+        match self.state.index_for(repo).await {
+            Ok(index) => Ok(Some(OverviewWikiListing {
+                pages: index.pages.iter().map(overview_page).collect(),
+                page_count: index.page_count(),
+                source: "wiki-bundle",
+                graph_version: Some(index.graph_version.clone()),
+                generated_at: Some(index.generated_at.clone()),
+            })),
+            Err(WikiError::NotFound(_)) => Ok(None),
+            Err(error) => Err(overview_wiki_error(error)),
+        }
     }
 }
 

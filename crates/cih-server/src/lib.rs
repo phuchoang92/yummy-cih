@@ -28,7 +28,6 @@ pub(crate) mod indexing;
 pub(crate) mod jobs;
 pub(crate) mod layout;
 pub(crate) mod mtime_cache;
-pub(crate) mod overview;
 pub(crate) mod repo_context;
 pub(crate) mod resources;
 pub(crate) mod server;

@@ -5,11 +5,14 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
 use super::CihServer;
+use crate::application::indexing::{
+    CancelIndexCommand, IndexRepositoryCommand, IndexStatusCommand,
+};
 use crate::args::{
     AddResolvePatternArgs, IndexCancelArgs, IndexRepoArgs, IndexStatusArgs, ListResolvePatternsArgs,
 };
-use crate::utils::json_result;
-use crate::{indexing, patterns};
+use crate::patterns;
+use crate::utils::{app_error_to_mcp, json_result};
 
 #[tool_router(router = admin_router, vis = "pub(crate)")]
 impl CihServer {
@@ -26,7 +29,15 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<IndexRepoArgs>,
     ) -> Result<CallToolResult, McpError> {
-        indexing::index_repo(&self.backend, &self.falkor_url, &self.indexer, args).await
+        let command =
+            IndexRepositoryCommand::try_new(args.repo_path, args.languages, args.graph_key)
+                .map_err(app_error_to_mcp)?;
+        let output = self
+            .indexing_service
+            .start(command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 
     #[tool(
@@ -38,17 +49,13 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<IndexStatusArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let jobs = self.jobs.read().await;
-        match jobs.get(&args.job_id) {
-            Some(state) => json_result(state),
-            None => Err(McpError::invalid_params(
-                format!(
-                    "unknown job_id '{}' — use index_repo to start a job",
-                    args.job_id
-                ),
-                None,
-            )),
-        }
+        let command = IndexStatusCommand::try_new(args.job_id).map_err(app_error_to_mcp)?;
+        let output = self
+            .indexing_service
+            .status(command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 
     #[tool(
@@ -61,18 +68,13 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<IndexCancelArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.indexer
-            .cancel(&args.job_id)
+        let command = CancelIndexCommand::try_new(args.job_id).map_err(app_error_to_mcp)?;
+        let output = self
+            .indexing_service
+            .cancel(command)
             .await
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        json_result(&serde_json::json!({
-            "job_id": args.job_id,
-            "status": "cancelling",
-            "message": format!(
-                "Cancellation signalled. Poll index_status(job_id=\"{}\") for the final state.",
-                args.job_id
-            ),
-        }))
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 
     #[tool(
@@ -91,14 +93,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<AddResolvePatternArgs>,
     ) -> Result<CallToolResult, McpError> {
-        patterns::add_resolve_pattern(
-            &self.backend,
-            &self.falkor_url,
-            &self.graph_key,
-            &self.indexer,
-            args,
-        )
-        .await
+        patterns::add_resolve_pattern(&self.graph_key, &self.indexing_service, args).await
     }
 
     #[tool(

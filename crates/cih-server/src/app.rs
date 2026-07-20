@@ -30,13 +30,14 @@ use rmcp::{
     tool, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
 
+use crate::application::architecture_overview::ArchitectureOverviewService;
 use crate::application::change_detection::{
     ChangeDetectionService, ChangeScope, DetectChangesCommand,
 };
 use crate::application::contracts::ContractService;
+use crate::application::indexing::IndexingService;
 use crate::application::taint::TaintService;
 use crate::args::*;
-use crate::jobs::Jobs;
 use crate::repo_context::{
     DefaultRepoContextProvider, RepoCatalogSnapshot, RepoContext, RepoContextProvider,
     RepoSelector, ResolvedRepo,
@@ -68,19 +69,15 @@ pub(crate) struct CihServer {
     graph_key: String,
     /// Home group (`CIH_GROUP`): when set, `list_repos` scopes to its members.
     group: Option<String>,
-    /// Graph backend used by administrative child-process commands.
-    backend: String,
-    falkor_url: String,
     /// Central repository identity + graph/search infrastructure provider.
     repo_contexts: Arc<dyn RepoContextProvider>,
-    jobs: Jobs,
-    /// Admission-controlled runner for `cih-engine analyze` jobs (shares `jobs`).
-    indexer: indexing::IndexScheduler,
     read_file_limits: files::ReadFileLimits,
     wiki: wiki::WikiSearchState,
     /// Typed application services used by the MCP adapters.
+    architecture_overview_service: ArchitectureOverviewService,
     change_detection_service: ChangeDetectionService,
     contract_service: ContractService,
+    indexing_service: IndexingService,
     taint_service: TaintService,
     tool_router: ToolRouter<CihServer>,
 }
@@ -118,29 +115,40 @@ impl CihServer {
                 embed_store,
                 search_cache,
             ));
-        let jobs: Jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let artifacts: Arc<dyn artifact_cache::ArtifactRepository> =
             Arc::new(artifact_cache::ArtifactCache::new());
-        let indexer = indexing::IndexScheduler::new(jobs.clone(), artifacts.clone());
+        let index_scheduler = Arc::new(indexing::IndexScheduler::new(
+            jobs,
+            artifacts.clone(),
+            backend,
+            falkor_url,
+        ));
+        let indexing_service = IndexingService::new(
+            Arc::new(indexing::RegistryIndexTargetResolver),
+            index_scheduler,
+        );
         let xflow = xflow::XflowState::new(artifacts.clone());
         let contract_service =
             ContractService::new(repo_contexts.clone(), xflow, artifacts.clone());
         let taint_service = TaintService::new(artifacts);
         let change_detection_service = ChangeDetectionService::new();
+        let architecture_overview_service = ArchitectureOverviewService::new(
+            repo_contexts.clone(),
+            Arc::new(wiki::WikiOverviewRepository::new(wiki.clone())),
+        );
         Self {
             store,
             search,
             graph_key,
             group,
-            backend,
-            falkor_url,
             repo_contexts,
-            jobs,
-            indexer,
             read_file_limits,
             wiki,
+            architecture_overview_service,
             change_detection_service,
             contract_service,
+            indexing_service,
             taint_service,
             tool_router: Self::tool_router()
                 + Self::files_router()
@@ -776,7 +784,7 @@ mod tests {
         // Every tool an architecture_overview `next` hint can emit must be a
         // real route — a hint that drifts from the tool surface teaches clients
         // hallucinated calls.
-        for tool in crate::overview::HINT_TOOLS {
+        for tool in crate::application::architecture_overview::HINT_TOOLS {
             assert!(
                 router.has_route(tool),
                 "overview next-hint references unregistered tool: {tool}"

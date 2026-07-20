@@ -1,15 +1,15 @@
 //! `architecture_overview` MCP tool — one-call orientation for an indexed repo.
-//! Composition lives in `crate::overview` (free functions over `&dyn GraphStore`
-//! plus artifact paths, for hermetic testing); this router is the thin MCP shim.
+//! The typed application service owns orchestration; this router only maps the
+//! wire request and translates the application result back to MCP.
 //! Design record: `docs/plans/architecture-overview-tool.md`.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
 use super::CihServer;
+use crate::application::architecture_overview::ArchitectureOverviewCommand;
 use crate::args::ArchitectureOverviewArgs;
-use crate::overview;
-use crate::utils::json_result;
+use crate::utils::{app_error_to_mcp, json_result};
 
 #[tool_router(router = overview_router, vis = "pub(crate)")]
 impl CihServer {
@@ -33,23 +33,13 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ArchitectureOverviewArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let context = self.resolve(&args.repo).await?;
-        let entry = &context.repo.registry_entry;
-        let catalog = self.catalog_snapshot();
-        let reg = catalog.registry();
-        let registry_stale = reg.is_stale(&entry.name);
-        let groups = overview::group_sections(&entry.name, reg, catalog.groups());
-        let wiki = crate::wiki::list_pages(&self.wiki, &context.repo).await?;
-        let response = overview::compose(overview::ComposeCtx {
-            store: context.store.as_ref(),
-            entry,
-            registry_stale,
-            groups,
-            wiki,
-            sections: args.sections,
-            limit: args.limit,
-        })
-        .await?;
+        let command = ArchitectureOverviewCommand::try_new(args.repo, args.sections, args.limit)
+            .map_err(app_error_to_mcp)?;
+        let response = self
+            .architecture_overview_service
+            .execute(command)
+            .await
+            .map_err(app_error_to_mcp)?;
         json_result(&response)
     }
 }

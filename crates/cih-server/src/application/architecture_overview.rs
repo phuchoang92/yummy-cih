@@ -1,4 +1,4 @@
-//! `architecture_overview` — one-call orientation composed live over existing
+//! Typed `architecture_overview` application service composed live over existing
 //! `GraphStore` port methods plus labeled artifact reads (entrypoints sidecar,
 //! wiki index, registry). Design record: `docs/plans/architecture-overview-tool.md`
 //! (D1–D6). No new port methods, no precomputed artifact: the motivating bug was
@@ -12,8 +12,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
-use rmcp::ErrorData as McpError;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use cih_core::RegistryEntry;
@@ -22,12 +23,12 @@ use cih_graph_store::{
     KindCount, Result as StoreResult, RouteInfo,
 };
 
-use crate::utils::to_mcp;
-use crate::wiki::WikiListing;
+use crate::app_error::AppError;
+use crate::repo_context::{RepoContextProvider, RepoSelector, ResolvedRepo};
 
 /// Hard response-size backstop. Approximate by design: a small margin is
 /// reserved so the drop warning itself cannot push the response back over.
-pub(crate) const MAX_RESPONSE_BYTES: usize = 32 * 1024;
+const MAX_RESPONSE_BYTES: usize = 32 * 1024;
 const BACKSTOP_MARGIN_BYTES: usize = 512;
 
 /// `limit` is a plain max-items-per-list, clamped to this (D5 — not a multiplier).
@@ -49,14 +50,14 @@ const MAX_ROUTE_FETCH: usize = 20_000;
 // wanted-section checks, and `OverviewResponse::drop_section` all reference
 // these consts, and `section_wiring_is_consistent` +
 // `every_drop_order_entry_actually_drops` pin the wiring when a section is added.
-pub(crate) const SECTION_STATS: &str = "stats";
-pub(crate) const SECTION_MODULES: &str = "modules";
-pub(crate) const SECTION_ROUTE_GROUPS: &str = "route_groups";
-pub(crate) const SECTION_ENTRYPOINTS: &str = "entrypoints";
-pub(crate) const SECTION_WIKI_PAGES: &str = "wiki_pages";
-pub(crate) const SECTION_HOTSPOTS: &str = "hotspots";
+const SECTION_STATS: &str = "stats";
+const SECTION_MODULES: &str = "modules";
+const SECTION_ROUTE_GROUPS: &str = "route_groups";
+const SECTION_ENTRYPOINTS: &str = "entrypoints";
+const SECTION_WIKI_PAGES: &str = "wiki_pages";
+const SECTION_HOTSPOTS: &str = "hotspots";
 
-pub(crate) const VALID_SECTIONS: &[&str] = &[
+const VALID_SECTIONS: &[&str] = &[
     SECTION_STATS,
     SECTION_MODULES,
     SECTION_ROUTE_GROUPS,
@@ -64,6 +65,92 @@ pub(crate) const VALID_SECTIONS: &[&str] = &[
     SECTION_WIKI_PAGES,
     SECTION_HOTSPOTS,
 ];
+
+#[derive(Clone, Debug)]
+pub(crate) struct ArchitectureOverviewCommand {
+    repo: RepoSelector,
+    sections: Vec<String>,
+    limit: usize,
+}
+
+impl ArchitectureOverviewCommand {
+    pub(crate) fn try_new(
+        repo: String,
+        sections: Vec<String>,
+        limit: usize,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            repo: RepoSelector::from_wire(&repo),
+            sections: validate_sections(&sections)?,
+            limit: limit.min(HARD_ITEM_CAP),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OverviewWikiPage {
+    pub(crate) slug: String,
+    pub(crate) title: String,
+    pub(crate) kind: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OverviewWikiListing {
+    pub(crate) pages: Vec<OverviewWikiPage>,
+    pub(crate) page_count: usize,
+    pub(crate) source: &'static str,
+    pub(crate) graph_version: Option<String>,
+    pub(crate) generated_at: Option<String>,
+}
+
+#[async_trait]
+pub(crate) trait OverviewWikiRepository: Send + Sync {
+    async fn list_pages(
+        &self,
+        repo: &ResolvedRepo,
+    ) -> Result<Option<OverviewWikiListing>, AppError>;
+}
+
+#[derive(Clone)]
+pub(crate) struct ArchitectureOverviewService {
+    repo_contexts: Arc<dyn RepoContextProvider>,
+    wiki: Arc<dyn OverviewWikiRepository>,
+}
+
+impl ArchitectureOverviewService {
+    pub(crate) fn new(
+        repo_contexts: Arc<dyn RepoContextProvider>,
+        wiki: Arc<dyn OverviewWikiRepository>,
+    ) -> Self {
+        Self {
+            repo_contexts,
+            wiki,
+        }
+    }
+
+    pub(crate) async fn execute(
+        &self,
+        command: ArchitectureOverviewCommand,
+    ) -> Result<OverviewResponse, AppError> {
+        let context = self.repo_contexts.resolve(command.repo).await?;
+        let entry = &context.repo.registry_entry;
+        let catalog = self.repo_contexts.catalog_snapshot();
+        let registry = catalog.registry();
+        let registry_stale = registry.is_stale(&entry.name);
+        let groups = group_sections(&entry.name, registry, catalog.groups());
+        let wiki = self.wiki.list_pages(&context.repo).await?;
+        compose(ComposeCtx {
+            store: context.store.as_ref(),
+            entry,
+            registry_stale,
+            groups,
+            wiki,
+            sections: command.sections,
+            limit: command.limit,
+        })
+        .await
+    }
+}
 /// `hotspots` is opt-in (product decision 2026-07-19): complexity data during
 /// orientation invites refactoring detours.
 const DEFAULT_SECTIONS: &[&str] = &[
@@ -165,14 +252,14 @@ impl<T: Serialize> Section<T> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct StatsBody {
+struct StatsBody {
     total_nodes: u64,
     total_edges: u64,
     kinds: Vec<KindCount>,
 }
 
 #[derive(Serialize)]
-pub(crate) struct ModulesBody {
+struct ModulesBody {
     /// Detected module clusters (graph communities) — not build modules.
     total: usize,
     truncated: bool,
@@ -193,7 +280,7 @@ struct ModuleEntry {
 }
 
 #[derive(Serialize)]
-pub(crate) struct RouteGroupsBody {
+struct RouteGroupsBody {
     total_routes: usize,
     total_groups: usize,
     truncated: bool,
@@ -212,7 +299,7 @@ struct RouteGroup {
 }
 
 #[derive(Serialize)]
-pub(crate) struct EntrypointsBody {
+struct EntrypointsBody {
     /// Top-degree structural symbols (runtime entry points and hubs — not `main()`).
     hubs: Vec<HubEntry>,
     /// Scheduled / event-listener methods from the discover sidecar.
@@ -228,7 +315,7 @@ struct HubEntry {
 }
 
 #[derive(Serialize)]
-pub(crate) struct ScheduledBody {
+struct ScheduledBody {
     total: usize,
     truncated: bool,
     items: Vec<EntrypointItem>,
@@ -243,7 +330,7 @@ struct EntrypointItem {
 }
 
 #[derive(Serialize)]
-pub(crate) struct WikiPagesBody {
+struct WikiPagesBody {
     page_count: usize,
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,7 +346,7 @@ struct WikiPageRef {
 }
 
 #[derive(Serialize)]
-pub(crate) struct HotspotsBody {
+struct HotspotsBody {
     /// True total is unknown (the query is limit-bounded); `truncated` says
     /// whether more exist beyond `items`.
     truncated: bool,
@@ -280,7 +367,7 @@ struct HotspotEntry {
 /// Thin group block (D6): membership + contract freshness + one-line member
 /// stats. Cross-repo structure stays in the dedicated tools (`next` points there).
 #[derive(Serialize)]
-pub(crate) struct GroupOut {
+struct GroupOut {
     pub(crate) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) contracts_synced_at: Option<String>,
@@ -293,7 +380,7 @@ pub(crate) struct GroupOut {
 /// One-line member stats, labeled `registry` at the section level. `repo` is
 /// the exact string accepted by every tool's `repo` argument.
 #[derive(Serialize)]
-pub(crate) struct GroupMemberOut {
+struct GroupMemberOut {
     pub(crate) repo: String,
     pub(crate) nodes: usize,
     pub(crate) edges: usize,
@@ -303,7 +390,7 @@ pub(crate) struct GroupMemberOut {
 }
 
 #[derive(Serialize)]
-pub(crate) struct GroupBody {
+struct GroupBody {
     groups: Vec<GroupOut>,
 }
 
@@ -377,14 +464,14 @@ impl OverviewResponse {
 /// than a private overview-only subtrait. A narrowed duplicate would add a
 /// second abstraction over the same backend boundary and diverge from every
 /// other tool; only the test fake pays for the wider interface.
-pub(crate) struct ComposeCtx<'a> {
-    pub store: &'a dyn GraphStore,
-    pub entry: &'a RegistryEntry,
-    pub registry_stale: bool,
-    pub groups: Vec<GroupOut>,
-    pub wiki: Option<WikiListing>,
-    pub sections: Vec<String>,
-    pub limit: usize,
+struct ComposeCtx<'a> {
+    store: &'a dyn GraphStore,
+    entry: &'a RegistryEntry,
+    registry_stale: bool,
+    groups: Vec<GroupOut>,
+    wiki: Option<OverviewWikiListing>,
+    sections: Vec<String>,
+    limit: usize,
 }
 
 /// Effective per-list cap: `limit == 0` means the section default (D5).
@@ -554,7 +641,7 @@ fn load_scheduled(
     )
 }
 
-fn build_wiki_pages(listing: &WikiListing, item_cap: usize) -> Section<WikiPagesBody> {
+fn build_wiki_pages(listing: &OverviewWikiListing, item_cap: usize) -> Section<WikiPagesBody> {
     fn kind_priority(kind: &str) -> u8 {
         match kind {
             "index" => 0,
@@ -563,7 +650,7 @@ fn build_wiki_pages(listing: &WikiListing, item_cap: usize) -> Section<WikiPages
             _ => 3,
         }
     }
-    let mut pages: Vec<&crate::wiki::PageMeta> = listing.pages.iter().collect();
+    let mut pages: Vec<&OverviewWikiPage> = listing.pages.iter().collect();
     pages.sort_by(|a, b| {
         (kind_priority(&a.kind), a.slug.as_str()).cmp(&(kind_priority(&b.kind), b.slug.as_str()))
     });
@@ -593,7 +680,7 @@ fn build_wiki_pages(listing: &WikiListing, item_cap: usize) -> Section<WikiPages
 /// Assemble the group block from the registries — mirrors how `status` builds
 /// its group view (`groups_containing`, not just the server's `--group`), so a
 /// repo's group facts appear even when the server isn't group-fronted (D6).
-pub(crate) fn group_sections(
+fn group_sections(
     repo_name: &str,
     reg: &cih_core::Registry,
     groups: &cih_core::GroupRegistry,
@@ -642,20 +729,20 @@ pub(crate) fn group_sections(
         .collect()
 }
 
-fn validate_sections(sections: &[String]) -> Result<Vec<String>, McpError> {
+fn validate_sections(sections: &[String]) -> Result<Vec<String>, AppError> {
     if sections.is_empty() {
         return Ok(DEFAULT_SECTIONS.iter().map(|s| s.to_string()).collect());
     }
     for section in sections {
         if !VALID_SECTIONS.contains(&section.as_str()) {
-            return Err(McpError::invalid_params(
-                format!(
+            return Err(AppError::InvalidInput {
+                field: "sections",
+                message: format!(
                     "unknown section '{}'; valid sections: {}",
                     section,
                     VALID_SECTIONS.join(", ")
                 ),
-                None,
-            ));
+            });
         }
     }
     Ok(sections.to_vec())
@@ -892,14 +979,22 @@ fn build_route_section(
     }
 }
 
-pub(crate) async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, McpError> {
+async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     let selected = validate_sections(&ctx.sections)?;
     let want = |name: &str| selected.iter().any(|s| s == name);
     let entry = ctx.entry;
 
     // First store call: a backend error here means the store is down — hard
     // error (D5 taxonomy). Every later store error degrades per-section.
-    let mut summary = ctx.store.graph_summary().await.map_err(to_mcp)?;
+    let mut summary = ctx
+        .store
+        .graph_summary()
+        .await
+        .map_err(|error| AppError::Unavailable {
+            dependency: "graph store",
+            message: format!("architecture overview summary: {error}"),
+            retryable: true,
+        })?;
     summary
         .kinds
         .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
@@ -1078,7 +1173,11 @@ pub(crate) async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, Mcp
     loop {
         let size = serde_json::to_vec(&response)
             .map(|v| v.len())
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|error| AppError::Unavailable {
+                dependency: "response serialization",
+                message: error.to_string(),
+                retryable: false,
+            })?;
         if size + BACKSTOP_MARGIN_BYTES <= MAX_RESPONSE_BYTES {
             break;
         }
@@ -1100,6 +1199,7 @@ pub(crate) async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, Mcp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo_context::{RepoCatalogSnapshot, RepoContext};
     use async_trait::async_trait;
     use cih_core::{Node, NodeId, NodeKind, RegistryEntry, RegistryStats};
     use cih_graph_store::{
@@ -1122,6 +1222,40 @@ mod tests {
         hotspots: Vec<HotspotNode>,
         fail_summary: bool,
         fail_communities: bool,
+    }
+
+    struct FixedRepoContexts {
+        context: Arc<RepoContext>,
+        catalog: RepoCatalogSnapshot,
+    }
+
+    #[async_trait]
+    impl RepoContextProvider for FixedRepoContexts {
+        fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
+            self.catalog.clone()
+        }
+
+        fn resolve_repo(&self, _selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
+            Ok(self.context.repo.clone())
+        }
+
+        async fn resolve(&self, _selector: RepoSelector) -> Result<Arc<RepoContext>, AppError> {
+            Ok(self.context.clone())
+        }
+    }
+
+    struct FixedWiki {
+        listing: Option<OverviewWikiListing>,
+    }
+
+    #[async_trait]
+    impl OverviewWikiRepository for FixedWiki {
+        async fn list_pages(
+            &self,
+            _repo: &ResolvedRepo,
+        ) -> Result<Option<OverviewWikiListing>, AppError> {
+            Ok(self.listing.clone())
+        }
     }
 
     fn unimpl<T>() -> StoreResult<T> {
@@ -1405,6 +1539,53 @@ mod tests {
         serde_json::to_value(&resp).expect("serializable")
     }
 
+    #[tokio::test]
+    async fn service_resolves_repo_and_wiki_through_typed_ports() {
+        let registry_entry = entry("/nonexistent/demo", Some("/x"), 100);
+        let context = Arc::new(RepoContext {
+            repo: ResolvedRepo::from_entry(registry_entry.clone()),
+            store: Arc::new(populated_store()),
+            search: crate::search::SearchState::new(None, None),
+        });
+        let catalog = RepoCatalogSnapshot::for_test(
+            "demo".into(),
+            cih_core::Registry {
+                entries: vec![registry_entry],
+            },
+            cih_core::GroupRegistry::default(),
+        );
+        let service = ArchitectureOverviewService::new(
+            Arc::new(FixedRepoContexts { context, catalog }),
+            Arc::new(FixedWiki {
+                listing: Some(OverviewWikiListing {
+                    pages: vec![OverviewWikiPage {
+                        slug: "index".into(),
+                        title: "Overview".into(),
+                        kind: "index".into(),
+                    }],
+                    page_count: 1,
+                    source: "test-wiki",
+                    graph_version: Some("v1".into()),
+                    generated_at: None,
+                }),
+            }),
+        );
+        let command = ArchitectureOverviewCommand::try_new(
+            String::new(),
+            vec!["stats".into(), "wiki_pages".into()],
+            5,
+        )
+        .unwrap();
+
+        let output = service.execute(command).await.unwrap();
+        let json = serde_json::to_value(output).unwrap();
+
+        assert_eq!(json["repo"], "demo");
+        assert_eq!(json["stats"]["available"], true);
+        assert_eq!(json["wiki_pages"]["source"], "test-wiki");
+        assert_eq!(json["wiki_pages"]["items"][0]["slug"], "index");
+    }
+
     #[test]
     fn section_wiring_is_consistent() {
         for &section in DEFAULT_SECTIONS {
@@ -1541,8 +1722,14 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("unknown section must be rejected"),
         };
-        assert!(err.message.contains("unknown section 'bogus'"));
-        assert!(err.message.contains("stats"));
+        match err {
+            AppError::InvalidInput { field, message } => {
+                assert_eq!(field, "sections");
+                assert!(message.contains("unknown section 'bogus'"));
+                assert!(message.contains("stats"));
+            }
+            other => panic!("expected invalid sections error, got {other}"),
+        }
     }
 
     #[tokio::test]
@@ -1728,16 +1915,13 @@ mod tests {
     async fn wiki_listing_produces_pointers_with_kind_priority() {
         let store = populated_store();
         let entry = entry("/nonexistent/demo", Some("/x"), 100);
-        let page = |slug: &str, kind: &str| crate::wiki::PageMeta {
+        let page = |slug: &str, kind: &str| OverviewWikiPage {
             slug: slug.into(),
-            role: "loan".into(),
             title: format!("T {slug}"),
             kind: kind.into(),
-            path: format!("{slug}.md"),
-            community_id: None,
         };
         let mut ctx = ctx_with(&store, &entry, vec!["wiki_pages".into()], 2);
-        ctx.wiki = Some(crate::wiki::WikiListing {
+        ctx.wiki = Some(OverviewWikiListing {
             pages: vec![
                 page("dev/loan", "dev"),
                 page("index", "index"),

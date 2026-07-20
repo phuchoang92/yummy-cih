@@ -2,57 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::Serialize;
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum JobState {
-    /// Admitted but waiting for a running slot (`CIH_INDEX_MAX_CONCURRENT`).
-    Queued {
-        queued_at_secs: u64,
-    },
-    Running {
-        started_at_secs: u64,
-    },
-    Done {
-        started_at_secs: u64,
-        finished_at_secs: u64,
-        output: String,
-        /// True when captured output hit the retention cap
-        /// (`CIH_INDEX_OUTPUT_CAP_BYTES`) and was truncated.
-        output_truncated: bool,
-    },
-    Failed {
-        started_at_secs: u64,
-        finished_at_secs: u64,
-        error: String,
-    },
-    /// The engine exceeded `CIH_INDEX_TIMEOUT_SECS` and was killed.
-    TimedOut {
-        started_at_secs: u64,
-        finished_at_secs: u64,
-        timeout_secs: u64,
-    },
-    /// Cancelled via `index_cancel` (a running engine was killed).
-    Cancelled {
-        cancelled_at_secs: u64,
-    },
-}
-
-impl JobState {
-    /// The wire value of the serde `status` tag (kept in sync with the
-    /// `rename_all = "snake_case"` derive above).
-    pub fn status_label(&self) -> &'static str {
-        match self {
-            JobState::Queued { .. } => "queued",
-            JobState::Running { .. } => "running",
-            JobState::Done { .. } => "done",
-            JobState::Failed { .. } => "failed",
-            JobState::TimedOut { .. } => "timed_out",
-            JobState::Cancelled { .. } => "cancelled",
-        }
-    }
-}
+pub(crate) use crate::application::indexing::IndexJobSnapshot as JobState;
 
 pub type Jobs = Arc<tokio::sync::RwLock<HashMap<String, JobState>>>;
 

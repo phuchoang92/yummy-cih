@@ -1535,8 +1535,10 @@ Implementation progress (2026-07-20):
   mapping in the existing tool adapters;
 - [x] add direct application tests, stable JSON-shape tests, and MCP dispatch
   regression coverage for the migrated slice;
-- [ ] migrate `architecture_overview` and indexing behind the same service
-  boundary;
+- [x] migrate `architecture_overview` behind a typed application service and
+  wiki repository port;
+- [x] migrate indexing start/status/cancel behind a typed application service,
+  target-resolver port, and job-scheduler port;
 - [ ] reorganize the tool adapters from `app/tools_*` to `transport::mcp`;
 - [ ] pass narrow application services to browser/HTTP routes.
 

@@ -7,8 +7,8 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use cih_patterns::{load_patterns, patterns_path, to_toml, RouteRule};
 
+use crate::application::indexing::{IndexRepositoryCommand, IndexingService};
 use crate::args::{AddResolvePatternArgs, ListResolvePatternsArgs};
-use crate::indexing;
 use crate::utils::json_result;
 
 /// Resolve a repo name/path (or the active graph key) to its filesystem root via the registry.
@@ -39,11 +39,9 @@ fn repo_root(repo: &str, graph_key: &str) -> Result<String, McpError> {
 }
 
 /// Add a resolve pattern to `<repo>/cih.patterns.toml`, de-duping, then optionally re-index.
-pub async fn add_resolve_pattern(
-    backend: &str,
-    falkor_url: &str,
+pub(crate) async fn add_resolve_pattern(
     graph_key: &str,
-    scheduler: &indexing::IndexScheduler,
+    indexing: &IndexingService,
     args: AddResolvePatternArgs,
 ) -> Result<CallToolResult, McpError> {
     if args.kind != "route" {
@@ -88,10 +86,12 @@ pub async fn add_resolve_pattern(
     // to that entry's own key (never the server's primary key).
     let mut job_id = None;
     if args.reindex {
-        if let Ok(receipt) =
-            indexing::start_index_job(backend, falkor_url, "", scheduler, &root, "").await
+        if let Ok(command) =
+            IndexRepositoryCommand::try_new(root.clone(), String::new(), String::new())
         {
-            job_id = Some(receipt.job_id);
+            if let Ok(receipt) = indexing.start(command).await {
+                job_id = Some(receipt.job_id().to_string());
+            }
         }
     }
 
@@ -109,7 +109,7 @@ pub async fn add_resolve_pattern(
 }
 
 /// Return the current resolve patterns for a repo.
-pub async fn list_resolve_patterns(
+pub(crate) async fn list_resolve_patterns(
     graph_key: &str,
     args: ListResolvePatternsArgs,
 ) -> Result<CallToolResult, McpError> {

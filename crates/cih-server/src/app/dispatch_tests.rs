@@ -214,6 +214,67 @@ async fn dispatch_detect_changes_validates_base_ref_before_repo_resolution() {
 }
 
 #[tokio::test]
+async fn dispatch_architecture_overview_validates_sections_before_repo_resolution() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "architecture_overview".into(),
+            arguments: Some(
+                serde_json::json!({ "sections": ["not-a-section"] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unknown overview sections must fail through MCP dispatch"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_indexing_commands_validate_typed_inputs() {
+    let client = serve_test_server().await;
+    for (name, arguments) in [
+        (
+            "index_repo",
+            serde_json::json!({ "repo_path": " " })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        (
+            "index_status",
+            serde_json::json!({ "job_id": " " })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        (
+            "index_cancel",
+            serde_json::json!({ "job_id": "" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    ] {
+        let result = client
+            .call_tool(CallToolRequestParam {
+                name: name.into(),
+                arguments: Some(arguments),
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "{name} must reject invalid input through MCP dispatch"
+        );
+    }
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn dispatch_list_repos_returns_success_envelope() {
     // `list_repos` only reads the registry (read-only); assert the success
     // envelope shape, independent of registry contents.

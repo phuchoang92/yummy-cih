@@ -88,6 +88,15 @@ impl RepoCatalogSnapshot {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        primary_graph_key: String,
+        registry: cih_core::Registry,
+        groups: cih_core::GroupRegistry,
+    ) -> Self {
+        Self::new(primary_graph_key, Arc::new(registry), Arc::new(groups))
+    }
+
     pub(crate) fn resolve(&self, selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
         resolve_entry(&self.registry, &selector, &self.primary_graph_key)
             .cloned()
