@@ -75,11 +75,9 @@ pub(crate) struct CihServer {
     indexer: indexing::IndexScheduler,
     read_file_limits: files::ReadFileLimits,
     wiki: wiki::WikiSearchState,
-    /// Cross-call artifact-graph cache for cross-repo tools (trace_flow_x,
-    /// api_impact caller walks).
+    /// Cross-repo graph views backed by the shared artifact snapshots below.
     xflow: xflow::XflowState,
-    /// Cross-call cache of raw parsed artifacts for taint_paths / shape_check,
-    /// which reload nodes.jsonl+edges.jsonl on every call.
+    /// Process-wide shared snapshots for xflow, taint, and shape checking.
     artifacts: artifact_cache::ArtifactCache,
     tool_router: ToolRouter<CihServer>,
 }
@@ -113,6 +111,8 @@ impl CihServer {
             ));
         let jobs: Jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let indexer = indexing::IndexScheduler::new(jobs.clone());
+        let artifacts = artifact_cache::ArtifactCache::new();
+        let xflow = xflow::XflowState::new(artifacts.clone());
         Self {
             store,
             search,
@@ -125,8 +125,8 @@ impl CihServer {
             indexer,
             read_file_limits,
             wiki,
-            xflow: xflow::XflowState::new(),
-            artifacts: artifact_cache::ArtifactCache::new(),
+            xflow,
+            artifacts,
             tool_router: Self::tool_router()
                 + Self::files_router()
                 + Self::crossrepo_router()

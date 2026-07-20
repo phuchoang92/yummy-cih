@@ -113,7 +113,7 @@ fn run_and_shape(
     refine: bool,
     limit: usize,
 ) -> Result<TaintPathsOut, McpError> {
-    let bundle = artifacts.bundle(artifacts_dir).map_err(|e| {
+    let snapshot = artifacts.snapshot_blocking(artifacts_dir).map_err(|e| {
         McpError::invalid_params(
             format!(
                 "cannot read graph artifacts at {artifacts_dir}: {e}. \
@@ -122,8 +122,8 @@ fn run_and_shape(
             None,
         )
     })?;
-    let nodes = &bundle.nodes;
-    let edges = &bundle.edges;
+    let nodes = snapshot.nodes.as_ref();
+    let edges = snapshot.edges.as_ref();
 
     let repo = std::path::Path::new(repo_path);
     let rules = cih_taint::load_taint_rules(repo);

@@ -203,7 +203,7 @@ fn consumer_callers(
         .as_deref()
         .ok_or_else(|| format!("consumer '{consumer_repo}' has no artifact directory"))?;
     let graph = xflow
-        .graph_for(&artifacts_dir.to_string_lossy())
+        .graph_for_blocking(&artifacts_dir.to_string_lossy())
         .map_err(|e| format!("consumer artifacts unreadable: {e}"))?;
 
     // Direct callers: ExternalCall edges into the endpoint node.
@@ -307,7 +307,7 @@ fn trace_flow_x_sync(
         )
     })?;
     let start_graph = xflow
-        .graph_for(&start_artifacts.to_string_lossy())
+        .graph_for_blocking(&start_artifacts.to_string_lossy())
         .map_err(|e| {
         McpError::invalid_params(
             format!(
@@ -362,7 +362,7 @@ fn trace_flow_x_sync(
         .collect();
     let mut source = |repo: &str| {
         let dir = artifacts_by_repo.get(repo)?;
-        xflow.graph_for(dir).ok()
+        xflow.graph_for_blocking(dir).ok()
     };
     let trace = xflow::trace_across(
         &mut source,
@@ -463,15 +463,15 @@ fn shape_check_sync(
             )
         })?;
 
-    let provider_bundle = artifacts
-        .bundle(&provider_artifacts.to_string_lossy())
+    let provider_snapshot = artifacts
+        .snapshot_blocking(&provider_artifacts.to_string_lossy())
         .map_err(|e| McpError::internal_error(format!("provider artifacts: {e}"), None))?;
-    let consumer_bundle = artifacts
-        .bundle(&consumer_artifacts.to_string_lossy())
+    let consumer_snapshot = artifacts
+        .snapshot_blocking(&consumer_artifacts.to_string_lossy())
         .map_err(|e| McpError::internal_error(format!("consumer artifacts: {e}"), None))?;
-    let provider_nodes = &provider_bundle.nodes;
-    let consumer_nodes = &consumer_bundle.nodes;
-    let consumer_edges = &consumer_bundle.edges;
+    let provider_nodes = provider_snapshot.nodes.as_ref();
+    let consumer_nodes = consumer_snapshot.nodes.as_ref();
+    let consumer_edges = consumer_snapshot.edges.as_ref();
 
     let provider_by_id: std::collections::BTreeMap<String, &cih_core::Node> = provider_nodes
         .iter()

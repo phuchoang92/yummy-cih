@@ -2,15 +2,14 @@
 //! value carries its own freshness token (an mtime, a version, ...); this cache
 //! adds **coalescing** (a burst of concurrent misses on the *same* key runs the
 //! expensive loader once instead of N times) and **bounded retention** (an
-//! entry cap with LRU eviction plus an idle TTL, so a long-lived multi-repo
-//! server can't grow memory monotonically — S4 of the design record). Distinct
-//! keys still load concurrently, and the value-read fast path never blocks on
-//! a load.
+//! entry cap with LRU eviction, an idle TTL, and a weight budget, so a
+//! long-lived multi-repo server can't grow memory monotonically — S4 of the
+//! design record). Distinct keys still load concurrently, and the value-read
+//! fast path never blocks on a load.
 //!
-//! Shared by [`crate::xflow::XflowState`] and
-//! [`crate::artifact_cache::ArtifactCache`], which previously each hand-rolled
-//! the same check-then-load logic — minus the coalescing, so a cold or
-//! just-reindexed key could stampede.
+//! This backs [`crate::artifact_cache::ArtifactCache`]. Xflow, taint, and shape
+//! checking all consume the same artifact snapshot instead of maintaining
+//! independent raw-graph caches.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +25,9 @@ pub(crate) struct CacheLimits {
     pub(crate) max_entries: usize,
     /// Entries untouched this long are evicted on the next load.
     pub(crate) idle_ttl: Duration,
+    /// Maximum estimated retained weight. Values larger than the budget are
+    /// served to the caller without being inserted.
+    pub(crate) max_weight_bytes: usize,
 }
 
 impl Default for CacheLimits {
@@ -33,6 +35,7 @@ impl Default for CacheLimits {
         Self {
             max_entries: usize::MAX,
             idle_ttl: Duration::MAX,
+            max_weight_bytes: usize::MAX,
         }
     }
 }
@@ -41,8 +44,8 @@ impl CacheLimits {
     /// Artifact-cache policy from env: `CIH_ARTIFACT_CACHE_MAX_ENTRIES`
     /// (unset/invalid/0 = 32 — the §12.4 suggested repo cap) and
     /// `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` (unset/invalid = 1800; 0 disables
-    /// the TTL). Shared by the two artifact-family caches; a byte-weighted
-    /// budget is deliberately deferred to the Milestone 3 re-pricing.
+    /// the TTL), and `CIH_ARTIFACT_CACHE_MAX_BYTES` (unset/invalid/0 =
+    /// 512 MiB, the §12.4 initial process budget).
     pub(crate) fn artifact_from_env() -> Self {
         let max_entries = std::env::var("CIH_ARTIFACT_CACHE_MAX_ENTRIES")
             .ok()
@@ -53,6 +56,11 @@ impl CacheLimits {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1800);
+        let max_weight_bytes = std::env::var("CIH_ARTIFACT_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(512 * 1024 * 1024);
         Self {
             max_entries,
             idle_ttl: if ttl_secs == 0 {
@@ -60,6 +68,7 @@ impl CacheLimits {
             } else {
                 Duration::from_secs(ttl_secs)
             },
+            max_weight_bytes,
         }
     }
 }
@@ -68,6 +77,7 @@ impl CacheLimits {
 /// bump recency under the read lock.
 struct Slot<V> {
     value: Arc<V>,
+    weight_bytes: usize,
     /// Strict LRU order: global access-sequence number at last touch.
     touched_seq: AtomicU64,
     /// Wall-clock milliseconds at last touch, for the idle TTL.
@@ -122,6 +132,7 @@ impl<V> MtimeCache<V> {
                 // A zero cap would evict the entry just inserted.
                 max_entries: limits.max_entries.max(1),
                 idle_ttl: limits.idle_ttl,
+                max_weight_bytes: limits.max_weight_bytes.max(1),
             },
         }
     }
@@ -131,11 +142,24 @@ impl<V> MtimeCache<V> {
     /// `is_fresh` is evaluated under the read lock; `load` runs with no cache
     /// lock held, serialized per key so concurrent misses coalesce. Each load
     /// also applies the retention policy (idle TTL, then LRU down to the cap).
+    #[cfg(test)]
     pub(crate) fn get_or_load(
         &self,
         key: &str,
         is_fresh: impl Fn(&V) -> bool,
         load: impl FnOnce() -> std::io::Result<V>,
+    ) -> std::io::Result<Arc<V>> {
+        self.get_or_load_weighted(key, is_fresh, load, |_| 0)
+    }
+
+    /// Weighted variant of [`get_or_load`](Self::get_or_load). `weight` is
+    /// evaluated once for a newly loaded value before retention.
+    pub(crate) fn get_or_load_weighted(
+        &self,
+        key: &str,
+        is_fresh: impl Fn(&V) -> bool,
+        load: impl FnOnce() -> std::io::Result<V>,
+        weight: impl FnOnce(&V) -> usize,
     ) -> std::io::Result<Arc<V>> {
         let key = PathBuf::from(key);
         if let Some(hit) = self.peek(&key, &is_fresh) {
@@ -149,7 +173,22 @@ impl<V> MtimeCache<V> {
             return Ok(hit);
         }
         let value = Arc::new(load()?);
+        let weight_bytes = weight(&value);
+        if weight_bytes > self.limits.max_weight_bytes {
+            // Do not insert then evict: an oversize newest entry would flush
+            // healthy older entries before strict LRU eventually removed it.
+            self.cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+            self.gates
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+            return Ok(value);
+        }
         let slot = Slot {
+            weight_bytes,
             value: value.clone(),
             touched_seq: AtomicU64::new(0),
             touched_at_ms: AtomicU64::new(0),
@@ -170,9 +209,8 @@ impl<V> MtimeCache<V> {
     }
 
     /// Apply the retention policy under the write lock: drop idle-TTL-expired
-    /// entries, then the least-recently-used until at most `max_entries`
-    /// remain. Returns the evicted keys so their gates can be dropped too.
-    /// The just-inserted entry has the newest recency, so it always survives.
+    /// entries, then the least-recently-used until the entry and weight limits
+    /// are met. Returns the evicted keys so their gates can be dropped too.
     fn evict_locked(&self, cache: &mut HashMap<PathBuf, Slot<V>>) -> Vec<PathBuf> {
         let mut evicted = Vec::new();
         if self.limits.idle_ttl != Duration::MAX {
@@ -188,7 +226,9 @@ impl<V> MtimeCache<V> {
                 cache.remove(key);
             }
         }
-        while cache.len() > self.limits.max_entries {
+        while cache.len() > self.limits.max_entries
+            || retained_weight(cache) > self.limits.max_weight_bytes
+        {
             let Some(oldest) = cache
                 .iter()
                 .min_by_key(|(_, slot)| slot.touched_seq.load(Ordering::Relaxed))
@@ -229,6 +269,12 @@ impl<V> MtimeCache<V> {
     fn gate_count(&self) -> usize {
         self.gates.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
+}
+
+fn retained_weight<V>(cache: &HashMap<PathBuf, Slot<V>>) -> usize {
+    cache.values().fold(0usize, |total, slot| {
+        total.saturating_add(slot.weight_bytes)
+    })
 }
 
 #[cfg(test)]
@@ -313,6 +359,7 @@ mod tests {
         let cache: MtimeCache<u32> = MtimeCache::with_limits(CacheLimits {
             max_entries: 2,
             idle_ttl: Duration::MAX,
+            max_weight_bytes: usize::MAX,
         });
         let load = |cache: &MtimeCache<u32>, key: &str| {
             cache.get_or_load(key, |_| true, || Ok(0u32)).unwrap();
@@ -349,11 +396,90 @@ mod tests {
         let cache: MtimeCache<u32> = MtimeCache::with_limits(CacheLimits {
             max_entries: usize::MAX,
             idle_ttl: Duration::from_millis(50),
+            max_weight_bytes: usize::MAX,
         });
         cache.get_or_load("old", |_| true, || Ok(0u32)).unwrap();
         thread::sleep(Duration::from_millis(120));
         cache.get_or_load("new", |_| true, || Ok(0u32)).unwrap();
         assert_eq!(cache.len(), 1, "idle entry must be evicted");
         assert_eq!(cache.gate_count(), 1);
+    }
+
+    #[test]
+    fn weight_budget_evicts_lru_and_does_not_retain_oversize_value() {
+        let cache: MtimeCache<u32> = MtimeCache::with_limits(CacheLimits {
+            max_entries: usize::MAX,
+            idle_ttl: Duration::MAX,
+            max_weight_bytes: 8,
+        });
+        let load = |key: &str, value: u32, weight: usize| {
+            cache
+                .get_or_load_weighted(key, |_| true, || Ok(value), |_| weight)
+                .unwrap()
+        };
+        load("a", 1, 4);
+        load("b", 2, 4);
+        cache.get_or_load("a", |_| true, || Ok(1)).unwrap();
+        load("c", 3, 4);
+        assert_eq!(cache.len(), 2);
+
+        let mut b_reloaded = false;
+        cache
+            .get_or_load_weighted(
+                "b",
+                |_| true,
+                || {
+                    b_reloaded = true;
+                    Ok(2)
+                },
+                |_| 4,
+            )
+            .unwrap();
+        assert!(
+            b_reloaded,
+            "least-recently-used weighted entry was retained"
+        );
+
+        let before = cache.len();
+        let before_gates = cache.gate_count();
+        let oversize = load("oversize", 9, 9);
+        assert_eq!(*oversize, 9);
+        assert_eq!(
+            cache.len(),
+            before,
+            "oversize load must not evict retained values"
+        );
+        assert_eq!(cache.gate_count(), before_gates);
+        let mut retained_reloaded = false;
+        cache
+            .get_or_load_weighted(
+                "b",
+                |_| true,
+                || {
+                    retained_reloaded = true;
+                    Ok(2)
+                },
+                |_| 4,
+            )
+            .unwrap();
+        assert!(
+            !retained_reloaded,
+            "oversize load must not flush a healthy retained value"
+        );
+        let mut reloaded = false;
+        cache
+            .get_or_load_weighted(
+                "oversize",
+                |_| true,
+                || {
+                    reloaded = true;
+                    Ok(9)
+                },
+                |_| 9,
+            )
+            .unwrap();
+        assert!(reloaded, "oversize value must be served without retention");
+        assert_eq!(cache.len(), before);
+        assert_eq!(cache.gate_count(), before_gates);
     }
 }

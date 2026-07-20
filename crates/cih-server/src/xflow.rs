@@ -5,129 +5,104 @@
 //! artifacts-based, including the first leg (uniform semantics; hermetic
 //! tests); the accepted trade-off is no Falkor `callSites` enrichment.
 //!
-//! Graphs are cached **across calls** (fleet members are big — Fineract's
-//! nodes.jsonl is 87k nodes), keyed on the artifacts dir with independent node
-//! and edge mtime invalidation - the `WikiSearchState::get_or_load` pattern.
+//! Graph views share the process-wide `ArtifactSnapshot` also used by taint and
+//! shape checking. Snapshot freshness tracks both graph files; positional
+//! adjacency indexes are initialized lazily inside the heavy blocking lane.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use cih_core::{ContractMatch, ContractMatchKind, Edge, EdgeKind, Node};
 use serde::Serialize;
 
-use crate::mtime_cache::MtimeCache;
-use crate::utils::{load_artifact_edges, load_artifact_nodes, node_prop_str_owned};
+use crate::artifact_cache::{ArtifactCache, ArtifactSnapshot};
+use crate::utils::node_prop_str_owned;
 
 // ── Artifact graph ───────────────────────────────────────────────────────────
 
 pub(crate) struct ArtifactGraph {
-    pub(crate) nodes_by_id: HashMap<String, Node>,
-    edges: Vec<Edge>,
-    out_edges: HashMap<String, Vec<usize>>,
-    in_edges: HashMap<String, Vec<usize>>,
-    nodes_mtime: Option<SystemTime>,
-    edges_mtime: Option<SystemTime>,
+    snapshot: Arc<ArtifactSnapshot>,
 }
 
 impl ArtifactGraph {
+    #[cfg(test)]
     pub(crate) fn build(
         nodes: Vec<Node>,
         edges: Vec<Edge>,
-        nodes_mtime: Option<SystemTime>,
-        edges_mtime: Option<SystemTime>,
+        _nodes_mtime: Option<std::time::SystemTime>,
+        _edges_mtime: Option<std::time::SystemTime>,
     ) -> Self {
-        let nodes_by_id = nodes
-            .into_iter()
-            .map(|node| (node.id.as_str().to_string(), node))
-            .collect();
-        let mut out_edges: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut in_edges: HashMap<String, Vec<usize>> = HashMap::new();
-        for (index, edge) in edges.iter().enumerate() {
-            out_edges
-                .entry(edge.src.as_str().to_string())
-                .or_default()
-                .push(index);
-            in_edges
-                .entry(edge.dst.as_str().to_string())
-                .or_default()
-                .push(index);
-        }
         Self {
-            nodes_by_id,
-            edges,
-            out_edges,
-            in_edges,
-            nodes_mtime,
-            edges_mtime,
+            snapshot: Arc::new(ArtifactSnapshot::from_memory(nodes, edges)),
         }
     }
 
-    fn load(artifacts_dir: &str) -> std::io::Result<Self> {
-        let nodes_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("nodes.jsonl"))
-            .and_then(|meta| meta.modified())
-            .ok();
-        let edges_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("edges.jsonl"))
-            .and_then(|meta| meta.modified())
-            .ok();
-        let nodes = load_artifact_nodes(artifacts_dir)?;
-        let edges = load_artifact_edges(artifacts_dir)?;
-        Ok(Self::build(nodes, edges, nodes_mtime, edges_mtime))
+    fn from_snapshot(snapshot: Arc<ArtifactSnapshot>) -> Self {
+        snapshot.indexes_blocking();
+        Self { snapshot }
+    }
+
+    pub(crate) fn node(&self, id: &str) -> Option<&Node> {
+        self.snapshot
+            .indexes_blocking()
+            .node_by_id
+            .get(id)
+            .map(|index| &self.snapshot.nodes[*index])
+    }
+
+    pub(crate) fn contains_node(&self, id: &str) -> bool {
+        self.snapshot.indexes_blocking().node_by_id.contains_key(id)
+    }
+
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &Node> {
+        self.snapshot.nodes.iter()
     }
 
     pub(crate) fn out<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Edge> {
-        self.out_edges
+        self.snapshot
+            .indexes_blocking()
+            .outgoing_edges
             .get(id)
             .into_iter()
             .flatten()
-            .map(|index| &self.edges[*index])
+            .map(|index| &self.snapshot.edges[*index])
     }
 
     pub(crate) fn incoming<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Edge> {
-        self.in_edges
+        self.snapshot
+            .indexes_blocking()
+            .incoming_edges
             .get(id)
             .into_iter()
             .flatten()
-            .map(|index| &self.edges[*index])
+            .map(|index| &self.snapshot.edges[*index])
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> &Arc<ArtifactSnapshot> {
+        &self.snapshot
     }
 }
 
-/// Process-wide artifact-graph cache with node/edge mtime invalidation and
-/// single-flight coalescing of concurrent misses (see [`crate::mtime_cache`]).
+/// Lightweight graph views over the process-wide shared artifact cache.
 #[derive(Clone, Default)]
 pub(crate) struct XflowState {
-    cache: Arc<MtimeCache<ArtifactGraph>>,
+    artifacts: ArtifactCache,
 }
 
 impl XflowState {
-    /// Server-lifetime cache: bounded by the shared artifact retention policy
-    /// (entry cap + idle TTL). `Default` stays unlimited for tests.
-    pub(crate) fn new() -> Self {
-        Self {
-            cache: Arc::new(MtimeCache::with_limits(
-                crate::mtime_cache::CacheLimits::artifact_from_env(),
-            )),
-        }
+    pub(crate) fn new(artifacts: ArtifactCache) -> Self {
+        Self { artifacts }
     }
 
-    pub(crate) fn graph_for(&self, artifacts_dir: &str) -> std::io::Result<Arc<ArtifactGraph>> {
-        let nodes_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("nodes.jsonl"))
-            .and_then(|meta| meta.modified())
-            .ok();
-        let edges_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("edges.jsonl"))
-            .and_then(|meta| meta.modified())
-            .ok();
-        self.cache.get_or_load(
-            artifacts_dir,
-            |graph| {
-                graph.nodes_mtime == nodes_mtime
-                    && graph.edges_mtime == edges_mtime
-                    && nodes_mtime.is_some()
-                    && edges_mtime.is_some()
-            },
-            || ArtifactGraph::load(artifacts_dir),
-        )
+    pub(crate) fn graph_for_blocking(
+        &self,
+        artifacts_dir: &str,
+    ) -> std::io::Result<Arc<ArtifactGraph>> {
+        self.artifacts
+            .snapshot_blocking(artifacts_dir)
+            .map(ArtifactGraph::from_snapshot)
+            .map(Arc::new)
     }
 }
 
@@ -268,7 +243,7 @@ fn walk_repo_leg(
         // Cross-repo hops out of terminal contract nodes; Route nodes (the
         // landing point of an HTTP hop) continue through their handlers via
         // the inverse HandlesRoute — a route has no outgoing flow edges.
-        if let Some(node) = graph.nodes_by_id.get(&node_id) {
+        if let Some(node) = graph.node(&node_id) {
             match node.kind {
                 cih_core::NodeKind::ExternalEndpoint => {
                     hop_http(
@@ -459,12 +434,11 @@ pub(crate) fn route_handlers(graph: &ArtifactGraph, route_id: &str) -> Vec<Strin
 /// then unique name / qualified-name match. `Err` carries candidate ids when
 /// ambiguous, or an empty vec when not found.
 pub(crate) fn resolve_entry(graph: &ArtifactGraph, entry: &str) -> Result<String, Vec<String>> {
-    if graph.nodes_by_id.contains_key(entry) {
+    if graph.contains_node(entry) {
         return Ok(entry.to_string());
     }
     let matches: Vec<&str> = graph
-        .nodes_by_id
-        .values()
+        .nodes()
         .filter(|node| node.name == entry || node.qualified_name.as_deref() == Some(entry))
         .map(|node| node.id.as_str())
         .collect();
@@ -478,6 +452,7 @@ pub(crate) fn resolve_entry(graph: &ArtifactGraph, entry: &str) -> Result<String
 mod tests {
     use super::*;
     use cih_core::{NodeId, NodeKind, Range};
+    use std::collections::HashMap;
 
     fn node(id: &str, kind: NodeKind) -> Node {
         Node {
@@ -832,22 +807,33 @@ mod tests {
         )
         .unwrap();
 
-        let state = XflowState::new();
+        let artifacts = ArtifactCache::new();
+        let base = artifacts
+            .snapshot_blocking(dir.path().to_str().unwrap())
+            .unwrap();
+        assert!(!base.indexes_initialized());
+        let state = XflowState::new(artifacts);
         let graph = state
-            .graph_for(dir.path().to_str().unwrap())
+            .graph_for_blocking(dir.path().to_str().unwrap())
             .expect("loads");
-        assert!(graph.nodes_by_id.contains_key("Method:a.B#c/0"));
+        assert!(Arc::ptr_eq(&base, graph.snapshot()));
+        assert!(base.indexes_initialized());
+        assert!(graph.contains_node("Method:a.B#c/0"));
         assert_eq!(graph.out("Method:a.B#c/0").count(), 1);
-        // Cached: same Arc while the mtime is unchanged.
-        let again = state.graph_for(dir.path().to_str().unwrap()).unwrap();
-        assert!(Arc::ptr_eq(&graph, &again));
+        // Cached: separate graph views share the same base snapshot.
+        let again = state
+            .graph_for_blocking(dir.path().to_str().unwrap())
+            .unwrap();
+        assert!(Arc::ptr_eq(graph.snapshot(), again.snapshot()));
 
         // Edge-only changes invalidate the graph too. The old implementation
         // watched nodes.jsonl only and retained stale adjacency indefinitely.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(dir.path().join("edges.jsonl"), "").unwrap();
-        let reloaded = state.graph_for(dir.path().to_str().unwrap()).unwrap();
-        assert!(!Arc::ptr_eq(&graph, &reloaded));
+        let reloaded = state
+            .graph_for_blocking(dir.path().to_str().unwrap())
+            .unwrap();
+        assert!(!Arc::ptr_eq(graph.snapshot(), reloaded.snapshot()));
         assert_eq!(reloaded.out("Method:a.B#c/0").count(), 0);
     }
 

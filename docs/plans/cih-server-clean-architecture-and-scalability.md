@@ -24,16 +24,28 @@
 > `cancelled` without running, a running job's engine is killed via
 > `kill_on_drop` on future drop. Registry freshness needs no invalidation
 > (mtime-checked cache).
-> Milestone 3 first slice (bounded retention) completed 2026-07-20: `MtimeCache`
-> now enforces an entry cap with strict-LRU eviction plus an idle TTL
+> Milestone 3 initial slice (bounded retention) completed 2026-07-20:
+> `MtimeCache` added an entry cap with strict-LRU eviction plus an idle TTL
 > (`CIH_ARTIFACT_CACHE_MAX_ENTRIES` default 32,
 > `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` default 1800), gates evicted with their
-> entries — so the xflow `ArtifactGraph` and `ArtifactBundle` caches (the two
-> raw-graph holders) no longer grow monotonically, and stale versioned-dir keys
-> age out after a re-index. Deliberately deferred to the M3 re-pricing:
-> byte-weighted budgets (`CIH_ARTIFACT_CACHE_MAX_BYTES`), the unified
-> `ArtifactSnapshot` (xflow migration is a rewrite), and wiki/search cache
-> budgets (§12.5).
+> entries. At that point the two raw-graph holders no longer grew
+> monotonically and stale versioned-directory keys aged out after a re-index;
+> byte weighting and snapshot unification remained open.
+> Milestone 3 shared-snapshot slice completed 2026-07-20: one
+> `ArtifactSnapshot` now owns shared `Arc<[Node]>` and `Arc<[Edge]>` arrays for
+> xflow, taint, and shape checking. `CihServer` injects one `ArtifactCache`
+> into all three paths; xflow now holds lightweight views and lazy positional
+> indexes rather than another full node representation. Freshness checks both
+> graph files using mtime plus length. Retention now also enforces
+> `CIH_ARTIFACT_CACHE_MAX_BYTES` (default 512 MiB), conservatively prices the
+> base arrays plus eventual indexes, and serves an individually oversize
+> snapshot without retaining it or evicting healthy entries. Tests cover
+> pointer sharing, lazy index construction, concurrent single-flight loading,
+> node/edge freshness, weighted LRU, oversize bypass, entry caps, and idle TTL.
+> The concrete snapshot/index API is intentionally named `_blocking` and every
+> production caller runs inside the existing heavy blocking lane. Still open:
+> the async `ArtifactRepository` port, explicit post-index invalidation,
+> cache metrics, and the combined wiki/search memory policy (§12.5).
 > Follow-up safety slice completed 2026-07-20: communities/processes now cap
 > the serialized `ReadResourceResult` rather than estimating raw JSONL bytes,
 > reject an individually oversize record, and use typed `v1` cursors carrying
@@ -734,15 +746,14 @@ later pages do not rescan the file from the beginning.
 
 ### 12.1 Replace duplicate caches
 
-**Review note (2026-07-20):** the duplication today is exactly two resident
-copies, not three — xflow's `ArtifactGraph` (id-keyed nodes + adjacency) and
-the `ArtifactBundle` in `ArtifactCache`, which taint and shape checking already
-share (`taint.rs` uses `artifacts.bundle()`; it does not load separately).
-Per-key single-flight coalescing also already exists for these caches:
-`MtimeCache::get_or_load` serializes concurrent misses per key with a proof
-test (16 threads → 1 load). The net-new work in this section is eviction,
-memory budgeting, dual node/edge freshness, and moving the coalesced load off
-the async worker — not coalescing itself.
+**Implementation status (2026-07-20):** the former two resident copies
+(`ArtifactGraph` and `ArtifactBundle`) have been replaced by one shared
+`ArtifactSnapshot`. Xflow's graph object is now only a view over that snapshot.
+Taint and shape checking use the same cache instance. Per-key single-flight,
+entry/idle eviction, weighted eviction, oversize bypass, and dual-file
+freshness are implemented and tested. Snapshot loading and lazy index
+construction use explicitly blocking APIs called only from the heavy blocking
+lane. Extracting the async `ArtifactRepository` port below remains a follow-up.
 
 Introduce one `ArtifactRepository` for artifact-backed server capabilities.
 
@@ -784,6 +795,12 @@ The lazy index cell must be initialized through an asynchronous single-flight
 repository operation whose CPU work runs on `BlockingRuntime`. The `OnceLock`
 in the sketch expresses one-value ownership only; it must not cause index
 construction to run directly on a Tokio worker.
+
+**Current implementation note (2026-07-20):** `ArtifactSnapshot` uses the
+positional index shape above. Its `indexes_blocking()` method is reached only
+inside existing `run_blocking_heavy` operations. The future async repository
+port should preserve this behavior while moving the admission boundary behind
+the repository interface.
 
 Taint analysis, shape checking, and cross-repo flow tracing consume views over
 the same snapshot.
@@ -1456,11 +1473,13 @@ Purpose: control memory and eliminate duplicate graph representations.
 
 Work:
 
-- introduce shared `ArtifactSnapshot`;
-- migrate xflow, taint, and shape checking;
-- add lazy shared indexes;
-- implement weighted cache and freshness;
-- add live wiki/search single-flight and memory budgets.
+- [x] introduce shared `ArtifactSnapshot`;
+- [x] migrate xflow, taint, and shape checking;
+- [x] add lazy shared indexes;
+- [x] implement weighted cache and dual-file freshness;
+- [ ] extract the async `ArtifactRepository` port and explicit invalidation;
+- [ ] add cache metrics;
+- [ ] add live wiki/search memory budgets (single-flight is already present).
 
 Exit criteria:
 
