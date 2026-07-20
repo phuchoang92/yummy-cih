@@ -42,7 +42,7 @@ use crate::{
     artifact_cache, changes, feature, files, indexing, resources, search, symbol, wiki, xflow,
 };
 
-use crate::search::{QueryArgs, QueryResult, SearchState};
+use crate::search::{QueryArgs, QueryResult, SearchCache, SearchState};
 
 /// Tool handlers split out of this god-module into per-theme `#[tool_router]`
 /// impl blocks; each emits a `*_router()` merged in [`CihServer::new`].
@@ -78,7 +78,7 @@ pub(crate) struct CihServer {
     /// Cross-repo graph views backed by the shared artifact snapshots below.
     xflow: xflow::XflowState,
     /// Process-wide shared snapshots for xflow, taint, and shape checking.
-    artifacts: artifact_cache::ArtifactCache,
+    artifacts: Arc<dyn artifact_cache::ArtifactRepository>,
     tool_router: ToolRouter<CihServer>,
 }
 
@@ -97,7 +97,12 @@ impl CihServer {
         read_file_limits: files::ReadFileLimits,
         wiki: wiki::WikiSearchState,
     ) -> Self {
-        let search = SearchState::new(artifacts_dir.clone(), embed_store.clone());
+        let search_cache = SearchCache::from_env();
+        let search = SearchState::with_cache(
+            artifacts_dir.clone(),
+            embed_store.clone(),
+            search_cache.clone(),
+        );
         let repo_contexts: Arc<dyn RepoContextProvider> =
             Arc::new(DefaultRepoContextProvider::production(
                 graph_key.clone(),
@@ -108,10 +113,12 @@ impl CihServer {
                 falkor_url.clone(),
                 store_limits,
                 embed_store,
+                search_cache,
             ));
         let jobs: Jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
-        let indexer = indexing::IndexScheduler::new(jobs.clone());
-        let artifacts = artifact_cache::ArtifactCache::new();
+        let artifacts: Arc<dyn artifact_cache::ArtifactRepository> =
+            Arc::new(artifact_cache::ArtifactCache::new());
+        let indexer = indexing::IndexScheduler::new(jobs.clone(), artifacts.clone());
         let xflow = xflow::XflowState::new(artifacts.clone());
         Self {
             store,

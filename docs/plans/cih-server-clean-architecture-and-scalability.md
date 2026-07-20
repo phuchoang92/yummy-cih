@@ -43,9 +43,19 @@
 > pointer sharing, lazy index construction, concurrent single-flight loading,
 > node/edge freshness, weighted LRU, oversize bypass, entry caps, and idle TTL.
 > The concrete snapshot/index API is intentionally named `_blocking` and every
-> production caller runs inside the existing heavy blocking lane. Still open:
-> the async `ArtifactRepository` port, explicit post-index invalidation,
-> cache metrics, and the combined wiki/search memory policy (§12.5).
+> production caller runs inside the existing heavy blocking lane.
+> Milestone 3 completed 2026-07-20: the async `ArtifactRepository` port now
+> owns snapshot/index admission and the targeted xflow, taint, and shape
+> handlers consume it;
+> successful index jobs explicitly invalidate retained repository versions.
+> Artifact metrics cover request, hit, miss, build, load failure, eviction,
+> invalidation, oversize, retained entries, and retained bytes. Repository
+> `SearchState` instances share one weighted BM25 cache, while disk wiki
+> indexes, resident renderers, and live wiki indexes share one weighted wiki
+> LRU. Search and wiki default to 256 MiB each; startup validates their sum
+> with the 512 MiB artifact budget against `CIH_CACHE_MAX_BYTES` (default
+> 1 GiB), logs effective budgets, and rejects invalid or overcommitted
+> configurations. Wiki/search cache updates emit structured cache metrics.
 > Follow-up safety slice completed 2026-07-20: communities/processes now cap
 > the serialized `ReadResourceResult` rather than estimating raw JSONL bytes,
 > reject an individually oversize record, and use typed `v1` cursors carrying
@@ -753,7 +763,8 @@ Taint and shape checking use the same cache instance. Per-key single-flight,
 entry/idle eviction, weighted eviction, oversize bypass, and dual-file
 freshness are implemented and tested. Snapshot loading and lazy index
 construction use explicitly blocking APIs called only from the heavy blocking
-lane. Extracting the async `ArtifactRepository` port below remains a follow-up.
+lane. The async `ArtifactRepository` port below now owns that admission
+boundary, explicit invalidation, and metrics.
 
 Introduce one `ArtifactRepository` for artifact-backed server capabilities.
 
@@ -796,11 +807,10 @@ repository operation whose CPU work runs on `BlockingRuntime`. The `OnceLock`
 in the sketch expresses one-value ownership only; it must not cause index
 construction to run directly on a Tokio worker.
 
-**Current implementation note (2026-07-20):** `ArtifactSnapshot` uses the
-positional index shape above. Its `indexes_blocking()` method is reached only
-inside existing `run_blocking_heavy` operations. The future async repository
-port should preserve this behavior while moving the admission boundary behind
-the repository interface.
+**Implementation note (2026-07-20):** `ArtifactSnapshot` uses the positional
+index shape above. Its `indexes_blocking()` method is private to repository
+loading and reached through `ArtifactRepository::indexed_snapshot`, which owns
+the `run_blocking_heavy` admission boundary.
 
 Taint analysis, shape checking, and cross-repo flow tracing consume views over
 the same snapshot.
@@ -858,6 +868,14 @@ verify their coverage of both cold paths before building new machinery here.
 
 The live search index should not duplicate page bodies when it can reference
 resident rendered content.
+
+**Implementation status (2026-07-20):** independent per-repository gates cover
+disk index loads, resident renderer loads, and live index builds. All three
+entry types share one weighted LRU and byte budget. BM25 graph search uses a
+separate weighted cache shared by every repository `SearchState`. Startup
+validates the artifact + wiki + search budget sum against the process cache
+ceiling. Individually oversize entries are served to the active caller without
+being retained or flushing healthy entries.
 
 ### 12.6 Future disk-backed option
 
@@ -1277,6 +1295,10 @@ Proposed new environment variables:
 | `CIH_ARTIFACT_CACHE_MAX_BYTES` | Shared artifact snapshot budget |
 | `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | Repository entry safety cap |
 | `CIH_WIKI_CACHE_MAX_BYTES` | Wiki resident/index budget |
+| `CIH_WIKI_CACHE_MAX_ENTRIES` | Wiki entry safety cap |
+| `CIH_SEARCH_CACHE_MAX_BYTES` | Shared repository BM25 budget |
+| `CIH_SEARCH_CACHE_MAX_ENTRIES` | Search entry safety cap |
+| `CIH_CACHE_MAX_BYTES` | Artifact + wiki + search process ceiling |
 | `CIH_INDEX_MAX_CONCURRENT` | Running engine jobs |
 | `CIH_INDEX_QUEUE_CAPACITY` | Queued jobs |
 | `CIH_INDEX_TIMEOUT_SECS` | Child-process deadline |
@@ -1477,9 +1499,9 @@ Work:
 - [x] migrate xflow, taint, and shape checking;
 - [x] add lazy shared indexes;
 - [x] implement weighted cache and dual-file freshness;
-- [ ] extract the async `ArtifactRepository` port and explicit invalidation;
-- [ ] add cache metrics;
-- [ ] add live wiki/search memory budgets (single-flight is already present).
+- [x] extract the async `ArtifactRepository` port and explicit invalidation;
+- [x] add cache metrics;
+- [x] add live wiki/search memory budgets and process-level validation.
 
 Exit criteria:
 

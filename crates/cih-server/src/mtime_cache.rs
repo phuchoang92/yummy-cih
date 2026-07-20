@@ -41,7 +41,9 @@ impl Default for CacheLimits {
 }
 
 impl CacheLimits {
-    /// Artifact-cache policy from env: `CIH_ARTIFACT_CACHE_MAX_ENTRIES`
+    /// Artifact-cache policy from env. Byte budgets are validated during
+    /// startup; these fallbacks keep direct test construction defensive.
+    /// `CIH_ARTIFACT_CACHE_MAX_ENTRIES`
     /// (unset/invalid/0 = 32 — the §12.4 suggested repo cap) and
     /// `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` (unset/invalid = 1800; 0 disables
     /// the TTL), and `CIH_ARTIFACT_CACHE_MAX_BYTES` (unset/invalid/0 =
@@ -60,7 +62,7 @@ impl CacheLimits {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(512 * 1024 * 1024);
+            .unwrap_or(crate::config::DEFAULT_ARTIFACT_CACHE_MAX_BYTES);
         Self {
             max_entries,
             idle_ttl: if ttl_secs == 0 {
@@ -115,6 +117,33 @@ pub(crate) struct MtimeCache<V> {
     /// key's `load()`.
     gates: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     limits: CacheLimits,
+    metrics: CacheMetricCounters,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CacheMetrics {
+    pub(crate) requests: u64,
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+    pub(crate) builds: u64,
+    pub(crate) load_failures: u64,
+    pub(crate) evictions: u64,
+    pub(crate) invalidations: u64,
+    pub(crate) oversize: u64,
+    pub(crate) retained_entries: usize,
+    pub(crate) retained_weight_bytes: usize,
+}
+
+#[derive(Default)]
+struct CacheMetricCounters {
+    requests: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    builds: AtomicU64,
+    load_failures: AtomicU64,
+    evictions: AtomicU64,
+    invalidations: AtomicU64,
+    oversize: AtomicU64,
 }
 
 impl<V> Default for MtimeCache<V> {
@@ -128,6 +157,7 @@ impl<V> MtimeCache<V> {
         Self {
             cache: RwLock::new(HashMap::new()),
             gates: Mutex::new(HashMap::new()),
+            metrics: CacheMetricCounters::default(),
             limits: CacheLimits {
                 // A zero cap would evict the entry just inserted.
                 max_entries: limits.max_entries.max(1),
@@ -162,9 +192,12 @@ impl<V> MtimeCache<V> {
         weight: impl FnOnce(&V) -> usize,
     ) -> std::io::Result<Arc<V>> {
         let key = PathBuf::from(key);
+        self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         if let Some(hit) = self.peek(&key, &is_fresh) {
+            self.metrics.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(hit);
         }
+        self.metrics.misses.fetch_add(1, Ordering::Relaxed);
         // Coalesce: hold this key's gate, then re-check — a racing caller may
         // have loaded (and cached) while we waited for the gate.
         let gate = self.gate_for(&key);
@@ -172,9 +205,19 @@ impl<V> MtimeCache<V> {
         if let Some(hit) = self.peek(&key, &is_fresh) {
             return Ok(hit);
         }
-        let value = Arc::new(load()?);
+        let value = match load() {
+            Ok(value) => {
+                self.metrics.builds.fetch_add(1, Ordering::Relaxed);
+                Arc::new(value)
+            }
+            Err(error) => {
+                self.metrics.load_failures.fetch_add(1, Ordering::Relaxed);
+                return Err(error);
+            }
+        };
         let weight_bytes = weight(&value);
         if weight_bytes > self.limits.max_weight_bytes {
+            self.metrics.oversize.fetch_add(1, Ordering::Relaxed);
             // Do not insert then evict: an oversize newest entry would flush
             // healthy older entries before strict LRU eventually removed it.
             self.cache
@@ -200,12 +243,58 @@ impl<V> MtimeCache<V> {
             self.evict_locked(&mut cache)
         };
         if !evicted.is_empty() {
+            self.metrics
+                .evictions
+                .fetch_add(evicted.len() as u64, Ordering::Relaxed);
             let mut gates = self.gates.lock().unwrap_or_else(|e| e.into_inner());
             for key in &evicted {
                 gates.remove(key);
             }
         }
         Ok(value)
+    }
+
+    /// Remove every retained key matching `predicate`, together with its
+    /// single-flight gate. Active callers keep their borrowed `Arc`.
+    pub(crate) fn invalidate_where(&self, predicate: impl Fn(&Path) -> bool) -> usize {
+        let removed = {
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+            let keys = cache
+                .keys()
+                .filter(|key| predicate(key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in &keys {
+                cache.remove(key);
+            }
+            keys
+        };
+        if !removed.is_empty() {
+            let mut gates = self.gates.lock().unwrap_or_else(|e| e.into_inner());
+            for key in &removed {
+                gates.remove(key);
+            }
+            self.metrics
+                .invalidations
+                .fetch_add(removed.len() as u64, Ordering::Relaxed);
+        }
+        removed.len()
+    }
+
+    pub(crate) fn metrics(&self) -> CacheMetrics {
+        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+        CacheMetrics {
+            requests: self.metrics.requests.load(Ordering::Relaxed),
+            hits: self.metrics.hits.load(Ordering::Relaxed),
+            misses: self.metrics.misses.load(Ordering::Relaxed),
+            builds: self.metrics.builds.load(Ordering::Relaxed),
+            load_failures: self.metrics.load_failures.load(Ordering::Relaxed),
+            evictions: self.metrics.evictions.load(Ordering::Relaxed),
+            invalidations: self.metrics.invalidations.load(Ordering::Relaxed),
+            oversize: self.metrics.oversize.load(Ordering::Relaxed),
+            retained_entries: cache.len(),
+            retained_weight_bytes: retained_weight(&cache),
+        }
     }
 
     /// Apply the retention policy under the write lock: drop idle-TTL-expired

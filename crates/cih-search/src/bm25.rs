@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::mem::size_of;
 
 use cih_core::{Node, NodeId, NodeKind, Range};
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,26 @@ impl SearchIndex {
 
     pub fn is_empty(&self) -> bool {
         self.docs.is_empty()
+    }
+
+    /// Conservative retained-memory estimate for process cache accounting.
+    pub fn estimated_size_bytes(&self) -> usize {
+        let docs = self.docs.iter().fold(
+            self.docs.capacity().saturating_mul(size_of::<IndexedDoc>()),
+            |total, doc| {
+                total
+                    .saturating_add(doc.node_id.as_str().len())
+                    .saturating_add(doc.name.capacity())
+                    .saturating_add(doc.qualified_name.as_ref().map_or(0, String::capacity))
+                    .saturating_add(doc.file.capacity())
+                    .saturating_add(doc.text.capacity())
+            },
+        );
+        size_of::<Self>()
+            .saturating_add(docs)
+            .saturating_add(string_usize_map_weight(&self.doc_freq))
+            .saturating_add(postings_weight(&self.postings))
+            .saturating_add(self.doc_len.capacity().saturating_mul(size_of::<u32>()))
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
@@ -244,6 +265,14 @@ impl TextIndex {
         self.num_docs == 0
     }
 
+    /// Conservative retained-memory estimate for process cache accounting.
+    pub fn estimated_size_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(string_usize_map_weight(&self.doc_freq))
+            .saturating_add(postings_weight(&self.postings))
+            .saturating_add(self.doc_len.capacity().saturating_mul(size_of::<u32>()))
+    }
+
     /// Rank documents against `query`, best first. Ties break on ordinal.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(usize, f32)> {
         if self.num_docs == 0 || limit == 0 {
@@ -282,6 +311,28 @@ impl TextIndex {
         hits.truncate(limit);
         hits
     }
+}
+
+fn string_usize_map_weight(values: &HashMap<String, usize>) -> usize {
+    values.iter().fold(
+        values
+            .capacity()
+            .saturating_mul(size_of::<(String, usize)>()),
+        |total, (key, _)| total.saturating_add(key.capacity()),
+    )
+}
+
+fn postings_weight(values: &HashMap<String, Vec<(u32, u32)>>) -> usize {
+    values.iter().fold(
+        values
+            .capacity()
+            .saturating_mul(size_of::<(String, Vec<(u32, u32)>)>()),
+        |total, (key, postings)| {
+            total
+                .saturating_add(key.capacity())
+                .saturating_add(postings.capacity().saturating_mul(size_of::<(u32, u32)>()))
+        },
+    )
 }
 
 fn idf(total_docs: f32, matching_docs: f32) -> f32 {

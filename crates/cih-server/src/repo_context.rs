@@ -13,7 +13,7 @@ use cih_embed::EmbedStore;
 use cih_graph_store::GraphStore;
 
 use crate::app_error::AppError;
-use crate::search::SearchState;
+use crate::search::{SearchCache, SearchState};
 use crate::single_flight::SingleFlight;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +190,7 @@ struct LocalRepoInfrastructure {
     falkor_url: String,
     store_limits: (usize, Duration),
     embed_store: Option<Arc<EmbedStore>>,
+    search_cache: SearchCache,
 }
 
 #[async_trait]
@@ -220,7 +221,11 @@ impl RepoInfrastructure for LocalRepoInfrastructure {
     }
 
     fn create_search(&self, artifacts_root: Option<PathBuf>) -> SearchState {
-        SearchState::new(artifacts_root, self.embed_store.clone())
+        SearchState::with_cache(
+            artifacts_root,
+            self.embed_store.clone(),
+            self.search_cache.clone(),
+        )
     }
 }
 
@@ -243,6 +248,7 @@ impl DefaultRepoContextProvider {
         falkor_url: String,
         store_limits: (usize, Duration),
         embed_store: Option<Arc<EmbedStore>>,
+        search_cache: SearchCache,
     ) -> Self {
         let search_key = search_cache_key(
             primary_artifacts_root.as_deref().map(normalize_path),
@@ -256,6 +262,7 @@ impl DefaultRepoContextProvider {
                 falkor_url,
                 store_limits,
                 embed_store,
+                search_cache,
             }),
             [(primary_graph_key, primary_store)],
             [(search_key, primary_search)],

@@ -7,6 +7,7 @@
 //! `cih-engine wiki` regeneration is picked up without a server restart.
 
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -28,6 +29,7 @@ use crate::args::{GetWikiPageArgs, SearchWikiArgs};
 use crate::blocking::{blocking_timeout, run_blocking};
 use crate::repo_context::{RepoContextProvider, RepoSelector, ResolvedRepo};
 use crate::utils::{json_result, text_result};
+use crate::weighted_cache::{AsyncCacheMetrics, AsyncWeightedCache};
 
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_LIMIT: usize = 50;
@@ -139,6 +141,16 @@ pub fn load_wiki_index(wiki_dir: &Path) -> anyhow::Result<WikiIndex> {
 impl WikiIndex {
     pub fn page_count(&self) -> usize {
         self.pages.len()
+    }
+
+    fn estimated_size_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.wiki_dir.capacity())
+            .saturating_add(self.repo_name.capacity())
+            .saturating_add(self.graph_version.capacity())
+            .saturating_add(self.generated_at.capacity())
+            .saturating_add(page_meta_weight(&self.pages, self.pages.capacity()))
+            .saturating_add(self.index.estimated_size_bytes())
     }
 
     pub fn page_by_slug(&self, slug: &str) -> Option<&PageMeta> {
@@ -310,12 +322,6 @@ impl Freshness {
     }
 }
 
-/// A resident renderer + the freshness token it was built from (for invalidation).
-struct ResidentEntry {
-    freshness: Freshness,
-    owned: Arc<cih_wiki::OwnedWiki>,
-}
-
 /// A live BM25 search index built by rendering the resident wiki's pages
 /// (no on-disk `.cih/wiki/` needed). Mirrors `WikiIndex` but holds bodies in
 /// memory. Built once (renders all pages), cached + mtime-invalidated.
@@ -356,6 +362,16 @@ impl LiveWikiIndex {
 
     fn page_count(&self) -> usize {
         self.pages.len()
+    }
+
+    fn estimated_size_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(page_meta_weight(&self.pages, self.pages.capacity()))
+            .saturating_add(self.bodies.iter().fold(
+                self.bodies.capacity().saturating_mul(size_of::<String>()),
+                |total, body| total.saturating_add(body.capacity()),
+            ))
+            .saturating_add(self.index.estimated_size_bytes())
     }
 
     /// Ranked, faceted search — mirrors `WikiIndex::search`, bodies from memory.
@@ -404,10 +420,19 @@ impl LiveWikiIndex {
     }
 }
 
-/// A live search index + the freshness token it was built from.
-struct LiveSearchEntry {
-    freshness: Freshness,
-    index: Arc<LiveWikiIndex>,
+fn page_meta_weight(pages: &[PageMeta], capacity: usize) -> usize {
+    pages.iter().fold(
+        capacity.saturating_mul(size_of::<PageMeta>()),
+        |total, page| {
+            total
+                .saturating_add(page.slug.capacity())
+                .saturating_add(page.role.capacity())
+                .saturating_add(page.title.capacity())
+                .saturating_add(page.kind.capacity())
+                .saturating_add(page.path.capacity())
+                .saturating_add(page.community_id.as_ref().map_or(0, String::capacity))
+        },
+    )
 }
 
 type WikiGates = Arc<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>;
@@ -421,14 +446,28 @@ fn gate_for(gates: &WikiGates, key: &Path) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum WikiCacheKey {
+    Disk(PathBuf),
+    Resident(PathBuf),
+    Live(PathBuf),
+}
+
+enum WikiCacheValue {
+    Disk(Arc<WikiIndex>),
+    Resident {
+        freshness: Freshness,
+        owned: Arc<cih_wiki::OwnedWiki>,
+    },
+    Live {
+        freshness: Freshness,
+        index: Arc<LiveWikiIndex>,
+    },
+}
+
 #[derive(Clone)]
 pub(crate) struct WikiSearchState {
-    cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, Arc<WikiIndex>>>>,
-    /// Resident renderers for live on-demand page rendering (P3.8), keyed by
-    /// repo path, invalidated on node, edge, or enrichment mtime changes.
-    render_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, ResidentEntry>>>,
-    /// Live search indexes (built by rendering all resident pages), same keying.
-    live_search_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, LiveSearchEntry>>>,
+    cache: Arc<AsyncWeightedCache<WikiCacheKey, WikiCacheValue>>,
     /// Single-flight gates for `get_or_load` - one per wiki dir. A std `Mutex`
     /// is fine: it's only held to clone the per-key async gate out (no `.await`).
     wiki_gates: WikiGates,
@@ -441,14 +480,106 @@ pub(crate) struct WikiSearchState {
 
 impl WikiSearchState {
     pub(crate) fn new() -> Self {
+        Self::with_limits(
+            cache_env("CIH_WIKI_CACHE_MAX_ENTRIES", 64),
+            cache_env(
+                "CIH_WIKI_CACHE_MAX_BYTES",
+                crate::config::DEFAULT_WIKI_CACHE_MAX_BYTES,
+            ),
+        )
+    }
+
+    fn with_limits(max_entries: usize, max_weight_bytes: usize) -> Self {
         Self {
-            cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            render_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            live_search_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            cache: Arc::new(AsyncWeightedCache::new(max_entries, max_weight_bytes)),
             wiki_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             resident_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             live_search_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    async fn cached_live(
+        &self,
+        repo_path: &Path,
+        freshness: &Freshness,
+    ) -> Option<Arc<LiveWikiIndex>> {
+        let value = self
+            .cache
+            .get_if(&WikiCacheKey::Live(repo_path.to_path_buf()), |value| {
+                matches!(
+                    value,
+                    WikiCacheValue::Live {
+                        freshness: cached,
+                        ..
+                    } if cached == freshness && freshness.has_complete_graph()
+                )
+            })
+            .await?;
+        match value.as_ref() {
+            WikiCacheValue::Live { index, .. } => Some(index.clone()),
+            _ => None,
+        }
+    }
+
+    async fn cached_resident(
+        &self,
+        repo_path: &Path,
+        freshness: &Freshness,
+    ) -> Option<Arc<cih_wiki::OwnedWiki>> {
+        let value = self
+            .cache
+            .get_if(&WikiCacheKey::Resident(repo_path.to_path_buf()), |value| {
+                matches!(
+                    value,
+                    WikiCacheValue::Resident {
+                        freshness: cached,
+                        ..
+                    } if cached == freshness && freshness.has_complete_graph()
+                )
+            })
+            .await?;
+        match value.as_ref() {
+            WikiCacheValue::Resident { owned, .. } => Some(owned.clone()),
+            _ => None,
+        }
+    }
+
+    async fn retain(&self, key: WikiCacheKey, value: WikiCacheValue, weight_bytes: usize) {
+        let result = self.cache.insert(key, Arc::new(value), weight_bytes).await;
+        if !result.removed_keys.is_empty() {
+            self.remove_gates(&result.removed_keys);
+        }
+        let metrics = self.metrics().await;
+        tracing::debug!(
+            retained = result.retained,
+            weight_bytes,
+            cache_hits = metrics.hits,
+            cache_misses = metrics.misses,
+            cache_builds = metrics.builds,
+            cache_entries = metrics.retained_entries,
+            cache_weight_bytes = metrics.retained_weight_bytes,
+            cache_evictions = metrics.evictions,
+            cache_oversize = metrics.oversize,
+            "wiki cache updated"
+        );
+    }
+
+    fn remove_gates(&self, keys: &[WikiCacheKey]) {
+        for key in keys {
+            let (gates, path) = match key {
+                WikiCacheKey::Disk(path) => (&self.wiki_gates, path),
+                WikiCacheKey::Resident(path) => (&self.resident_gates, path),
+                WikiCacheKey::Live(path) => (&self.live_search_gates, path),
+            };
+            gates
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(path);
+        }
+    }
+
+    pub(crate) async fn metrics(&self) -> AsyncCacheMetrics {
+        self.cache.metrics().await
     }
 
     /// Resolve `repo` to its live search index, building it (renders all pages)
@@ -462,10 +593,8 @@ impl WikiSearchState {
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        if let Some(entry) = self.live_search_cache.read().await.get(&repo_path) {
-            if entry.freshness == freshness && freshness.has_complete_graph() {
-                return Ok(Some(entry.index.clone()));
-            }
+        if let Some(index) = self.cached_live(&repo_path, &freshness).await {
+            return Ok(Some(index));
         }
         let gate = gate_for(&self.live_search_gates, &repo_path);
         let _held = gate.lock().await;
@@ -474,10 +603,8 @@ impl WikiSearchState {
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        if let Some(entry) = self.live_search_cache.read().await.get(&repo_path) {
-            if entry.freshness == freshness && freshness.has_complete_graph() {
-                return Ok(Some(entry.index.clone()));
-            }
+        if let Some(index) = self.cached_live(&repo_path, &freshness).await {
+            return Ok(Some(index));
         }
         let Some(owned) = self.resident_for(repo).await? else {
             return Ok(None);
@@ -488,13 +615,16 @@ impl WikiSearchState {
         .await
         .map_err(|e| WikiError::Internal(e.to_string()))?;
         let index = Arc::new(index);
-        self.live_search_cache.write().await.insert(
-            repo_path,
-            LiveSearchEntry {
+        let weight = index.estimated_size_bytes();
+        self.retain(
+            WikiCacheKey::Live(repo_path),
+            WikiCacheValue::Live {
                 freshness,
                 index: index.clone(),
             },
-        );
+            weight,
+        )
+        .await;
         Ok(Some(index))
     }
 
@@ -511,20 +641,16 @@ impl WikiSearchState {
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        if let Some(entry) = self.render_cache.read().await.get(&repo_path) {
-            if entry.freshness == freshness && freshness.has_complete_graph() {
-                return Ok(Some(entry.owned.clone()));
-            }
+        if let Some(owned) = self.cached_resident(&repo_path, &freshness).await {
+            return Ok(Some(owned));
         }
         let gate = gate_for(&self.resident_gates, &repo_path);
         let _held = gate.lock().await;
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        if let Some(entry) = self.render_cache.read().await.get(&repo_path) {
-            if entry.freshness == freshness && freshness.has_complete_graph() {
-                return Ok(Some(entry.owned.clone()));
-            }
+        if let Some(owned) = self.cached_resident(&repo_path, &freshness).await {
+            return Ok(Some(owned));
         }
         let load_repo = repo_path.clone();
         let name = repo_path
@@ -539,13 +665,16 @@ impl WikiSearchState {
         .map_err(|e| WikiError::Internal(e.to_string()))?
         .map_err(|e| WikiError::Internal(format!("failed to load resident wiki: {e}")))?;
         let owned = Arc::new(owned);
-        self.render_cache.write().await.insert(
-            repo_path,
-            ResidentEntry {
+        let weight = owned.estimated_size_bytes();
+        self.retain(
+            WikiCacheKey::Resident(repo_path),
+            WikiCacheValue::Resident {
                 freshness,
                 owned: owned.clone(),
             },
-        );
+            weight,
+        )
+        .await;
         Ok(Some(owned))
     }
 
@@ -586,10 +715,13 @@ impl WikiSearchState {
             })
             .await??,
         );
-        self.cache
-            .write()
-            .await
-            .insert(wiki_dir.to_path_buf(), loaded.clone());
+        let weight = loaded.estimated_size_bytes();
+        self.retain(
+            WikiCacheKey::Disk(wiki_dir.to_path_buf()),
+            WikiCacheValue::Disk(loaded.clone()),
+            weight,
+        )
+        .await;
         Ok(loaded)
     }
 
@@ -599,10 +731,28 @@ impl WikiSearchState {
         wiki_dir: &Path,
         manifest_mtime: SystemTime,
     ) -> Option<Arc<WikiIndex>> {
-        let cache = self.cache.read().await;
-        let cached = cache.get(wiki_dir)?;
-        (cached.manifest_mtime == manifest_mtime).then(|| cached.clone())
+        let value = self
+            .cache
+            .get_if(&WikiCacheKey::Disk(wiki_dir.to_path_buf()), |value| {
+                matches!(
+                    value,
+                    WikiCacheValue::Disk(index) if index.manifest_mtime == manifest_mtime
+                )
+            })
+            .await?;
+        match value.as_ref() {
+            WikiCacheValue::Disk(index) => Some(index.clone()),
+            _ => None,
+        }
     }
+}
+
+fn cache_env(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 #[derive(Debug, Deserialize)]
@@ -892,5 +1042,62 @@ mod single_flight_tests {
             task.await.unwrap();
         }
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn disk_and_live_indexes_share_one_weight_budget() {
+        let state = WikiSearchState::with_limits(8, 100);
+        let disk_path = PathBuf::from("/repo/.cih/wiki");
+        let disk = Arc::new(WikiIndex {
+            wiki_dir: disk_path.clone(),
+            manifest_mtime: SystemTime::UNIX_EPOCH,
+            repo_name: "repo".into(),
+            graph_version: "v1".into(),
+            generated_at: String::new(),
+            pages: Vec::new(),
+            index: TextIndex::default(),
+        });
+        state
+            .retain(
+                WikiCacheKey::Disk(disk_path.clone()),
+                WikiCacheValue::Disk(disk),
+                60,
+            )
+            .await;
+        let live_path = PathBuf::from("/repo");
+        state
+            .retain(
+                WikiCacheKey::Live(live_path.clone()),
+                WikiCacheValue::Live {
+                    freshness: Freshness {
+                        nodes: Some(SystemTime::UNIX_EPOCH),
+                        edges: Some(SystemTime::UNIX_EPOCH),
+                        class_enrich: None,
+                        wiki_meta: None,
+                    },
+                    index: Arc::new(LiveWikiIndex {
+                        pages: Vec::new(),
+                        bodies: Vec::new(),
+                        index: TextIndex::default(),
+                    }),
+                },
+                60,
+            )
+            .await;
+
+        assert!(state
+            .cache
+            .get_if(&WikiCacheKey::Disk(disk_path), |_| true)
+            .await
+            .is_none());
+        assert!(state
+            .cache
+            .get_if(&WikiCacheKey::Live(live_path), |_| true)
+            .await
+            .is_some());
+        let metrics = state.metrics().await;
+        assert_eq!(metrics.retained_entries, 1);
+        assert_eq!(metrics.retained_weight_bytes, 60);
+        assert_eq!(metrics.evictions, 1);
     }
 }

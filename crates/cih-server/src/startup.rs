@@ -21,7 +21,7 @@ use tower_http::{
 const MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 use crate::app::CihServer;
-use crate::config::{build_store, Config};
+use crate::config::{build_store, CacheBudgets, Config};
 use crate::{browser, files, server, wiki};
 
 /// Start the CIH MCP server: read config from env, build the graph store,
@@ -36,7 +36,15 @@ pub async fn run() -> Result<()> {
         .init();
 
     let cfg = Config::from_env();
+    let cache_budgets = CacheBudgets::from_env()?;
     tracing::info!(?cfg, "starting CIH MCP server");
+    tracing::info!(
+        artifact_cache_bytes = cache_budgets.artifact_bytes,
+        wiki_cache_bytes = cache_budgets.wiki_bytes,
+        search_cache_bytes = cache_budgets.search_bytes,
+        total_cache_bytes = cache_budgets.total_bytes,
+        "validated process cache budgets"
+    );
 
     cfg.check_auth_posture()?;
     if cfg.api_token.is_none() {

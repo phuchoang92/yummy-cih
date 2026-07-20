@@ -6,16 +6,17 @@
 //! `cih-engine taint` run is required and results always match the live index.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use cih_taint::{run_taint_analysis, SinkCategory, TaintAnalysisInput, TaintPhaseConfig};
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 use serde::Serialize;
 
 use crate::args::TaintPathsArgs;
-use crate::artifact_cache::ArtifactCache;
+use crate::artifact_cache::{ArtifactRepository, ArtifactSnapshot};
 use crate::blocking::{blocking_timeout, run_blocking_heavy};
 use crate::repo_context::ResolvedRepo;
-use crate::utils::json_result;
+use crate::utils::{app_error_to_mcp, json_result};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;
@@ -62,7 +63,7 @@ fn parse_category(s: &str) -> Result<Option<SinkCategory>, String> {
 pub async fn taint_paths(
     repo: ResolvedRepo,
     args: TaintPathsArgs,
-    artifacts: &ArtifactCache,
+    artifacts: &Arc<dyn ArtifactRepository>,
 ) -> Result<CallToolResult, McpError> {
     let category = parse_category(&args.category).map_err(|e| McpError::invalid_params(e, None))?;
     let min_confidence = args.min_confidence.clamp(0.0, 1.0);
@@ -73,26 +74,16 @@ pub async fn taint_paths(
     };
     let refine = args.refine;
 
+    let snapshot = artifacts.snapshot(&repo).await.map_err(app_error_to_mcp)?;
     let repo_path = repo.canonical_path;
-    let artifacts_dir = repo.versioned_artifacts_dir.ok_or_else(|| {
-        McpError::invalid_params(
-            format!(
-                "repo '{}' has no graph artifacts; run `cih-engine analyze` first",
-                repo.registry_entry.name
-            ),
-            None,
-        )
-    })?;
 
     // The analysis is synchronous and CPU-bound (and reads source files when
-    // refining) — keep it off the async runtime threads. The artifact load (a
-    // cache miss) also happens inside the blocking task.
-    let artifacts = artifacts.clone();
+    // refining) — keep it off the async runtime threads. Snapshot loading has
+    // already passed through the asynchronous repository boundary.
     let out = run_blocking_heavy(blocking_timeout(), "taint analysis", move || {
         run_and_shape(
             &repo_path.to_string_lossy(),
-            &artifacts_dir.to_string_lossy(),
-            &artifacts,
+            &snapshot,
             category,
             min_confidence,
             refine,
@@ -106,22 +97,12 @@ pub async fn taint_paths(
 
 fn run_and_shape(
     repo_path: &str,
-    artifacts_dir: &str,
-    artifacts: &ArtifactCache,
+    snapshot: &ArtifactSnapshot,
     category: Option<SinkCategory>,
     min_confidence: f32,
     refine: bool,
     limit: usize,
 ) -> Result<TaintPathsOut, McpError> {
-    let snapshot = artifacts.snapshot_blocking(artifacts_dir).map_err(|e| {
-        McpError::invalid_params(
-            format!(
-                "cannot read graph artifacts at {artifacts_dir}: {e}. \
-                 Run `cih-engine analyze` first"
-            ),
-            None,
-        )
-    })?;
     let nodes = snapshot.nodes.as_ref();
     let edges = snapshot.edges.as_ref();
 
@@ -218,6 +199,7 @@ mod tests {
     use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 
     use super::*;
+    use crate::artifact_cache::ArtifactCache;
 
     const CONTROLLER: &str = "Method:com.acme.OrderController#create/1";
     const SERVICE: &str = "Method:com.acme.OrderService#save/1";
@@ -308,8 +290,11 @@ mod tests {
         limit: usize,
     ) -> TaintPathsOut {
         let dir = dir.to_str().unwrap();
-        let cache = ArtifactCache::new();
-        run_and_shape(dir, dir, &cache, category, min_confidence, false, limit).unwrap()
+        let snapshot = ArtifactSnapshot::from_memory(
+            crate::utils::load_artifact_nodes(dir).unwrap(),
+            crate::utils::load_artifact_edges(dir).unwrap(),
+        );
+        run_and_shape(dir, &snapshot, category, min_confidence, false, limit).unwrap()
     }
 
     #[test]
@@ -379,16 +364,27 @@ mod tests {
         assert_eq!(none.total_found, 2);
     }
 
-    #[test]
-    fn missing_artifacts_is_an_error() {
+    #[tokio::test]
+    async fn missing_artifacts_is_an_error() {
         let dir = std::env::temp_dir().join("cih-server-taint-test-missing-nothing-here");
-        let dir = dir.to_str().unwrap();
         let cache = ArtifactCache::new();
-        let err = run_and_shape(dir, dir, &cache, None, 0.0, false, 50).unwrap_err();
+        let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            name: "missing".into(),
+            path: dir.display().to_string(),
+            graph_key: "missing".into(),
+            artifacts_dir: dir.display().to_string(),
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        });
+        let err = match cache.snapshot(&repo).await {
+            Ok(_) => panic!("missing artifacts unexpectedly loaded"),
+            Err(error) => error,
+        };
         assert!(
-            err.message.contains("cih-engine analyze"),
-            "unexpected error: {}",
-            err.message
+            err.to_string().contains("graph artifacts"),
+            "unexpected error: {err}"
         );
     }
 

@@ -15,13 +15,16 @@ use std::sync::Arc;
 use cih_core::{ContractMatch, ContractMatchKind, Edge, EdgeKind, Node};
 use serde::Serialize;
 
-use crate::artifact_cache::{ArtifactCache, ArtifactSnapshot};
+use crate::app_error::AppError;
+use crate::artifact_cache::{ArtifactRepository, ArtifactSnapshot};
+use crate::repo_context::ResolvedRepo;
 use crate::utils::node_prop_str_owned;
 
 // ── Artifact graph ───────────────────────────────────────────────────────────
 
 pub(crate) struct ArtifactGraph {
     snapshot: Arc<ArtifactSnapshot>,
+    indexes: Arc<crate::artifact_cache::ArtifactIndexes>,
 }
 
 impl ArtifactGraph {
@@ -32,26 +35,23 @@ impl ArtifactGraph {
         _nodes_mtime: Option<std::time::SystemTime>,
         _edges_mtime: Option<std::time::SystemTime>,
     ) -> Self {
-        Self {
-            snapshot: Arc::new(ArtifactSnapshot::from_memory(nodes, edges)),
-        }
+        Self::from_snapshot(Arc::new(ArtifactSnapshot::from_memory(nodes, edges)))
     }
 
     fn from_snapshot(snapshot: Arc<ArtifactSnapshot>) -> Self {
-        snapshot.indexes_blocking();
-        Self { snapshot }
+        let indexes = snapshot.indexes().clone();
+        Self { snapshot, indexes }
     }
 
     pub(crate) fn node(&self, id: &str) -> Option<&Node> {
-        self.snapshot
-            .indexes_blocking()
+        self.indexes
             .node_by_id
             .get(id)
             .map(|index| &self.snapshot.nodes[*index])
     }
 
     pub(crate) fn contains_node(&self, id: &str) -> bool {
-        self.snapshot.indexes_blocking().node_by_id.contains_key(id)
+        self.indexes.node_by_id.contains_key(id)
     }
 
     pub(crate) fn nodes(&self) -> impl Iterator<Item = &Node> {
@@ -59,8 +59,7 @@ impl ArtifactGraph {
     }
 
     pub(crate) fn out<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Edge> {
-        self.snapshot
-            .indexes_blocking()
+        self.indexes
             .outgoing_edges
             .get(id)
             .into_iter()
@@ -69,8 +68,7 @@ impl ArtifactGraph {
     }
 
     pub(crate) fn incoming<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Edge> {
-        self.snapshot
-            .indexes_blocking()
+        self.indexes
             .incoming_edges
             .get(id)
             .into_iter()
@@ -85,22 +83,23 @@ impl ArtifactGraph {
 }
 
 /// Lightweight graph views over the process-wide shared artifact cache.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct XflowState {
-    artifacts: ArtifactCache,
+    artifacts: Arc<dyn ArtifactRepository>,
 }
 
 impl XflowState {
-    pub(crate) fn new(artifacts: ArtifactCache) -> Self {
+    pub(crate) fn new(artifacts: Arc<dyn ArtifactRepository>) -> Self {
         Self { artifacts }
     }
 
-    pub(crate) fn graph_for_blocking(
+    pub(crate) async fn graph_for(
         &self,
-        artifacts_dir: &str,
-    ) -> std::io::Result<Arc<ArtifactGraph>> {
+        repo: &ResolvedRepo,
+    ) -> Result<Arc<ArtifactGraph>, AppError> {
         self.artifacts
-            .snapshot_blocking(artifacts_dir)
+            .indexed_snapshot(repo)
+            .await
             .map(ArtifactGraph::from_snapshot)
             .map(Arc::new)
     }
@@ -451,6 +450,7 @@ pub(crate) fn resolve_entry(graph: &ArtifactGraph, entry: &str) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_cache::{ArtifactCache, ArtifactRepository};
     use cih_core::{NodeId, NodeKind, Range};
     use std::collections::HashMap;
 
@@ -790,8 +790,8 @@ mod tests {
             .any(|t| t.reason.contains("node cap")));
     }
 
-    #[test]
-    fn artifact_graph_loads_from_jsonl_fixtures() {
+    #[tokio::test]
+    async fn artifact_graph_loads_from_jsonl_fixtures() {
         let dir = tempfile::tempdir().unwrap();
         let nodes_path = dir.path().join("nodes.jsonl");
         let n = node("Method:a.B#c/0", NodeKind::Method);
@@ -807,32 +807,34 @@ mod tests {
         )
         .unwrap();
 
-        let artifacts = ArtifactCache::new();
-        let base = artifacts
-            .snapshot_blocking(dir.path().to_str().unwrap())
-            .unwrap();
+        let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            name: "fixture".into(),
+            path: dir.path().display().to_string(),
+            graph_key: "fixture".into(),
+            artifacts_dir: dir.path().display().to_string(),
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        });
+        let artifacts = Arc::new(ArtifactCache::new());
+        let base = artifacts.snapshot(&repo).await.unwrap();
         assert!(!base.indexes_initialized());
         let state = XflowState::new(artifacts);
-        let graph = state
-            .graph_for_blocking(dir.path().to_str().unwrap())
-            .expect("loads");
+        let graph = state.graph_for(&repo).await.expect("loads");
         assert!(Arc::ptr_eq(&base, graph.snapshot()));
         assert!(base.indexes_initialized());
         assert!(graph.contains_node("Method:a.B#c/0"));
         assert_eq!(graph.out("Method:a.B#c/0").count(), 1);
         // Cached: separate graph views share the same base snapshot.
-        let again = state
-            .graph_for_blocking(dir.path().to_str().unwrap())
-            .unwrap();
+        let again = state.graph_for(&repo).await.unwrap();
         assert!(Arc::ptr_eq(graph.snapshot(), again.snapshot()));
 
         // Edge-only changes invalidate the graph too. The old implementation
         // watched nodes.jsonl only and retained stale adjacency indefinitely.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(dir.path().join("edges.jsonl"), "").unwrap();
-        let reloaded = state
-            .graph_for_blocking(dir.path().to_str().unwrap())
-            .unwrap();
+        let reloaded = state.graph_for(&repo).await.unwrap();
         assert!(!Arc::ptr_eq(graph.snapshot(), reloaded.snapshot()));
         assert_eq!(reloaded.out("Method:a.B#c/0").count(), 0);
     }

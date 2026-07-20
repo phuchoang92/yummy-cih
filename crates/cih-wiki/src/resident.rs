@@ -19,6 +19,7 @@
 //! borrows the graph + input).
 
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -241,6 +242,55 @@ impl OwnedWiki {
         &self.repo_name
     }
 
+    /// Conservative retained-memory estimate for server cache accounting.
+    pub fn estimated_size_bytes(&self) -> usize {
+        let nodes = self
+            .inner
+            .borrow_nodes()
+            .iter()
+            .fold(0usize, |total, node| {
+                total
+                    .saturating_add(size_of::<Node>())
+                    .saturating_add(node.id.as_str().len())
+                    .saturating_add(node.name.capacity())
+                    .saturating_add(node.qualified_name.as_ref().map_or(0, String::capacity))
+                    .saturating_add(node.file.capacity())
+                    .saturating_add(node.props.as_ref().map_or(0, json_weight))
+            });
+        let edges = self
+            .inner
+            .borrow_edges()
+            .iter()
+            .fold(0usize, |total, edge| {
+                total
+                    .saturating_add(size_of::<Edge>())
+                    .saturating_add(edge.src.as_str().len())
+                    .saturating_add(edge.dst.as_str().len())
+                    .saturating_add(edge.reason.capacity())
+                    .saturating_add(edge.props.as_ref().map_or(0, json_weight))
+            });
+        let bodies = self
+            .inner
+            .borrow_input()
+            .bodies
+            .iter()
+            .fold(0usize, |total, (id, body)| {
+                total
+                    .saturating_add(size_of::<(String, BodyEntry)>())
+                    .saturating_add(id.capacity())
+                    .saturating_add(body.stripped.capacity())
+            });
+        // WikiGraph and RenderContext retain derived maps and selected node
+        // clones. Pricing raw graph memory three times is intentionally
+        // conservative and leaves room for those internal indexes.
+        size_of::<Self>()
+            .saturating_add(nodes.saturating_mul(3))
+            .saturating_add(edges.saturating_mul(2))
+            .saturating_add(bodies)
+            .saturating_add(self.repo_name.capacity())
+            .saturating_add(self.graph_version.capacity())
+    }
+
     /// Render one page by slug from the resident state. Sub-millisecond: no
     /// ctx/index rebuild. `None` when the slug isn't a known page.
     pub fn render_slug(&self, slug: &str) -> Option<RenderedPage> {
@@ -272,6 +322,32 @@ impl OwnedWiki {
                 Some((entry, page.content))
             })
             .collect()
+    }
+}
+
+fn json_weight(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            size_of::<serde_json::Value>()
+        }
+        serde_json::Value::String(value) => {
+            size_of::<serde_json::Value>().saturating_add(value.capacity())
+        }
+        serde_json::Value::Array(values) => values.iter().fold(
+            values
+                .capacity()
+                .saturating_mul(size_of::<serde_json::Value>()),
+            |total, value| total.saturating_add(json_weight(value)),
+        ),
+        serde_json::Value::Object(values) => {
+            values
+                .iter()
+                .fold(size_of::<serde_json::Value>(), |total, (key, value)| {
+                    total
+                        .saturating_add(key.capacity())
+                        .saturating_add(json_weight(value))
+                })
+        }
     }
 }
 

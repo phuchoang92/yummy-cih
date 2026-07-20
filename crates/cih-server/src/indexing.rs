@@ -7,6 +7,7 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 use tokio::sync::{watch, Mutex, Semaphore};
 
 use crate::args::IndexRepoArgs;
+use crate::artifact_cache::ArtifactRepository;
 use crate::jobs::{evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs};
 use crate::utils::json_result;
 
@@ -30,6 +31,7 @@ pub struct IndexScheduler {
     cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     job_timeout: Duration,
     output_cap: usize,
+    artifacts: Arc<dyn ArtifactRepository>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,7 +68,7 @@ impl IndexScheduler {
     /// Limits from env: `CIH_INDEX_MAX_CONCURRENT` (default 1),
     /// `CIH_INDEX_QUEUE_CAPACITY` (default 16), `CIH_INDEX_TIMEOUT_SECS`
     /// (default 1800, 0 disables), `CIH_INDEX_OUTPUT_CAP_BYTES` (default 1 MiB).
-    pub fn new(jobs: Jobs) -> Self {
+    pub(crate) fn new(jobs: Jobs, artifacts: Arc<dyn ArtifactRepository>) -> Self {
         let usize_env = |name: &str, default: usize| {
             std::env::var(name)
                 .ok()
@@ -89,15 +91,17 @@ impl IndexScheduler {
             usize_env("CIH_INDEX_QUEUE_CAPACITY", 16),
             timeout,
             usize_env("CIH_INDEX_OUTPUT_CAP_BYTES", 1024 * 1024),
+            artifacts,
         )
     }
 
-    pub fn with_limits(
+    pub(crate) fn with_limits(
         jobs: Jobs,
         max_concurrent: usize,
         queue_capacity: usize,
         job_timeout: Duration,
         output_cap: usize,
+        artifacts: Arc<dyn ArtifactRepository>,
     ) -> Self {
         Self {
             jobs,
@@ -107,6 +111,7 @@ impl IndexScheduler {
             cancels: Arc::new(Mutex::new(HashMap::new())),
             job_timeout,
             output_cap,
+            artifacts,
         }
     }
 
@@ -250,6 +255,9 @@ impl IndexScheduler {
                     error,
                 },
             };
+            if matches!(state, JobState::Done { .. }) {
+                sched.artifacts.invalidate_repo(&canonical);
+            }
             sched.settle(&job_id, &canonical, state).await;
             drop(permit);
         });
@@ -594,6 +602,7 @@ mod tests {
             queue_capacity,
             Duration::from_secs(60),
             64 * 1024,
+            Arc::new(crate::artifact_cache::ArtifactCache::default()),
         )
     }
 
@@ -896,5 +905,59 @@ mod tests {
         wait_for(&sched, "job-d", |s| matches!(s, JobState::Done { .. })).await;
         let err = sched.cancel("job-d").await.unwrap_err();
         assert!(err.contains("already finished (done)"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn successful_job_invalidates_retained_repo_artifacts() {
+        use crate::artifact_cache::{ArtifactCache, ArtifactRepository};
+        use crate::repo_context::ResolvedRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts_dir = dir.path().join(".cih").join("artifacts").join("v1");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+        std::fs::write(artifacts_dir.join("nodes.jsonl"), "").unwrap();
+        std::fs::write(artifacts_dir.join("edges.jsonl"), "").unwrap();
+        let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            name: "fixture".into(),
+            path: dir.path().display().to_string(),
+            graph_key: "fixture".into(),
+            artifacts_dir: artifacts_dir.display().to_string(),
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        });
+        let artifacts = Arc::new(ArtifactCache::default());
+        artifacts.snapshot(&repo).await.unwrap();
+        assert_eq!(artifacts.metrics().retained_entries, 1);
+
+        let sched = IndexScheduler::with_limits(
+            Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            1,
+            1,
+            Duration::from_secs(5),
+            1024,
+            artifacts.clone(),
+        );
+        let canonical = dir.path().canonicalize().unwrap();
+        assert!(matches!(
+            sched
+                .admit(&canonical, "job-invalidate", &command(""))
+                .await,
+            Admission::Admitted
+        ));
+        let mut quick = tokio::process::Command::new("sh");
+        quick.arg("-c").arg("true");
+        sched
+            .submit("job-invalidate".into(), canonical, quick)
+            .await;
+        wait_for(&sched, "job-invalidate", |state| {
+            matches!(state, JobState::Done { .. })
+        })
+        .await;
+
+        let metrics = artifacts.metrics();
+        assert_eq!(metrics.invalidations, 1);
+        assert_eq!(metrics.retained_entries, 0);
     }
 }

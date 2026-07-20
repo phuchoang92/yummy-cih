@@ -10,9 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
+use async_trait::async_trait;
 use cih_core::{Edge, Node};
 
-use crate::mtime_cache::MtimeCache;
+use crate::app_error::AppError;
+use crate::blocking::{blocking_timeout, run_blocking_heavy};
+use crate::mtime_cache::{CacheMetrics, MtimeCache};
+use crate::repo_context::ResolvedRepo;
 use crate::utils::{load_artifact_edges, load_artifact_nodes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,7 +122,7 @@ impl ArtifactSnapshot {
 
     #[cfg(test)]
     pub(crate) fn from_memory(nodes: Vec<Node>, edges: Vec<Edge>) -> Self {
-        Self::from_parts(
+        let snapshot = Self::from_parts(
             "memory".to_string(),
             nodes,
             edges,
@@ -132,14 +136,20 @@ impl ArtifactSnapshot {
                     len: None,
                 },
             },
-        )
+        );
+        snapshot.ensure_indexes_blocking();
+        snapshot
     }
 
-    /// Build positional indexes on first use. Production callers reach this
-    /// only from operations already admitted to the heavy blocking runtime.
-    pub(crate) fn indexes_blocking(&self) -> &Arc<ArtifactIndexes> {
+    fn ensure_indexes_blocking(&self) -> &Arc<ArtifactIndexes> {
         self.indexes
             .get_or_init(|| Arc::new(ArtifactIndexes::build(&self.nodes, &self.edges)))
+    }
+
+    pub(crate) fn indexes(&self) -> &Arc<ArtifactIndexes> {
+        self.indexes
+            .get()
+            .expect("indexed snapshot must be prepared by ArtifactRepository")
     }
 
     pub(crate) fn estimated_weight_bytes(&self) -> usize {
@@ -234,6 +244,20 @@ pub(crate) struct ArtifactCache {
     cache: Arc<MtimeCache<ArtifactSnapshot>>,
 }
 
+#[async_trait]
+pub(crate) trait ArtifactRepository: Send + Sync {
+    async fn snapshot(&self, repo: &ResolvedRepo) -> Result<Arc<ArtifactSnapshot>, AppError>;
+
+    async fn indexed_snapshot(
+        &self,
+        repo: &ResolvedRepo,
+    ) -> Result<Arc<ArtifactSnapshot>, AppError>;
+
+    fn invalidate_repo(&self, repo_path: &Path) -> usize;
+
+    fn metrics(&self) -> CacheMetrics;
+}
+
 impl ArtifactCache {
     /// Server-lifetime cache: bounded by the shared artifact retention policy
     /// (entry cap + idle TTL). `Default` stays unlimited for tests.
@@ -247,10 +271,7 @@ impl ArtifactCache {
 
     /// Parsed nodes+edges for `artifacts_dir`, reused until either file identity
     /// changes. Production callers invoke this inside the blocking runtime.
-    pub(crate) fn snapshot_blocking(
-        &self,
-        artifacts_dir: &str,
-    ) -> std::io::Result<Arc<ArtifactSnapshot>> {
+    fn snapshot_blocking(&self, artifacts_dir: &str) -> std::io::Result<Arc<ArtifactSnapshot>> {
         let dir = PathBuf::from(artifacts_dir)
             .canonicalize()
             .unwrap_or_else(|_| PathBuf::from(artifacts_dir));
@@ -272,6 +293,94 @@ impl ArtifactCache {
             },
             ArtifactSnapshot::estimated_weight_bytes,
         )
+    }
+
+    async fn load_for_repo(
+        &self,
+        repo: &ResolvedRepo,
+        build_indexes: bool,
+    ) -> Result<Arc<ArtifactSnapshot>, AppError> {
+        let artifacts_dir =
+            repo.versioned_artifacts_dir
+                .clone()
+                .ok_or_else(|| AppError::InvalidInput {
+                    field: "repo",
+                    message: format!(
+                        "repo '{}' has no graph artifacts; run `cih-engine analyze` first",
+                        repo.registry_entry.name
+                    ),
+                })?;
+        let cache = self.clone();
+        let snapshot =
+            run_blocking_heavy(blocking_timeout(), "artifact snapshot load", move || {
+                let snapshot = cache.snapshot_blocking(&artifacts_dir.to_string_lossy())?;
+                if build_indexes {
+                    snapshot.ensure_indexes_blocking();
+                }
+                Ok::<_, std::io::Error>(snapshot)
+            })
+            .await
+            .map_err(|error| AppError::Unavailable {
+                dependency: "artifact repository",
+                message: error.to_string(),
+                retryable: true,
+            })?
+            .map_err(|error| AppError::Unavailable {
+                dependency: "graph artifacts",
+                message: error.to_string(),
+                retryable: false,
+            })?;
+        let metrics = self.metrics();
+        tracing::debug!(
+            repo = %repo.registry_entry.name,
+            version = %snapshot.version,
+            indexed = build_indexes,
+            cache_hits = metrics.hits,
+            cache_misses = metrics.misses,
+            cache_builds = metrics.builds,
+            cache_load_failures = metrics.load_failures,
+            cache_evictions = metrics.evictions,
+            cache_oversize = metrics.oversize,
+            cache_weight_bytes = metrics.retained_weight_bytes,
+            "artifact snapshot ready"
+        );
+        Ok(snapshot)
+    }
+}
+
+#[async_trait]
+impl ArtifactRepository for ArtifactCache {
+    async fn snapshot(&self, repo: &ResolvedRepo) -> Result<Arc<ArtifactSnapshot>, AppError> {
+        self.load_for_repo(repo, false).await
+    }
+
+    async fn indexed_snapshot(
+        &self,
+        repo: &ResolvedRepo,
+    ) -> Result<Arc<ArtifactSnapshot>, AppError> {
+        self.load_for_repo(repo, true).await
+    }
+
+    fn invalidate_repo(&self, repo_path: &Path) -> usize {
+        let canonical = repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo_path.to_path_buf());
+        let artifact_root = canonical.join(".cih").join("artifacts");
+        let removed = self
+            .cache
+            .invalidate_where(|key| key.starts_with(&artifact_root));
+        if removed > 0 {
+            tracing::info!(
+                repo = %canonical.display(),
+                removed,
+                "invalidated artifact snapshots after indexing"
+            );
+        }
+        removed
+    }
+
+    fn metrics(&self) -> CacheMetrics {
+        self.cache.metrics()
     }
 }
 
@@ -386,6 +495,32 @@ mod tests {
     }
 
     #[test]
+    fn invalidation_drops_repo_snapshots_and_updates_metrics() {
+        let repo = tempfile::tempdir().unwrap();
+        let artifacts = repo.path().join(".cih").join("artifacts").join("v1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        write_fixture(&artifacts, &[]);
+        let cache = ArtifactCache::default();
+        let key = artifacts.to_str().unwrap();
+        let first = cache.snapshot_blocking(key).unwrap();
+        let hit = cache.snapshot_blocking(key).unwrap();
+        assert!(Arc::ptr_eq(&first, &hit));
+
+        assert_eq!(cache.invalidate_repo(repo.path()), 1);
+        let reloaded = cache.snapshot_blocking(key).unwrap();
+        assert!(!Arc::ptr_eq(&first, &reloaded));
+
+        let metrics = cache.metrics();
+        assert_eq!(metrics.requests, 3);
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.misses, 2);
+        assert_eq!(metrics.builds, 2);
+        assert_eq!(metrics.invalidations, 1);
+        assert_eq!(metrics.retained_entries, 1);
+        assert!(metrics.retained_weight_bytes > 0);
+    }
+
+    #[test]
     fn indexes_are_lazy_and_reference_shared_arrays() {
         let dir = tempfile::tempdir().unwrap();
         let edge = Edge::new(
@@ -400,7 +535,7 @@ mod tests {
             .snapshot_blocking(dir.path().to_str().unwrap())
             .unwrap();
         assert!(!snapshot.indexes_initialized());
-        let indexes = snapshot.indexes_blocking();
+        let indexes = snapshot.ensure_indexes_blocking();
         assert!(snapshot.indexes_initialized());
         assert_eq!(indexes.node_by_id["Method:a.B#c/0"], 0);
         assert_eq!(indexes.outgoing_edges["Method:a.B#c/0"], vec![0]);

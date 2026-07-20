@@ -5,7 +5,7 @@ use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind};
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
-use crate::artifact_cache::ArtifactCache;
+use crate::artifact_cache::{ArtifactRepository, ArtifactSnapshot};
 use crate::blocking::{blocking_timeout, run_blocking_heavy};
 use crate::repo_context::{RepoCatalogSnapshot, RepoContextProvider, RepoSelector};
 use crate::utils::{
@@ -117,10 +117,42 @@ pub async fn api_impact(
     repo_contexts: Arc<dyn RepoContextProvider>,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
-    let xflow = xflow.clone();
-    run_blocking_heavy(blocking_timeout(), "api_impact artifact load", move || {
-        let catalog = repo_contexts.catalog_snapshot();
-        api_impact_sync(args, &catalog, &xflow)
+    let group = args.group.clone();
+    let (catalog, contracts) =
+        run_blocking_heavy(blocking_timeout(), "api_impact contract load", move || {
+            let catalog = repo_contexts.catalog_snapshot();
+            let contracts = load_group_contracts(&group)?;
+            Ok::<_, McpError>((catalog, contracts))
+        })
+        .await??;
+    let method = args.method.to_ascii_uppercase();
+    let target_key = format!(
+        "{} {}",
+        method,
+        cih_core::normalize_contract_path(&args.path)
+    );
+    let mut graphs = HashMap::new();
+    if args.include_callers {
+        for consumer in contracts
+            .iter()
+            .filter(|item| {
+                item.kind == ContractMatchKind::HttpRoute && item.match_key == target_key
+            })
+            .map(|item| item.consumer_repo.clone())
+            .collect::<HashSet<_>>()
+        {
+            let loaded = match catalog.resolve(RepoSelector::NameOrPath(consumer.clone())) {
+                Ok(repo) => xflow
+                    .graph_for(&repo)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            graphs.insert(consumer, loaded);
+        }
+    }
+    run_blocking_heavy(blocking_timeout(), "api_impact analysis", move || {
+        api_impact_sync(args, &catalog, &contracts, &graphs)
     })
     .await?
 }
@@ -128,9 +160,9 @@ pub async fn api_impact(
 fn api_impact_sync(
     args: ApiImpactArgs,
     catalog: &RepoCatalogSnapshot,
-    xflow: &XflowState,
+    contracts: &[ContractMatch],
+    graphs: &HashMap<String, Result<Arc<xflow::ArtifactGraph>, String>>,
 ) -> Result<CallToolResult, McpError> {
-    let contracts = load_group_contracts(&args.group)?;
     let method = args.method.to_ascii_uppercase();
     let target_key = format!(
         "{} {}",
@@ -144,7 +176,7 @@ fn api_impact_sync(
     })
     .clamp(1, 6);
     let mut consumers = Vec::new();
-    for item in &contracts {
+    for item in contracts {
         if item.kind != ContractMatchKind::HttpRoute || item.match_key != target_key {
             continue;
         }
@@ -156,8 +188,7 @@ fn api_impact_sync(
         });
         if args.include_callers {
             row["consumer_callers"] = match consumer_callers(
-                catalog,
-                xflow,
+                graphs.get(&item.consumer_repo),
                 &item.consumer_repo,
                 &item.consumer_id,
                 caller_depth,
@@ -189,22 +220,15 @@ struct ConsumerCaller {
 /// Reverse-CALLS walk in the consumer repo: methods that (transitively) reach
 /// the `ExternalCall` site, each with its enclosing route when one handles it.
 fn consumer_callers(
-    catalog: &RepoCatalogSnapshot,
-    xflow: &XflowState,
+    graph: Option<&Result<Arc<xflow::ArtifactGraph>, String>>,
     consumer_repo: &str,
     consumer_endpoint: &str,
     depth_limit: u32,
 ) -> Result<Vec<ConsumerCaller>, String> {
-    let repo = catalog
-        .resolve(RepoSelector::NameOrPath(consumer_repo.to_string()))
-        .map_err(|error| error.to_string())?;
-    let artifacts_dir = repo
-        .versioned_artifacts_dir
-        .as_deref()
-        .ok_or_else(|| format!("consumer '{consumer_repo}' has no artifact directory"))?;
-    let graph = xflow
-        .graph_for_blocking(&artifacts_dir.to_string_lossy())
-        .map_err(|e| format!("consumer artifacts unreadable: {e}"))?;
+    let graph = graph
+        .ok_or_else(|| format!("consumer '{consumer_repo}' graph was not loaded"))?
+        .as_ref()
+        .map_err(|error| format!("consumer artifacts unreadable: {error}"))?;
 
     // Direct callers: ExternalCall edges into the endpoint node.
     let mut queue: VecDeque<(String, u32)> = graph
@@ -265,24 +289,17 @@ pub async fn trace_flow_x(
     repo_contexts: Arc<dyn RepoContextProvider>,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
-    let xflow = xflow.clone();
-    run_blocking_heavy(
+    let group = args.group.clone();
+    let (catalog, contracts) = run_blocking_heavy(
         blocking_timeout(),
-        "trace_flow_x artifact load",
+        "trace_flow_x contract load",
         move || {
             let catalog = repo_contexts.catalog_snapshot();
-            trace_flow_x_sync(args, &catalog, &xflow)
+            let contracts = load_group_contracts(&group)?;
+            Ok::<_, McpError>((catalog, contracts))
         },
     )
-    .await?
-}
-
-fn trace_flow_x_sync(
-    args: TraceFlowXArgs,
-    catalog: &RepoCatalogSnapshot,
-    xflow: &XflowState,
-) -> Result<CallToolResult, McpError> {
-    let contracts = load_group_contracts(&args.group)?;
+    .await??;
     let repo = catalog
         .resolve(RepoSelector::from_wire(&args.repo))
         .map_err(app_error_to_mcp)?;
@@ -299,23 +316,19 @@ fn trace_flow_x_sync(
     })?;
     validate_group_member(&args.group, &group_entry.repos, &start_repo)
         .map_err(|e| McpError::invalid_params(e, None))?;
+    let group_members = group_entry.repos.clone();
 
-    let start_artifacts = repo.versioned_artifacts_dir.as_deref().ok_or_else(|| {
-        McpError::invalid_params(
-            format!("repo '{start_repo}' has no artifact directory; re-run analyze"),
-            None,
-        )
-    })?;
     let start_graph = xflow
-        .graph_for_blocking(&start_artifacts.to_string_lossy())
+        .graph_for(&repo)
+        .await
         .map_err(|e| {
-        McpError::invalid_params(
-            format!(
-                "cannot load artifacts for '{start_repo}': {e} — re-run `cih-engine analyze {start_repo}`"
-            ),
-            None,
-        )
-    })?;
+            McpError::invalid_params(
+                format!(
+                    "cannot load artifacts for '{start_repo}': {e} — re-run `cih-engine analyze {start_repo}`"
+                ),
+                None,
+            )
+        })?;
 
     let entry_id = match xflow::resolve_entry(&start_graph, &args.entry_point) {
         Ok(id) => id,
@@ -349,86 +362,67 @@ fn trace_flow_x_sync(
     })
     .clamp(1, 5);
 
-    let artifacts_by_repo: HashMap<String, String> = group_entry
-        .repos
-        .iter()
-        .filter_map(|name| {
-            let repo = catalog
-                .resolve(RepoSelector::NameOrPath(name.clone()))
-                .ok()?;
-            let dir = repo.versioned_artifacts_dir?;
-            Some((repo.registry_entry.name, dir.to_string_lossy().into_owned()))
-        })
-        .collect();
-    let mut source = |repo: &str| {
-        let dir = artifacts_by_repo.get(repo)?;
-        xflow.graph_for_blocking(dir).ok()
-    };
-    let trace = xflow::trace_across(
-        &mut source,
-        &contracts,
-        &start_repo,
-        &entry_id,
-        max_depth,
-        max_hops,
-    );
-
-    let (synced_at, stale) = group_freshness(&args.group, catalog);
-    json_result(&serde_json::json!({
-        "entry_point": entry_id,
-        "repo": start_repo,
-        "group": args.group,
-        "max_depth": max_depth,
-        "max_hops": max_hops,
-        "contracts_synced_at": synced_at,
-        "contracts_stale": stale,
-        "step_count": trace.steps.len(),
-        "steps": trace.steps,
-        "truncated": trace.truncated,
-    }))
+    let mut graphs = HashMap::from([(start_repo.clone(), start_graph)]);
+    for name in &group_members {
+        if graphs.contains_key(name) {
+            continue;
+        }
+        let Ok(repo) = catalog.resolve(RepoSelector::NameOrPath(name.clone())) else {
+            continue;
+        };
+        if let Ok(graph) = xflow.graph_for(&repo).await {
+            graphs.insert(repo.registry_entry.name, graph);
+        }
+    }
+    run_blocking_heavy(blocking_timeout(), "trace_flow_x analysis", move || {
+        let mut source = |repo: &str| graphs.get(repo).cloned();
+        let trace = xflow::trace_across(
+            &mut source,
+            &contracts,
+            &start_repo,
+            &entry_id,
+            max_depth,
+            max_hops,
+        );
+        let (synced_at, stale) = group_freshness(&args.group, &catalog);
+        json_result(&serde_json::json!({
+            "entry_point": entry_id,
+            "repo": start_repo,
+            "group": args.group,
+            "max_depth": max_depth,
+            "max_hops": max_hops,
+            "contracts_synced_at": synced_at,
+            "contracts_stale": stale,
+            "step_count": trace.steps.len(),
+            "steps": trace.steps,
+            "truncated": trace.truncated,
+        }))
+    })
+    .await?
 }
 
 pub async fn shape_check(
     args: ShapeCheckArgs,
     repo_contexts: Arc<dyn RepoContextProvider>,
-    artifacts: &ArtifactCache,
+    artifacts: &Arc<dyn ArtifactRepository>,
 ) -> Result<CallToolResult, McpError> {
-    let artifacts = artifacts.clone();
-    run_blocking_heavy(blocking_timeout(), "shape_check artifact load", move || {
-        let catalog = repo_contexts.catalog_snapshot();
-        shape_check_sync(args, &catalog, &artifacts)
-    })
-    .await?
-}
-
-fn shape_check_sync(
-    args: ShapeCheckArgs,
-    catalog: &RepoCatalogSnapshot,
-    artifacts: &ArtifactCache,
-) -> Result<CallToolResult, McpError> {
-    let contracts_file = cih_core::contracts_path(&args.group).ok_or_else(|| {
-        McpError::internal_error("cannot determine HOME for group contracts path", None)
-    })?;
-    let raw = std::fs::read_to_string(&contracts_file).map_err(|e| {
-        McpError::invalid_params(
-            format!(
-                "cannot read contracts for group '{}': {e}. \
-                 Run `cih-engine group sync {}` first",
-                args.group, args.group
-            ),
-            None,
-        )
-    })?;
-    let contracts: Vec<ContractMatch> = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<ContractMatch>(l).ok())
-        .filter(|c| {
-            c.kind == ContractMatchKind::HttpRoute
-                && c.provider_repo == args.provider
-                && c.consumer_repo == args.consumer
+    let group = args.group.clone();
+    let provider_name = args.provider.clone();
+    let consumer_name = args.consumer.clone();
+    let (catalog, contracts) =
+        run_blocking_heavy(blocking_timeout(), "shape_check contract load", move || {
+            let catalog = repo_contexts.catalog_snapshot();
+            let contracts = load_group_contracts(&group)?
+                .into_iter()
+                .filter(|contract| {
+                    contract.kind == ContractMatchKind::HttpRoute
+                        && contract.provider_repo == provider_name
+                        && contract.consumer_repo == consumer_name
+                })
+                .collect::<Vec<_>>();
+            Ok::<_, McpError>((catalog, contracts))
         })
-        .collect();
+        .await??;
     if contracts.is_empty() {
         return json_result(&serde_json::json!({
             "provider": args.provider,
@@ -444,31 +438,33 @@ fn shape_check_sync(
     let consumer_repo = catalog
         .resolve(RepoSelector::NameOrPath(args.consumer.clone()))
         .map_err(app_error_to_mcp)?;
-    let provider_artifacts = provider_repo
-        .versioned_artifacts_dir
-        .as_deref()
-        .ok_or_else(|| {
-            McpError::invalid_params(
-                format!("provider '{}' has no artifact directory", args.provider),
-                None,
-            )
-        })?;
-    let consumer_artifacts = consumer_repo
-        .versioned_artifacts_dir
-        .as_deref()
-        .ok_or_else(|| {
-            McpError::invalid_params(
-                format!("consumer '{}' has no artifact directory", args.consumer),
-                None,
-            )
-        })?;
-
     let provider_snapshot = artifacts
-        .snapshot_blocking(&provider_artifacts.to_string_lossy())
-        .map_err(|e| McpError::internal_error(format!("provider artifacts: {e}"), None))?;
+        .snapshot(&provider_repo)
+        .await
+        .map_err(app_error_to_mcp)?;
     let consumer_snapshot = artifacts
-        .snapshot_blocking(&consumer_artifacts.to_string_lossy())
-        .map_err(|e| McpError::internal_error(format!("consumer artifacts: {e}"), None))?;
+        .snapshot(&consumer_repo)
+        .await
+        .map_err(app_error_to_mcp)?;
+    run_blocking_heavy(blocking_timeout(), "shape_check analysis", move || {
+        shape_check_loaded(
+            args,
+            catalog,
+            contracts,
+            provider_snapshot,
+            consumer_snapshot,
+        )
+    })
+    .await?
+}
+
+fn shape_check_loaded(
+    args: ShapeCheckArgs,
+    catalog: RepoCatalogSnapshot,
+    contracts: Vec<ContractMatch>,
+    provider_snapshot: Arc<ArtifactSnapshot>,
+    consumer_snapshot: Arc<ArtifactSnapshot>,
+) -> Result<CallToolResult, McpError> {
     let provider_nodes = provider_snapshot.nodes.as_ref();
     let consumer_nodes = consumer_snapshot.nodes.as_ref();
     let consumer_edges = consumer_snapshot.edges.as_ref();
@@ -596,7 +592,7 @@ fn shape_check_sync(
         }));
     }
 
-    let (synced_at, stale) = group_freshness(&args.group, catalog);
+    let (synced_at, stale) = group_freshness(&args.group, &catalog);
     json_result(&serde_json::json!({
         "provider": args.provider,
         "consumer": args.consumer,

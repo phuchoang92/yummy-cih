@@ -36,6 +36,7 @@ pub(crate) mod server;
 pub(crate) mod single_flight;
 pub(crate) mod symbol;
 pub(crate) mod taint;
+pub(crate) mod weighted_cache;
 pub(crate) mod xflow;
 
 pub use startup::run;

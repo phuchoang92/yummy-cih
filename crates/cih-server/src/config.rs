@@ -45,6 +45,83 @@ pub const DEFAULT_READ_FILE_MAX_LINES: usize = 5000;
 pub const DEFAULT_MAX_CONCURRENT_QUERIES: usize = 64;
 /// Default max wait (ms) for a query slot before shedding.
 pub const DEFAULT_QUERY_QUEUE_TIMEOUT_MS: u64 = 5000;
+pub const DEFAULT_ARTIFACT_CACHE_MAX_BYTES: usize = 512 * 1024 * 1024;
+pub const DEFAULT_WIKI_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+pub const DEFAULT_SEARCH_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+pub const DEFAULT_TOTAL_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CacheBudgets {
+    pub(crate) artifact_bytes: usize,
+    pub(crate) wiki_bytes: usize,
+    pub(crate) search_bytes: usize,
+    pub(crate) total_bytes: usize,
+}
+
+impl CacheBudgets {
+    pub(crate) fn from_env() -> Result<Self> {
+        Self::parse(
+            std::env::var("CIH_ARTIFACT_CACHE_MAX_BYTES").ok(),
+            std::env::var("CIH_WIKI_CACHE_MAX_BYTES").ok(),
+            std::env::var("CIH_SEARCH_CACHE_MAX_BYTES").ok(),
+            std::env::var("CIH_CACHE_MAX_BYTES").ok(),
+        )
+    }
+
+    fn parse(
+        artifact: Option<String>,
+        wiki: Option<String>,
+        search: Option<String>,
+        total: Option<String>,
+    ) -> Result<Self> {
+        let parse = |name: &'static str, value: Option<String>, default: usize| {
+            let value = match value {
+                Some(raw) => raw.parse::<usize>().map_err(|_| {
+                    anyhow!("{name} must be a positive integer byte count (got '{raw}')")
+                })?,
+                None => default,
+            };
+            if value == 0 {
+                return Err(anyhow!("{name} must be greater than zero"));
+            }
+            Ok(value)
+        };
+        let budgets = Self {
+            artifact_bytes: parse(
+                "CIH_ARTIFACT_CACHE_MAX_BYTES",
+                artifact,
+                DEFAULT_ARTIFACT_CACHE_MAX_BYTES,
+            )?,
+            wiki_bytes: parse(
+                "CIH_WIKI_CACHE_MAX_BYTES",
+                wiki,
+                DEFAULT_WIKI_CACHE_MAX_BYTES,
+            )?,
+            search_bytes: parse(
+                "CIH_SEARCH_CACHE_MAX_BYTES",
+                search,
+                DEFAULT_SEARCH_CACHE_MAX_BYTES,
+            )?,
+            total_bytes: parse("CIH_CACHE_MAX_BYTES", total, DEFAULT_TOTAL_CACHE_MAX_BYTES)?,
+        };
+        let configured = budgets
+            .artifact_bytes
+            .checked_add(budgets.wiki_bytes)
+            .and_then(|sum| sum.checked_add(budgets.search_bytes))
+            .ok_or_else(|| anyhow!("configured cache budgets overflow usize"))?;
+        if configured > budgets.total_bytes {
+            return Err(anyhow!(
+                "configured cache budgets total {configured} bytes, exceeding \
+                 CIH_CACHE_MAX_BYTES={} (artifact={}, wiki={}, search={})",
+                budgets.total_bytes,
+                budgets.artifact_bytes,
+                budgets.wiki_bytes,
+                budgets.search_bytes
+            ));
+        }
+        Ok(budgets)
+    }
+}
 
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -192,7 +269,7 @@ pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
 
 #[cfg(test)]
 mod tests {
-    use super::bind_is_loopback;
+    use super::{bind_is_loopback, CacheBudgets};
 
     #[test]
     fn loopback_binds_are_recognized() {
@@ -210,5 +287,33 @@ mod tests {
         assert!(!bind_is_loopback("10.0.0.5:8080"));
         // Unparseable host fails safe (treated as exposed).
         assert!(!bind_is_loopback("not-an-addr:8080"));
+    }
+
+    #[test]
+    fn cache_budgets_reject_invalid_or_excessive_totals() {
+        assert!(CacheBudgets::parse(Some("0".into()), None, None, None).is_err());
+        let error = CacheBudgets::parse(
+            Some("8".into()),
+            Some("8".into()),
+            Some("8".into()),
+            Some("16".into()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeding CIH_CACHE_MAX_BYTES"));
+    }
+
+    #[test]
+    fn cache_budgets_accept_a_bounded_partition() {
+        let budgets = CacheBudgets::parse(
+            Some("8".into()),
+            Some("4".into()),
+            Some("4".into()),
+            Some("16".into()),
+        )
+        .unwrap();
+        assert_eq!(budgets.artifact_bytes, 8);
+        assert_eq!(budgets.wiki_bytes, 4);
+        assert_eq!(budgets.search_bytes, 4);
+        assert_eq!(budgets.total_bytes, 16);
     }
 }
