@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::{model::CallToolResult, ErrorData as McpError};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{watch, Mutex, Semaphore};
 
 use crate::args::IndexRepoArgs;
 use crate::jobs::{evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs};
@@ -25,6 +25,9 @@ pub struct IndexScheduler {
     active: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// Queued + running bound: running cap + queue capacity.
     admission_capacity: usize,
+    /// Job id → cancellation signal for queued/running jobs (dropped when the
+    /// job settles).
+    cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     job_timeout: Duration,
     output_cap: usize,
 }
@@ -71,9 +74,149 @@ impl IndexScheduler {
             running: Arc::new(Semaphore::new(max_concurrent)),
             active: Arc::new(Mutex::new(HashMap::new())),
             admission_capacity: max_concurrent + queue_capacity,
+            cancels: Arc::new(Mutex::new(HashMap::new())),
             job_timeout,
             output_cap,
         }
+    }
+
+    /// Signal cancellation for a queued or running job. The lifecycle task
+    /// kills a running engine (`kill_on_drop`) and settles the job as
+    /// `cancelled`; callers poll `index_status` for the final state.
+    pub async fn cancel(&self, job_id: &str) -> Result<(), String> {
+        if let Some(cancel) = self.cancels.lock().await.get(job_id) {
+            let _ = cancel.send(true);
+            return Ok(());
+        }
+        match self.jobs.read().await.get(job_id) {
+            Some(state) => Err(format!(
+                "job '{job_id}' already finished ({}) — nothing to cancel",
+                state.status_label()
+            )),
+            None => Err(format!(
+                "unknown job_id '{job_id}' — use index_repo to start a job"
+            )),
+        }
+    }
+
+    /// Terminal bookkeeping: record the state, release the repo, drop the
+    /// cancel channel.
+    async fn settle(&self, job_id: &str, canonical: &Path, state: JobState) {
+        self.jobs.write().await.insert(job_id.to_string(), state);
+        self.active.lock().await.remove(canonical);
+        self.cancels.lock().await.remove(job_id);
+    }
+
+    /// Register the job (state `queued`, cancel channel) and spawn its
+    /// lifecycle: wait for a running slot → run the engine → settle a terminal
+    /// state. The caller has already claimed the repo via [`admit`](Self::admit).
+    async fn submit(&self, job_id: String, canonical: PathBuf, cmd: tokio::process::Command) {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        {
+            let mut jobs = self.jobs.write().await;
+            jobs.insert(
+                job_id.clone(),
+                JobState::Queued {
+                    queued_at_secs: unix_now_secs(),
+                },
+            );
+            evict_terminal(&mut jobs);
+        }
+        self.cancels.lock().await.insert(job_id.clone(), cancel_tx);
+        let sched = self.clone();
+        tokio::spawn(async move {
+            // Queued phase: a cancel here must not wait for a running slot.
+            let permit = tokio::select! {
+                permit = sched.running.clone().acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    // The semaphore is never closed; if it somehow is, fail
+                    // the job rather than hang it.
+                    Err(closed) => {
+                        let now = unix_now_secs();
+                        sched
+                            .settle(&job_id, &canonical, JobState::Failed {
+                                started_at_secs: now,
+                                finished_at_secs: now,
+                                error: format!("scheduler unavailable: {closed}"),
+                            })
+                            .await;
+                        return;
+                    }
+                },
+                _ = wait_cancelled(cancel_rx.clone()) => {
+                    sched
+                        .settle(&job_id, &canonical, JobState::Cancelled {
+                            cancelled_at_secs: unix_now_secs(),
+                        })
+                        .await;
+                    return;
+                }
+            };
+            let started_at_secs = unix_now_secs();
+            sched
+                .jobs
+                .write()
+                .await
+                .insert(job_id.clone(), JobState::Running { started_at_secs });
+
+            // Running phase: on cancel, dropping the unfinished `run_engine`
+            // future kills the child (`kill_on_drop`) and its reader tasks end
+            // on pipe EOF.
+            let outcome = tokio::select! {
+                outcome = run_engine(cmd, sched.job_timeout, sched.output_cap) => Some(outcome),
+                _ = wait_cancelled(cancel_rx) => None,
+            };
+            let finished_at_secs = unix_now_secs();
+            let state = match outcome {
+                None => JobState::Cancelled {
+                    cancelled_at_secs: finished_at_secs,
+                },
+                Some(EngineOutcome::Exited {
+                    success: true,
+                    stdout,
+                    truncated,
+                    ..
+                }) => JobState::Done {
+                    started_at_secs,
+                    finished_at_secs,
+                    output: stdout.trim().to_string(),
+                    output_truncated: truncated,
+                },
+                Some(EngineOutcome::Exited {
+                    code,
+                    stdout,
+                    stderr,
+                    ..
+                }) => {
+                    let stderr: String = stderr
+                        .lines()
+                        .filter(|l| !l.contains('\x1b'))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    JobState::Failed {
+                        started_at_secs,
+                        finished_at_secs,
+                        error: format!(
+                            "cih-engine exited {code}: {}\n{}",
+                            stderr.trim(),
+                            stdout.trim()
+                        ),
+                    }
+                }
+                Some(EngineOutcome::TimedOut) => JobState::TimedOut {
+                    started_at_secs,
+                    finished_at_secs,
+                    timeout_secs: sched.job_timeout.as_secs(),
+                },
+                Some(EngineOutcome::LaunchFailed(error)) => JobState::Failed {
+                    started_at_secs,
+                    finished_at_secs,
+                    error,
+                },
+            };
+            sched.settle(&job_id, &canonical, state).await;
+            drop(permit);
+        });
     }
 
     /// Admission decision under the active-jobs lock: duplicates coalesce onto
@@ -237,125 +380,44 @@ pub async fn start_index_job(
         }
         Admission::Admitted => {}
     }
-    {
-        let mut jobs_lock = scheduler.jobs.write().await;
-        jobs_lock.insert(
-            job_id.clone(),
-            JobState::Queued {
-                queued_at_secs: unix_now_secs(),
-            },
-        );
-        evict_terminal(&mut jobs_lock);
-    }
 
-    let engine = find_engine_binary();
-    let backend = backend.to_string();
-    let falkor_url = falkor_url.to_string();
-    let languages = languages.to_string();
-    let sched = scheduler.clone();
-    let job_id2 = job_id.clone();
-    let canonical2 = canonical.clone();
-
-    tokio::spawn(async move {
-        // Queued until a running slot frees. The semaphore is never closed;
-        // if it somehow is, fail the job rather than hang it.
-        let permit = match sched.running.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(closed) => {
-                let now = unix_now_secs();
-                sched.jobs.write().await.insert(
-                    job_id2,
-                    JobState::Failed {
-                        started_at_secs: now,
-                        finished_at_secs: now,
-                        error: format!("scheduler unavailable: {closed}"),
-                    },
-                );
-                sched.active.lock().await.remove(&canonical2);
-                return;
-            }
-        };
-        let started_at_secs = unix_now_secs();
-        sched
-            .jobs
-            .write()
-            .await
-            .insert(job_id2.clone(), JobState::Running { started_at_secs });
-
-        let mut cmd = tokio::process::Command::new(&engine);
-        cmd.arg("analyze")
-            .arg(canonical2.display().to_string())
-            .arg("--all")
-            .env("CIH_GRAPH_BACKEND", &backend)
-            .env("FALKOR_URL", &falkor_url)
-            .env("CIH_GRAPH_KEY", &graph_key)
-            .env("NO_COLOR", "1")
-            .env("RUST_LOG", "warn,cih_engine=info");
-        if !languages.is_empty() {
-            for lang in languages.split(',') {
-                let l = lang.trim();
-                if !l.is_empty() {
-                    cmd.arg("--language").arg(l);
-                }
+    let mut cmd = tokio::process::Command::new(find_engine_binary());
+    cmd.arg("analyze")
+        .arg(canonical.display().to_string())
+        .arg("--all")
+        .env("CIH_GRAPH_BACKEND", backend)
+        .env("FALKOR_URL", falkor_url)
+        .env("CIH_GRAPH_KEY", &graph_key)
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "warn,cih_engine=info");
+    if !languages.is_empty() {
+        for lang in languages.split(',') {
+            let l = lang.trim();
+            if !l.is_empty() {
+                cmd.arg("--language").arg(l);
             }
         }
-
-        let outcome = run_engine(cmd, sched.job_timeout, sched.output_cap).await;
-        let finished_at_secs = unix_now_secs();
-        let state = match outcome {
-            EngineOutcome::Exited {
-                success: true,
-                stdout,
-                truncated,
-                ..
-            } => JobState::Done {
-                started_at_secs,
-                finished_at_secs,
-                output: stdout.trim().to_string(),
-                output_truncated: truncated,
-            },
-            EngineOutcome::Exited {
-                code,
-                stdout,
-                stderr,
-                ..
-            } => {
-                let stderr: String = stderr
-                    .lines()
-                    .filter(|l| !l.contains('\x1b'))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                JobState::Failed {
-                    started_at_secs,
-                    finished_at_secs,
-                    error: format!(
-                        "cih-engine exited {code}: {}\n{}",
-                        stderr.trim(),
-                        stdout.trim()
-                    ),
-                }
-            }
-            EngineOutcome::TimedOut => JobState::TimedOut {
-                started_at_secs,
-                finished_at_secs,
-                timeout_secs: sched.job_timeout.as_secs(),
-            },
-            EngineOutcome::LaunchFailed(error) => JobState::Failed {
-                started_at_secs,
-                finished_at_secs,
-                error,
-            },
-        };
-        sched.jobs.write().await.insert(job_id2, state);
-        sched.active.lock().await.remove(&canonical2);
-        drop(permit);
-    });
+    }
+    scheduler.submit(job_id.clone(), canonical, cmd).await;
 
     Ok(JobReceipt {
         job_id,
         repo: repo_str,
         deduped: false,
     })
+}
+
+/// Resolves when the job's cancel signal fires; pends forever if the sender
+/// is dropped without cancelling (i.e. the job settles normally).
+async fn wait_cancelled(mut rx: watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -655,5 +717,100 @@ mod tests {
             }
             other => panic!("expected LaunchFailed, got {other:?}"),
         }
+    }
+
+    /// Poll until the job reaches a state matching `pred` (bounded wait).
+    async fn wait_for(
+        sched: &IndexScheduler,
+        job_id: &str,
+        pred: impl Fn(&JobState) -> bool,
+    ) -> JobState {
+        for _ in 0..200 {
+            if let Some(state) = sched.jobs.read().await.get(job_id) {
+                if pred(state) {
+                    return state.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for job '{job_id}' state");
+    }
+
+    fn sleeper_cmd(secs: u32) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(format!("sleep {secs}"));
+        cmd
+    }
+
+    /// §13: cancelling a running job kills the engine promptly, settles the
+    /// job as `cancelled`, and releases the repo + cancel channel.
+    #[tokio::test]
+    async fn cancel_kills_a_running_job() {
+        let sched = test_scheduler(1, 4);
+        let repo = Path::new("/tmp/cancel-running");
+        assert!(matches!(
+            sched.admit(repo, "job-r").await,
+            Admission::Admitted
+        ));
+        let start = std::time::Instant::now();
+        sched
+            .submit("job-r".into(), repo.to_path_buf(), sleeper_cmd(30))
+            .await;
+        wait_for(&sched, "job-r", |s| matches!(s, JobState::Running { .. })).await;
+        sched.cancel("job-r").await.unwrap();
+        wait_for(&sched, "job-r", |s| matches!(s, JobState::Cancelled { .. })).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "cancel must not wait out the 30s sleep"
+        );
+        assert!(
+            sched.active.lock().await.is_empty(),
+            "repo must be released"
+        );
+        assert!(
+            sched.cancels.lock().await.is_empty(),
+            "cancel channel must be dropped"
+        );
+    }
+
+    /// Cancelling while still queued settles the job without ever running it.
+    #[tokio::test]
+    async fn cancel_while_queued_settles_without_running() {
+        // Zero running slots: the job can only ever be queued.
+        let sched = test_scheduler(0, 4);
+        let repo = Path::new("/tmp/cancel-queued");
+        assert!(matches!(
+            sched.admit(repo, "job-q").await,
+            Admission::Admitted
+        ));
+        sched
+            .submit("job-q".into(), repo.to_path_buf(), sleeper_cmd(30))
+            .await;
+        wait_for(&sched, "job-q", |s| matches!(s, JobState::Queued { .. })).await;
+        sched.cancel("job-q").await.unwrap();
+        wait_for(&sched, "job-q", |s| matches!(s, JobState::Cancelled { .. })).await;
+        assert!(sched.active.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_or_finished_job_errors() {
+        let sched = test_scheduler(1, 4);
+        let err = sched.cancel("nope").await.unwrap_err();
+        assert!(err.contains("unknown job_id"), "{err}");
+
+        // A finished job can't be cancelled — the error names its state.
+        let repo = Path::new("/tmp/cancel-done");
+        assert!(matches!(
+            sched.admit(repo, "job-d").await,
+            Admission::Admitted
+        ));
+        let mut quick = tokio::process::Command::new("sh");
+        quick.arg("-c").arg("true");
+        sched
+            .submit("job-d".into(), repo.to_path_buf(), quick)
+            .await;
+        wait_for(&sched, "job-d", |s| matches!(s, JobState::Done { .. })).await;
+        let err = sched.cancel("job-d").await.unwrap_err();
+        assert!(err.contains("already finished (done)"), "{err}");
     }
 }

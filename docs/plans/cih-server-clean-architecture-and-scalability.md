@@ -19,9 +19,11 @@
 > control (running cap 1, queue 16, one active job per repo with dedup), a
 > deadline that kills the child (`CIH_INDEX_TIMEOUT_SECS`, default 30 min),
 > capped output retention with truncation flags, and `queued`/`timed_out` job
-> states. Still open from §13: an explicit cancel operation and old-version
-> search/wiki cache eviction (Milestone 3's weighted-cache work); registry
-> freshness needs no invalidation (mtime-checked cache).
+> states. §13 cancel operation completed 2026-07-20: the `index_cancel` tool
+> (tool count 31) signals a per-job watch channel; a queued job settles as
+> `cancelled` without running, a running job's engine is killed via
+> `kill_on_drop` on future drop. Registry freshness needs no invalidation
+> (mtime-checked cache).
 > Milestone 3 first slice (bounded retention) completed 2026-07-20: `MtimeCache`
 > now enforces an entry cap with strict-LRU eviction plus an idle TTL
 > (`CIH_ARTIFACT_CACHE_MAX_ENTRIES` default 32,

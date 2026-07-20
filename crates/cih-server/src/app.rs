@@ -795,7 +795,7 @@ mod tests {
             + CihServer::admin_router();
         assert_eq!(
             router.list_all().len(),
-            30,
+            31,
             "tool count changed after the split — a tool was dropped or duplicated"
         );
         for tool in [
@@ -805,6 +805,7 @@ mod tests {
             "taint_paths",
             "search_wiki",
             "index_repo",
+            "index_cancel",
             "impact",
             "architecture_overview",
         ] {

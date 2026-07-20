@@ -352,7 +352,8 @@ dependency                         consumer
 cih-core ------------------------> cih-knowledge
 cih-knowledge -------------------> cih-doc-store
 cih-knowledge -------------------> cih-docs
-cih-search / cih-embed ----------> cih-docs
+cih-search ----------------------> cih-docs
+cih-embed -- optional semantic --> cih-docs
 
 cih-doc-store / cih-docs --------> cih-engine
 cih-llm -------------------------> cih-engine
@@ -369,12 +370,25 @@ CI must additionally run a transitive dependency assertion equivalent to
 no `cih-docs` feature that enables LLM support, so a server feature combination
 cannot accidentally cross the egress boundary.
 
-`cih-docs`'s `cih-embed` dependency is optional, enabled only by the
-`local-semantic`/`pgvector-semantic` features: `cih-embed` pulls `fastembed` with
-ONNX/ORT, so an unconditional dependency would drag the native runtime into every
-binary linking `cih-docs` and break the no-model build guarantee (§12.7). CI
-asserts this with the same mechanism — `cargo tree -p cih-server -i fastembed`
-(and `-i ort`) must fail on reachability for the default feature set.
+Semantic dependencies are optional across the complete path:
+
+- `cih-docs` has no default `cih-embed` dependency.
+  `local-semantic`/`pgvector-semantic` enable it explicitly.
+- `cih-doc-store` defaults to SQLite and FTS only. Its `local-semantic` feature
+  enables the selected USearch binding; no USearch type appears in a default-feature
+  public signature.
+- `cih-server` propagates semantic features to those crates. Its current direct,
+  unconditional `cih-embed` dependency and imports
+  (`crates/cih-server/Cargo.toml`, `app.rs`, `search.rs`, and `startup.rs`) must be
+  moved behind the feature boundary before the new crates are accepted.
+- `cih-embed` pulls `fastembed` with ONNX/ORT, so merely disabling model
+  initialization at runtime is insufficient.
+
+CI checks the default server tree for absence of `cih-embed`, `fastembed`, `ort`,
+and the selected USearch package, in addition to `cih-llm`. It separately compiles
+and tests the `local-semantic` and `pgvector-semantic` profiles to prove that
+feature propagation is intentional. The default standalone server therefore
+contains SQLite/FTS but no model or native vector runtime (§12.7).
 
 ## 8. Universal Evidence Layer
 
@@ -1103,6 +1117,11 @@ pointer commits, but their intermediate values cannot affect grouped readers.
     "taxonomy_hash": "blake3-value",
     "overlay_hash": "blake3-value",
     "projection_policy_hash": "blake3-value",
+    "technical_edge_index": {
+      "format": "sqlite-compact-v1",
+      "kinds": ["calls", "references"],
+      "policy_hash": "blake3-value"
+    },
     "adapters": [
       {
         "namespace": "cih:graph-artifacts",
@@ -1203,6 +1222,28 @@ CREATE TABLE relations (
   deleted_generation TEXT
 );
 
+CREATE TABLE technical_node_ids (
+  compact_id INTEGER PRIMARY KEY,
+  object_key TEXT NOT NULL UNIQUE REFERENCES object_refs(key)
+);
+
+CREATE TABLE technical_edge_kinds (
+  compact_id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE technical_edges (
+  source_id INTEGER NOT NULL REFERENCES technical_node_ids(compact_id),
+  kind_id INTEGER NOT NULL REFERENCES technical_edge_kinds(compact_id),
+  target_id INTEGER NOT NULL REFERENCES technical_node_ids(compact_id),
+  local_key_hash BLOB NOT NULL,
+  content_hash BLOB NOT NULL,
+  PRIMARY KEY (source_id, kind_id, target_id, local_key_hash)
+) WITHOUT ROWID;
+
+CREATE INDEX technical_edges_reverse
+  ON technical_edges(target_id, kind_id, source_id, local_key_hash);
+
 CREATE TABLE blocks (
   id TEXT PRIMARY KEY,
   object_key TEXT NOT NULL REFERENCES objects(key) ON DELETE CASCADE,
@@ -1283,6 +1324,7 @@ CREATE TABLE comments (
 CREATE TABLE change_sets (
   id TEXT PRIMARY KEY,
   proposal_id TEXT REFERENCES proposal_envelopes(id),
+  proposal_envelope_hash BLOB,
   idempotency_key TEXT NOT NULL UNIQUE,
   coordination_scope TEXT NOT NULL
     CHECK (coordination_scope IN ('standalone-service', 'workspace')),
@@ -1397,11 +1439,12 @@ CREATE TABLE proposal_envelopes (
   coordinator_id TEXT NOT NULL,
   base_snapshot_id TEXT NOT NULL,
   principal_id TEXT NOT NULL,
-  envelope_json TEXT NOT NULL,
+  envelope_json TEXT,
   envelope_hash BLOB NOT NULL,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  expires_at TEXT
+  expires_at TEXT,
+  purged_at TEXT
 );
 
 CREATE TABLE apply_journal (
@@ -1561,9 +1604,10 @@ Required indexes:
 - `evidence(repo, source_version, graph_node_id)`
 - `evidence(lifecycle, deleted_generation)`
 - `block_evidence(evidence_id)`
-- `change_set_generations(change_set_id, scope_kind, scope_id)`
+- `change_set_generations(scope_kind, scope_id, target_generation)`
 - `reviews(status, created_at)`
 - `publication_items(status)`
+- `generation_history(scope_kind, scope_id, created_at)`
 - `proposal_envelopes(status, created_at)`
 - `apply_journal(phase, updated_at)`
 - `apply_journal_packs(scope_kind, scope_id, target_generation)`
@@ -1611,7 +1655,8 @@ dropped.
 The local semantic feature uses a USearch HNSW sidecar:
 
 - Cosine distance.
-- Stable `u64` vector IDs mapped by `vector_keys`.
+- Stable nonzero 63-bit vector IDs mapped by `vector_keys`, so every ID fits both
+  SQLite's signed `INTEGER` and USearch's `u64` key without reinterpretation.
 - Memory-mapped read-only serving.
 - Atomic replacement with the containing generation.
 - No in-place mutation of an active index.
@@ -1648,14 +1693,17 @@ Build sequence:
 5. Run integrity, schema, referential, count, and checksum validation.
 6. Write `manifest.json`.
 7. Fsync files and generation directory where supported.
-8. Atomically replace `current.json` using temporary-file rename. On Windows this
-   requires `ReplaceFile`/`MOVEFILE_REPLACE_EXISTING` semantics; a plain rename
-   does not replace an existing file there.
+8. Atomically replace the standalone pack's `current.json` using temporary-file
+   rename. A grouped multi-pack publication instead commits only the workspace
+   coordinator pointer through §12.10. On Windows either path requires
+   `ReplaceFile`/`MOVEFILE_REPLACE_EXISTING` semantics; a plain rename does not
+   replace an existing file there.
 9. Leave the previous generation available for rollback.
 10. Prune old generations only after retention policy permits it.
 
-Readers open the generation named by one snapshot of `current.json`. They never
-follow a moving file during a request.
+Standalone readers open the service generation named by one snapshot of
+`current.json`. Group readers open one workspace generation and its pinned service
+map (§12.2). Neither follows a moving pointer during a request.
 
 ### 12.9 Runtime pack manager
 
@@ -1672,11 +1720,14 @@ The server maintains:
 
 Eviction never interrupts an active request; pack handles are reference counted.
 
-The manager checks a cheap fingerprint of `current.json` before admitting a request
-and may also use a filesystem watcher as an optimization. A pointer change opens
-and validates the target pack through single flight, atomically swaps the active
-reference, and lets in-flight requests finish on the old reference. A corrupt or
-missing target leaves the last valid pack active and raises a readiness diagnostic.
+The manager checks a cheap fingerprint of the coordinator `current.json` before
+admitting a request and may also use a filesystem watcher as an optimization. For a
+group, it does not watch service pointers for consistency; it validates and opens
+the service generations pinned by the selected workspace manifest. A coordinator
+pointer change opens and validates the complete target snapshot through single
+flight, atomically swaps the active reference, and lets in-flight requests finish
+on the old snapshot. A corrupt, missing, or hash-mismatched target leaves the last
+valid snapshot active and raises a readiness diagnostic.
 
 ### 12.10 Mutable state and write path
 
@@ -1684,49 +1735,162 @@ Generations are immutable; collaboration and workflow state is not. The mutable
 tables (§12.3: comments, change sets, reviews, publication state) live in a
 separate `state.sqlite` beside `current.json`, outside any generation directory.
 
+State ownership:
+
+- A standalone repository uses its service-root `state.sqlite` and service
+  `current.json` as the coordinator.
+- A grouped workspace uses the workspace-root `state.sqlite` as the authoritative
+  home for proposals, cross-service change sets, reviews, comments, jobs,
+  publication state, retention references, and the apply journal. Service-root
+  state files do not duplicate those workflow rows. Its `generation_history`
+  catalogs the workspace generations and every service generation referenced by a
+  workspace manifest.
+- The grouped coordinator snapshot is the workspace generation selected by the
+  workspace `current.json`. Its manifest contains the exact service-generation map
+  (§12.2). A change set cannot span two workspaces; such a request is split into
+  independently reviewed change sets.
+- `change_set_generations` stores the typed base and target generation for every
+  affected service and the workspace. `apply_journal_packs` stores the same
+  resolved target set plus manifest hashes for crash recovery. Generation maps are
+  never hidden only in `metadata_json`.
+
 Rules:
 
-- `state.sqlite` is the only database opened for writing during serving.
-- State rows reference generations by ID and survive generation replacement.
+- The coordinator `state.sqlite` is the only database opened for workflow writes
+  during serving.
+- State rows reference immutable snapshot and generation IDs and survive pointer
+  replacement.
 - Applying a change set never mutates the active generation: it produces a new
-  generation through the incremental build path (§13.3) and activates it through
-  the protocol below.
+  standalone service generation or a new workspace snapshot through the
+  incremental build path (§13.3) and activates it through the protocol below.
 - Generation producers (`cih docs index`, `cih docs sync`, change-set apply,
-  review resolution) serialize on the advisory `write.lock` beside
-  `current.json`. The lock is an operating-system advisory file lock, not an
-  existence check; process exit releases it automatically. Lock metadata contains
-  PID, host, start time, and operation ID for diagnostics. A second producer fails
-  fast with a clear diagnostic rather than queueing silently.
+  review resolution, and GC) serialize on operating-system advisory file locks,
+  not file-existence checks. A workspace operation acquires the workspace
+  `write.lock` first and affected service locks in stable service-ID order; a
+  standalone operation acquires only its service lock. This global order prevents
+  deadlock. Process exit releases locks automatically. Lock metadata contains PID,
+  host, start time, and operation ID for diagnostics. A second producer fails fast
+  with a clear diagnostic rather than queueing silently.
 - Readers never open `state.sqlite` transactionally with a pack; cross-database
-  consistency is by generation ID reference, not joint transactions.
+  consistency is by the one selected coordinator snapshot, not joint transactions.
 
 Change-set activation protocol:
 
-1. Acquire `write.lock`, validate the base generation, and build and validate target
-   generation `G` without changing `current.json`.
-2. In one `state.sqlite` transaction, register `G` in `generation_history`, insert
-   the `apply_journal` row as `Prepared`, append revision rows, and store all
-   generation-qualified workflow effects. Prepared rows are not treated as
-   generally active; their visibility is resolved against the active generation.
-3. Atomically replace `current.json` with `G`.
-4. In one idempotent `state.sqlite` transaction, mark the journal `Committed`,
-   finalize the change-set/review status, and set `G` Active.
-5. Release `write.lock`. Cleanup of the previous generation occurs only under the
-   normal retention policy.
+1. Acquire the coordinator and affected-pack locks in the order above. Read the
+   coordinator pointer once. Validate `base_snapshot_id` and every
+   `change_set_generations.base_generation` against that snapshot's manifest.
+2. Build and validate every affected service target without changing a pointer.
+   Build the target workspace generation last; its manifest pins the new service
+   targets and the unchanged service generations inherited from the base snapshot.
+   A standalone apply builds one service target.
+3. In one coordinator `state.sqlite` transaction, register all target generations,
+   insert the `apply_journal` row and its `apply_journal_packs` children as
+   `Prepared`, append revision rows, add required `retention_refs`, and store all
+   snapshot-qualified workflow effects. Prepared rows are visible only through
+   reconciliation logic.
+4. Atomically replace only the coordinator `current.json`: the workspace pointer
+   for a group or the service pointer for standalone operation. This single rename
+   is the logical commit point.
+5. In one idempotent coordinator-state transaction, mark the journal `Committed`,
+   finalize change-set/review status, and mark the target snapshot Active.
+6. For a grouped apply, idempotently advance affected service `current.json`
+   pointers and record each `pointer_state`. These pointers support standalone
+   readers but are not consulted by grouped readers, so a crash here cannot expose
+   a mixed workspace snapshot.
+7. Release locks. Cleanup occurs only through §12.11.
 
 Startup and pre-write reconciliation runs before accepting another producer:
 
-- `Prepared` and `current == base`: resume validation and activation, or mark the
-  journal Aborted and discard the unreferenced staging generation.
-- `Prepared` and `current == target`: idempotently run the finalization transaction.
-- `Committed` and `current == target`: no action.
+- `Prepared` and coordinator `current == base_snapshot_id`: revalidate every
+  `apply_journal_packs` target and manifest hash, then resume pointer activation; if
+  validation fails before the commit point, mark the journal Aborted and leave
+  unreferenced targets for GC.
+- `Prepared` and coordinator `current == target_snapshot_id`: idempotently run the
+  finalization transaction and repair grouped service pointers.
+- `Committed` and coordinator `current == target_snapshot_id`: repair any remaining
+  grouped service pointers; no logical state transition is needed.
 - Any other pointer/journal combination is quarantined as a blocking consistency
   error; it is never guessed or silently overwritten.
 
-State readers use the active generation plus journal phase when resolving
-generation-qualified rows, so a crash after pointer replacement cannot expose a
-new pack with logically unrelated workflow state. Fault-injection tests kill the
-process before and after every step.
+State readers use the selected coordinator snapshot plus journal phase when
+resolving snapshot-qualified rows. Group readers always derive service generations
+from the selected workspace manifest, so a crash cannot expose a mixture of old
+and new service packs. Fault-injection tests kill the process before and after
+every step and after each service-pointer repair.
+
+### 12.11 Retention, archive, and garbage collection
+
+Default policy:
+
+```toml
+[retention]
+inactive_generation_count = 3
+inactive_generation_days = 30
+evidence_tombstone_generations = 2
+live_revision_days = 90
+archive_revision_days = 0 # zero means retain archives indefinitely
+proposal_ttl_days = 7
+terminal_job_ttl_days = 30
+terminal_job_cap = 10000
+audit_live_days = 365
+```
+
+Count and age generation limits are both minimum protections: a generation is a
+candidate only after it exceeds both. The active snapshot and its immediate parent
+are always protected. Every service generation referenced by an active or retained
+workspace manifest is also protected.
+
+`retention_refs` is the only workflow-reference source used by GC. Workflow
+transactions create and remove these typed references with their owner rows:
+
+- Submitted change set to proposal envelope and all base/target snapshots.
+- Unresolved review or comment to its change set, revision, and required snapshot.
+- Publication conflict to the published revision and generation.
+- Nonterminal apply journal to every pack generation in `apply_journal_packs`.
+- Active job to its proposal, change set, export, or publication result.
+- Retained workspace snapshot to every service generation in its manifest.
+
+GC never parses `metadata_json`, `payload_json`, `result_id`, or audit text to infer
+reachability. Audit records do not pin all historical storage indefinitely: when an
+audited operation requires reconstructable content, its transaction creates an
+explicit `retention_refs` row. The audit row itself retains immutable hashes and
+identifiers after referenced payloads expire.
+
+Revision archiving is queryable storage, not deletion disguised as archive:
+
+1. Under the coordinator lock, select unprotected live revisions older than
+   `live_revision_days` in a bounded batch.
+2. Write a schema-versioned temporary SQLite segment under `history/`, including
+   complete revision payloads and denormalized evidence locators.
+3. Validate row counts and integrity, fsync it, compute its checksum, and atomically
+   rename it to `<archive-segment>.sqlite`.
+4. In one `state.sqlite` transaction, insert `revision_archives`, delete exactly
+   those live rows, and append an audit event.
+5. On restart, delete an unregistered temporary segment. An unregistered
+   final-named segment is removed only when its source rows are still live;
+   otherwise reconciliation quarantines the ambiguity. Validate every registered
+   segment before serving it. A missing or corrupt registered segment makes history
+   readiness degraded and blocks further archive deletion.
+
+The history API merges `document_revisions` with the ordered
+`revision_archives` catalog. A cursor identifies the live table or archive segment
+and row position; one archive segment is opened at a time, so history remains
+bounded and queryable after pack pruning. Archive segments may be removed only
+when `archive_revision_days` is nonzero, every contained revision is unprotected,
+and the removal is explicitly audited.
+
+Generation GC deletes immutable pack directories only after computing the
+transitive protected set, then records `pruned_at` without deleting
+`generation_history`. Evidence tombstones are physically removed only after the
+configured generation delay and when no active block, revision, review, change set,
+or retention reference requires them. Expired proposal envelopes and terminal jobs
+are changed only when no `retention_refs` row targets them. GC first nulls an
+expired proposal's potentially large `envelope_json` and records `purged_at`; the
+small identity/hash row remains while a `change_sets.proposal_id` foreign key
+references it. An unreferenced purged row and an unprotected terminal job may then
+be deleted under their caps. Audit rows are exported and checksum-verified before
+their configured removal. Dry-run and real GC use the same candidate-selection
+function.
 
 ## 13. Knowledge Compilation
 
@@ -1746,17 +1910,29 @@ Pass 2: edges
 - Stream graph edges.
 - Insert normalized technical relations for projector-relevant edge kinds only:
   containment, route and entrypoint membership, API exposure, event production and
-  consumption, data access, test coverage, and cross-service contracts. Raw call
-  and reference edges are not re-materialized as `relations` rows; they stay in
-  `GraphArtifacts` and are reached through query descriptors or the optional
-  `GraphStore`.
+  consumption, data access, test coverage, and cross-service contracts.
+- Insert configured one-hop call/reference kinds into the compact integer-keyed
+  `technical_edges` index (§12.3). These rows are not `KnowledgeRelation` records:
+  they carry no duplicated titles, authority payloads, or rendered content.
+  Outbound lookup uses the table primary key and inbound lookup uses its reverse
+  covering index.
 - Accumulate only bounded high-level statistics in memory.
-- Write large relation sets directly to temporary SQLite tables.
+- Assign compact node/kind IDs deterministically and populate both relation forms
+  through bounded batches and temporary external-sort tables. No query path scans
+  `edges.jsonl`.
 
 Phase 0 measures the resulting `relations` row count and pack size on the 5M-edge
-benchmark service; those numbers are inputs to the storage ADR. A policy that
-materializes a large fraction of raw edges re-creates the graph inside every pack
-and cannot meet the §3.2 build and size budgets.
+benchmark service, plus the separate row count, index size, build time, and one-hop
+latency of `technical_edges`; those numbers are inputs to the storage ADR. A policy
+that materializes a large fraction of raw edges as rich `relations` re-creates the
+graph inside every pack and cannot meet the §3.2 build and size budgets.
+
+Large relation-block query descriptors identify the pack generation, backend
+(`knowledge-relations` or `technical-edges`), subject compact ID, direction, kind
+filter, and opaque cursor. The mandatory FTS profile supports bounded one-hop
+technical-edge queries without `GraphStore`. The optional `GraphStore` remains the
+backend for deeper traversal, path finding, and backend-specific graph analytics;
+its absence is reported only for those advanced operations.
 
 Pass 3: technical assets
 
@@ -1841,8 +2017,9 @@ Physical staging strategy:
    copy while the source remains read-only. This cost is part of the incremental
    budget; it is not excluded from benchmarks.
 4. Apply deletes and upserts to the staging database in bounded transactions.
-   Update affected FTS rows and run `PRAGMA optimize`; do not run a full `VACUUM`
-   on every incremental build.
+   Update affected rich relations, compact technical edges, evidence tombstones,
+   and FTS rows, then run `PRAGMA optimize`; do not run a full `VACUUM` on every
+   incremental build.
 5. Clone and update the vector sidecar only in staging. If the vector backend
    cannot meet correctness or budget requirements, follow the FTS-only
    `Rebuilding` fallback in §12.7.
@@ -1990,7 +2167,7 @@ cih docs document \
 ```
 
 When scope is omitted, the command uses evidence changed since the active document
-generation. It refuses an unbounded instruction when no deterministic scope can be
+snapshot. It refuses an unbounded instruction when no deterministic scope can be
 resolved.
 
 ### 15.2 Change envelope
@@ -2003,10 +2180,17 @@ pub struct BoundedCollection<T> {
     pub continuation: Option<LocalQueryRef>,
 }
 
+pub struct DocumentationSnapshotRef {
+    pub coordination_scope: CoordinationScope,
+    pub coordinator_id: String,
+    pub snapshot_id: GenerationId,
+    pub service_generations: BTreeMap<ServiceId, GenerationId>,
+}
+
 pub struct ChangeEnvelope {
     pub workspace: WorkspaceId,
     pub repositories: BoundedCollection<RepositoryVersion>,
-    pub base_document_generation: GenerationId,
+    pub base_snapshot: DocumentationSnapshotRef,
     pub instruction: String,
     pub added: BoundedCollection<EvidenceRef>,
     pub changed: BoundedCollection<EvidenceRef>,
@@ -2032,7 +2216,7 @@ The envelope includes bounded summaries of:
 The local envelope is capped by both serialized bytes and item count: defaults are
 4 MiB total and 2,000 items per collection. `total_count`, `complete`, and
 `continuation` preserve completeness information when the cap is reached.
-Continuation references are local, generation-bound query descriptors; they are
+Continuation references are local, snapshot-bound query descriptors; they are
 not expanded automatically into an LLM prompt. The provider request receives a
 second bounded selection, default 512 KiB, chosen by deterministic relevance and
 coverage rules. A request that cannot represent enough evidence to support a safe
@@ -2107,8 +2291,7 @@ does not establish that evidence entails generated prose.
 pub struct DocumentationChangeSet {
     pub id: ChangeSetId,
     pub idempotency_key: String,
-    pub base_workspace_generation: GenerationId,
-    pub base_service_generations: BTreeMap<ServiceId, GenerationId>,
+    pub base_snapshot: DocumentationSnapshotRef,
     pub instruction: Option<String>,
     pub object_operations: Vec<ObjectOperation>,
     pub relation_operations: Vec<RelationOperation>,
@@ -2127,9 +2310,11 @@ There is no unrestricted SQL or Markdown-edit operation.
 
 Before apply:
 
-- Base generations still match.
+- The coordinator snapshot and every service generation still exactly match
+  `base_snapshot`.
 - Object keys and kinds are valid.
-- Referenced objects and evidence exist.
+- Referenced objects and evidence exist. Deleted-evidence operations may reference
+  retained tombstones; other operations require Active evidence.
 - New relations do not create forbidden primary-parent cycles.
 - Block payloads match their type schema.
 - Every Observed claim has a deterministic attestation containing projector
@@ -2140,11 +2325,13 @@ Before apply:
 - Human and pinned authority rules are respected.
 - Replacement base hashes match current blocks.
 - Deletion targets are generated content.
-- Prompt and model metadata are present.
+- Prompt and model metadata are present when an LLM contributed output;
+  deterministic-only change sets carry an explicit deterministic generator.
 - Content and instruction sizes are within limits.
 - Idempotency key has not already been applied.
 
-Any validation or pre-activation failure leaves the active generation unchanged.
+Any validation or pre-activation failure leaves the active coordinator snapshot
+unchanged.
 Once pointer activation succeeds, a finalization failure is recovered
 idempotently through `apply_journal` (§12.10); it does not roll the pointer back
 without an explicit rollback operation.
@@ -2159,18 +2346,22 @@ claims.
 
 ### 15.7 Idempotency
 
-The idempotency key hashes:
+Idempotency is defined separately for proposal, change-set submission, and apply:
 
-- Normalized instruction.
-- Resolved scope.
-- Graph versions.
-- Technical-asset fingerprints.
-- Taxonomy version.
-- Overlay version.
-- Model and prompt versions.
-- Agent policy version.
+- Proposal key: normalized instruction, canonical resolved scope,
+  `base_snapshot.snapshot_id`, the key-sorted service-generation map, graph and
+  technical-asset fingerprints, taxonomy and overlay versions, and agent policy
+  version.
+- Change-set key: proposal ID, envelope hash, canonical typed-operation hash, model
+  and prompt versions when applicable, and generator policy version.
+- Apply key: change-set ID, expected base snapshot ID, and mutation hash.
 
-Repeating the request returns the prior change-set result.
+Repeating an operation against the same snapshot returns its prior result. If
+human, AI, indexing, or review activity advances the coordinator snapshot, the
+proposal key necessarily changes even when the source graph and instruction are
+unchanged. The system then builds a fresh envelope instead of returning a stale
+change set. A submitted stale key never aliases a newer operation; normal base
+snapshot validation reports the conflict.
 
 ### 15.8 Review inbox
 
@@ -2208,7 +2399,7 @@ Review resolution creates an auditable change set. It does not mutate rows direc
 - Valid evidence ID with an unsupported or non-entailed claim: keep the claim
   Inferred or reject it; never upgrade it to Observed.
 - Low confidence: review or Unclassified.
-- Stale base generation: rebase deterministic evidence and request explicit retry.
+- Stale base snapshot: rebase deterministic evidence and request explicit retry.
 - Secret detection: redact or omit the affected snippet and report it.
 
 ### 15.10 LLM egress boundary
@@ -2237,17 +2428,18 @@ The handoff is an explicit durable protocol:
    provider response locally, and constructs a complete
    `DocumentationChangeSet`.
 4. The CLI submits that typed change set through `POST /change-sets`. The server
-   verifies proposal ID, envelope hash, base generations, schema, principal,
-   idempotency key, and size limits before storing it and returning the change-set
-   ID. Local-filesystem mode uses the same application service and `write.lock`; it
-   does not write SQLite tables directly.
+   verifies proposal ID, envelope hash, base snapshot and generation map, schema,
+   principal, idempotency key, and size limits before storing it and returning the
+   change-set ID. Local-filesystem mode uses the same application service and
+   `write.lock`; it does not write SQLite tables directly.
 5. `apply_documentation_change` or `POST /changes/apply` accepts the stored
    change-set ID and runs the activation protocol in §12.10.
 
-Proposal envelopes expire according to configuration only when no submitted change
-set, unresolved review, or active job references them. A client cannot submit
-unrestricted SQL, rendered Markdown mutations, or a provider response in place of
-the typed change-set schema.
+An expired proposal payload is purgeable only when no active `retention_refs` owner
+requires it. Its ID and envelope hash remain in the small proposal row while a
+change set references it (§12.11). A client cannot submit unrestricted SQL,
+rendered Markdown mutations, or a provider response in place of the typed
+change-set schema.
 
 ## 16. Search and Retrieval
 
@@ -2284,7 +2476,8 @@ AI query rewriting is optional and cannot remove explicit user filters.
 
 1. Query FTS5.
 2. Query the semantic index when enabled.
-3. Expand bounded graph/context neighbors for top results.
+3. Expand bounded one-hop neighbors from `relations` and `technical_edges`; use
+   `GraphStore` only for explicitly requested deeper analysis.
 4. Merge result lists with reciprocal-rank fusion.
 5. Apply role, authority, truth, freshness, and context reranking.
 6. Deduplicate by object and block.
@@ -2371,14 +2564,15 @@ pub struct DocumentView {
     pub freshness: Freshness,
     pub available_actions: Vec<ViewAction>,
     pub history: Option<Page<RevisionSummary>>,
-    pub generation: GenerationId,
+    pub snapshot_id: GenerationId,
+    pub source_generation: GenerationId,
 }
 ```
 
 When `include_history` is true, the response includes only the first bounded page
-of document-visible revisions from `document_revisions` (§12.6). Further history
-uses its own cursor. History is not reconstructed by scanning or retaining every
-old pack generation.
+of document-visible revisions from the live table and archive catalog (§12.6,
+§12.11). Further history uses its own snapshot-bound cursor. History is not
+reconstructed by scanning or retaining every old pack generation.
 
 ### 17.3 Assembly order
 
@@ -2389,7 +2583,7 @@ old pack generation.
 5. Add conflict and stale callouts.
 6. Convert large block data to paginated query descriptors.
 7. Add breadcrumbs, backlinks, evidence summary, and actions.
-8. Cache by object, role, locale, and generation.
+8. Cache by object, role, locale, coordinator snapshot, and source generation.
 
 No rendered document body is stored as the source of truth.
 
@@ -2404,7 +2598,9 @@ Initial object response includes:
 - Counts for relations and evidence.
 
 Additional sections use independent requests. A section payload is capped at 256
-KiB; larger data is paginated.
+KiB; larger data is paginated through generation-pinned `relations`,
+`technical_edges`, or evidence queries. A descriptor never triggers a scan of raw
+artifact JSONL.
 
 ## 18. HTTP API
 
@@ -2426,7 +2622,7 @@ GET /relations?key=<knowledge-key>&kind=<kind>&direction=<direction>&cursor=<cur
 GET /evidence?key=<knowledge-key>&block=<block-id>&cursor=<cursor>
 GET /history?key=<knowledge-key>&entity=<optional-id>&cursor=<cursor>
 GET /search?q=<query>&workspace=<id>&role=<role>&filters...
-GET /changes?workspace=<id>&since=<generation>&cursor=<cursor>
+GET /changes?workspace=<id>&since_snapshot=<snapshot>&cursor=<cursor>
 GET /change?id=<change-set-id>
 GET /proposals/<id>/envelope
 GET /reviews?workspace=<id>&status=<status>&cursor=<cursor>
@@ -2436,7 +2632,7 @@ GET /legacy?slug=<legacy-slug>
 ```
 
 Knowledge keys are query parameters because they contain URI separators. Cursors are
-opaque, generation-bound, and invalidated when filters change.
+opaque, coordinator-snapshot-bound, and invalidated when filters change.
 
 ### 18.2 Write endpoints
 
@@ -2562,7 +2758,8 @@ On restart:
 `get_documentation_status`
 
 - Inputs: workspace or repository.
-- Returns: generations, staleness, coverage, diagnostics, and review counts.
+- Returns: coordinator snapshot, pinned pack generations, staleness, coverage,
+  diagnostics, and review counts.
 
 ### 19.2 Write tools
 
@@ -2578,7 +2775,7 @@ On restart:
 `get_documentation_proposal`
 
 - Inputs: proposal ID.
-- Returns: the bounded generation-bound envelope required by the CLI agent.
+- Returns: the bounded snapshot-bound envelope required by the CLI agent.
 - Read classification, but requires the same workspace scope as the proposal.
 
 `submit_documentation_change`
@@ -2590,7 +2787,7 @@ On restart:
 
 `apply_documentation_change`
 
-- Inputs: change-set ID and expected base generation.
+- Inputs: change-set ID and expected base snapshot.
 - External write classification.
 - Requires explicit client approval.
 
@@ -2663,7 +2860,7 @@ missing services.
 
 Reports:
 
-- Active generations.
+- Active coordinator snapshot and pinned pack generations.
 - Input and taxonomy versions.
 - Staleness.
 - Object, block, relation, and evidence counts.
@@ -2698,13 +2895,14 @@ cih docs gc [--group <group>] [--repo <repo>] [--dry-run] [--json]
 
 Applies the retention policy: prunes inactive generations past the retention
 window, archives document revisions according to configured history retention,
-and removes expired proposal envelopes and terminal job rows past their TTL/cap
-policies. Protected references are always honored — a generation or revision
-referenced by an unresolved review, comment, publication conflict, apply-journal
-entry, or audit record is never pruned (§12.6, §18.3). The active generation and
-its immediate parent are never candidates. `gc` serializes on the same advisory
-`write.lock` as other generation producers (§12.10). `--dry-run` reports what
-would be removed without removing it.
+purges expired proposal payloads, and removes unreferenced proposal/job rows past
+their TTL/cap policies. It uses the archive protocol and normalized
+`retention_refs` reachability
+rules in §12.11; it never infers protection by parsing workflow JSON. A group GC
+acquires the workspace lock and affected service locks in the global order from
+§12.10. `--dry-run` executes the same candidate-selection logic and reports pack
+generations, tombstones, live revisions, archive segments, envelopes, jobs, and
+audit rows that would change without mutating them.
 
 ## 21. UI Design
 
@@ -3063,21 +3261,27 @@ Deliverables:
 - Benchmark corpus and hardware definition.
 - Current wiki content inventory.
 - Role-based evaluation queries.
-- Architecture decision records for keys, ontology, packs, AI authority, and vector
-  backend.
+- Architecture decision records for keys, ontology, packs, workspace-snapshot
+  coordination, technical-edge indexing, retention/archive, AI authority, and
+  vector backend.
 - New crate skeletons and layering enforcement.
 - Storage dependency selection: SQLite binding, migration approach, and USearch
   binding. The workspace currently contains no SQLite or USearch usage anywhere —
   the pack storage stack is net-new, and Phase 0/1 estimates must account for
   that.
+- Migration of the current direct `cih-server -> cih-embed` dependency behind
+  explicit semantic features, with default and semantic dependency-tree checks.
 - Physical incremental-pack prototype covering copy-on-write and portable-copy
   paths, checksum/fsync cost, and staged vector updates.
+- Compact `technical_edges` prototype on the 5M-edge benchmark, including forward
+  and reverse lookup size and latency.
 
 Acceptance:
 
 - Reproducible current memory, page-count, generation-time, and search baselines.
 - Agreement on the benchmark repositories and required role outputs.
-- `cih-server` has no direct or transitive dependency on `cih-llm`.
+- The default `cih-server` tree has no direct or transitive `cih-llm`, `cih-embed`,
+  `fastembed`, `ort`, or USearch dependency; semantic profiles compile separately.
 - The selected physical pack strategy demonstrates a credible path to both full and
   incremental budgets; otherwise the storage ADR is revised before Phase 1.
 
@@ -3089,10 +3293,13 @@ Deliverables:
 - `cih-doc-store`.
 - Stable key and kind validation.
 - SQLite migrations.
+- Canonical manifest input/fingerprint schema.
 - Artifact streaming adapter.
 - Streaming repository-docs adapter with include/ignore, path-count, file-size,
   total-byte, cancellation, and coverage rules.
-- Technical object, relation, block, and evidence projection.
+- Technical object, knowledge relation, compact technical-edge, block, and evidence
+  projection.
+- Evidence tombstone transitions and protected tombstone GC.
 - Atomic generation publication.
 - Status and integrity commands.
 
@@ -3101,7 +3308,12 @@ Acceptance:
 - Builds a service pack without a graph database.
 - Does not load all nodes or edges into memory.
 - Does not retain all discovered repository paths or document bodies in memory.
-- Can resolve object, relation, and evidence queries.
+- Can resolve object, evidence, knowledge-relation, and one-hop call/reference
+  queries without `GraphStore` or a scan of `edges.jsonl`.
+- Manifest comparison returns no-change only when every configured input
+  fingerprint matches.
+- Deleted evidence remains resolvable as a tombstone until its protection and
+  retention window expire.
 - Survives interrupted builds without changing the active generation.
 
 ### Phase 2: Taxonomy, role views, and workspace packs
@@ -3114,6 +3326,7 @@ Deliverables:
 - Overlay system.
 - Shared role-view assembly.
 - Workspace compiler.
+- Workspace manifests that pin exact service generations and manifest hashes.
 - FTS5 indexing.
 - Markdown export.
 
@@ -3123,13 +3336,14 @@ Acceptance:
 - No source files or code entities appear in primary navigation.
 - One capability can span multiple services.
 - Uncertain placement appears in Unclassified.
+- One workspace pointer selects a reproducible workspace/service generation map.
 
 ### Phase 3: Server, MCP reads, and UI
 
 Deliverables:
 
 - Knowledge pack manager.
-- Atomic generation refresh with in-flight old-generation handling.
+- Atomic coordinator-snapshot refresh with in-flight old-snapshot handling.
 - HTTP read APIs.
 - MCP read tools.
 - Shared bounded job scheduler and durable job repository foundation.
@@ -3142,6 +3356,8 @@ Acceptance:
 - UI meets navigation and retrieval latency targets on the benchmark workspace.
 - Browser receives no unbounded collection.
 - Legacy `search_wiki` and `get_wiki_page` work through adapters.
+- Grouped reads use only service generations pinned by the selected workspace
+  manifest, even while service pointers move independently.
 
 ### Phase 4: Semantic search and AI documentation
 
@@ -3154,8 +3370,11 @@ Deliverables:
 - Placement engine.
 - Structured AI proposals.
 - Durable proposal retrieval and typed change-set submission handoff.
-- Change-set validation and idempotent apply.
-- Recoverable apply journal and document revision history.
+- Snapshot-bound change-set validation and idempotent apply.
+- Multi-pack coordinator journal with normalized generation maps and deterministic
+  lock ordering.
+- Document revision history, normalized retention references, queryable archive
+  segments, and the full `cih docs gc` workflow.
 - Review inbox and UI.
 - Minimal principal model and authenticated MCP/HTTP write tools.
 
@@ -3166,9 +3385,13 @@ Acceptance:
 - Ambiguous and taxonomy-changing scenarios require review.
 - Hallucinated or stale references cannot be applied.
 - AI prose cannot be marked Observed without deterministic attestation.
-- Repeating an instruction is idempotent.
+- Repeating an instruction against the same snapshot is idempotent; advancing only
+  the document snapshot produces a new proposal instead of a stale prior result.
 - Process termination at every activation step converges to one consistent
-  generation and workflow state after restart.
+  workspace snapshot and workflow state after restart, including cross-service
+  changes and service-pointer repair.
+- Archived revision history remains paginated and queryable after live revision
+  and pack-generation pruning.
 
 ### Phase 5: Universal technical assets
 
@@ -3192,7 +3415,8 @@ Deliverables:
 - Full benchmark runs.
 - Profiling and query-plan review.
 - Cache, LRU, scheduler, and SQLite tuning.
-- Fault injection for generation activation, durable jobs, and optional services.
+- Fault injection for multi-pack activation, archive/GC transitions, durable jobs,
+  and optional services.
 - Windows, macOS, and Linux build/test matrix for selected feature profiles.
 - Security and recovery review.
 - Operational runbooks.
@@ -3203,6 +3427,8 @@ Acceptance:
 - The Phase 0 local-semantic budget passes when that feature is enabled.
 - No unbounded endpoint, discovery path, envelope, job queue, log, or cache remains.
 - Restart recovery converges every apply-journal and durable-job fault scenario.
+- GC preserves every normalized retention root and recovers every archive
+  temp-file/catalog crash point without history loss.
 - Corrupt and unavailable optional components degrade safely.
 - The system is approved to become the default only after these gates pass.
 
@@ -3234,6 +3460,8 @@ Acceptance:
 - Knowledge kind and key validation.
 - Stable ID generation.
 - Globally namespaced evidence-ID generation and collision fixtures.
+- Immutable repository-ID validation.
+- Evidence Active/Tombstone/reappearance transitions and protected deletion.
 - Alias and merge behavior.
 - Primary-parent cycle prevention.
 - Pack-local foreign keys and external-reference validation.
@@ -3243,16 +3471,22 @@ Acceptance:
 - Overlay merge modes.
 - Config validation.
 - Placement thresholds and sticky placement.
-- Idempotency keys.
+- Snapshot-bound proposal, change-set, and apply idempotency keys.
 - Change-set validation.
-- Apply-journal transition and reconciliation tables.
+- Canonical manifest serialization, complete input accounting, and generation hashes.
+- Compact technical-edge forward/reverse lookup and cursor behavior.
+- Multi-pack generation-map validation, lock ordering, apply-journal transitions,
+  and reconciliation tables.
+- Retention-reference reachability and cycle handling.
+- Revision-archive catalog, checksum, and cross-segment cursor behavior.
 - Observed-claim attestation and rejection of AI-originated Observed claims.
 - Bounded collection byte/item limits and completeness metadata.
 - Principal capability and credential-rotation behavior.
 - SQLite migrations.
 - FTS indexing.
 - Vector-key mapping.
-- Cursor encoding and generation binding.
+- Cursor encoding and coordinator-snapshot binding.
+- Default and semantic-profile dependency-tree assertions.
 
 ### 28.2 Adapter tests
 
@@ -3267,6 +3501,7 @@ Each adapter requires:
 - Path-count, per-file, total-byte, and cancellation budget exhaustion.
 - Incremental unchanged input.
 - Changed and deleted input.
+- Deleted then reappearing adapter-local key.
 - Coverage report assertions.
 - Path traversal and secret-handling assertions where relevant.
 
@@ -3300,11 +3535,12 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 10. AI proposes a new capability.
 11. AI proposes a capability move.
 12. Same instruction is repeated.
-13. Base generation changes before apply.
+13. Base snapshot or one pinned service generation changes before apply.
 14. LLM returns an unknown evidence ID.
 15. LLM cites a valid evidence ID that does not entail its claim.
 16. LLM attempts to mark generated prose Observed.
 17. External requirement conflicts with code.
+18. Only document content advances; repeating the instruction creates a new proposal.
 
 ### 28.5 Search tests
 
@@ -3319,6 +3555,7 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 - Pagination stability.
 - Result explanation.
 - Evidence citation integrity.
+- One-hop call/reference retrieval without `GraphStore` or JSONL rescans.
 
 ### 28.6 UI tests
 
@@ -3330,7 +3567,8 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 - Large virtualized lists.
 - Evidence and relation pagination.
 - Review diff and resolution.
-- Paginated history remains available after old generation directories are pruned.
+- Paginated history remains available across live rows and archive segments after
+  old generation directories are pruned.
 - Mobile and desktop layouts.
 - Keyboard and screen-reader navigation.
 - Bounded graph expansion.
@@ -3338,10 +3576,14 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 
 ### 28.7 Failure tests
 
-- Process killed during each build phase and every apply-journal transition.
-- Crash before pointer activation reconciles to the base generation.
+- Process killed during each build phase, every apply-journal transition, and each
+  grouped service-pointer repair.
+- Crash before coordinator-pointer activation reconciles to the base snapshot.
 - Crash after pointer activation but before journal finalization reconciles to the
-  target generation without applying state twice.
+  target snapshot without applying state twice.
+- Cross-service targets are complete while the workspace pointer remains at base.
+- Group readers never observe mixed service generations while service pointers are
+  being repaired.
 - Pointer/journal disagreement is quarantined instead of guessed.
 - Invalid active pointer.
 - Missing or corrupt SQLite file.
@@ -3354,6 +3596,12 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 - Disk full.
 - Concurrent index attempts.
 - Concurrent apply with stale base.
+- Concurrent workspace apply, service index, and GC acquire locks without deadlock.
+- Crash before and after archive-segment fsync, rename, catalog insertion, and live
+  revision deletion.
+- Missing, corrupt, duplicate, and unregistered revision archive segments.
+- GC with protected generations, tombstones, revisions, proposals, jobs, and
+  transitive workspace-to-service references.
 - Server restart with Queued, Running, AwaitingReview, and terminal jobs.
 - Expired job deadline, queue saturation, cancellation, and retained-history caps.
 - Stale diagnostic lock metadata with and without an active OS file lock.
@@ -3366,17 +3614,20 @@ Service benchmark:
 - 500k nodes.
 - 5m edges.
 - Representative APIs, events, data, processes, and tests.
-- Materialized `relations` row count and pack size relative to the raw edge count
-  (edge-materialization policy check, §13.1 pass 2).
+- Materialized `relations` and compact `technical_edges` row counts, index sizes,
+  and pack-size ratios relative to the raw edge count (§13.1 pass 2).
 - Full and incremental builds.
 - Copy-on-write and portable-copy incremental publication paths.
 - Checksum, fsync, FTS update, staged-vector update, and compaction costs.
-- Object, relation, evidence, FTS, and semantic queries.
+- Object, knowledge-relation, forward/reverse technical-edge, evidence, FTS, and
+  semantic queries.
+- Tombstone and generation GC, revision archive creation, and archive-history reads.
 
 Workspace benchmark:
 
 - 20 service packs.
 - Cross-service contracts and processes.
+- Atomic workspace-snapshot swaps while service pointers change independently.
 - Cold and warm navigation.
 - PO, BA, Tester, and Dev search workloads.
 - LRU churn.
@@ -3407,22 +3658,33 @@ The replacement is ready for default use only when:
 5. Human and pinned blocks survive regeneration unchanged.
 6. Full and incremental performance budgets pass.
 7. Search works without embeddings and improves when semantic search is enabled.
-8. No endpoint, adapter discovery path, change envelope, job queue, retained job
-   history, log buffer, or cache is unbounded.
+8. No endpoint, adapter discovery path, change envelope, job queue, live revision
+   set, archive query, retained job history, log buffer, or cache is unbounded.
 9. AI high-confidence placement meets the precision target fixed in Phase 0.
 10. Ambiguous and taxonomy-changing operations enter review.
-11. AI change application is crash-consistent, recoverable, generation-safe, and
-    idempotent across `state.sqlite` and `current.json`.
+11. AI change application is crash-consistent, recoverable, snapshot-safe, and
+    idempotent across coordinator `state.sqlite`, workspace `current.json`, and
+    every affected service generation.
 12. Unsupported extraction is visible.
 13. Static Markdown and HTML exports resolve internal links.
 14. Confluence publication is optional, idempotent, and conflict-safe.
 15. Existing MCP wiki tools and legacy slugs remain functional during migration.
-16. The system can roll back to the previous pack generation.
+16. The system can roll back to the previous standalone generation or workspace
+    snapshot and its exact service-generation map.
 17. Docusaurus removal does not remove a supported user workflow.
-18. Document history remains queryable after pack-generation retention pruning.
+18. Document history remains queryable across live and archive storage after
+    pack-generation retention pruning.
 19. Durable jobs recover according to policy after server restart.
 20. `cih-server` has no direct or transitive `cih-llm` dependency and performs no
-    LLM egress.
+    LLM egress; its default feature tree also excludes `cih-embed`, `fastembed`,
+    ONNX/ORT, and USearch.
+21. The default FTS profile resolves bounded one-hop call/reference relations from
+    the pack without `GraphStore` or runtime JSONL scans.
+22. Deleted evidence remains a resolvable tombstone until all stale-block, review,
+    history, and retention protections expire.
+23. No-change publication is based on a complete canonical manifest input set.
+24. Grouped readers select one workspace snapshot and can never observe a mixed
+    service-generation set.
 
 ## 30. Risks and Mitigations
 
@@ -3432,11 +3694,13 @@ The replacement is ready for default use only when:
 | AI places content incorrectly | Deterministic candidates first, bounded options, evidence, confidence, and review |
 | AI cites real but irrelevant evidence | AI prose remains Inferred; only deterministic attestations can create Observed claims |
 | Business meaning cannot be derived from code | Separate Observed from Intended; support human taxonomy and requirements |
-| SQLite packs become too large | Lightweight technical entities, no rendered symbol pages, indexes, sharding by service |
+| SQLite packs become too large | Lightweight technical entities, compact integer technical edges, no rendered symbol pages, measurement gates, and sharding by service |
+| Compact edge indexes reproduce the raw graph cost | Separate rich relations from integer adjacency; benchmark row/index ratios and revise the storage ADR before Phase 1 |
 | Portable incremental copy exceeds the budget | Phase 0 physical prototype is a gate; revise the ADR to shard before Phase 1 |
-| Pointer and mutable workflow state diverge after a crash | Prepared journal, generation-qualified state, startup reconciliation, and quarantine |
+| Service pointers expose a mixed workspace after a crash | One workspace coordinator pointer, manifest-pinned service generations, journaled pointer repair, and quarantine |
 | Restart retries duplicate a side effect | Durable job intent, operation-specific idempotency, apply-journal reconciliation, and publication state |
-| Revision history grows without bound | Document-visible revision scope plus explicit retention/archive policy and protected references |
+| Deleted evidence breaks stale documentation or review | Stable tombstones, preserved joins and locators, and protected delayed deletion |
+| Revision archive or GC loses required history | Immutable checksummed segments, normalized retention roots, crash recovery, and one shared candidate selector |
 | Search fan-out opens every service | Workspace-first retrieval, bounded service expansion, LRU and concurrency limits |
 | Vector dependency breaks standalone builds | Feature-gated local semantic adapter and complete FTS fallback |
 | Native vector library has platform issues | CI matrix; slim profile excludes it; active pack never depends on vector availability |
@@ -3460,14 +3724,18 @@ The following defaults are fixed for the first implementation:
 - Observed implementation separated from Intended requirements.
 - Controlled core ontology with namespaced extensions.
 - SQLite service and workspace packs.
+- A workspace generation manifest as the atomic grouped snapshot and service-generation map.
 - FTS5 as the mandatory search baseline.
+- Compact pack-local technical-edge indexes for bounded one-hop queries.
 - Feature-gated USearch local semantic index.
 - `GraphArtifacts` as the indexing source.
 - `GraphStore` as an optional runtime query collaborator.
 - High-confidence automatic generated placement and matching AI-block updates;
   only deterministic projectors create Observed claims.
 - Review required for taxonomy changes.
-- Durable bounded jobs and crash-recoverable generation activation.
+- Stable evidence tombstones with protected delayed deletion.
+- Durable bounded jobs and crash-recoverable coordinator-snapshot activation.
+- Queryable revision archives and normalized GC retention references.
 - Minimal capability-bearing principals without an enterprise RBAC platform.
 - Scale and recovery gates before default UI cutover or Docusaurus removal.
 - Repository-owned Markdown overlays.
@@ -3486,7 +3754,8 @@ cih docs index
   -> immutable service knowledge pack
 
 cih docs sync
-  -> immutable workspace knowledge pack
+  -> immutable workspace snapshot
+  -> exact service-generation map
 
 cih-server
   -> CIH UI

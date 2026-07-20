@@ -317,6 +317,12 @@ pub struct IndexStatusArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct IndexCancelArgs {
+    /// Job ID returned by `index_repo` (must be queued or running).
+    pub job_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddResolvePatternArgs {
     /// Repo name or absolute path. Empty = the server's active graph.
     #[serde(default)]

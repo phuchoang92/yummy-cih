@@ -71,7 +71,7 @@ of a member repo (disable with `CIH_NO_AUTO_GROUP_SYNC=1`). `status` reports per
 `contracts_synced_at`/`stale`, and every contract tool response carries
 `contracts_synced_at`/`contracts_stale` — treat stale contracts as suspect and re-run
 `cih-engine group sync <group>` (or check `cih-engine group status <group>`).
-| Index a repo | `index_repo`, `index_status` |
+| Index a repo | `index_repo`, `index_status`, `index_cancel` |
 
 ## Resources
 

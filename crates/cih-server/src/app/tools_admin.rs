@@ -5,7 +5,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
 use super::CihServer;
-use crate::args::{AddResolvePatternArgs, IndexRepoArgs, IndexStatusArgs, ListResolvePatternsArgs};
+use crate::args::{
+    AddResolvePatternArgs, IndexCancelArgs, IndexRepoArgs, IndexStatusArgs, ListResolvePatternsArgs,
+};
 use crate::utils::json_result;
 use crate::{indexing, patterns};
 
@@ -29,7 +31,8 @@ impl CihServer {
 
     #[tool(
         description = "Poll the status of a repo-indexing job started by index_repo. \
-            Returns status (running/done/failed), timing, and output or error message."
+            Returns status (queued/running/done/failed/timed_out/cancelled), timing, and \
+            output or error message."
     )]
     async fn index_status(
         &self,
@@ -46,6 +49,30 @@ impl CihServer {
                 None,
             )),
         }
+    }
+
+    #[tool(
+        description = "Cancel a queued or running index job started by index_repo. A running \
+            cih-engine process is killed; a queued job never starts. Returns immediately with \
+            status \"cancelling\" — poll index_status(job_id=...) until the status settles as \
+            \"cancelled\". Jobs that already finished cannot be cancelled."
+    )]
+    async fn index_cancel(
+        &self,
+        Parameters(args): Parameters<IndexCancelArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.indexer
+            .cancel(&args.job_id)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_result(&serde_json::json!({
+            "job_id": args.job_id,
+            "status": "cancelling",
+            "message": format!(
+                "Cancellation signalled. Poll index_status(job_id=\"{}\") for the final state.",
+                args.job_id
+            ),
+        }))
     }
 
     #[tool(

@@ -97,7 +97,7 @@ async fn tools_list_returns_full_surface_with_schemas() {
     }
     assert_eq!(
         tools.len(),
-        30,
+        31,
         "tool count drifted from the registered surface"
     );
 

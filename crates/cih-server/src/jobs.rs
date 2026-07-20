@@ -33,14 +33,34 @@ pub enum JobState {
         finished_at_secs: u64,
         timeout_secs: u64,
     },
+    /// Cancelled via `index_cancel` (a running engine was killed).
+    Cancelled {
+        cancelled_at_secs: u64,
+    },
+}
+
+impl JobState {
+    /// The wire value of the serde `status` tag (kept in sync with the
+    /// `rename_all = "snake_case"` derive above).
+    pub fn status_label(&self) -> &'static str {
+        match self {
+            JobState::Queued { .. } => "queued",
+            JobState::Running { .. } => "running",
+            JobState::Done { .. } => "done",
+            JobState::Failed { .. } => "failed",
+            JobState::TimedOut { .. } => "timed_out",
+            JobState::Cancelled { .. } => "cancelled",
+        }
+    }
 }
 
 pub type Jobs = Arc<tokio::sync::RwLock<HashMap<String, JobState>>>;
 
 /// Upper bound on retained job entries. Once exceeded, the oldest terminal
-/// (`Done`/`Failed`/`TimedOut`) jobs are evicted first so the map can't grow
-/// unbounded on a long-lived server. `Queued`/`Running` jobs are never evicted
-/// (their count is bounded by the scheduler's admission capacity).
+/// (`Done`/`Failed`/`TimedOut`/`Cancelled`) jobs are evicted first so the map
+/// can't grow unbounded on a long-lived server. `Queued`/`Running` jobs are
+/// never evicted (their count is bounded by the scheduler's admission
+/// capacity).
 const MAX_RETAINED_JOBS: usize = 256;
 
 /// Monotonic per-process counter appended to the job id so two `index_repo`
@@ -75,6 +95,7 @@ pub fn evict_terminal(jobs: &mut HashMap<String, JobState>) {
             | JobState::TimedOut {
                 finished_at_secs, ..
             } => Some((id.clone(), *finished_at_secs)),
+            JobState::Cancelled { cancelled_at_secs } => Some((id.clone(), *cancelled_at_secs)),
             JobState::Queued { .. } | JobState::Running { .. } => None,
         })
         .collect();
