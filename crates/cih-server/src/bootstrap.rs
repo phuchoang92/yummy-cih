@@ -92,10 +92,8 @@ pub(crate) fn assemble_services(
         backend,
         falkor_url,
     ));
-    let indexing_service = IndexingService::new(
-        Arc::new(RegistryIndexTargetResolver),
-        index_scheduler,
-    );
+    let indexing_service =
+        IndexingService::new(Arc::new(RegistryIndexTargetResolver), index_scheduler);
     let contract_service = ContractService::new(
         repo_contexts.clone(),
         XflowState::new(artifacts.clone()),

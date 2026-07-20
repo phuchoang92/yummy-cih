@@ -11,12 +11,12 @@ use std::sync::Arc;
 use cih_taint::{run_taint_analysis, SinkCategory, TaintAnalysisInput, TaintPhaseConfig};
 use serde::Serialize;
 
+use crate::domain::error::AppError;
+use crate::domain::repository::ResolvedRepo;
 use crate::infrastructure::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
 use crate::infrastructure::blocking_runtime::{
     blocking_timeout, run_blocking_heavy, BlockingError,
 };
-use crate::domain::error::AppError;
-use crate::domain::repository::ResolvedRepo;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;

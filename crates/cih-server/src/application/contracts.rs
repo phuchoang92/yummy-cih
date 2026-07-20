@@ -6,14 +6,14 @@ use std::sync::Arc;
 use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind};
 use serde::Serialize;
 
+use crate::domain::error::AppError;
+use crate::domain::repository::{RepoCatalogSnapshot, RepoSelector};
 use crate::infrastructure::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
 use crate::infrastructure::blocking_runtime::{
     blocking_timeout, run_blocking_heavy, BlockingError,
 };
-use crate::domain::error::AppError;
-use crate::domain::repository::{RepoCatalogSnapshot, RepoSelector};
-use crate::ports::repo_context_provider::RepoContextProvider;
 use crate::infrastructure::cross_repo_graph::{self as xflow, XflowState};
+use crate::ports::repo_context_provider::RepoContextProvider;
 
 #[derive(Clone)]
 pub(crate) struct ContractService {

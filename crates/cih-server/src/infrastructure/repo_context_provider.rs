@@ -20,9 +20,9 @@ use crate::domain::repository::unversioned_artifacts_dir;
 use crate::domain::repository::{
     normalize_path, resolve_entry, RepoCatalogSnapshot, RepoSelector, ResolvedRepo,
 };
-use crate::ports::repo_context_provider::{RepoContext, RepoContextProvider};
-use crate::infrastructure::search_provider::{SearchCache, SearchState};
 use crate::infrastructure::cache::single_flight::SingleFlight;
+use crate::infrastructure::search_provider::{SearchCache, SearchState};
+use crate::ports::repo_context_provider::{RepoContext, RepoContextProvider};
 
 trait RepoCatalog: Send + Sync {
     fn resolve(

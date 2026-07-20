@@ -8,9 +8,9 @@ use cih_core::Node;
 use cih_graph_store::Direction;
 use serde::Serialize;
 
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking, BlockingError};
 use crate::domain::completeness::Completeness;
 use crate::domain::error::AppError;
+use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking, BlockingError};
 use crate::ports::repo_context_provider::RepoContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -385,9 +385,9 @@ mod tests {
                 stats: Default::default(),
             }),
             store,
-            search: Arc::new(
-                crate::infrastructure::search_provider::SearchState::new(None, None),
-            ),
+            search: Arc::new(crate::infrastructure::search_provider::SearchState::new(
+                None, None,
+            )),
         }
     }
 

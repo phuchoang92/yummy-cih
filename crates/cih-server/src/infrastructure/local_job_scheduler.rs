@@ -8,12 +8,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{watch, Mutex, Semaphore};
 
-use crate::infrastructure::artifact_repository::ArtifactRepository;
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::domain::error::AppError;
 use crate::domain::indexing::{
     IndexJobSnapshot, IndexJobSpec, IndexSchedulerReceipt, ResolvedRepoTarget,
 };
+use crate::infrastructure::artifact_repository::ArtifactRepository;
+use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::infrastructure::index_jobs::{
     evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs,
 };
@@ -956,8 +956,8 @@ mod tests {
 
     #[tokio::test]
     async fn successful_job_invalidates_retained_repo_artifacts() {
-        use crate::infrastructure::artifact_repository::{ArtifactCache, ArtifactRepository};
         use crate::domain::repository::ResolvedRepo;
+        use crate::infrastructure::artifact_repository::{ArtifactCache, ArtifactRepository};
 
         let dir = tempfile::tempdir().unwrap();
         let artifacts_dir = dir.path().join(".cih").join("artifacts").join("v1");

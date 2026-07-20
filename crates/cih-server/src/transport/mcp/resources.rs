@@ -343,7 +343,7 @@ fn read_wiki_page(
     })?;
     let manifest: crate::infrastructure::wiki_repository::Manifest =
         serde_json::from_str(&manifest_raw)
-        .map_err(|e| McpError::internal_error(format!("invalid wiki manifest: {e}"), None))?;
+            .map_err(|e| McpError::internal_error(format!("invalid wiki manifest: {e}"), None))?;
     let page = manifest
         .pages
         .iter()
@@ -354,12 +354,12 @@ fn read_wiki_page(
                 None,
             )
         })?;
-    let markdown =
-        crate::infrastructure::wiki_repository::read_page_raw(&wiki_dir, &page.path).ok_or_else(|| {
-        McpError::internal_error(
-            format!("wiki page '{slug}' exists in the manifest but its file is unreadable"),
-            None,
-        )
+    let markdown = crate::infrastructure::wiki_repository::read_page_raw(&wiki_dir, &page.path)
+        .ok_or_else(|| {
+            McpError::internal_error(
+                format!("wiki page '{slug}' exists in the manifest but its file is unreadable"),
+                None,
+            )
         })?;
     Ok(ReadResourceResult {
         contents: vec![ResourceContents::text(markdown, uri)],

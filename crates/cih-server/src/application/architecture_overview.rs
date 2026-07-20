@@ -1547,9 +1547,9 @@ mod tests {
         let context = Arc::new(RepoContext {
             repo: ResolvedRepo::from_entry(registry_entry.clone()),
             store: Arc::new(populated_store()),
-            search: Arc::new(
-                crate::infrastructure::search_provider::SearchState::new(None, None),
-            ),
+            search: Arc::new(crate::infrastructure::search_provider::SearchState::new(
+                None, None,
+            )),
         });
         let catalog = RepoCatalogSnapshot::for_test(
             "demo".into(),

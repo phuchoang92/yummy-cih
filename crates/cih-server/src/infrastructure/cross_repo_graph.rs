@@ -15,9 +15,9 @@ use std::sync::Arc;
 use cih_core::{ContractMatch, ContractMatchKind, Edge, EdgeKind, Node};
 use serde::Serialize;
 
-use crate::infrastructure::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
 use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
+use crate::infrastructure::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
 use crate::utils::node_prop_str_owned;
 
 // ── Artifact graph ───────────────────────────────────────────────────────────

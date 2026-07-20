@@ -19,8 +19,8 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 use crate::application::browser::{BrowserSearchResult, GraphBrowserService};
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::domain::error::AppError;
+use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::layout;
 use crate::search;
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
@@ -600,9 +600,9 @@ mod tests {
         let state = BrowserState::new(
             GraphBrowserService::new(
                 store,
-                std::sync::Arc::new(
-                    crate::infrastructure::search_provider::SearchState::new(None, None),
-                ),
+                std::sync::Arc::new(crate::infrastructure::search_provider::SearchState::new(
+                    None, None,
+                )),
             ),
             None,
         );
