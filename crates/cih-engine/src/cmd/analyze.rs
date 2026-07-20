@@ -1,11 +1,39 @@
 //! `cih-engine analyze` — settings layering, then the analyze pipeline.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::analyze::{run_analyze, AnalyzeFlags};
 use crate::settings;
 
 use super::args::AnalyzeArgs;
+
+/// Reject `--language` values no provider claims. The scan filter matches on
+/// exact language id, so an unknown value silently selects **zero files** and
+/// produces an empty-but-"successful" index — the failure mode this guards.
+/// Validated against the live provider registry, never a hard-coded list.
+fn validate_languages(languages: &[String]) -> Result<()> {
+    if languages.is_empty() {
+        return Ok(());
+    }
+    let mut supported: Vec<&'static str> = cih_lang::all_providers()
+        .iter()
+        .map(|provider| provider.language_id())
+        .collect();
+    supported.sort_unstable();
+    let unknown: Vec<&str> = languages
+        .iter()
+        .map(String::as_str)
+        .filter(|language| !supported.contains(language))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "unknown --language value(s): {}. Supported: {}",
+        unknown.join(", "),
+        supported.join(", ")
+    ))
+}
 
 pub fn run(args: AnalyzeArgs) -> Result<()> {
     let repo = match args.repo {
@@ -43,6 +71,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         },
         &layers,
     );
+    validate_languages(&resolved.languages)?;
     run_analyze(
         repo,
         AnalyzeFlags {
@@ -63,4 +92,28 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
             route_base_path: resolved.cxf_base_path,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_languages;
+
+    /// An unknown `--language` used to select zero files, so the index came out
+    /// empty but "successful". It must fail loudly, and the message must list
+    /// what is actually supported.
+    #[test]
+    fn unknown_languages_are_rejected_with_the_supported_set() {
+        let error = validate_languages(&["kotlim".to_string()]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("kotlim"), "{message}");
+        assert!(message.contains("java"), "{message}");
+        assert!(message.contains("kotlin"), "{message}");
+    }
+
+    #[test]
+    fn supported_and_empty_language_filters_pass() {
+        validate_languages(&[]).expect("no filter means all languages");
+        validate_languages(&["java".to_string(), "typescript".to_string()])
+            .expect("registered providers must be accepted");
+    }
 }

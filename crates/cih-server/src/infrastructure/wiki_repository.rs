@@ -62,6 +62,95 @@ pub struct PageMeta {
     pub community_id: Option<String>,
 }
 
+/// A facet value that matches no page in this repo's wiki, with the values that
+/// would have worked. Returning this instead of an empty result set is what
+/// stops `kind="devs"` from looking like "no such documentation".
+pub(crate) struct UnknownFacet {
+    pub(crate) field: &'static str,
+    pub(crate) value: String,
+    pub(crate) available: Vec<String>,
+}
+
+/// Values are enumerated from the pages actually present, not a hard-coded
+/// list: the wiki generator's kind/role sets evolve (personas, `routes`,
+/// `api-flow`, `listener-flow`, …) and a stale allowlist here would reject
+/// perfectly valid facets.
+fn unknown_facet(pages: &[PageMeta], facets: &WikiFacets) -> Option<UnknownFacet> {
+    fn distinct(values: impl Iterator<Item = String>) -> Vec<String> {
+        let mut values: Vec<String> = values.collect();
+        values.sort();
+        values.dedup();
+        values
+    }
+
+    if let Some(role) = facets.role {
+        if !pages.iter().any(|p| p.role.eq_ignore_ascii_case(role)) {
+            return Some(UnknownFacet {
+                field: "role",
+                value: role.to_string(),
+                available: distinct(
+                    pages
+                        .iter()
+                        .filter(|p| !p.role.is_empty())
+                        .map(|p| p.role.clone()),
+                ),
+            });
+        }
+    }
+    if let Some(kind) = facets.kind {
+        if !pages.iter().any(|p| p.kind.eq_ignore_ascii_case(kind)) {
+            return Some(UnknownFacet {
+                field: "kind",
+                value: kind.to_string(),
+                available: distinct(
+                    pages
+                        .iter()
+                        .filter(|p| !p.kind.is_empty())
+                        .map(|p| p.kind.clone()),
+                ),
+            });
+        }
+    }
+    if let Some(feature) = facets.feature {
+        if !pages
+            .iter()
+            .any(|p| p.community_id.as_deref() == Some(feature))
+        {
+            return Some(UnknownFacet {
+                field: "feature",
+                value: feature.to_string(),
+                // Feature ids are unbounded in principle; show a usable sample.
+                available: distinct(pages.iter().filter_map(|p| p.community_id.clone()))
+                    .into_iter()
+                    .take(20)
+                    .collect(),
+            });
+        }
+    }
+    None
+}
+
+impl UnknownFacet {
+    pub(crate) fn into_app_error(self) -> AppError {
+        let available = if self.available.is_empty() {
+            "this wiki has no pages carrying that facet".to_string()
+        } else {
+            format!("available: {}", self.available.join(", "))
+        };
+        AppError::InvalidInput {
+            field: match self.field {
+                "role" => "role",
+                "kind" => "kind",
+                _ => "feature",
+            },
+            message: format!(
+                "no wiki page has {} '{}' in this repo — {available}",
+                self.field, self.value
+            ),
+        }
+    }
+}
+
 /// An immutable, searchable snapshot of one generated wiki.
 pub struct WikiIndex {
     wiki_dir: PathBuf,
@@ -158,6 +247,11 @@ impl WikiIndex {
     /// provenance (enrichment tier, graph_version) callers should see.
     pub fn page_raw(&self, page: &PageMeta) -> Option<String> {
         read_page_raw(&self.wiki_dir, &page.path)
+    }
+
+    /// Report a facet value that matches no page (see [`unknown_facet`]).
+    pub(crate) fn unknown_facet(&self, facets: &WikiFacets) -> Option<UnknownFacet> {
+        unknown_facet(&self.pages, facets)
     }
 
     /// Rank pages against `query`, best first, then apply facet filters and
@@ -362,6 +456,10 @@ impl LiveWikiIndex {
                 |total, body| total.saturating_add(body.capacity()),
             ))
             .saturating_add(self.index.estimated_size_bytes())
+    }
+
+    fn unknown_facet(&self, facets: &WikiFacets) -> Option<UnknownFacet> {
+        unknown_facet(&self.pages, facets)
     }
 
     /// Ranked, faceted search — mirrors `WikiIndex::search`, bodies from memory.
@@ -776,6 +874,11 @@ impl WikiSearchRepository for WikiBundleSearchRepository {
             .await
             .map_err(wiki_app_error)?
         {
+            // A facet value no page carries is caller error, not an empty
+            // result: fail with the values that would have worked.
+            if let Some(unknown) = live.unknown_facet(&facets) {
+                return Err(unknown.into_app_error());
+            }
             let hits = live
                 .search(query, &facets, limit)
                 .into_iter()
@@ -806,6 +909,9 @@ impl WikiSearchRepository for WikiBundleSearchRepository {
                     retryable: false,
                 },
             })?;
+        if let Some(unknown) = index.unknown_facet(&facets) {
+            return Err(unknown.into_app_error());
+        }
         let hits = index
             .search(query, &facets, limit)
             .into_iter()
@@ -1061,5 +1167,107 @@ mod single_flight_tests {
         assert_eq!(metrics.retained_entries, 1);
         assert_eq!(metrics.retained_weight_bytes, 60);
         assert_eq!(metrics.evictions, 1);
+    }
+}
+
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+
+    fn page(role: &str, kind: &str, community: Option<&str>) -> PageMeta {
+        PageMeta {
+            slug: format!("{role}/{kind}"),
+            role: role.to_string(),
+            title: String::new(),
+            kind: kind.to_string(),
+            path: String::new(),
+            community_id: community.map(str::to_string),
+        }
+    }
+
+    fn pages() -> Vec<PageMeta> {
+        vec![
+            page("loan", "dev", Some("c-1")),
+            page("loan", "po", Some("c-1")),
+            page("system", "routes", None),
+        ]
+    }
+
+    fn facets<'a>(
+        role: Option<&'a str>,
+        kind: Option<&'a str>,
+        feature: Option<&'a str>,
+    ) -> WikiFacets<'a> {
+        WikiFacets {
+            role,
+            kind,
+            feature,
+        }
+    }
+
+    #[test]
+    fn known_facet_values_are_accepted_case_insensitively() {
+        let pages = pages();
+        assert!(unknown_facet(&pages, &facets(None, None, None)).is_none());
+        assert!(unknown_facet(&pages, &facets(Some("loan"), Some("dev"), Some("c-1"))).is_none());
+        // Roles/kinds match case-insensitively, as the search filter does.
+        assert!(unknown_facet(&pages, &facets(Some("LOAN"), Some("Dev"), None)).is_none());
+    }
+
+    /// The gap this closes: `kind="devs"` used to return zero hits with no
+    /// error, which reads as "this repo has no such documentation".
+    #[test]
+    fn unknown_kind_reports_the_values_that_would_work() {
+        let pages = pages();
+        let unknown = unknown_facet(&pages, &facets(None, Some("devs"), None))
+            .expect("an unmatched kind must be reported");
+        assert_eq!(unknown.field, "kind");
+        assert_eq!(unknown.value, "devs");
+        assert_eq!(unknown.available, vec!["dev", "po", "routes"]);
+
+        let error = unknown.into_app_error();
+        match error {
+            AppError::InvalidInput { field, message } => {
+                assert_eq!(field, "kind");
+                assert!(message.contains("devs"), "{message}");
+                assert!(message.contains("dev, po, routes"), "{message}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_role_and_feature_are_reported_too() {
+        let pages = pages();
+        let unknown = unknown_facet(&pages, &facets(Some("lending"), None, None)).unwrap();
+        assert_eq!(unknown.field, "role");
+        assert_eq!(unknown.available, vec!["loan", "system"]);
+
+        let unknown = unknown_facet(&pages, &facets(None, None, Some("c-9"))).unwrap();
+        assert_eq!(unknown.field, "feature");
+        assert_eq!(unknown.available, vec!["c-1"]);
+    }
+
+    /// Role is checked before kind, so the first offending facet is the one
+    /// reported — the caller fixes one thing at a time.
+    #[test]
+    fn the_first_offending_facet_is_reported() {
+        let pages = pages();
+        let unknown = unknown_facet(&pages, &facets(Some("nope"), Some("alsonope"), None)).unwrap();
+        assert_eq!(unknown.field, "role");
+    }
+
+    #[test]
+    fn a_wiki_without_the_facet_says_so_rather_than_listing_nothing() {
+        let pages = vec![page("", "", None)];
+        let unknown = unknown_facet(&pages, &facets(None, Some("dev"), None)).unwrap();
+        assert!(unknown.available.is_empty());
+        let AppError::InvalidInput { message, .. } = unknown.into_app_error() else {
+            panic!("expected InvalidInput");
+        };
+        assert!(
+            message.contains("no pages carrying that facet"),
+            "{message}"
+        );
     }
 }

@@ -495,14 +495,19 @@ pub struct SearchWikiArgs {
     /// Repo name or absolute path (from registry). Leave empty to use the server's active graph key.
     #[serde(default)]
     pub repo: String,
-    /// Feature/module facet (the manifest `role` grouping, e.g. `loan`, `system`, `shared`). Leave empty for all.
+    /// Feature/module facet (the manifest `role` grouping, e.g. `loan`, `system`, `shared`).
+    /// Leave empty for all. A value no page carries is rejected, and the error
+    /// lists this repo's actual roles.
     #[serde(default)]
     pub role: String,
-    /// Page kind facet — persona pages carry their persona as the kind: `po`, `ba`, `dev`,
-    /// plus `index`, `routes`, `api-flow`. Leave empty for all kinds.
+    /// Page kind facet — persona pages carry their persona as the kind (`po`, `ba`,
+    /// `dev`), alongside generated kinds such as `index`, `routes`, and the flow
+    /// pages. The exact set is per-repo: leave empty for all kinds, and if you pass
+    /// one that no page carries the error lists the values that would have worked.
     #[serde(default)]
     pub kind: String,
-    /// Feature facet: matches a hit's `community_id`. Leave empty for all features.
+    /// Feature facet: matches a hit's `community_id`. Leave empty for all features;
+    /// an id no page carries is rejected with a sample of the real ids.
     #[serde(default)]
     pub feature: String,
     /// Max hits to return (default 20, max 50, pass 0 for default).

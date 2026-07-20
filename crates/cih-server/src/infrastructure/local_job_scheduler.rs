@@ -380,6 +380,58 @@ fn resolve_target_graph_key(
     }
 }
 
+/// Environment forwarded to `cih-engine`. The child starts from a **cleared**
+/// environment and receives only these (plus the job-specific graph settings the
+/// caller sets explicitly), so server-only secrets — notably `CIH_API_TOKEN` —
+/// never reach a subprocess (§20, "child processes receive only an allowlisted
+/// environment").
+///
+/// Keep in sync with what the engine actually reads: adding an engine env var
+/// without adding it here makes it silently unset in server-launched jobs.
+const ENGINE_ENV_ALLOWLIST: &[&str] = &[
+    // OS essentials — the engine shells out (git, gradle, javap) and writes the
+    // registry under `$HOME/.cih`, so clearing these would break indexing.
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "USER",
+    "LOGNAME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "RUST_BACKTRACE",
+    // Engine tuning and data sources it reads directly.
+    "CIH_ASCII",
+    "CIH_BULK_BATCH_BYTES",
+    "CIH_FALKOR_CONNECT_TIMEOUT_SECS",
+    "CIH_FALKOR_LOAD_WAIT_SECS",
+    "CIH_PG_URL",
+    "POSTGRES_PASSWORD",
+    "GRADLE_USER_HOME",
+    "HF_HOME",
+    "HF_HUB_OFFLINE",
+    // `analyze --all` ends in the wiki stage, which may call an LLM provider.
+    // These are forwarded deliberately: the child needs them, the server does not.
+    "CIH_LLM_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+];
+
+/// Clear the inherited environment and re-add only [`ENGINE_ENV_ALLOWLIST`].
+fn apply_engine_environment(command: &mut tokio::process::Command) {
+    command.env_clear();
+    for key in ENGINE_ENV_ALLOWLIST {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct RegistryIndexTargetResolver;
 
@@ -471,6 +523,7 @@ impl IndexJobScheduler for IndexScheduler {
         }
 
         let mut command = tokio::process::Command::new(find_engine_binary());
+        apply_engine_environment(&mut command);
         command
             .arg("analyze")
             .arg(canonical.display().to_string())
@@ -787,6 +840,57 @@ mod tests {
             Admission::Conflict { .. } => "Conflict",
             Admission::QueueFull { .. } => "QueueFull",
             Admission::Admitted => "Admitted",
+        }
+    }
+
+    /// §20: the child must not inherit server-only secrets. Runs a real child
+    /// through the same environment construction and inspects what it sees.
+    #[tokio::test]
+    async fn engine_child_gets_only_allowlisted_environment() {
+        // SAFETY: single-threaded test process; the vars are removed below.
+        std::env::set_var("CIH_API_TOKEN", "super-secret-bearer");
+        std::env::set_var("CIH_LLM_API_KEY", "llm-key");
+        std::env::set_var("SOME_UNRELATED_HOST_VAR", "leaky");
+
+        let mut cmd = tokio::process::Command::new("sh");
+        apply_engine_environment(&mut cmd);
+        cmd.arg("-c").arg("env");
+        let outcome = run_engine(cmd, Duration::from_secs(30), 256 * 1024).await;
+
+        std::env::remove_var("CIH_API_TOKEN");
+        std::env::remove_var("CIH_LLM_API_KEY");
+        std::env::remove_var("SOME_UNRELATED_HOST_VAR");
+
+        let EngineOutcome::Exited { stdout, .. } = outcome else {
+            panic!("expected the child to exit, got {outcome:?}");
+        };
+        let seen: std::collections::HashSet<&str> = stdout
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, _)| key)
+            .collect();
+
+        // The server's bearer token and unrelated host state must not cross.
+        assert!(
+            !seen.contains("CIH_API_TOKEN"),
+            "server bearer token leaked into the engine child: {seen:?}"
+        );
+        assert!(!seen.contains("SOME_UNRELATED_HOST_VAR"));
+        // What the engine genuinely needs must survive, or indexing breaks:
+        // `$HOME/.cih` is where the registry lives and it shells out to git.
+        assert!(seen.contains("HOME"), "HOME must be forwarded: {seen:?}");
+        assert!(seen.contains("PATH"), "PATH must be forwarded: {seen:?}");
+        // Deliberately forwarded: `analyze --all` ends in the wiki stage.
+        assert!(seen.contains("CIH_LLM_API_KEY"));
+        // Everything present must come from the allowlist — except the few
+        // variables the shell itself sets in its own process (they are not
+        // inherited from the server, which is what this guard is about).
+        const SHELL_INJECTED: &[&str] = &["PWD", "SHLVL", "_"];
+        for key in &seen {
+            assert!(
+                ENGINE_ENV_ALLOWLIST.contains(key) || SHELL_INJECTED.contains(key),
+                "unexpected variable in the child environment: {key}"
+            );
         }
     }
 

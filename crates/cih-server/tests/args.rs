@@ -1,11 +1,9 @@
-use cih_core::ContractMatchKind;
 use cih_graph_store::Direction;
 use cih_server::args::{
     DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs, ImpactFormat,
     RegressionScopeArgs, RouteMapArgs, RouteMapFormat, TraceFlowArgs, TraceFlowFormat,
     UntestedPathsArgs,
 };
-use cih_server::utils::parse_contract_kind_filter;
 
 #[test]
 fn direction_arg_is_typed_and_rejects_unknown_values() {
@@ -55,24 +53,6 @@ fn detect_changes_args_defaults() {
     assert_eq!(args.scope, DiffScope::Working);
     assert!(args.base_ref.is_empty());
     assert!(args.repo.is_empty());
-}
-
-#[test]
-fn contract_kind_filter_accepts_aliases() {
-    assert_eq!(parse_contract_kind_filter(None).unwrap(), None);
-    assert_eq!(
-        parse_contract_kind_filter(Some("http")).unwrap(),
-        Some(ContractMatchKind::HttpRoute)
-    );
-    assert_eq!(
-        parse_contract_kind_filter(Some("kafka_topic")).unwrap(),
-        Some(ContractMatchKind::KafkaTopic)
-    );
-    assert_eq!(
-        parse_contract_kind_filter(Some("spring-event")).unwrap(),
-        Some(ContractMatchKind::SpringEvent)
-    );
-    assert!(parse_contract_kind_filter(Some("queue")).is_err());
 }
 
 #[test]

@@ -87,6 +87,9 @@ async fn add_resolve_pattern(
             message: "annotation name is required, without @".into(),
         });
     }
+    // `method` is persisted verbatim into cih.patterns.toml and then used as the
+    // route's HTTP verb, so a typo silently produces routes nobody can match.
+    let method = validate_http_method(&command.method)?;
 
     let repo = repos.resolve_repo(RepoSelector::from_wire(&command.repo))?;
     let repo_path = repo.canonical_path.as_path();
@@ -94,7 +97,7 @@ async fn add_resolve_pattern(
     let rule = RouteRule {
         annotation: command.annotation.trim().to_string(),
         path_attr: nonempty(&command.path_attr).unwrap_or_else(|| "value".to_string()),
-        method: nonempty(&command.method),
+        method,
         method_attr: nonempty(&command.method_attr),
         class_prefix_annotation: nonempty(&command.class_prefix_annotation),
         class_prefix_attr: "value".to_string(),
@@ -149,11 +152,74 @@ fn list_resolve_patterns(
     })
 }
 
+/// HTTP verbs a route rule may pin. Empty means "no fixed verb" (the rule then
+/// relies on `method_attr`, or the engine's GET default).
+const ROUTE_METHODS: &[&str] = &[
+    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE",
+];
+
+fn validate_http_method(method: &str) -> Result<Option<String>, AppError> {
+    let Some(method) = nonempty(method) else {
+        return Ok(None);
+    };
+    let upper = method.to_ascii_uppercase();
+    if !ROUTE_METHODS.contains(&upper.as_str()) {
+        return Err(AppError::InvalidInput {
+            field: "method",
+            message: format!(
+                "unknown HTTP method '{method}'; expected one of {}",
+                ROUTE_METHODS.join(", ")
+            ),
+        });
+    }
+    Ok(Some(upper))
+}
+
 fn nonempty(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {
         None
     } else {
         Some(t.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `method` is persisted into `cih.patterns.toml` and becomes the route's
+    /// verb, so an unvalidated typo produced routes nothing could match.
+    #[test]
+    fn http_method_is_validated_and_normalized() {
+        assert_eq!(
+            validate_http_method("post").unwrap().as_deref(),
+            Some("POST")
+        );
+        assert_eq!(
+            validate_http_method(" Get ").unwrap().as_deref(),
+            Some("GET")
+        );
+        // Empty means "no fixed verb" — the rule uses method_attr instead.
+        assert_eq!(validate_http_method("").unwrap(), None);
+        assert_eq!(validate_http_method("   ").unwrap(), None);
+
+        let error = validate_http_method("POSTT").unwrap_err();
+        match error {
+            AppError::InvalidInput { field, message } => {
+                assert_eq!(field, "method");
+                assert!(message.contains("POSTT"), "{message}");
+                assert!(message.contains("GET, POST"), "{message}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(validate_http_method("SELECT").is_err());
+    }
+
+    #[test]
+    fn nonempty_trims_and_drops_blanks() {
+        assert_eq!(nonempty("  value  ").as_deref(), Some("value"));
+        assert_eq!(nonempty("   "), None);
+        assert_eq!(nonempty(""), None);
     }
 }

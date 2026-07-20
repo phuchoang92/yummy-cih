@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::application::browser::{BrowserSearchResult, GraphBrowserService};
 use crate::domain::error::AppError;
 use crate::layout;
-use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking, run_blocking_heavy};
 use crate::search;
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
@@ -250,9 +250,21 @@ async fn graph_communities(
 ///
 /// Always returns 200: when no embedding run exists it returns an empty list plus a
 /// `note` explaining how to generate one, so the UI can render a friendly empty state.
+///
+/// [`load_feature_clusters`] is a cold artifact read (it parses the whole
+/// `nodes.jsonl` to build its first-party filter), so it runs in the **heavy
+/// blocking lane** rather than on a Tokio worker — at 500k nodes that is a
+/// ~700 ms parse that would otherwise stall every other request on this runtime.
+/// Lane saturation and the load deadline both surface as the friendly `note`.
 async fn graph_features(State(state): State<BrowserState>) -> Json<serde_json::Value> {
-    match load_feature_clusters(state.artifacts_dir.as_deref()) {
-        Ok(clusters) => Json(json!({ "clusters": clusters })),
+    let artifacts_dir = state.artifacts_dir.clone();
+    let loaded = run_blocking_heavy(blocking_timeout(), "graph features load", move || {
+        load_feature_clusters(artifacts_dir.as_deref())
+    })
+    .await;
+    match loaded {
+        Ok(Ok(clusters)) => Json(json!({ "clusters": clusters })),
+        Ok(Err(err)) => Json(json!({ "clusters": [], "note": err.to_string() })),
         Err(err) => Json(json!({ "clusters": [], "note": err.to_string() })),
     }
 }

@@ -748,5 +748,27 @@ mod tests {
         assert_eq!(report.same_key_cold_burst.loader_builds, 1);
         assert!(report.same_key_cold_burst.all_callers_shared_snapshot);
         assert!(report.search.returned_hits > 0);
+
+        // The acceptance results are the point of the harness — computing them
+        // and never asserting was how "cold loads stay off the runtime" went
+        // unguarded. `event_loop_delay_p99` here is measured during a real cold
+        // artifact load, so removing the blocking-lane wrap fails this test.
+        let failed: Vec<&str> = report
+            .acceptance
+            .iter()
+            .filter(|result| !result.passed)
+            .map(|result| result.name)
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "acceptance checks failed on the small fixture: {failed:?}"
+        );
+        assert!(
+            report
+                .acceptance
+                .iter()
+                .any(|result| result.name == "event_loop_delay_p99"),
+            "the event-loop delay guard must be part of acceptance"
+        );
     }
 }

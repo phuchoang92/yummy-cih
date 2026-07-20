@@ -137,6 +137,49 @@
 > served without retention. Remaining Milestone 5 work: memory-mapped/persisted
 > artifact indexes, evaluating more cross-repo reads via `GraphStore`,
 > page-level wiki materialization, and a scheduled soak test.
+> Audit follow-ups completed 2026-07-20 (a DoD audit found the status header had
+> overstated two claims): the `/graph/features` HTTP handler was still parsing
+> the whole `nodes.jsonl` on a Tokio worker and now runs in the heavy blocking
+> lane; the scale harness test now asserts `report.acceptance`, so the
+> `event_loop_delay_p99` guard measured during a real cold load actually gates
+> CI (removing a blocking-lane wrap now fails the suite); index child processes
+> start from a cleared environment with an explicit allowlist, so server-only
+> secrets such as `CIH_API_TOKEN` no longer reach a subprocess (Section 20); and
+> the architecture-boundary guard, which silently stopped scanning at the first
+> `#[cfg(test)]` and so ignored ~2000 lines of the largest application module,
+> now strips test items individually and keeps all production code (the three
+> boundary tests still pass under the wider scan, so nothing was hiding there).
+> Documentation was realigned in the same pass: CLAUDE.md no longer points at
+> the deleted `app.rs` and states the layering rule, SECURITY.md documents the
+> indexing child-process/path/graph-key posture, ARCHITECTURE.md gained the
+> request flow, and the 16 tuning environment variables are documented in
+> README and the multi-repo runbook.
+> Silent-default cleanup completed 2026-07-20: `search_wiki`'s `role`/`kind`/
+> `feature` facets are validated against the values actually present in that
+> repo's wiki — a value no page carries now fails with the values that would
+> have worked, instead of returning an empty result set that reads as "no such
+> documentation". Enumerating from the index rather than a hard-coded list is
+> deliberate: the generator's kind set evolves (personas, `routes`,
+> `listener-flow`, `scheduled-flow`), and the arg documentation had already
+> drifted from it. `add_resolve_pattern.method` is validated and normalized
+> before being persisted to `cih.patterns.toml`, and `cih-engine analyze`
+> rejects unknown `--language` values against the live provider registry (an
+> unknown value previously matched zero files and produced an empty but
+> "successful" index — fixed in the engine so the CLI path benefits too).
+> `utils::parse_contract_kind_filter`, a dead duplicate kept alive only by an
+> integration test, was removed and its coverage moved onto the live
+> `contracts::parse_contract_kind`. `resolve_patterns.rs` gained its first tests.
+> Known gaps still open: no structured per-request completion event (Section 19)
+> and no blocking-lane/index-queue counters — the largest remaining DoD miss;
+> `Completeness` is carried by `detect_changes` only, so limit-capped `impact`/
+> `communities`/`complexity_hotspots`/`find_duplicates` results are
+> indistinguishable from exhaustive ones; and `architecture_overview`/`status`
+> still read small group-freshness state (`SyncState`, a `contracts_path` stat)
+> and the entrypoints sidecar synchronously on async paths. Those last reads are
+> stat/small-JSON scale rather than the cold full-artifact parses Milestone 1
+> targeted, so they are recorded rather than wrapped — wrapping microsecond work
+> in `spawn_blocking` costs more than it saves. Revisit if profiling on a slow
+> or networked filesystem shows otherwise.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  

@@ -1,4 +1,4 @@
-use cih_core::{ContractMatchKind, Edge, GraphArtifacts, Node, VersionId};
+use cih_core::{Edge, GraphArtifacts, Node, VersionId};
 pub fn load_artifact_nodes(artifacts_dir: &str) -> std::io::Result<Vec<Node>> {
     let dir = std::path::Path::new(artifacts_dir);
     GraphArtifacts {
@@ -31,18 +31,4 @@ pub fn strip_response_wrapper(raw: &str) -> &str {
 
 pub fn short_class_name(fqcn: &str) -> &str {
     fqcn.rsplit('.').next().unwrap_or(fqcn)
-}
-
-pub fn parse_contract_kind_filter(
-    kind: Option<&str>,
-) -> std::result::Result<Option<ContractMatchKind>, String> {
-    match kind.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
-        "" | "all" => Ok(None),
-        "http" | "http_route" | "http-route" => Ok(Some(ContractMatchKind::HttpRoute)),
-        "kafka" | "kafka_topic" | "kafka-topic" => Ok(Some(ContractMatchKind::KafkaTopic)),
-        "spring" | "spring_event" | "spring-event" => Ok(Some(ContractMatchKind::SpringEvent)),
-        other => Err(format!(
-            "unknown contract kind '{other}'; expected all, http, kafka, or spring"
-        )),
-    }
 }

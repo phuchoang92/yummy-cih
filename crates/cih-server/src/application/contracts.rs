@@ -877,6 +877,37 @@ fn shape_check_loaded(
 mod tests {
     use super::*;
 
+    /// Coverage moved here from `tests/args.rs`, which was exercising a
+    /// duplicate of this parser in `utils.rs` that no production path called —
+    /// so the alias table could have drifted without any test noticing.
+    #[test]
+    fn contract_kind_accepts_aliases_and_rejects_unknown() {
+        assert_eq!(parse_contract_kind("").unwrap(), None);
+        assert_eq!(parse_contract_kind("all").unwrap(), None);
+        for alias in ["http", "http_route", "http-route", "HTTP"] {
+            assert_eq!(
+                parse_contract_kind(alias).unwrap(),
+                Some(ContractMatchKind::HttpRoute),
+                "alias {alias}"
+            );
+        }
+        for alias in ["kafka", "kafka_topic", "kafka-topic"] {
+            assert_eq!(
+                parse_contract_kind(alias).unwrap(),
+                Some(ContractMatchKind::KafkaTopic),
+                "alias {alias}"
+            );
+        }
+        for alias in ["spring", "spring_event", "spring-event"] {
+            assert_eq!(
+                parse_contract_kind(alias).unwrap(),
+                Some(ContractMatchKind::SpringEvent),
+                "alias {alias}"
+            );
+        }
+        assert!(parse_contract_kind("queue").is_err());
+    }
+
     #[test]
     fn group_member_accepted() {
         let members = vec!["212ecom-be".to_string(), "212ecom-fe".to_string()];
