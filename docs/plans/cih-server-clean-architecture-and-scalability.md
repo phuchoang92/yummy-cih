@@ -21,7 +21,17 @@
 > capped output retention with truncation flags, and `queued`/`timed_out` job
 > states. Still open from §13: an explicit cancel operation and old-version
 > search/wiki cache eviction (Milestone 3's weighted-cache work); registry
-> freshness needs no invalidation (mtime-checked cache).  
+> freshness needs no invalidation (mtime-checked cache).
+> Milestone 3 first slice (bounded retention) completed 2026-07-20: `MtimeCache`
+> now enforces an entry cap with strict-LRU eviction plus an idle TTL
+> (`CIH_ARTIFACT_CACHE_MAX_ENTRIES` default 32,
+> `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` default 1800), gates evicted with their
+> entries — so the xflow `ArtifactGraph` and `ArtifactBundle` caches (the two
+> raw-graph holders) no longer grow monotonically, and stale versioned-dir keys
+> age out after a re-index. Deliberately deferred to the M3 re-pricing:
+> byte-weighted budgets (`CIH_ARTIFACT_CACHE_MAX_BYTES`), the unified
+> `ArtifactSnapshot` (xflow migration is a rewrite), and wiki/search cache
+> budgets (§12.5).  
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  

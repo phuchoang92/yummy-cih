@@ -29,8 +29,14 @@ pub(crate) struct ArtifactCache {
 }
 
 impl ArtifactCache {
+    /// Server-lifetime cache: bounded by the shared artifact retention policy
+    /// (entry cap + idle TTL). `Default` stays unlimited for tests.
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            cache: Arc::new(MtimeCache::with_limits(
+                crate::mtime_cache::CacheLimits::artifact_from_env(),
+            )),
+        }
     }
 
     /// Parsed nodes+edges for `artifacts_dir`, reused across calls until

@@ -216,6 +216,7 @@ The design target is:
 | Change set | Validated object, relation, block, placement, and review operations. |
 | Overlay | Repository-owned human content attached to an object or section. |
 | Generation | An immutable, successfully published pack version. |
+| Workspace snapshot | One workspace generation plus the exact service generations pinned by its manifest. |
 
 ## 7. Target Architecture
 
@@ -1040,6 +1041,8 @@ Service pack:
   current.json
   state.sqlite
   write.lock
+  history/
+    <archive-segment>.sqlite
   <generation>/
     manifest.json
     service.sqlite
@@ -1054,6 +1057,8 @@ Workspace pack:
   current.json
   state.sqlite
   write.lock
+  history/
+    <archive-segment>.sqlite
   <generation>/
     manifest.json
     workspace.sqlite
@@ -1062,6 +1067,18 @@ Workspace pack:
 ```
 
 `vectors.usearch` is omitted when semantic search is disabled.
+
+For a standalone repository, `current.json` selects one service generation. For a
+group, `current.json` selects one workspace generation, and that workspace
+generation's manifest pins the exact generation and manifest hash of every service
+pack in the snapshot. Group readers never follow the independently moving service
+`current.json` files during a request; they open the service generations named by
+the one workspace manifest they already selected. The workspace pointer is
+therefore the single atomic visibility boundary for a multi-service snapshot.
+
+Service pointers remain useful for standalone serving and direct `cih docs index`
+workflows. A grouped publication updates them idempotently after the workspace
+pointer commits, but their intermediate values cannot affect grouped readers.
 
 ### 12.2 Manifest
 
@@ -1073,24 +1090,61 @@ Workspace pack:
   "workspace": "banking",
   "service": "payment-service",
   "generation": "blake3-value",
-  "graph_version": "graph-version",
-  "taxonomy_version": "taxonomy-hash",
-  "overlay_version": "overlay-hash",
+  "profile": "fts",
+  "inputs": {
+    "graph": {
+      "schema": 1,
+      "version": "graph-version",
+      "nodes_hash": "blake3-value",
+      "edges_hash": "blake3-value"
+    },
+    "community_version": "community-version",
+    "configuration_hash": "blake3-value",
+    "taxonomy_hash": "blake3-value",
+    "overlay_hash": "blake3-value",
+    "projection_policy_hash": "blake3-value",
+    "adapters": [
+      {
+        "namespace": "cih:graph-artifacts",
+        "schema": 1,
+        "adapter_version": "cih-version",
+        "discovery_fingerprint": "blake3-value",
+        "content_fingerprint": "blake3-value",
+        "coverage": "complete"
+      }
+    ],
+    "service_generations": {}
+  },
   "generator_version": "cih-version",
-  "embedding_model": "all-minilm-l6-v2",
+  "embedding": null,
   "created_at": "RFC3339 timestamp",
   "counts": {
     "objects": 0,
     "relations": 0,
+    "technical_edges": 0,
     "blocks": 0,
     "evidence": 0
   },
   "checksums": {
-    "service.sqlite": "blake3-value",
-    "vectors.usearch": "blake3-value"
+    "service.sqlite": "blake3-value"
   }
 }
 ```
+
+For a workspace pack, `inputs.service_generations` is a key-sorted map from stable
+service ID to `{ generation, manifest_hash }`; for a service pack it is empty.
+Optional artifact fields and checksums, including the embedding model and
+`vectors.usearch`, are omitted rather than populated with sentinel values.
+Adapter entries are sorted by namespace and include every input needed to decide
+whether extraction can be reused. The manifest also records any selected compact
+technical-edge-index format and version (§13.1).
+
+The generation ID hashes canonicalized deterministic manifest fields and artifact
+checksums; it excludes `created_at` and the generation field itself. Comparing the
+active manifest's versioned `inputs` to freshly discovered input fingerprints is
+the contract behind the two-second no-change path. An implementation may use cheap
+version/metadata checks before computing content hashes, but it cannot report
+`unchanged` unless every configured input is accounted for.
 
 ### 12.3 SQLite schema
 
@@ -1180,7 +1234,12 @@ CREATE TABLE evidence (
   end_col INTEGER,
   adapter TEXT NOT NULL,
   confidence REAL NOT NULL,
+  content_hash BLOB NOT NULL,
   snippet_hash BLOB,
+  lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active', 'tombstone')),
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  deleted_generation TEXT,
   metadata_json TEXT NOT NULL,
   UNIQUE (adapter, repo, local_key)
 );
@@ -1223,9 +1282,13 @@ CREATE TABLE comments (
 
 CREATE TABLE change_sets (
   id TEXT PRIMARY KEY,
+  proposal_id TEXT REFERENCES proposal_envelopes(id),
   idempotency_key TEXT NOT NULL UNIQUE,
-  base_generation TEXT NOT NULL REFERENCES generation_history(generation),
-  target_generation TEXT REFERENCES generation_history(generation),
+  coordination_scope TEXT NOT NULL
+    CHECK (coordination_scope IN ('standalone-service', 'workspace')),
+  coordinator_id TEXT NOT NULL,
+  base_snapshot_id TEXT NOT NULL,
+  target_snapshot_id TEXT,
   status TEXT NOT NULL,
   instruction TEXT,
   metadata_json TEXT NOT NULL,
@@ -1239,6 +1302,16 @@ CREATE TABLE change_operations (
   operation_type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   PRIMARY KEY (change_set_id, ordinal)
+);
+
+CREATE TABLE change_set_generations (
+  change_set_id TEXT NOT NULL REFERENCES change_sets(id) ON DELETE CASCADE,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
+  scope_id TEXT NOT NULL,
+  base_generation TEXT NOT NULL,
+  target_generation TEXT,
+  manifest_hash BLOB,
+  PRIMARY KEY (change_set_id, scope_kind, scope_id)
 );
 
 CREATE TABLE reviews (
@@ -1306,6 +1379,8 @@ Additional mutable workflow tables:
 ```sql
 CREATE TABLE generation_history (
   generation TEXT PRIMARY KEY,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
+  scope_id TEXT NOT NULL,
   parent_generation TEXT REFERENCES generation_history(generation),
   manifest_hash BLOB NOT NULL,
   status TEXT NOT NULL,
@@ -1317,7 +1392,10 @@ CREATE TABLE generation_history (
 CREATE TABLE proposal_envelopes (
   id TEXT PRIMARY KEY,
   idempotency_key TEXT NOT NULL UNIQUE,
-  base_generation TEXT NOT NULL REFERENCES generation_history(generation),
+  coordination_scope TEXT NOT NULL
+    CHECK (coordination_scope IN ('standalone-service', 'workspace')),
+  coordinator_id TEXT NOT NULL,
+  base_snapshot_id TEXT NOT NULL,
   principal_id TEXT NOT NULL,
   envelope_json TEXT NOT NULL,
   envelope_hash BLOB NOT NULL,
@@ -1330,12 +1408,26 @@ CREATE TABLE apply_journal (
   id TEXT PRIMARY KEY,
   change_set_id TEXT NOT NULL REFERENCES change_sets(id),
   idempotency_key TEXT NOT NULL UNIQUE,
-  base_generation TEXT NOT NULL REFERENCES generation_history(generation),
-  target_generation TEXT NOT NULL REFERENCES generation_history(generation),
+  coordination_scope TEXT NOT NULL
+    CHECK (coordination_scope IN ('standalone-service', 'workspace')),
+  coordinator_id TEXT NOT NULL,
+  base_snapshot_id TEXT NOT NULL,
+  target_snapshot_id TEXT NOT NULL,
   phase TEXT NOT NULL,
   mutation_hash BLOB NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE apply_journal_packs (
+  journal_id TEXT NOT NULL REFERENCES apply_journal(id) ON DELETE CASCADE,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
+  scope_id TEXT NOT NULL,
+  base_generation TEXT NOT NULL,
+  target_generation TEXT NOT NULL,
+  manifest_hash BLOB NOT NULL,
+  pointer_state TEXT NOT NULL,
+  PRIMARY KEY (journal_id, scope_kind, scope_id)
 );
 
 CREATE TABLE document_revisions (
@@ -1359,12 +1451,33 @@ CREATE TABLE jobs (
   request_hash BLOB NOT NULL,
   status TEXT NOT NULL,
   progress_phase TEXT NOT NULL,
-  result_ref TEXT,
+  result_kind TEXT,
+  result_id TEXT,
   error_code TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deadline_at TEXT,
   UNIQUE (kind, idempotency_key)
+);
+
+CREATE TABLE revision_archives (
+  id TEXT PRIMARY KEY,
+  relative_path TEXT NOT NULL UNIQUE,
+  min_created_at TEXT NOT NULL,
+  max_created_at TEXT NOT NULL,
+  row_count INTEGER NOT NULL,
+  checksum BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE retention_refs (
+  owner_kind TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (owner_kind, owner_id, target_kind, target_id)
 );
 
 CREATE TABLE audit_events (
@@ -1380,15 +1493,16 @@ CREATE TABLE audit_events (
 );
 ```
 
-The `comments`, `change_sets`, `change_operations`, `reviews`,
+The `comments`, `change_sets`, `change_set_generations`, `change_operations`, `reviews`,
 `publication_targets`, `publication_items`, `generation_history`,
-`proposal_envelopes`, `apply_journal`, `document_revisions`, and `jobs` tables live
-in the mutable `state.sqlite` beside `current.json`, not in the immutable
-generation database (§12.10). Foreign keys among those state tables are enforced;
-references from state to pack objects or generations are validated by the
-application because SQLite cannot enforce cross-database generation references.
-`audit_events` also lives in `state.sqlite`; it is append-only under normal
-operation and follows an explicit retention/export policy.
+`proposal_envelopes`, `apply_journal`, `apply_journal_packs`,
+`document_revisions`, `revision_archives`, `retention_refs`, and `jobs` tables
+live in the mutable `state.sqlite` beside `current.json`, not in the immutable
+generation database (§12.10). Foreign keys among those state tables are enforced.
+Pack-object references and service-generation references that cross pack roots are
+validated against exact manifest hashes by the application. `audit_events` also
+lives in `state.sqlite`; it is append-only under normal operation and follows the
+explicit retention/export policy in §12.11.
 
 Evidence IDs are globally stable hashes of `(adapter namespace, repo identity,
 adapter-local key)`. `local_key` preserves the adapter identity used to derive the
@@ -1396,12 +1510,19 @@ hash. `source_version` records the source version last observed and is deliberat
 excluded from the identity hash: a version-qualified identity would rotate every
 evidence ID on any repository change, invalidating every stored `EvidenceRef` and
 `block_evidence` row and making the Changed and Renamed evidence sets of §13.3 —
-and the 1-percent incremental budget of §3.2 — unattainable. Identity is stable
-across versions; re-extraction upserts the row, refreshing `source_version`,
-locations, and hashes, and the adapter-level content fingerprint decides whether
-the evidence counts as Changed. Evidence rows intentionally carry no
-generation-lifecycle columns; rows whose `local_key` disappears from the new
-source version are deleted together with their join rows.
+and the 1-percent incremental budget of §3.2 — unattainable. `repo` is the
+immutable, globally unique repository registry ID, not a display name or mutable
+path. Identity is stable across versions; re-extraction upserts the row, refreshing
+`source_version`, locations, and hashes, and `content_hash` decides whether the
+evidence counts as Changed.
+
+When an adapter-local key disappears, the compiler marks its row `tombstone`,
+records `deleted_generation`, and preserves its last locator and join rows.
+Dependent blocks can therefore transition to Stale and a
+`ChangeEnvelope.deleted` entry remains resolvable during review. Reappearance of
+the same adapter-local key clears the tombstone and records a Changed transition.
+Physical deletion occurs only through the protected tombstone-retention rules in
+§12.11.
 
 ### 12.4 FTS schema
 
@@ -1438,12 +1559,17 @@ Required indexes:
 - `relations(target_key, kind, deleted_generation)`
 - `blocks(object_key, section, ordinal)`
 - `evidence(repo, source_version, graph_node_id)`
+- `evidence(lifecycle, deleted_generation)`
 - `block_evidence(evidence_id)`
+- `change_set_generations(change_set_id, scope_kind, scope_id)`
 - `reviews(status, created_at)`
 - `publication_items(status)`
 - `proposal_envelopes(status, created_at)`
 - `apply_journal(phase, updated_at)`
+- `apply_journal_packs(scope_kind, scope_id, target_generation)`
 - `document_revisions(entity_kind, entity_id, created_at)`
+- `revision_archives(min_created_at, max_created_at)`
+- `retention_refs(target_kind, target_id)`
 - `jobs(status, updated_at)`
 - `audit_events(principal_id, occurred_at)`
 - `audit_events(action, occurred_at)`
@@ -1470,13 +1596,15 @@ entity. The history API reads these revisions instead of depending on old pack
 directories.
 Generation retention remains useful for rollback but is not the history contract.
 Pruning an old generation therefore cannot remove document history. Configured
-history retention may archive revisions, but it cannot silently remove revisions
-referenced by unresolved reviews, comments, publication conflicts, or audit
-records.
+history retention moves older revisions into queryable immutable archive segments
+under the protocol in §12.11. It cannot archive or remove revisions protected by an
+explicit `retention_refs` row.
 A revision may outlive the generation packs holding its evidence: revision
-payloads retain enough locator fields (adapter, `local_key`, file, and line span)
-that evidence references render as labeled but unresolvable once their generation
-is pruned — never as broken links, and never silently dropped.
+payloads retain the evidence ID, adapter, repository ID, `local_key`,
+`source_version`, content hash, file, and line span. Evidence references render as
+labeled but unresolvable once their generation is pruned — never as a link to
+newer content at the same location, never as a broken link, and never silently
+dropped.
 
 ### 12.7 Vector index
 
