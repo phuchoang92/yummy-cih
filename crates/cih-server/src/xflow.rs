@@ -6,8 +6,8 @@
 //! tests); the accepted trade-off is no Falkor `callSites` enrichment.
 //!
 //! Graphs are cached **across calls** (fleet members are big — Fineract's
-//! nodes.jsonl is 87k nodes), keyed on the artifacts dir with nodes.jsonl
-//! mtime invalidation — the `WikiSearchState::get_or_load` pattern.
+//! nodes.jsonl is 87k nodes), keyed on the artifacts dir with independent node
+//! and edge mtime invalidation - the `WikiSearchState::get_or_load` pattern.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ pub(crate) struct ArtifactGraph {
     out_edges: HashMap<String, Vec<usize>>,
     in_edges: HashMap<String, Vec<usize>>,
     nodes_mtime: Option<SystemTime>,
+    edges_mtime: Option<SystemTime>,
 }
 
 impl ArtifactGraph {
@@ -35,6 +36,7 @@ impl ArtifactGraph {
         nodes: Vec<Node>,
         edges: Vec<Edge>,
         nodes_mtime: Option<SystemTime>,
+        edges_mtime: Option<SystemTime>,
     ) -> Self {
         let nodes_by_id = nodes
             .into_iter()
@@ -58,16 +60,20 @@ impl ArtifactGraph {
             out_edges,
             in_edges,
             nodes_mtime,
+            edges_mtime,
         }
     }
 
     fn load(artifacts_dir: &str) -> std::io::Result<Self> {
-        let mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("nodes.jsonl"))
+        let nodes_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("nodes.jsonl"))
+            .and_then(|meta| meta.modified())
+            .ok();
+        let edges_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("edges.jsonl"))
             .and_then(|meta| meta.modified())
             .ok();
         let nodes = load_artifact_nodes(artifacts_dir)?;
         let edges = load_artifact_edges(artifacts_dir)?;
-        Ok(Self::build(nodes, edges, mtime))
+        Ok(Self::build(nodes, edges, nodes_mtime, edges_mtime))
     }
 
     pub(crate) fn out<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Edge> {
@@ -87,7 +93,7 @@ impl ArtifactGraph {
     }
 }
 
-/// Process-wide artifact-graph cache with nodes.jsonl-mtime invalidation and
+/// Process-wide artifact-graph cache with node/edge mtime invalidation and
 /// single-flight coalescing of concurrent misses (see [`crate::mtime_cache`]).
 #[derive(Clone, Default)]
 pub(crate) struct XflowState {
@@ -106,12 +112,20 @@ impl XflowState {
     }
 
     pub(crate) fn graph_for(&self, artifacts_dir: &str) -> std::io::Result<Arc<ArtifactGraph>> {
-        let mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("nodes.jsonl"))
+        let nodes_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("nodes.jsonl"))
+            .and_then(|meta| meta.modified())
+            .ok();
+        let edges_mtime = std::fs::metadata(PathBuf::from(artifacts_dir).join("edges.jsonl"))
             .and_then(|meta| meta.modified())
             .ok();
         self.cache.get_or_load(
             artifacts_dir,
-            |graph| graph.nodes_mtime == mtime && mtime.is_some(),
+            |graph| {
+                graph.nodes_mtime == nodes_mtime
+                    && graph.edges_mtime == edges_mtime
+                    && nodes_mtime.is_some()
+                    && edges_mtime.is_some()
+            },
             || ArtifactGraph::load(artifacts_dir),
         )
     }
@@ -524,6 +538,7 @@ mod tests {
                 ),
             ],
             None,
+            None,
         );
         let orders = ArtifactGraph::build(
             vec![
@@ -539,6 +554,7 @@ mod tests {
                 ),
                 edge("Method:or.O#h1/1", "Method:or.O#h2/0", EdgeKind::Calls),
             ],
+            None,
             None,
         );
         let graphs = HashMap::from([
@@ -610,6 +626,7 @@ mod tests {
                 EdgeKind::PublishesEvent,
             )],
             None,
+            None,
         );
         let listener = ArtifactGraph::build(
             vec![
@@ -621,6 +638,7 @@ mod tests {
                 "Method:b.L#store/1",
                 EdgeKind::Calls,
             )],
+            None,
             None,
         );
         let graphs = HashMap::from([
@@ -677,6 +695,7 @@ mod tests {
                     EdgeKind::HandlesRoute,
                 ),
             ],
+            None,
             None,
         );
         graphs.insert("orders".to_string(), Arc::new(orders));
@@ -749,6 +768,7 @@ mod tests {
                 EdgeKind::ExternalCall,
             )],
             None,
+            None,
         );
         let (mut graphs, rows) = two_repo_fixture();
         graphs.insert("checkout".to_string(), Arc::new(consumer));
@@ -784,7 +804,7 @@ mod tests {
         }
         let graphs = HashMap::from([(
             "big".to_string(),
-            Arc::new(ArtifactGraph::build(nodes, edges_v, None)),
+            Arc::new(ArtifactGraph::build(nodes, edges_v, None, None)),
         )]);
         let mut source = |repo: &str| graphs.get(repo).cloned();
         let trace = trace_across(&mut source, &[], "big", "Method:m#0/0", MAX_DEPTH * 100, 3);
@@ -821,6 +841,14 @@ mod tests {
         // Cached: same Arc while the mtime is unchanged.
         let again = state.graph_for(dir.path().to_str().unwrap()).unwrap();
         assert!(Arc::ptr_eq(&graph, &again));
+
+        // Edge-only changes invalidate the graph too. The old implementation
+        // watched nodes.jsonl only and retained stale adjacency indefinitely.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.path().join("edges.jsonl"), "").unwrap();
+        let reloaded = state.graph_for(dir.path().to_str().unwrap()).unwrap();
+        assert!(!Arc::ptr_eq(&graph, &reloaded));
+        assert_eq!(reloaded.out("Method:a.B#c/0").count(), 0);
     }
 
     #[test]
@@ -829,7 +857,7 @@ mod tests {
         save_b.name = "save".into();
         let mut save_c = node("Method:a.C#save/1", NodeKind::Method);
         save_c.name = "save".into();
-        let graph = ArtifactGraph::build(vec![save_b, save_c], vec![], None);
+        let graph = ArtifactGraph::build(vec![save_b, save_c], vec![], None, None);
         assert_eq!(
             resolve_entry(&graph, "Method:a.B#save/1").unwrap(),
             "Method:a.B#save/1"

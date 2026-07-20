@@ -21,8 +21,8 @@ pub struct IndexScheduler {
     jobs: Jobs,
     /// Bounds concurrently *running* engine processes.
     running: Arc<Semaphore>,
-    /// Canonical repo path → active (queued or running) job id.
-    active: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// Canonical repo path → active (queued or running) job.
+    active: Arc<Mutex<HashMap<PathBuf, ActiveJob>>>,
     /// Queued + running bound: running cap + queue capacity.
     admission_capacity: usize,
     /// Job id → cancellation signal for queued/running jobs (dropped when the
@@ -30,6 +30,36 @@ pub struct IndexScheduler {
     cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     job_timeout: Duration,
     output_cap: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IndexCommandKey {
+    graph_key: String,
+    /// Sorted and deduplicated because language order does not change analysis.
+    languages: Vec<String>,
+}
+
+impl IndexCommandKey {
+    fn new(graph_key: String, languages: &str) -> Self {
+        let mut languages: Vec<String> = languages
+            .split(',')
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+            .map(str::to_string)
+            .collect();
+        languages.sort();
+        languages.dedup();
+        Self {
+            graph_key,
+            languages,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ActiveJob {
+    job_id: String,
+    command: IndexCommandKey,
 }
 
 impl IndexScheduler {
@@ -103,7 +133,13 @@ impl IndexScheduler {
     /// cancel channel.
     async fn settle(&self, job_id: &str, canonical: &Path, state: JobState) {
         self.jobs.write().await.insert(job_id.to_string(), state);
-        self.active.lock().await.remove(canonical);
+        let mut active = self.active.lock().await;
+        if active
+            .get(canonical)
+            .is_some_and(|active| active.job_id == job_id)
+        {
+            active.remove(canonical);
+        }
         self.cancels.lock().await.remove(job_id);
     }
 
@@ -219,12 +255,19 @@ impl IndexScheduler {
         });
     }
 
-    /// Admission decision under the active-jobs lock: duplicates coalesce onto
-    /// the existing job, a full queue rejects, otherwise the repo is claimed.
-    async fn admit(&self, canonical: &Path, job_id: &str) -> Admission {
+    /// Admission decision under the active-jobs lock: identical commands
+    /// coalesce, a different command for an active repo conflicts, a full queue
+    /// rejects, and otherwise the repo is claimed.
+    async fn admit(&self, canonical: &Path, job_id: &str, command: &IndexCommandKey) -> Admission {
         let mut active = self.active.lock().await;
         if let Some(existing) = active.get(canonical) {
-            return Admission::Duplicate(existing.clone());
+            return if existing.command == *command {
+                Admission::Duplicate(existing.job_id.clone())
+            } else {
+                Admission::Conflict {
+                    existing: existing.job_id.clone(),
+                }
+            };
         }
         if active.len() >= self.admission_capacity {
             return Admission::QueueFull {
@@ -232,7 +275,13 @@ impl IndexScheduler {
                 capacity: self.admission_capacity,
             };
         }
-        active.insert(canonical.to_path_buf(), job_id.to_string());
+        active.insert(
+            canonical.to_path_buf(),
+            ActiveJob {
+                job_id: job_id.to_string(),
+                command: command.clone(),
+            },
+        );
         Admission::Admitted
     }
 }
@@ -240,6 +289,10 @@ impl IndexScheduler {
 enum Admission {
     /// This repo already has a queued/running job — reuse its id.
     Duplicate(String),
+    /// The repo is busy with a different indexing command.
+    Conflict {
+        existing: String,
+    },
     QueueFull {
         active: usize,
         capacity: usize,
@@ -359,15 +412,25 @@ pub async fn start_index_job(
     let graph_key =
         resolve_target_graph_key(&cih_core::Registry::load(), &canonical, requested_graph_key)
             .map_err(|e| McpError::invalid_params(e, None))?;
+    let command_key = IndexCommandKey::new(graph_key.clone(), languages);
 
     let job_id = new_job_id();
-    match scheduler.admit(&canonical, &job_id).await {
+    match scheduler.admit(&canonical, &job_id, &command_key).await {
         Admission::Duplicate(existing) => {
             return Ok(JobReceipt {
                 job_id: existing,
                 repo: repo_str,
                 deduped: true,
             });
+        }
+        Admission::Conflict { existing } => {
+            return Err(McpError::invalid_params(
+                format!(
+                    "repo already has a different active index job '{existing}'; \
+                     wait for it to finish or cancel it before changing graph_key/languages"
+                ),
+                None,
+            ));
         }
         Admission::QueueFull { active, capacity } => {
             return Err(McpError::internal_error(
@@ -390,13 +453,8 @@ pub async fn start_index_job(
         .env("CIH_GRAPH_KEY", &graph_key)
         .env("NO_COLOR", "1")
         .env("RUST_LOG", "warn,cih_engine=info");
-    if !languages.is_empty() {
-        for lang in languages.split(',') {
-            let l = lang.trim();
-            if !l.is_empty() {
-                cmd.arg("--language").arg(l);
-            }
-        }
+    for language in &command_key.languages {
+        cmd.arg("--language").arg(language);
     }
     scheduler.submit(job_id.clone(), canonical, cmd).await;
 
@@ -539,6 +597,10 @@ mod tests {
         )
     }
 
+    fn command(languages: &str) -> IndexCommandKey {
+        IndexCommandKey::new("graph".into(), languages)
+    }
+
     /// A registered path uses its own registry key — never the server primary.
     #[test]
     fn registered_path_uses_its_registry_key() {
@@ -607,18 +669,32 @@ mod tests {
         let sched = test_scheduler(1, 4);
         let repo = Path::new("/tmp/repo-a");
         assert!(matches!(
-            sched.admit(repo, "job-1").await,
+            sched.admit(repo, "job-1", &command("rust,java")).await,
             Admission::Admitted
         ));
-        match sched.admit(repo, "job-2").await {
+        match sched.admit(repo, "job-2", &command("java,rust")).await {
             Admission::Duplicate(existing) => assert_eq!(existing, "job-1"),
             other => panic!("expected Duplicate, got {}", admission_name(&other)),
         }
         // After the job completes (repo released), a new one is admitted.
         sched.active.lock().await.remove(repo);
         assert!(matches!(
-            sched.admit(repo, "job-3").await,
+            sched.admit(repo, "job-3", &command("rust")).await,
             Admission::Admitted
+        ));
+    }
+
+    #[tokio::test]
+    async fn different_command_for_active_repo_is_a_conflict() {
+        let sched = test_scheduler(1, 4);
+        let repo = Path::new("/tmp/repo-a");
+        assert!(matches!(
+            sched.admit(repo, "job-1", &command("rust")).await,
+            Admission::Admitted
+        ));
+        assert!(matches!(
+            sched.admit(repo, "job-2", &command("java")).await,
+            Admission::Conflict { existing } if existing == "job-1"
         ));
     }
 
@@ -627,14 +703,21 @@ mod tests {
     async fn admission_rejects_when_the_queue_is_full() {
         let sched = test_scheduler(1, 1); // capacity: 1 running + 1 queued
         assert!(matches!(
-            sched.admit(Path::new("/tmp/a"), "job-a").await,
+            sched
+                .admit(Path::new("/tmp/a"), "job-a", &command(""))
+                .await,
             Admission::Admitted
         ));
         assert!(matches!(
-            sched.admit(Path::new("/tmp/b"), "job-b").await,
+            sched
+                .admit(Path::new("/tmp/b"), "job-b", &command(""))
+                .await,
             Admission::Admitted
         ));
-        match sched.admit(Path::new("/tmp/c"), "job-c").await {
+        match sched
+            .admit(Path::new("/tmp/c"), "job-c", &command(""))
+            .await
+        {
             Admission::QueueFull { active, capacity } => {
                 assert_eq!((active, capacity), (2, 2));
             }
@@ -645,6 +728,7 @@ mod tests {
     fn admission_name(a: &Admission) -> &'static str {
         match a {
             Admission::Duplicate(_) => "Duplicate",
+            Admission::Conflict { .. } => "Conflict",
             Admission::QueueFull { .. } => "QueueFull",
             Admission::Admitted => "Admitted",
         }
@@ -749,7 +833,7 @@ mod tests {
         let sched = test_scheduler(1, 4);
         let repo = Path::new("/tmp/cancel-running");
         assert!(matches!(
-            sched.admit(repo, "job-r").await,
+            sched.admit(repo, "job-r", &command("")).await,
             Admission::Admitted
         ));
         let start = std::time::Instant::now();
@@ -780,7 +864,7 @@ mod tests {
         let sched = test_scheduler(0, 4);
         let repo = Path::new("/tmp/cancel-queued");
         assert!(matches!(
-            sched.admit(repo, "job-q").await,
+            sched.admit(repo, "job-q", &command("")).await,
             Admission::Admitted
         ));
         sched
@@ -801,7 +885,7 @@ mod tests {
         // A finished job can't be cancelled — the error names its state.
         let repo = Path::new("/tmp/cancel-done");
         assert!(matches!(
-            sched.admit(repo, "job-d").await,
+            sched.admit(repo, "job-d", &command("")).await,
             Admission::Admitted
         ));
         let mut quick = tokio::process::Command::new("sh");

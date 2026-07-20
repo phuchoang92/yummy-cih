@@ -190,8 +190,10 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
         .ok_or_else(|| crate::utils::repo_not_found(name))?;
 
     let text = match section {
-        "communities" => read_community_nodes(entry, NodeKind::Community, "communities", &page)?,
-        "processes" => read_community_nodes(entry, NodeKind::Process, "processes", &page)?,
+        "communities" => {
+            read_community_nodes(entry, NodeKind::Community, "communities", uri, &page)?
+        }
+        "processes" => read_community_nodes(entry, NodeKind::Process, "processes", uri, &page)?,
         section if query.is_some() => {
             return Err(McpError::invalid_params(
                 format!("section '{section}' is not paged — drop the query string"),
@@ -218,6 +220,59 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
 struct PageQuery {
     cursor: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ResourceCursor {
+    version: String,
+    section: String,
+    offset: usize,
+}
+
+impl ResourceCursor {
+    const SCHEMA: &'static str = "v1";
+
+    fn encode(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            Self::SCHEMA,
+            self.version,
+            self.section,
+            self.offset
+        )
+    }
+
+    fn decode(raw: &str) -> Result<Self, McpError> {
+        let malformed = || {
+            McpError::invalid_params(
+                format!("malformed resource cursor '{raw}' - use the response's next_cursor"),
+                None,
+            )
+        };
+        let mut parts = raw.split(':');
+        let schema = parts.next().ok_or_else(malformed)?;
+        let version = parts
+            .next()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(malformed)?;
+        let section = parts
+            .next()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(malformed)?;
+        let offset = parts
+            .next()
+            .ok_or_else(malformed)?
+            .parse()
+            .map_err(|_| malformed())?;
+        if schema != Self::SCHEMA || parts.next().is_some() {
+            return Err(malformed());
+        }
+        Ok(Self {
+            version: version.to_string(),
+            section: section.to_string(),
+            offset,
+        })
+    }
 }
 
 fn parse_page_query(query: Option<&str>) -> Result<PageQuery, McpError> {
@@ -326,6 +381,7 @@ fn read_community_nodes(
     entry: &cih_core::RegistryEntry,
     kind: NodeKind,
     section: &str,
+    resource_uri: &str,
     page: &PageQuery,
 ) -> Result<String, McpError> {
     let dir = entry
@@ -339,24 +395,28 @@ fn read_community_nodes(
     let offset = match &page.cursor {
         None => 0,
         Some(c) => {
-            let malformed = || {
-                McpError::invalid_params(
-                    format!("malformed resource cursor '{c}' — use the response's next_cursor"),
-                    None,
-                )
-            };
-            let (v, off) = c.rsplit_once(':').ok_or_else(malformed)?;
-            let off: usize = off.parse().map_err(|_| malformed())?;
-            if v != version {
+            let cursor = ResourceCursor::decode(c)?;
+            if cursor.version != version {
                 return Err(McpError::invalid_params(
                     format!(
-                        "stale cursor: artifacts were re-indexed (cursor version '{v}', \
-                         current '{version}') — restart from the base URI"
+                        "stale cursor: artifacts were re-indexed (cursor version '{}', \
+                         current '{version}') - restart from the base URI",
+                        cursor.version
                     ),
                     None,
                 ));
             }
-            off
+            if cursor.section != section {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "resource cursor is for '{}' but was used with '{section}' - \
+                         restart from the base URI",
+                        cursor.section
+                    ),
+                    None,
+                ));
+            }
+            cursor.offset
         }
     };
     let limit = page
@@ -364,59 +424,39 @@ fn read_community_nodes(
         .unwrap_or(RESOURCE_ITEM_DEFAULT)
         .min(RESOURCE_ITEM_MAX);
     let path = std::path::Path::new(dir).join("nodes.jsonl");
-    let scan = scan_jsonl_page(&path, kind.label(), offset, limit, resource_byte_budget())?;
-    let count = scan.items.len();
-    let next_cursor = scan.next_offset.map(|o| format!("{version}:{o}"));
-    let next_uri = next_cursor.as_ref().map(|c| {
-        format!(
-            "cih://repo/{}/{section}?cursor={c}&limit={limit}",
-            entry.name
-        )
-    });
-    let out = serde_json::json!({
-        "items": scan.items,
-        "count": count,
-        "truncated": next_cursor.is_some(),
-        "truncated_by": scan.stop,
-        "next_cursor": next_cursor,
-        "next_uri": next_uri,
-        "source_version": version,
-    });
-    serde_json::to_string_pretty(&out).map_err(|e| McpError::internal_error(e.to_string(), None))
+    let scan = scan_jsonl_candidates(&path, kind.label(), offset, limit.saturating_add(1))?;
+    render_resource_page(
+        entry,
+        section,
+        &version,
+        offset,
+        limit,
+        &scan.items,
+        resource_uri,
+        resource_byte_budget(),
+    )
 }
 
-/// A streamed page of JSONL records.
-struct JsonlPage {
+/// A bounded candidate window from a JSONL file. At most `limit + 1` matching
+/// records are retained so the response builder can distinguish a full final
+/// page from a page with more data.
+struct JsonlCandidates {
     items: Vec<serde_json::Value>,
-    /// Offset (in matching records) of the first item of the next page.
-    next_offset: Option<usize>,
-    /// What ended the page early: "limit" or "bytes".
-    stop: Option<&'static str>,
 }
 
-/// Stream one page out of a JSONL file: skip `offset` records whose `kind`
-/// equals `label`, then take up to `limit` of them while their raw line bytes
-/// fit `byte_budget` (the first record of a page is always served, so an
-/// oversize record cannot wedge pagination). Holds only the current page.
-fn scan_jsonl_page(
+fn scan_jsonl_candidates(
     path: &std::path::Path,
     label: &str,
     offset: usize,
-    limit: usize,
-    byte_budget: usize,
-) -> Result<JsonlPage, McpError> {
+    candidate_limit: usize,
+) -> Result<JsonlCandidates, McpError> {
     use std::io::BufRead;
     let read_err =
         |e| McpError::internal_error(format!("cannot read {}: {e}", path.display()), None);
     let file = std::fs::File::open(path).map_err(read_err)?;
     let reader = std::io::BufReader::new(file);
-    let mut out = JsonlPage {
-        items: Vec::new(),
-        next_offset: None,
-        stop: None,
-    };
+    let mut items = Vec::new();
     let mut matched = 0usize;
-    let mut bytes = 0usize;
     for line in reader.lines() {
         let line = line.map_err(read_err)?;
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -430,20 +470,140 @@ fn scan_jsonl_page(
         if index < offset {
             continue;
         }
-        if out.items.len() >= limit {
-            out.next_offset = Some(index);
-            out.stop = Some("limit");
+        if items.len() >= candidate_limit {
             break;
         }
-        if !out.items.is_empty() && bytes + line.len() > byte_budget {
-            out.next_offset = Some(index);
-            out.stop = Some("bytes");
-            break;
-        }
-        bytes += line.len();
-        out.items.push(v);
+        items.push(v);
     }
-    Ok(out)
+    Ok(JsonlCandidates { items })
+}
+
+#[derive(serde::Serialize)]
+struct ResourcePageBody<'a> {
+    items: &'a [serde_json::Value],
+    count: usize,
+    truncated: bool,
+    truncated_by: Option<&'static str>,
+    next_cursor: Option<String>,
+    next_uri: Option<String>,
+    source_version: &'a str,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serialize_resource_page(
+    entry: &cih_core::RegistryEntry,
+    section: &str,
+    version: &str,
+    offset: usize,
+    limit: usize,
+    items: &[serde_json::Value],
+    available: usize,
+) -> Result<String, McpError> {
+    let count = items.len();
+    let has_more = count < available;
+    let truncated_by = if count < available.min(limit) {
+        Some("bytes")
+    } else if has_more {
+        Some("limit")
+    } else {
+        None
+    };
+    let next_cursor = has_more.then(|| {
+        ResourceCursor {
+            version: version.to_string(),
+            section: section.to_string(),
+            offset: offset + count,
+        }
+        .encode()
+    });
+    let next_uri = next_cursor.as_ref().map(|cursor| {
+        format!(
+            "cih://repo/{}/{section}?cursor={cursor}&limit={limit}",
+            entry.name
+        )
+    });
+    serde_json::to_string(&ResourcePageBody {
+        items,
+        count,
+        truncated: has_more,
+        truncated_by,
+        next_cursor,
+        next_uri,
+        source_version: version,
+    })
+    .map_err(|e| McpError::internal_error(e.to_string(), None))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_resource_page(
+    entry: &cih_core::RegistryEntry,
+    section: &str,
+    version: &str,
+    offset: usize,
+    limit: usize,
+    candidates: &[serde_json::Value],
+    resource_uri: &str,
+    byte_budget: usize,
+) -> Result<String, McpError> {
+    let available = candidates.len();
+    let max_count = available.min(limit);
+
+    // Find the largest prefix whose actual serialized response, including
+    // pagination metadata, fits the configured budget.
+    let mut low = 0usize;
+    let mut high = max_count;
+    while low < high {
+        let count = (low + high).div_ceil(2);
+        let serialized = serialize_resource_page(
+            entry,
+            section,
+            version,
+            offset,
+            limit,
+            &candidates[..count],
+            available,
+        )?;
+        if serialized_resource_result_len(&serialized, resource_uri)? <= byte_budget {
+            low = count;
+        } else {
+            high = count - 1;
+        }
+    }
+
+    if max_count > 0 && low == 0 {
+        return Err(McpError::internal_error(
+            format!(
+                "first {section} record exceeds CIH_RESOURCE_MAX_BYTES ({byte_budget}); \
+                 increase CIH_RESOURCE_MAX_BYTES or regenerate a smaller artifact record"
+            ),
+            None,
+        ));
+    }
+
+    let serialized = serialize_resource_page(
+        entry,
+        section,
+        version,
+        offset,
+        limit,
+        &candidates[..low],
+        available,
+    )?;
+    if serialized_resource_result_len(&serialized, resource_uri)? > byte_budget {
+        return Err(McpError::internal_error(
+            format!("{section} resource metadata exceeds CIH_RESOURCE_MAX_BYTES ({byte_budget})"),
+            None,
+        ));
+    }
+    Ok(serialized)
+}
+
+fn serialized_resource_result_len(body: &str, resource_uri: &str) -> Result<usize, McpError> {
+    serde_json::to_vec(&ReadResourceResult {
+        contents: vec![ResourceContents::text(body.to_string(), resource_uri)],
+    })
+    .map(|bytes| bytes.len())
+    .map_err(|e| McpError::internal_error(e.to_string(), None))
 }
 
 fn schema_json() -> String {
@@ -501,7 +661,9 @@ fn schema_json() -> String {
 mod tests {
     use super::{
         annotated_resource, paginate_resources, parse_page_query, read_community_nodes,
-        scan_jsonl_page, split_wiki_uri, PageQuery, RESOURCE_PAGE_SIZE,
+        render_resource_page, scan_jsonl_candidates, serialize_resource_page,
+        serialized_resource_result_len, split_wiki_uri, PageQuery, ResourceCursor,
+        RESOURCE_PAGE_SIZE,
     };
     use cih_core::NodeKind;
     use std::io::Write;
@@ -541,31 +703,66 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_page_respects_offset_and_limit() {
+    fn jsonl_scan_respects_offset_and_candidate_limit() {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_fixture(tmp.path(), 5);
-        let p1 = scan_jsonl_page(&path, "Community", 0, 2, usize::MAX).unwrap();
+        let p1 = scan_jsonl_candidates(&path, "Community", 0, 2).unwrap();
         assert_eq!(p1.items.len(), 2);
-        assert_eq!(p1.next_offset, Some(2));
-        assert_eq!(p1.stop, Some("limit"));
-        let p2 = scan_jsonl_page(&path, "Community", 2, 2, usize::MAX).unwrap();
+        let p2 = scan_jsonl_candidates(&path, "Community", 2, 2).unwrap();
         assert_eq!(p2.items[0]["id"], "Community:c2");
-        let p3 = scan_jsonl_page(&path, "Community", 4, 2, usize::MAX).unwrap();
+        let p3 = scan_jsonl_candidates(&path, "Community", 4, 2).unwrap();
         assert_eq!(p3.items.len(), 1);
-        assert_eq!(p3.next_offset, None, "final page has no next cursor");
         // Non-matching kinds are invisible to paging.
-        let all = scan_jsonl_page(&path, "Community", 0, 500, usize::MAX).unwrap();
+        let all = scan_jsonl_candidates(&path, "Community", 0, 500).unwrap();
         assert_eq!(all.items.len(), 5);
     }
 
     #[test]
-    fn jsonl_page_stops_at_byte_budget_but_serves_at_least_one() {
+    fn serialized_resource_page_never_exceeds_its_byte_budget() {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_fixture(tmp.path(), 5);
-        let p = scan_jsonl_page(&path, "Community", 0, 500, 1).unwrap();
-        assert_eq!(p.items.len(), 1, "oversize first record is still served");
-        assert_eq!(p.stop, Some("bytes"));
-        assert_eq!(p.next_offset, Some(1));
+        let entry = entry_with_dir(tmp.path());
+        let candidates = scan_jsonl_candidates(&path, "Community", 0, 5).unwrap();
+        let one = serialize_resource_page(
+            &entry,
+            "communities",
+            "deadbeef",
+            0,
+            5,
+            &candidates.items[..1],
+            candidates.items.len(),
+        )
+        .unwrap();
+        let uri = "cih://repo/r/communities";
+        let budget = serialized_resource_result_len(&one, uri).unwrap();
+        let page = render_resource_page(
+            &entry,
+            "communities",
+            "deadbeef",
+            0,
+            5,
+            &candidates.items,
+            uri,
+            budget,
+        )
+        .unwrap();
+        assert!(serialized_resource_result_len(&page, uri).unwrap() <= budget);
+        let body: serde_json::Value = serde_json::from_str(&page).unwrap();
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["truncated_by"], "bytes");
+
+        let err = render_resource_page(
+            &entry,
+            "communities",
+            "deadbeef",
+            0,
+            5,
+            &candidates.items,
+            uri,
+            budget - 1,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("first communities record"));
     }
 
     #[test]
@@ -596,24 +793,26 @@ mod tests {
             &entry,
             NodeKind::Community,
             "communities",
+            "cih://repo/r/communities?limit=2",
             &page(None, Some(2)),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["count"], 2);
         assert_eq!(v["truncated"], true);
-        assert_eq!(v["next_cursor"], "deadbeef:2");
+        assert_eq!(v["next_cursor"], "v1:deadbeef:communities:2");
         assert!(v["next_uri"]
             .as_str()
             .unwrap()
-            .contains("communities?cursor=deadbeef:2"));
+            .contains("communities?cursor=v1:deadbeef:communities:2"));
 
         // The minted cursor pages on to the final page.
         let text = read_community_nodes(
             &entry,
             NodeKind::Community,
             "communities",
-            &page(Some("deadbeef:2"), Some(2)),
+            "cih://repo/r/communities?cursor=v1:deadbeef:communities:2&limit=2",
+            &page(Some("v1:deadbeef:communities:2"), Some(2)),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -626,7 +825,8 @@ mod tests {
             &entry,
             NodeKind::Community,
             "communities",
-            &page(Some("cafebabe:2"), None),
+            "cih://repo/r/communities?cursor=v1:cafebabe:communities:2",
+            &page(Some("v1:cafebabe:communities:2"), None),
         )
         .unwrap_err();
         assert!(err.message.contains("stale cursor"), "{}", err.message);
@@ -636,11 +836,33 @@ mod tests {
             &entry,
             NodeKind::Community,
             "communities",
+            "cih://repo/r/communities?cursor=nonsense",
             &page(Some("nonsense"), None),
         )
         .unwrap_err();
         assert!(err.message.contains("malformed"), "{}", err.message);
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+        // A typed cursor cannot be reused for a different resource kind.
+        let err = read_community_nodes(
+            &entry,
+            NodeKind::Process,
+            "processes",
+            "cih://repo/r/processes?cursor=v1:deadbeef:communities:2",
+            &page(Some("v1:deadbeef:communities:2"), None),
+        )
+        .unwrap_err();
+        assert!(err.message.contains("cursor is for 'communities'"));
+    }
+
+    #[test]
+    fn resource_cursor_round_trips_all_identity_fields() {
+        let cursor = ResourceCursor {
+            version: "deadbeef".into(),
+            section: "processes".into(),
+            offset: 42,
+        };
+        assert_eq!(ResourceCursor::decode(&cursor.encode()).unwrap(), cursor);
     }
 
     #[test]

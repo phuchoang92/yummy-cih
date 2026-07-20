@@ -288,6 +288,7 @@ fn wiki_err_to_mcp(err: WikiError) -> McpError {
 #[derive(Clone, PartialEq)]
 struct Freshness {
     nodes: Option<SystemTime>,
+    edges: Option<SystemTime>,
     class_enrich: Option<SystemTime>,
     wiki_meta: Option<SystemTime>,
 }
@@ -300,9 +301,14 @@ impl Freshness {
         let mt = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         Some(Self {
             nodes: mt(ga.nodes_path),
+            edges: mt(ga.edges_path),
             class_enrich: mt(repo_path.join(".cih").join("class-enrichment.json")),
             wiki_meta: mt(repo_path.join(".cih").join("wiki").join("wiki_meta.json")),
         })
+    }
+
+    fn has_complete_graph(&self) -> bool {
+        self.nodes.is_some() && self.edges.is_some()
     }
 }
 
@@ -406,18 +412,34 @@ struct LiveSearchEntry {
     index: Arc<LiveWikiIndex>,
 }
 
+type WikiGates = Arc<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>;
+
+fn gate_for(gates: &WikiGates, key: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    gates
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(key.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 #[derive(Clone)]
 pub(crate) struct WikiSearchState {
     graph_key: String,
     cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, Arc<WikiIndex>>>>,
     /// Resident renderers for live on-demand page rendering (P3.8), keyed by
-    /// repo path, invalidated on `.cih/artifacts` nodes.jsonl mtime change.
+    /// repo path, invalidated on node, edge, or enrichment mtime changes.
     render_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, ResidentEntry>>>,
     /// Live search indexes (built by rendering all resident pages), same keying.
     live_search_cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, LiveSearchEntry>>>,
-    /// Single-flight gates for `get_or_load` — one per wiki dir. A std `Mutex`
+    /// Single-flight gates for `get_or_load` - one per wiki dir. A std `Mutex`
     /// is fine: it's only held to clone the per-key async gate out (no `.await`).
-    wiki_gates: Arc<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
+    wiki_gates: WikiGates,
+    /// Independent gates avoid duplicate resident loads and live search builds.
+    /// Live-index construction may call `resident_for`, so sharing one gate
+    /// between the two paths would deadlock.
+    resident_gates: WikiGates,
+    live_search_gates: WikiGates,
 }
 
 impl WikiSearchState {
@@ -428,6 +450,8 @@ impl WikiSearchState {
             render_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             live_search_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             wiki_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            resident_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            live_search_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -441,7 +465,19 @@ impl WikiSearchState {
             return Ok(None);
         };
         if let Some(entry) = self.live_search_cache.read().await.get(&repo_path) {
-            if entry.freshness == freshness && freshness.nodes.is_some() {
+            if entry.freshness == freshness && freshness.has_complete_graph() {
+                return Ok(Some(entry.index.clone()));
+            }
+        }
+        let gate = gate_for(&self.live_search_gates, &repo_path);
+        let _held = gate.lock().await;
+        // The artifact may have changed, or another waiter may have completed
+        // the build, while this request waited for the per-repository gate.
+        let Some(freshness) = Freshness::probe(&repo_path) else {
+            return Ok(None);
+        };
+        if let Some(entry) = self.live_search_cache.read().await.get(&repo_path) {
+            if entry.freshness == freshness && freshness.has_complete_graph() {
                 return Ok(Some(entry.index.clone()));
             }
         }
@@ -479,7 +515,17 @@ impl WikiSearchState {
             return Ok(None);
         };
         if let Some(entry) = self.render_cache.read().await.get(&repo_path) {
-            if entry.freshness == freshness && freshness.nodes.is_some() {
+            if entry.freshness == freshness && freshness.has_complete_graph() {
+                return Ok(Some(entry.owned.clone()));
+            }
+        }
+        let gate = gate_for(&self.resident_gates, &repo_path);
+        let _held = gate.lock().await;
+        let Some(freshness) = Freshness::probe(&repo_path) else {
+            return Ok(None);
+        };
+        if let Some(entry) = self.render_cache.read().await.get(&repo_path) {
+            if entry.freshness == freshness && freshness.has_complete_graph() {
                 return Ok(Some(entry.owned.clone()));
             }
         }
@@ -533,13 +579,7 @@ impl WikiSearchState {
         // Single-flight: serialize concurrent first-time loads of the same wiki
         // dir behind a per-key gate, then re-check — a racing caller may have
         // loaded (and cached) while we waited for the gate.
-        let gate = self
-            .wiki_gates
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(wiki_dir.to_path_buf())
-            .or_default()
-            .clone();
+        let gate = gate_for(&self.wiki_gates, wiki_dir);
         let _held = gate.lock().await;
         if let Some(hit) = self.peek_index(wiki_dir, manifest_mtime).await {
             return Ok(hit);
@@ -777,4 +817,44 @@ pub(crate) async fn get_wiki_page(
         )
     })?;
     text_result(markdown)
+}
+
+#[cfg(test)]
+mod single_flight_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_repository_gate_serializes_same_key_but_not_distinct_keys() {
+        let gates: WikiGates = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let repo = PathBuf::from("/tmp/wiki-repo");
+        assert!(Arc::ptr_eq(
+            &gate_for(&gates, &repo),
+            &gate_for(&gates, &repo)
+        ));
+        assert!(!Arc::ptr_eq(
+            &gate_for(&gates, &repo),
+            &gate_for(&gates, Path::new("/tmp/other-wiki-repo"))
+        ));
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let gate = gate_for(&gates, &repo);
+            let active = active.clone();
+            let max_active = max_active.clone();
+            tasks.push(tokio::spawn(async move {
+                let _held = gate.lock().await;
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
 }

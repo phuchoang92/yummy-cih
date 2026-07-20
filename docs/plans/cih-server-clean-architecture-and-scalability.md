@@ -33,7 +33,17 @@
 > age out after a re-index. Deliberately deferred to the M3 re-pricing:
 > byte-weighted budgets (`CIH_ARTIFACT_CACHE_MAX_BYTES`), the unified
 > `ArtifactSnapshot` (xflow migration is a rewrite), and wiki/search cache
-> budgets (§12.5).  
+> budgets (§12.5).
+> Follow-up safety slice completed 2026-07-20: communities/processes now cap
+> the serialized `ReadResourceResult` rather than estimating raw JSONL bytes,
+> reject an individually oversize record, and use typed `v1` cursors carrying
+> artifact version, resource kind, and offset; both artifact representations
+> invalidate on independent node and edge mtimes; index-job deduplication is
+> command-aware, so only equivalent graph-key/language requests coalesce and a
+> different command for an active repository returns a conflict. Live wiki
+> resident loading and live search-index construction now also use independent
+> per-repository single-flight gates with post-wait freshness rechecks, and
+> their freshness token now includes both graph files.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  

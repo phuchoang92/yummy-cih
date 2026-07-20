@@ -1135,7 +1135,6 @@ pointer commits, but their intermediate values cannot affect grouped readers.
     "service_generations": {}
   },
   "generator_version": "cih-version",
-  "embedding": null,
   "created_at": "RFC3339 timestamp",
   "counts": {
     "objects": 0,
@@ -1145,7 +1144,8 @@ pointer commits, but their intermediate values cannot affect grouped readers.
     "evidence": 0
   },
   "checksums": {
-    "service.sqlite": "blake3-value"
+    "service.sqlite": "blake3-value",
+    "diagnostics.jsonl": "blake3-value"
   }
 }
 ```
@@ -1223,11 +1223,13 @@ CREATE TABLE relations (
 );
 
 CREATE TABLE technical_node_ids (
+  -- Stable nonzero 63-bit hash ID; it is not a generation-local row ordinal.
   compact_id INTEGER PRIMARY KEY,
   object_key TEXT NOT NULL UNIQUE REFERENCES object_refs(key)
 );
 
 CREATE TABLE technical_edge_kinds (
+  -- Stable nonzero 63-bit hash ID from the canonical edge-kind identifier.
   compact_id INTEGER PRIMARY KEY,
   kind TEXT NOT NULL UNIQUE
 );
@@ -1351,8 +1353,9 @@ CREATE TABLE change_set_generations (
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
   scope_id TEXT NOT NULL,
   base_generation TEXT NOT NULL,
+  base_manifest_hash BLOB NOT NULL,
   target_generation TEXT,
-  manifest_hash BLOB,
+  target_manifest_hash BLOB,
   PRIMARY KEY (change_set_id, scope_kind, scope_id)
 );
 
@@ -1419,6 +1422,11 @@ CREATE TABLE publication_items (
 Additional mutable workflow tables:
 
 ```sql
+CREATE TABLE state_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE generation_history (
   generation TEXT PRIMARY KEY,
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
@@ -1467,8 +1475,9 @@ CREATE TABLE apply_journal_packs (
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
   scope_id TEXT NOT NULL,
   base_generation TEXT NOT NULL,
+  base_manifest_hash BLOB NOT NULL,
   target_generation TEXT NOT NULL,
-  manifest_hash BLOB NOT NULL,
+  target_manifest_hash BLOB NOT NULL,
   pointer_state TEXT NOT NULL,
   PRIMARY KEY (journal_id, scope_kind, scope_id)
 );
@@ -1506,6 +1515,7 @@ CREATE TABLE jobs (
 CREATE TABLE revision_archives (
   id TEXT PRIMARY KEY,
   relative_path TEXT NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL,
   min_created_at TEXT NOT NULL,
   max_created_at TEXT NOT NULL,
   row_count INTEGER NOT NULL,
@@ -1537,7 +1547,7 @@ CREATE TABLE audit_events (
 ```
 
 The `comments`, `change_sets`, `change_set_generations`, `change_operations`, `reviews`,
-`publication_targets`, `publication_items`, `generation_history`,
+`publication_targets`, `publication_items`, `state_meta`, `generation_history`,
 `proposal_envelopes`, `apply_journal`, `apply_journal_packs`,
 `document_revisions`, `revision_archives`, `retention_refs`, and `jobs` tables
 live in the mutable `state.sqlite` beside `current.json`, not in the immutable
@@ -1778,7 +1788,11 @@ Change-set activation protocol:
 
 1. Acquire the coordinator and affected-pack locks in the order above. Read the
    coordinator pointer once. Validate `base_snapshot_id` and every
-   `change_set_generations.base_generation` against that snapshot's manifest.
+   `change_set_generations` base generation and manifest hash against that
+   snapshot's manifest. For each affected service, its standalone pointer must
+   still equal the pinned base generation (or already equal the idempotent target);
+   a newer independent service index causes a stale-snapshot failure and requires
+   workspace sync/rebase. The apply path never moves a service pointer backward.
 2. Build and validate every affected service target without changing a pointer.
    Build the target workspace generation last; its manifest pins the new service
    targets and the unchanged service generations inherited from the base snapshot.
@@ -1794,9 +1808,9 @@ Change-set activation protocol:
 5. In one idempotent coordinator-state transaction, mark the journal `Committed`,
    finalize change-set/review status, and mark the target snapshot Active.
 6. For a grouped apply, idempotently advance affected service `current.json`
-   pointers and record each `pointer_state`. These pointers support standalone
-   readers but are not consulted by grouped readers, so a crash here cannot expose
-   a mixed workspace snapshot.
+   pointers with an expected-base compare and record each `pointer_state`. These
+   pointers support standalone readers but are not consulted by grouped readers,
+   so a crash here cannot expose a mixed workspace snapshot.
 7. Release locks. Cleanup occurs only through §12.11.
 
 Startup and pre-write reconciliation runs before accepting another producer:
@@ -1858,6 +1872,29 @@ identifiers after referenced payloads expire.
 
 Revision archiving is queryable storage, not deletion disguised as archive:
 
+```sql
+CREATE TABLE archive_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE archived_document_revisions (
+  entity_kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  generation TEXT NOT NULL,
+  content_hash BLOB NOT NULL,
+  payload_json TEXT NOT NULL,
+  evidence_locators_json TEXT NOT NULL,
+  authority TEXT NOT NULL,
+  source_change_set_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (entity_kind, entity_id, generation)
+);
+
+CREATE INDEX archived_revisions_created
+  ON archived_document_revisions(created_at, entity_kind, entity_id);
+```
+
 1. Under the coordinator lock, select unprotected live revisions older than
    `live_revision_days` in a bounded batch.
 2. Write a schema-versioned temporary SQLite segment under `history/`, including
@@ -1872,12 +1909,16 @@ Revision archiving is queryable storage, not deletion disguised as archive:
    segment before serving it. A missing or corrupt registered segment makes history
    readiness degraded and blocks further archive deletion.
 
-The history API merges `document_revisions` with the ordered
-`revision_archives` catalog. A cursor identifies the live table or archive segment
-and row position; one archive segment is opened at a time, so history remains
-bounded and queryable after pack pruning. Archive segments may be removed only
-when `archive_revision_days` is nonzero, every contained revision is unprotected,
-and the removal is explicitly audited.
+The history API merges live `document_revisions` with
+`archived_document_revisions` from the ordered `revision_archives` catalog. A
+cursor identifies the coordinator snapshot, `history_catalog_epoch`, live table or
+archive segment, and row position. The archive transaction increments the epoch
+when it moves rows or changes the catalog; a cursor from an older epoch returns a
+stable cursor-expired response instead of skipping or duplicating revisions. One
+archive segment is opened at a time, so history remains bounded and queryable after
+pack pruning. Archive segments may be removed only when
+`archive_revision_days` is nonzero, every contained revision is unprotected, and
+the removal is explicitly audited.
 
 Generation GC deletes immutable pack directories only after computing the
 transitive protected set, then records `pruned_at` without deleting
@@ -1917,9 +1958,11 @@ Pass 2: edges
   Outbound lookup uses the table primary key and inbound lookup uses its reverse
   covering index.
 - Accumulate only bounded high-level statistics in memory.
-- Assign compact node/kind IDs deterministically and populate both relation forms
-  through bounded batches and temporary external-sort tables. No query path scans
-  `edges.jsonl`.
+- Derive stable nonzero 63-bit node/kind IDs from canonical keys, preserving prior
+  mappings in incremental builds. Collision groups use a deterministic salted
+  rehash recorded in the mapping tables; adding or deleting an unrelated key never
+  renumbers existing IDs. Populate both relation forms through bounded batches and
+  temporary external-sort tables. No query path scans `edges.jsonl`.
 
 Phase 0 measures the resulting `relations` row count and pack size on the 5M-edge
 benchmark service, plus the separate row count, index size, build time, and one-hop
@@ -1932,7 +1975,9 @@ Large relation-block query descriptors identify the pack generation, backend
 filter, and opaque cursor. The mandatory FTS profile supports bounded one-hop
 technical-edge queries without `GraphStore`. The optional `GraphStore` remains the
 backend for deeper traversal, path finding, and backend-specific graph analytics;
-its absence is reported only for those advanced operations.
+its absence is reported only for those advanced operations. An edge kind excluded
+by the manifest policy is reported as Unsupported coverage, not as an empty
+relation set.
 
 Pass 3: technical assets
 
@@ -2048,7 +2093,8 @@ Deletion behavior:
 
 - Missing generated evidence becomes a tombstone.
 - Dependent blocks become Stale in the first generation.
-- Removal occurs only after retention policy or explicit cleanup.
+- Physical evidence removal occurs only through §12.11 after stale-block and
+  workflow protections expire.
 - Human overlays remain and show a missing-evidence warning.
 - Legacy slugs continue to resolve to deprecated or replacement objects.
 
@@ -2904,6 +2950,12 @@ acquires the workspace lock and affected service locks in the global order from
 generations, tombstones, live revisions, archive segments, envelopes, jobs, and
 audit rows that would change without mutating them.
 
+`--repo` without `--group` runs standalone service GC. `--group` computes
+reachability from the workspace coordinator and all retained workspace manifests;
+adding `--repo` narrows eligible service payloads but never skips group-level
+references. A service registered in a group cannot be pruned safely through a
+standalone scan that ignores its workspace roots.
+
 ## 21. UI Design
 
 ### 21.1 Application structure
@@ -3474,11 +3526,13 @@ Acceptance:
 - Snapshot-bound proposal, change-set, and apply idempotency keys.
 - Change-set validation.
 - Canonical manifest serialization, complete input accounting, and generation hashes.
-- Compact technical-edge forward/reverse lookup and cursor behavior.
+- Stable compact-ID insertion/collision behavior plus technical-edge
+  forward/reverse lookup and cursors.
 - Multi-pack generation-map validation, lock ordering, apply-journal transitions,
   and reconciliation tables.
 - Retention-reference reachability and cycle handling.
-- Revision-archive catalog, checksum, and cross-segment cursor behavior.
+- Revision-archive catalog, checksum, epoch invalidation, and cross-segment cursor
+  behavior.
 - Observed-claim attestation and rejection of AI-originated Observed claims.
 - Bounded collection byte/item limits and completeness metadata.
 - Principal capability and credential-rotation behavior.
@@ -3584,6 +3638,8 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 - Cross-service targets are complete while the workspace pointer remains at base.
 - Group readers never observe mixed service generations while service pointers are
   being repaired.
+- An affected service pointer advanced by independent indexing causes rebase
+  instead of being moved backward by apply.
 - Pointer/journal disagreement is quarantined instead of guessed.
 - Invalid active pointer.
 - Missing or corrupt SQLite file.
