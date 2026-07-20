@@ -16,6 +16,9 @@ group's members.
 - **Cross-repo group tools** (`list_repos`, `status`, `group_contracts`,
   `api_impact`, `trace_flow_x`, `shape_check`) — artifacts-based; always span
   the whole group.
+- **Admin tools** (`index_repo`, `index_status`, `index_cancel`,
+  `add_resolve_pattern`, `list_resolve_patterns`) — these **spawn `cih-engine`
+  on the host**; see "Indexing from the server" below and `docs/SECURITY.md` §3.
 
 So the whole microservice is **one endpoint**. A team registers a single MCP
 server and passes `repo=` when they want a specific service.
@@ -63,6 +66,55 @@ All env-driven (`crates/cih-server/src/config.rs`):
 | `CIH_ARTIFACTS_DIR` | the **primary** repo's **unversioned** `<repo>/.cih/artifacts` parent (BM25 resolves the latest versioned subdir) |
 | `FALKOR_URL` | `redis://127.0.0.1:6380` |
 | `CIH_PG_URL` | `postgres://<user>:<pass>@127.0.0.1:5433/<db>` — optional; enables semantic `query`. BM25 `search_code` works without it |
+
+### Memory budgets (validated at startup)
+
+Resident caches are bounded per family, and **the server refuses to start when the
+families sum above the total** — the error names `CIH_CACHE_MAX_BYTES`, so it is
+worth setting these deliberately on a multi-repo host.
+
+| Env | Default | Bounds |
+|-----|---------|--------|
+| `CIH_CACHE_MAX_BYTES` | 1040 MiB | total; must be ≥ the sum of the four below |
+| `CIH_ARTIFACT_CACHE_MAX_BYTES` | 512 MiB | parsed `nodes.jsonl`/`edges.jsonl` snapshots |
+| `CIH_WIKI_CACHE_MAX_BYTES` | 256 MiB | wiki indexes, resident renderers, live search |
+| `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | per-repo BM25 indexes |
+| `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES` | 16 MiB | JSONL resource paging indexes |
+| `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | 32 | retained repo versions (LRU beyond this) |
+| `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` | 1800 | idle eviction (0 disables) |
+
+A single value larger than its budget is served **without being retained**, so an
+oversize repository degrades to "no caching" rather than evicting healthy
+entries or exceeding the budget. At ~500k nodes one repository's snapshot alone
+exceeds the 512 MiB default (see `docs/perf/scale-500k.md`) — raise the artifact
+and total budgets if you serve repositories that large and want them cached.
+
+Other tuning knobs: `CIH_BLOCKING_MAX_CONCURRENT` (2) and
+`CIH_BLOCKING_QUEUE_TIMEOUT_SECS` (5) bound concurrent cold artifact loads;
+`CIH_BLOCKING_TIMEOUT_SECS` (90) is the per-load deadline;
+`CIH_RESOURCE_MAX_BYTES` (256 KiB) caps one resource page;
+`CIH_DETECT_CHANGES_MAX_SYMBOLS` (200) caps blast-radius traversals per
+`detect_changes` call.
+
+### Indexing from the server
+
+`index_repo` spawns `cih-engine analyze` on the host, so it is bounded and
+explicitly targeted:
+
+- **Graph key.** A repo already in the registry re-indexes under **its own** key.
+  A path not yet registered requires an explicit `graph_key`, and a key owned by
+  a different repo is rejected — the server's primary key is never reused
+  implicitly.
+- **Admission.** `CIH_INDEX_MAX_CONCURRENT` (1) running, `CIH_INDEX_QUEUE_CAPACITY`
+  (16) queued; one active job per repo (duplicates coalesce onto it); excess is
+  rejected rather than queued without bound.
+- **Deadline and output.** `CIH_INDEX_TIMEOUT_SECS` (1800) kills the child;
+  `CIH_INDEX_OUTPUT_CAP_BYTES` (1 MiB) caps retained stdout/stderr per stream.
+- **Cancellation.** `index_cancel(job_id=…)` kills a running child; poll
+  `index_status` until it settles as `cancelled`.
+
+There is **no path allow-list** — any directory readable by the server process can
+be indexed. Keep `/mcp` authenticated (`docs/SECURITY.md` §1, §3).
 
 Member repos other than the primary need no extra config: the server resolves
 each member's graph key + `artifacts_dir` from the `Registry` when a tool's

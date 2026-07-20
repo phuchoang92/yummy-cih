@@ -95,6 +95,34 @@ Do not import `rmcp` or Axum outside `transport`, and do not import
 `infrastructure` from production `application` code. The
 `architecture_boundaries` integration test enforces these rules.
 
+### What to test, and where
+
+| Concern | Where | Pattern to copy |
+|---|---|---|
+| Use-case behaviour | unit tests beside the `application` service | drive the service against in-memory port doubles, not a live store — see `application/architecture_overview.rs` (fake `GraphStore`) |
+| Argument validation | `transport/mcp/args.rs` + `tests/args.rs` | a typo in a closed-set field must **fail** deserialization, not default |
+| Response shape | beside the service | assert exact fields/ordering; deterministic output is a contract |
+| Tool registration | `transport/mcp/server.rs` tests | the router guard pins the tool count and every `next`-hint target |
+| End-to-end dispatch | `transport/mcp/dispatch_tests.rs` | real `call_tool` over an in-memory transport pair |
+| Bounded/partial results | beside the service | prove a budget-limited answer can never report itself complete |
+| Concurrency | beside the adapter | e.g. N concurrent misses ⇒ exactly one load (`infrastructure/cache`, `repo_context_provider`) |
+
+Tests must be hermetic — no FalkorDB, no network. Integration paths use artifact
+fixtures or the embedded LadybugDB. Live-backend checks are `#[ignore]` and run
+explicitly.
+
+Before opening a PR, run the same gate CI enforces:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+Performance-sensitive changes to the read path should also be measured, not
+asserted: `cargo run --release -p cih-server --example scale_bench -- --help`
+(see `docs/perf/scale-500k.md` for the reference run and its acceptance targets).
+
 ## Suggested reading order
 
 To understand the concepts without drowning, read in dependency order — each builds

@@ -373,6 +373,36 @@ Then just run `analyze /repo` without extra flags — the scope file is picked u
 
 Override any variable under `cih-server → environment` in `docker-compose.yml`.
 
+### Server tuning (all optional)
+
+Defaults are sized for a single mid-size repo; raise them for large or
+multi-repo hosts. Memory budgets are **validated at startup** — the server
+refuses to start if the four cache families sum above `CIH_CACHE_MAX_BYTES`.
+See `docs/runbooks/multi-repo-host-serving.md` for guidance and
+`docs/perf/scale-500k.md` for measured behaviour at 500k nodes.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CIH_API_TOKEN` | — | Bearer token for `/mcp` and `/graph`; **required** on a non-loopback bind |
+| `CIH_CACHE_MAX_BYTES` | 1040 MiB | Total cache budget; must be ≥ the sum of the four below |
+| `CIH_ARTIFACT_CACHE_MAX_BYTES` | 512 MiB | Parsed artifact snapshots |
+| `CIH_WIKI_CACHE_MAX_BYTES` | 256 MiB | Wiki indexes and resident renderers |
+| `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | Per-repo BM25 indexes |
+| `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES` | 16 MiB | JSONL resource paging indexes |
+| `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | 32 | Retained repo versions (LRU beyond this) |
+| `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` | 1800 | Idle cache eviction (0 disables) |
+| `CIH_BLOCKING_MAX_CONCURRENT` | 2 | Concurrent heavy artifact loads |
+| `CIH_BLOCKING_QUEUE_TIMEOUT_SECS` | 5 | Wait for a heavy-load slot before shedding |
+| `CIH_BLOCKING_TIMEOUT_SECS` | 90 | Deadline for one blocking load |
+| `CIH_RESOURCE_MAX_BYTES` | 256 KiB | Byte cap for one MCP resource page |
+| `CIH_DETECT_CHANGES_MAX_SYMBOLS` | 200 | Blast-radius traversals per `detect_changes` |
+| `CIH_INDEX_MAX_CONCURRENT` | 1 | Concurrently running index jobs |
+| `CIH_INDEX_QUEUE_CAPACITY` | 16 | Queued index jobs before rejection |
+| `CIH_INDEX_TIMEOUT_SECS` | 1800 | Index job deadline, then the child is killed (0 disables) |
+| `CIH_INDEX_OUTPUT_CAP_BYTES` | 1 MiB | Retained `cih-engine` output per stream |
+| `CIH_MAX_CONCURRENT_QUERIES` | 64 | Concurrent Cypher queries |
+| `CIH_QUERY_QUEUE_TIMEOUT_MS` | 5000 | Wait for a query slot before shedding |
+
 ---
 
 ## Data Persistence

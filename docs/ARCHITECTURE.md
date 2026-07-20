@@ -27,8 +27,41 @@ MCP / HTTP transport -> application services -> domain + ports
 Production dependencies are enforced by
 `cih-server/tests/architecture_boundaries.rs`: domain cannot depend inward;
 application cannot import transport or infrastructure; ports cannot import
-adapters or transports. Public `args`, `browser`, `search`, and `wiki` modules
-in `lib.rs` are compatibility facades only.
+adapters or transports. The public `args`, `browser`, `search`, and `wiki`
+modules in `lib.rs` are compatibility facades only (`utils`, `viz`, and the
+`#[doc(hidden)]` `scale_bench` harness are also public).
+
+### Request flow
+
+One MCP tool call travels a single predictable path:
+
+```text
+rmcp Parameters<ToolArgs>          transport/mcp/args.rs — protocol DTO
+  -> validated command             typed enums + TryFrom; invalid input fails here
+  -> application service           one call; orchestration + limits + completeness
+  -> ports                         RepoContextProvider, ArtifactRepository,
+                                   SearchProvider, JobScheduler, BlockingRuntime
+  -> infrastructure adapters       registry, graph store, caches, git, child processes
+  -> typed output                  a named struct, deterministically ordered
+  -> CallToolResult / AppError     transport maps success and error codes
+```
+
+Three properties are worth knowing before changing a handler:
+
+- **Repository identity is resolved once**, by `RepoContextProvider`. A use case
+  never reloads the registry to rediscover a path, graph key, or artifact dir;
+  identity-only resolution avoids initializing graph/search infrastructure it
+  will not use.
+- **Cold, heavy work does not run on a Tokio worker.** Artifact parsing, git
+  diffs, filesystem scans, and taint analysis go through the blocking runtime
+  port, whose *heavy lane* is semaphore-bounded and sheds with a typed
+  overload error instead of queueing without bound.
+- **Bounded results are explicit.** Lists carry item and byte caps; anything
+  budget-limited reports completeness (what was analyzed, omitted, failed) so a
+  partial answer can never read as a complete one.
+
+HTTP routes (`/graph`, wiki) follow the same path through the same application
+services; only the adapter differs.
 
 CIH builds its graph from tree-sitter parses plus a set of framework/SQL
 heuristics. The heuristics are deliberately conservative: when a fact can't be
