@@ -21,6 +21,7 @@ use tower_http::{
 const MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 use crate::app::CihServer;
+use crate::application::browser::ReadinessService;
 use crate::config::{build_store, CacheBudgets, Config};
 use crate::{browser, files, server, wiki};
 
@@ -80,12 +81,9 @@ pub async fn run() -> Result<()> {
         },
         wiki_state.clone(),
     );
-    let browser_state = browser::BrowserState::new(
-        cih.store.clone(),
-        cih.search.clone(),
-        cfg.artifacts_dir.clone(),
-    );
-    let repo_contexts = cih.repo_context_provider();
+    let browser_state =
+        browser::BrowserState::new(cih.browser_service(), cfg.artifacts_dir.clone());
+    let wiki_search_service = cih.wiki_search_service();
 
     let service = StreamableHttpService::new(
         move || Ok(cih.clone()),
@@ -109,14 +107,14 @@ pub async fn run() -> Result<()> {
         .allow_origin(tower_http::cors::Any)
         .allow_methods([axum::http::Method::GET])
         .allow_headers([axum::http::header::AUTHORIZATION]);
-    let wiki_routes = wiki::router(wiki_state, repo_contexts)
+    let wiki_routes = wiki::router(wiki_search_service)
         .layer(middleware::from_fn_with_state(
             cfg.api_token.clone(),
             server::auth_middleware,
         ))
         .layer(cors);
 
-    let ready_state = (store, cfg.artifacts_dir.clone());
+    let ready_state = ReadinessService::new(store, cfg.artifacts_dir.clone());
     let public = axum::Router::new()
         .route("/health", get(server::health_handler))
         .route("/ready", get(server::ready_handler).with_state(ready_state));

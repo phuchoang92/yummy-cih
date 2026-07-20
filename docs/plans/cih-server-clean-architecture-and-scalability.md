@@ -1541,7 +1541,9 @@ Implementation progress (2026-07-20):
   target-resolver port, and job-scheduler port;
 - [x] reorganize the split tool adapters from `app/tools_*` into a centralized
   `transport::mcp` namespace and router assembler;
-- [ ] pass narrow application services to browser/HTTP routes.
+- [x] pass `GraphBrowserService`, `WikiSearchService`, and
+  `ReadinessService` to browser/HTTP routes instead of raw stores, search
+  state, or repository providers.
 
 Exit criteria:
 

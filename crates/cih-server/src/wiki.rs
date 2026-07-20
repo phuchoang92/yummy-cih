@@ -29,9 +29,13 @@ use crate::app_error::AppError;
 use crate::application::architecture_overview::{
     OverviewWikiListing, OverviewWikiPage, OverviewWikiRepository,
 };
+use crate::application::wiki_search::{
+    WikiSearchCommand, WikiSearchDocument, WikiSearchFacets as AppWikiSearchFacets, WikiSearchHit,
+    WikiSearchRepository, WikiSearchService,
+};
 use crate::args::{GetWikiPageArgs, SearchWikiArgs};
 use crate::blocking::{blocking_timeout, run_blocking};
-use crate::repo_context::{RepoContextProvider, RepoSelector, ResolvedRepo};
+use crate::repo_context::ResolvedRepo;
 use crate::utils::{json_result, text_result};
 use crate::weighted_cache::{AsyncCacheMetrics, AsyncWeightedCache};
 
@@ -772,61 +776,31 @@ pub(crate) struct WikiSearchParams {
     limit: Option<usize>,
 }
 
-#[derive(Clone)]
-struct WikiRouterState {
-    wiki: WikiSearchState,
-    repo_contexts: Arc<dyn RepoContextProvider>,
-}
-
-pub(crate) fn router(wiki: WikiSearchState, repo_contexts: Arc<dyn RepoContextProvider>) -> Router {
+pub(crate) fn router(service: WikiSearchService) -> Router {
     Router::new()
         .route("/wiki/search", get(wiki_search_handler))
-        .with_state(WikiRouterState {
-            wiki,
-            repo_contexts,
-        })
+        .with_state(service)
 }
 
 async fn wiki_search_handler(
-    State(state): State<WikiRouterState>,
+    State(service): State<WikiSearchService>,
     Query(params): Query<WikiSearchParams>,
 ) -> Response {
-    let query = params.q.trim();
-    if query.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "missing query parameter 'q'");
-    }
-    let repo = match state
-        .repo_contexts
-        .resolve_repo(RepoSelector::from_wire(&params.repo))
-    {
-        Ok(repo) => repo,
+    let command = match WikiSearchCommand::try_new(
+        params.q,
+        params.repo,
+        params.role,
+        params.kind,
+        params.feature,
+        params.limit,
+    ) {
+        Ok(command) => command,
         Err(error) => return app_error_response(error),
     };
-    let index = match state.wiki.index_for(&repo).await {
-        Ok(index) => index,
-        Err(WikiError::NotFound(msg)) => return error_response(StatusCode::NOT_FOUND, &msg),
-        Err(WikiError::Internal(msg)) => {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg)
-        }
-    };
-
-    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let facets = WikiFacets {
-        role: params.role.as_deref(),
-        kind: params.kind.as_deref(),
-        feature: params.feature.as_deref(),
-    };
-    let hits = index.search(query, &facets, limit);
-
-    Json(json!({
-        "repo": index.repo_name,
-        "graph_version": index.graph_version,
-        "generated_at": index.generated_at,
-        "query": query,
-        "page_count": index.page_count(),
-        "hits": hits,
-    }))
-    .into_response()
+    match service.search(command).await {
+        Ok(output) => Json(output).into_response(),
+        Err(error) => app_error_response(error),
+    }
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
@@ -839,10 +813,14 @@ fn app_error_response(error: AppError) -> Response {
             StatusCode::BAD_REQUEST,
             &format!("invalid {field}: {message}"),
         ),
-        AppError::NotFound { entity, key } => error_response(
-            StatusCode::BAD_REQUEST,
-            &format!("{entity} '{key}' not found"),
-        ),
+        AppError::NotFound { entity, key } => {
+            let status = if entity == "wiki" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            error_response(status, &format!("{entity} '{key}' not found"))
+        }
         AppError::Unavailable {
             dependency,
             message,
@@ -862,6 +840,71 @@ fn app_error_response(error: AppError) -> Response {
                 ),
             )
         }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct WikiBundleSearchRepository {
+    state: WikiSearchState,
+}
+
+impl WikiBundleSearchRepository {
+    pub(crate) fn new(state: WikiSearchState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl WikiSearchRepository for WikiBundleSearchRepository {
+    async fn search(
+        &self,
+        repo: &ResolvedRepo,
+        query: &str,
+        facets: &AppWikiSearchFacets,
+        limit: usize,
+    ) -> Result<WikiSearchDocument, AppError> {
+        let index = self
+            .state
+            .index_for(repo)
+            .await
+            .map_err(|error| match error {
+                WikiError::NotFound(_) => AppError::NotFound {
+                    entity: "wiki",
+                    key: repo.registry_entry.name.clone(),
+                },
+                WikiError::Internal(message) => AppError::Unavailable {
+                    dependency: "wiki search index",
+                    message,
+                    retryable: false,
+                },
+            })?;
+        let facets = WikiFacets {
+            role: facets.role.as_deref(),
+            kind: facets.kind.as_deref(),
+            feature: facets.feature.as_deref(),
+        };
+        let hits = index
+            .search(query, &facets, limit)
+            .into_iter()
+            .map(|hit| WikiSearchHit {
+                slug: hit.slug,
+                role: hit.role,
+                title: hit.title,
+                kind: hit.kind,
+                path: hit.path,
+                community_id: hit.community_id,
+                score: hit.score,
+                snippet: hit.snippet,
+            })
+            .collect();
+        Ok(WikiSearchDocument {
+            repo: index.repo_name.clone(),
+            graph_version: index.graph_version.clone(),
+            generated_at: index.generated_at.clone(),
+            query: query.to_string(),
+            page_count: index.page_count(),
+            hits,
+        })
     }
 }
 
@@ -1121,5 +1164,20 @@ mod single_flight_tests {
         assert_eq!(metrics.retained_entries, 1);
         assert_eq!(metrics.retained_weight_bytes, 60);
         assert_eq!(metrics.evictions, 1);
+    }
+
+    #[test]
+    fn http_error_mapping_distinguishes_validation_and_missing_wiki() {
+        let invalid = app_error_response(AppError::InvalidInput {
+            field: "q",
+            message: "query parameter is required".into(),
+        });
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let missing = app_error_response(AppError::NotFound {
+            entity: "wiki",
+            key: "demo".into(),
+        });
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 }

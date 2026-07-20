@@ -5,9 +5,6 @@
 //! baked in via `include_str!`) plus bounded JSON endpoints backed by the existing
 //! `GraphStore` domain methods.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use axum::{
     extract::{Query, State},
     http::{header, StatusCode},
@@ -16,13 +13,16 @@ use axum::{
     Json, Router,
 };
 use cih_core::{Node, NodeId};
-use cih_graph_store::{Direction, FlowHop, GraphStore, GraphStoreError, GraphSummary};
+use cih_graph_store::{Direction, FlowHop, GraphSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 
+use crate::app_error::AppError;
+use crate::application::browser::{BrowserSearchResult, GraphBrowserService};
 use crate::blocking::{blocking_timeout, run_blocking};
 use crate::layout;
-use crate::search::{self, QueryResult, SearchState};
+use crate::search;
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
 #[doc(hidden)]
@@ -32,22 +32,16 @@ const STYLES_CSS: &str = include_str!("../assets/graph/styles.css");
 
 #[derive(Clone)]
 pub(crate) struct BrowserState {
-    store: Arc<dyn GraphStore>,
-    search: SearchState,
+    queries: GraphBrowserService,
     /// Artifacts root (`CIH_ARTIFACTS_DIR`, e.g. `<repo>/.cih/artifacts`). Used to locate the
     /// sibling embedding-cluster artifacts under `<repo>/.cih/artifacts-features/<version>`.
     artifacts_dir: Option<PathBuf>,
 }
 
 impl BrowserState {
-    pub(crate) fn new(
-        store: Arc<dyn GraphStore>,
-        search: SearchState,
-        artifacts_dir: Option<PathBuf>,
-    ) -> Self {
+    pub(crate) fn new(queries: GraphBrowserService, artifacts_dir: Option<PathBuf>) -> Self {
         Self {
-            store,
-            search,
+            queries,
             artifacts_dir,
         }
     }
@@ -150,10 +144,10 @@ async fn graph_overview(
             .collect()
     });
     let overview = state
-        .store
-        .graph_overview(max_nodes, max_edges, kinds.as_deref())
+        .queries
+        .overview(max_nodes, max_edges, kinds.as_deref())
         .await
-        .map_err(BrowserError::from_store)?;
+        .map_err(BrowserError::from_app)?;
     let positioned = run_blocking(blocking_timeout(), "graph layout", move || {
         layout::compute(overview)
     })
@@ -166,42 +160,24 @@ async fn graph_summary_handler(
     State(state): State<BrowserState>,
 ) -> Result<Json<GraphSummary>, BrowserError> {
     let summary = state
-        .store
-        .graph_summary()
+        .queries
+        .summary()
         .await
-        .map_err(BrowserError::from_store)?;
+        .map_err(BrowserError::from_app)?;
     Ok(Json(summary))
 }
 
 async fn graph_search(
     State(state): State<BrowserState>,
     Query(params): Query<SearchParams>,
-) -> Result<Json<QueryResult>, BrowserError> {
-    let q = params.q.trim();
-    if q.is_empty() {
-        return Err(BrowserError::bad_request("query parameter `q` is required"));
-    }
-
+) -> Result<Json<BrowserSearchResult>, BrowserError> {
     let limit = search::query_limit(params.limit.unwrap_or(0));
-    let hits = state
-        .search
-        .query_hits(q, limit)
+    let result = state
+        .queries
+        .search(&params.q, limit, params.expand.unwrap_or(true))
         .await
-        .map_err(|err| BrowserError::internal(err.to_string()))?;
-    let subgraph = if params.expand.unwrap_or(true) && !hits.is_empty() {
-        let seeds: Vec<NodeId> = hits.iter().take(5).map(|hit| hit.node_id.clone()).collect();
-        Some(
-            state
-                .store
-                .subgraph(&seeds, 1)
-                .await
-                .map_err(BrowserError::from_store)?,
-        )
-    } else {
-        None
-    };
-
-    Ok(Json(QueryResult { hits, subgraph }))
+        .map_err(BrowserError::from_app)?;
+    Ok(Json(result))
 }
 
 async fn graph_context(
@@ -210,10 +186,10 @@ async fn graph_context(
 ) -> Result<Json<serde_json::Value>, BrowserError> {
     let id = node_id(params.id)?;
     let ctx = state
-        .store
+        .queries
         .context(&id)
         .await
-        .map_err(BrowserError::from_store)?;
+        .map_err(BrowserError::from_app)?;
     Ok(Json(json!(ctx)))
 }
 
@@ -225,10 +201,10 @@ async fn graph_impact(
     let direction = parse_graph_direction(params.direction.as_deref());
     let depth = bounded_depth(params.depth, 4, 8);
     let impact = state
-        .store
+        .queries
         .impact(&id, direction, depth)
         .await
-        .map_err(BrowserError::from_store)?;
+        .map_err(BrowserError::from_app)?;
 
     Ok(Json(render_d3_impact(&impact)))
 }
@@ -239,21 +215,16 @@ async fn graph_flow(
 ) -> Result<Json<serde_json::Value>, BrowserError> {
     let entry_id = node_id(params.id)?;
     let depth = bounded_depth(params.depth, 6, 10);
-    let steps = state
-        .store
-        .flow_downstream(&entry_id, depth)
+    let flow = state
+        .queries
+        .flow(&entry_id, depth)
         .await
-        .map_err(BrowserError::from_store)?;
-    let entry_node = state
-        .store
-        .get_node(&entry_id)
-        .await
-        .map_err(BrowserError::from_store)?;
+        .map_err(BrowserError::from_app)?;
 
     Ok(Json(render_flow_graph(
         &entry_id,
-        entry_node.as_ref(),
-        &steps,
+        flow.entry_node.as_ref(),
+        &flow.hops,
         depth,
     )))
 }
@@ -261,17 +232,15 @@ async fn graph_flow(
 async fn graph_communities(
     State(state): State<BrowserState>,
 ) -> Result<Json<serde_json::Value>, BrowserError> {
-    let communities = state
-        .store
+    let graph = state
+        .queries
         .communities()
         .await
-        .map_err(BrowserError::from_store)?;
-    let edges = state
-        .store
-        .community_graph()
-        .await
-        .map_err(BrowserError::from_store)?;
-    Ok(Json(render_community_diagram(&communities, &edges)))
+        .map_err(BrowserError::from_app)?;
+    Ok(Json(render_community_diagram(
+        &graph.communities,
+        &graph.edges,
+    )))
 }
 
 /// Embedding clusters (feature groups) for the current repo. Reads the
@@ -416,10 +385,10 @@ async fn graph_routes(
     let prefix = params.prefix.as_deref().filter(|s| !s.trim().is_empty());
     let limit = limit_or_default(params.limit, 200, 1000);
     let routes = state
-        .store
-        .route_map(prefix, limit)
+        .queries
+        .routes(prefix, limit)
         .await
-        .map_err(BrowserError::from_store)?;
+        .map_err(BrowserError::from_app)?;
     let openapi = render_openapi(&routes);
     Ok(Json(json!({
         "routes": routes,
@@ -548,13 +517,16 @@ impl BrowserError {
         }
     }
 
-    fn from_store(err: GraphStoreError) -> Self {
-        match err {
-            GraphStoreError::NotFound(id) => Self {
+    fn from_app(error: AppError) -> Self {
+        match error {
+            AppError::InvalidInput { field, message } => {
+                Self::bad_request(format!("invalid {field}: {message}"))
+            }
+            AppError::NotFound { entity, key } => Self {
                 status: StatusCode::NOT_FOUND,
-                message: format!("node not found: {id}"),
+                message: format!("{entity} not found: {key}"),
             },
-            other => Self::internal(other.to_string()),
+            AppError::Unavailable { message, .. } => Self::internal(message),
         }
     }
 }
@@ -579,6 +551,7 @@ impl IntoResponse for BrowserError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cih_graph_store::GraphStore;
     use cih_grouping::FeatureGroupEntry;
 
     fn entry(name: &str, node_id: &str, confidence: f32) -> FeatureGroupEntry {
@@ -613,5 +586,33 @@ mod tests {
 
         // Average confidence is the mean of the members.
         assert!((clusters[0].avg_confidence - 0.6).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn browser_handler_maps_application_validation_to_bad_request() {
+        let store: std::sync::Arc<dyn GraphStore> = cih_store_factory::connect_store(
+            "falkor",
+            "redis://127.0.0.1:6380",
+            "browser_boundary_test",
+            &cih_store_factory::StoreOptions::default(),
+        )
+        .expect("lazy graph store");
+        let state = BrowserState::new(
+            GraphBrowserService::new(store, crate::search::SearchState::new(None, None)),
+            None,
+        );
+
+        let error = graph_search(
+            State(state),
+            Query(SearchParams {
+                q: " ".into(),
+                limit: None,
+                expand: None,
+            }),
+        )
+        .await
+        .expect_err("blank query must fail in the application service");
+
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
     }
 }

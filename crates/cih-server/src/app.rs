@@ -31,12 +31,14 @@ use rmcp::{
 };
 
 use crate::application::architecture_overview::ArchitectureOverviewService;
+use crate::application::browser::GraphBrowserService;
 use crate::application::change_detection::{
     ChangeDetectionService, ChangeScope, DetectChangesCommand,
 };
 use crate::application::contracts::ContractService;
 use crate::application::indexing::IndexingService;
 use crate::application::taint::TaintService;
+use crate::application::wiki_search::WikiSearchService;
 use crate::args::*;
 use crate::repo_context::{
     DefaultRepoContextProvider, RepoCatalogSnapshot, RepoContext, RepoContextProvider,
@@ -50,9 +52,6 @@ use crate::search::{QueryArgs, QueryResult, SearchCache, SearchState};
 
 #[derive(Clone)]
 pub(crate) struct CihServer {
-    /// Primary read services retained for the HTTP graph browser.
-    pub(crate) store: Arc<dyn GraphStore>,
-    pub(crate) search: SearchState,
     /// Default graph key — the repo served when a tool's `repo` arg is empty.
     graph_key: String,
     /// Home group (`CIH_GROUP`): when set, `list_repos` scopes to its members.
@@ -63,10 +62,12 @@ pub(crate) struct CihServer {
     wiki: wiki::WikiSearchState,
     /// Typed application services used by the MCP adapters.
     architecture_overview_service: ArchitectureOverviewService,
+    browser_service: GraphBrowserService,
     change_detection_service: ChangeDetectionService,
     contract_service: ContractService,
     indexing_service: IndexingService,
     taint_service: TaintService,
+    wiki_search_service: WikiSearchService,
     tool_router: ToolRouter<CihServer>,
 }
 
@@ -91,6 +92,7 @@ impl CihServer {
             embed_store.clone(),
             search_cache.clone(),
         );
+        let browser_service = GraphBrowserService::new(store.clone(), search.clone());
         let repo_contexts: Arc<dyn RepoContextProvider> =
             Arc::new(DefaultRepoContextProvider::production(
                 graph_key.clone(),
@@ -125,19 +127,23 @@ impl CihServer {
             repo_contexts.clone(),
             Arc::new(wiki::WikiOverviewRepository::new(wiki.clone())),
         );
+        let wiki_search_service = WikiSearchService::new(
+            repo_contexts.clone(),
+            Arc::new(wiki::WikiBundleSearchRepository::new(wiki.clone())),
+        );
         Self {
-            store,
-            search,
             graph_key,
             group,
             repo_contexts,
             read_file_limits,
             wiki,
             architecture_overview_service,
+            browser_service,
             change_detection_service,
             contract_service,
             indexing_service,
             taint_service,
+            wiki_search_service,
             tool_router: Self::tool_router() + crate::transport::mcp::router(),
         }
     }
@@ -161,10 +167,6 @@ impl CihServer {
             .map_err(app_error_to_mcp)
     }
 
-    pub(crate) fn repo_context_provider(&self) -> Arc<dyn RepoContextProvider> {
-        self.repo_contexts.clone()
-    }
-
     pub(crate) fn graph_key(&self) -> &str {
         &self.graph_key
     }
@@ -177,8 +179,16 @@ impl CihServer {
         &self.wiki
     }
 
+    pub(crate) fn wiki_search_service(&self) -> WikiSearchService {
+        self.wiki_search_service.clone()
+    }
+
     pub(crate) fn architecture_overview_service(&self) -> &ArchitectureOverviewService {
         &self.architecture_overview_service
+    }
+
+    pub(crate) fn browser_service(&self) -> GraphBrowserService {
+        self.browser_service.clone()
     }
 
     pub(crate) fn contract_service(&self) -> &ContractService {

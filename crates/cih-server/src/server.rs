@@ -1,13 +1,11 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use axum::{
     extract::State,
     http::{header::AUTHORIZATION, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Json, Response},
 };
-use cih_graph_store::GraphStore;
+
+use crate::application::browser::ReadinessService;
 
 pub async fn auth_middleware(
     State(token): State<Option<String>>,
@@ -37,27 +35,21 @@ pub async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({"status": "ok"}))
 }
 
-pub async fn ready_handler(
-    State((store, artifacts_dir)): State<(Arc<dyn GraphStore>, Option<PathBuf>)>,
-) -> impl IntoResponse {
-    let mut issues: Vec<&str> = Vec::new();
+pub async fn ready_handler(State(service): State<ReadinessService>) -> impl IntoResponse {
+    let report = service.check().await;
+    readiness_response(report)
+}
 
-    if store.communities().await.is_err() {
-        issues.push("graph store unreachable");
-    }
-
-    if let Some(dir) = &artifacts_dir {
-        if !dir.exists() {
-            issues.push("artifacts dir not found");
-        }
-    }
-
-    if issues.is_empty() {
+fn readiness_response(report: crate::application::browser::ReadinessReport) -> Response {
+    if report.is_ready() {
         (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"status": "degraded", "issues": issues})),
+            Json(serde_json::json!({
+                "status": "degraded",
+                "issues": report.issues
+            })),
         )
             .into_response()
     }
@@ -88,4 +80,21 @@ pub async fn shutdown_signal() {
     ctrl_c.await;
 
     tracing::info!("shutdown signal received, draining connections");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::browser::ReadinessReport;
+
+    #[test]
+    fn readiness_report_controls_http_status() {
+        let ready = readiness_response(ReadinessReport { issues: Vec::new() });
+        assert_eq!(ready.status(), StatusCode::OK);
+
+        let degraded = readiness_response(ReadinessReport {
+            issues: vec!["graph store unreachable"],
+        });
+        assert_eq!(degraded.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
