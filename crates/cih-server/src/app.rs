@@ -33,7 +33,8 @@ use rmcp::{
 use crate::args::*;
 use crate::jobs::Jobs;
 use crate::repo_context::{
-    DefaultRepoContextProvider, RepoContext, RepoContextProvider, RepoSelector, ResolvedRepo,
+    DefaultRepoContextProvider, RepoCatalogSnapshot, RepoContext, RepoContextProvider,
+    RepoSelector, ResolvedRepo,
 };
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{app_error_to_mcp, json_result, text_result, to_mcp};
@@ -142,6 +143,10 @@ impl CihServer {
         self.repo_contexts
             .resolve_repo(RepoSelector::from_wire(repo))
             .map_err(app_error_to_mcp)
+    }
+
+    fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
+        self.repo_contexts.catalog_snapshot()
     }
 
     async fn resolve(&self, repo: &str) -> Result<Arc<RepoContext>, McpError> {
@@ -334,12 +339,13 @@ impl CihServer {
 
     #[tool(description = "List all repos indexed in the CIH registry with their stats.")]
     async fn list_repos(&self, _: Parameters<ListReposArgs>) -> Result<CallToolResult, McpError> {
-        let reg = cih_core::Registry::load_cached();
+        let catalog = self.catalog_snapshot();
+        let reg = catalog.registry();
         // Multi-repo serving: when the server fronts a group, scope the listing
         // to its members and flag the primary (the repo used when a tool's
         // `repo` arg is empty). Pass `repo` to any deep tool to target another.
         if let Some(group) = &self.group {
-            let groups = cih_core::GroupRegistry::load_cached();
+            let groups = catalog.groups();
             if let Some(g) = groups.find(group) {
                 let members: Vec<&cih_core::RegistryEntry> = reg
                     .entries
@@ -364,44 +370,41 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<StatusArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let reg = cih_core::Registry::load_cached();
-        if let Some(entry) = reg.find(&args.name) {
-            let stale = reg.is_stale(&args.name);
-            let group_registry = cih_core::GroupRegistry::load_cached();
-            let groups: Vec<serde_json::Value> = group_registry
-                .groups_containing(&entry.name)
-                .map(|group| {
-                    let state = cih_core::group_dir(&group.name)
-                        .and_then(|dir| cih_core::SyncState::load(&dir));
-                    let contracts_exist =
-                        cih_core::contracts_path(&group.name).is_some_and(|path| path.exists());
-                    let group_stale = cih_core::group_contracts_stale(
-                        group,
-                        &reg,
-                        state.as_ref(),
-                        contracts_exist,
-                    );
-                    serde_json::json!({
-                        "name": group.name,
-                        "contracts_synced_at": state.map(|s| s.synced_at),
-                        "stale": group_stale,
-                    })
+        let catalog = self.catalog_snapshot();
+        let repo = catalog
+            .resolve(RepoSelector::NameOrPath(args.name.clone()))
+            .map_err(app_error_to_mcp)?;
+        let reg = catalog.registry();
+        let entry = &repo.registry_entry;
+        let stale = reg.is_stale(&entry.name);
+        let groups: Vec<serde_json::Value> = catalog
+            .groups()
+            .groups_containing(&entry.name)
+            .map(|group| {
+                let state = cih_core::group_dir(&group.name)
+                    .and_then(|dir| cih_core::SyncState::load(&dir));
+                let contracts_exist =
+                    cih_core::contracts_path(&group.name).is_some_and(|path| path.exists());
+                let group_stale =
+                    cih_core::group_contracts_stale(group, reg, state.as_ref(), contracts_exist);
+                serde_json::json!({
+                    "name": group.name,
+                    "contracts_synced_at": state.map(|s| s.synced_at),
+                    "stale": group_stale,
                 })
-                .collect();
-            #[derive(serde::Serialize)]
-            struct Out<'a> {
-                entry: &'a cih_core::RegistryEntry,
-                stale: bool,
-                groups: Vec<serde_json::Value>,
-            }
-            json_result(&Out {
-                entry,
-                stale,
-                groups,
             })
-        } else {
-            Err(crate::utils::repo_not_found(&args.name))
+            .collect();
+        #[derive(serde::Serialize)]
+        struct Out<'a> {
+            entry: &'a cih_core::RegistryEntry,
+            stale: bool,
+            groups: Vec<serde_json::Value>,
         }
+        json_result(&Out {
+            entry,
+            stale,
+            groups,
+        })
     }
 
     #[tool(
@@ -683,7 +686,7 @@ impl ServerHandler for CihServer {
         request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        resources::list_resources(request)
+        resources::list_resources(&self.catalog_snapshot(), request)
     }
 
     async fn list_resource_templates(
@@ -700,10 +703,11 @@ impl ServerHandler for CihServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         // Resource reads scan artifact files — heavy lane, not the worker.
+        let catalog = self.catalog_snapshot();
         crate::blocking::run_blocking_heavy(
             crate::blocking::blocking_timeout(),
             "resource read",
-            move || resources::read_resource(request),
+            move || resources::read_resource(&catalog, request),
         )
         .await?
     }

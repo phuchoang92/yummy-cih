@@ -59,6 +59,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TaintPathsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        taint::taint_paths(&self.graph_key, args, &self.artifacts).await
+        let repo = self.resolve_repo(&args.repo)?;
+        taint::taint_paths(repo, args, &self.artifacts).await
     }
 }

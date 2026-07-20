@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind, Registry};
+use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind};
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
 use crate::artifact_cache::ArtifactCache;
 use crate::blocking::{blocking_timeout, run_blocking_heavy};
-use crate::repo_context::{RepoContextProvider, RepoSelector};
+use crate::repo_context::{RepoCatalogSnapshot, RepoContextProvider, RepoSelector};
 use crate::utils::{
     app_error_to_mcp, json_result, node_prop_str_owned, parse_contract_kind_filter,
     short_class_name, strip_response_wrapper,
@@ -41,18 +41,17 @@ fn load_group_contracts(group: &str) -> Result<Vec<ContractMatch>, McpError> {
 
 /// Contract-sync freshness for a group: `(contracts_synced_at, contracts_stale)`.
 /// Conservative on missing data: an unstamped or unregistered group reads as stale.
-fn group_freshness(group_name: &str) -> (Option<String>, bool) {
+fn group_freshness(group_name: &str, catalog: &RepoCatalogSnapshot) -> (Option<String>, bool) {
     let state = cih_core::group_dir(group_name).and_then(|dir| cih_core::SyncState::load(&dir));
     let synced_at = state.as_ref().map(|s| s.synced_at.clone());
-    let group_registry = cih_core::GroupRegistry::load_cached();
-    let Some(group) = group_registry.find(group_name) else {
+    let Some(group) = catalog.groups().find(group_name) else {
         // Contracts were readable but the group is gone from groups.json —
         // freshness can't be verified against members, so flag it.
         return (synced_at, true);
     };
     let contracts_exist = cih_core::contracts_path(group_name).is_some_and(|path| path.exists());
-    let registry = Registry::load_cached();
-    let stale = cih_core::group_contracts_stale(group, &registry, state.as_ref(), contracts_exist);
+    let stale =
+        cih_core::group_contracts_stale(group, catalog.registry(), state.as_ref(), contracts_exist);
     (synced_at, stale)
 }
 
@@ -60,14 +59,21 @@ fn group_freshness(group_name: &str) -> (Option<String>, bool) {
 /// (contracts file reads, artifact graph loads) plus pure compute, so one
 /// `run_blocking` closure owns the whole phase — a cold multi-thousand-node
 /// artifact parse must never run on a Tokio worker.
-pub async fn group_contracts(args: GroupContractsArgs) -> Result<CallToolResult, McpError> {
+pub async fn group_contracts(
+    args: GroupContractsArgs,
+    repo_contexts: Arc<dyn RepoContextProvider>,
+) -> Result<CallToolResult, McpError> {
     run_blocking_heavy(blocking_timeout(), "group_contracts load", move || {
-        group_contracts_sync(args)
+        let catalog = repo_contexts.catalog_snapshot();
+        group_contracts_sync(args, &catalog)
     })
     .await?
 }
 
-fn group_contracts_sync(args: GroupContractsArgs) -> Result<CallToolResult, McpError> {
+fn group_contracts_sync(
+    args: GroupContractsArgs,
+    catalog: &RepoCatalogSnapshot,
+) -> Result<CallToolResult, McpError> {
     let path = cih_core::contracts_path(&args.group).ok_or_else(|| {
         McpError::internal_error("cannot determine HOME for group contracts path", None)
     })?;
@@ -97,7 +103,7 @@ fn group_contracts_sync(args: GroupContractsArgs) -> Result<CallToolResult, McpE
             matches.push(item);
         }
     }
-    let (synced_at, stale) = group_freshness(&args.group);
+    let (synced_at, stale) = group_freshness(&args.group, catalog);
     json_result(&serde_json::json!({
         "group": args.group,
         "contracts_synced_at": synced_at,
@@ -113,14 +119,15 @@ pub async fn api_impact(
 ) -> Result<CallToolResult, McpError> {
     let xflow = xflow.clone();
     run_blocking_heavy(blocking_timeout(), "api_impact artifact load", move || {
-        api_impact_sync(args, repo_contexts.as_ref(), &xflow)
+        let catalog = repo_contexts.catalog_snapshot();
+        api_impact_sync(args, &catalog, &xflow)
     })
     .await?
 }
 
 fn api_impact_sync(
     args: ApiImpactArgs,
-    repo_contexts: &dyn RepoContextProvider,
+    catalog: &RepoCatalogSnapshot,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
@@ -149,7 +156,7 @@ fn api_impact_sync(
         });
         if args.include_callers {
             row["consumer_callers"] = match consumer_callers(
-                repo_contexts,
+                catalog,
                 xflow,
                 &item.consumer_repo,
                 &item.consumer_id,
@@ -161,7 +168,7 @@ fn api_impact_sync(
         }
         consumers.push(row);
     }
-    let (synced_at, stale) = group_freshness(&args.group);
+    let (synced_at, stale) = group_freshness(&args.group, catalog);
     json_result(&serde_json::json!({
         "method": method,
         "path": args.path,
@@ -182,14 +189,14 @@ struct ConsumerCaller {
 /// Reverse-CALLS walk in the consumer repo: methods that (transitively) reach
 /// the `ExternalCall` site, each with its enclosing route when one handles it.
 fn consumer_callers(
-    repo_contexts: &dyn RepoContextProvider,
+    catalog: &RepoCatalogSnapshot,
     xflow: &XflowState,
     consumer_repo: &str,
     consumer_endpoint: &str,
     depth_limit: u32,
 ) -> Result<Vec<ConsumerCaller>, String> {
-    let repo = repo_contexts
-        .resolve_repo(RepoSelector::NameOrPath(consumer_repo.to_string()))
+    let repo = catalog
+        .resolve(RepoSelector::NameOrPath(consumer_repo.to_string()))
         .map_err(|error| error.to_string())?;
     let artifacts_dir = repo
         .versioned_artifacts_dir
@@ -262,24 +269,26 @@ pub async fn trace_flow_x(
     run_blocking_heavy(
         blocking_timeout(),
         "trace_flow_x artifact load",
-        move || trace_flow_x_sync(args, repo_contexts.as_ref(), &xflow),
+        move || {
+            let catalog = repo_contexts.catalog_snapshot();
+            trace_flow_x_sync(args, &catalog, &xflow)
+        },
     )
     .await?
 }
 
 fn trace_flow_x_sync(
     args: TraceFlowXArgs,
-    repo_contexts: &dyn RepoContextProvider,
+    catalog: &RepoCatalogSnapshot,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
-    let repo = repo_contexts
-        .resolve_repo(RepoSelector::from_wire(&args.repo))
+    let repo = catalog
+        .resolve(RepoSelector::from_wire(&args.repo))
         .map_err(app_error_to_mcp)?;
     let start_repo = repo.registry_entry.name.clone();
 
-    let groups = cih_core::GroupRegistry::load_cached();
-    let group_entry = groups.find(&args.group).ok_or_else(|| {
+    let group_entry = catalog.groups().find(&args.group).ok_or_else(|| {
         McpError::invalid_params(
             format!(
                 "group '{}' not found — create it with `cih-engine group create` and sync it",
@@ -344,8 +353,8 @@ fn trace_flow_x_sync(
         .repos
         .iter()
         .filter_map(|name| {
-            let repo = repo_contexts
-                .resolve_repo(RepoSelector::NameOrPath(name.clone()))
+            let repo = catalog
+                .resolve(RepoSelector::NameOrPath(name.clone()))
                 .ok()?;
             let dir = repo.versioned_artifacts_dir?;
             Some((repo.registry_entry.name, dir.to_string_lossy().into_owned()))
@@ -364,7 +373,7 @@ fn trace_flow_x_sync(
         max_hops,
     );
 
-    let (synced_at, stale) = group_freshness(&args.group);
+    let (synced_at, stale) = group_freshness(&args.group, catalog);
     json_result(&serde_json::json!({
         "entry_point": entry_id,
         "repo": start_repo,
@@ -386,14 +395,15 @@ pub async fn shape_check(
 ) -> Result<CallToolResult, McpError> {
     let artifacts = artifacts.clone();
     run_blocking_heavy(blocking_timeout(), "shape_check artifact load", move || {
-        shape_check_sync(args, repo_contexts.as_ref(), &artifacts)
+        let catalog = repo_contexts.catalog_snapshot();
+        shape_check_sync(args, &catalog, &artifacts)
     })
     .await?
 }
 
 fn shape_check_sync(
     args: ShapeCheckArgs,
-    repo_contexts: &dyn RepoContextProvider,
+    catalog: &RepoCatalogSnapshot,
     artifacts: &ArtifactCache,
 ) -> Result<CallToolResult, McpError> {
     let contracts_file = cih_core::contracts_path(&args.group).ok_or_else(|| {
@@ -428,11 +438,11 @@ fn shape_check_sync(
         }));
     }
 
-    let provider_repo = repo_contexts
-        .resolve_repo(RepoSelector::NameOrPath(args.provider.clone()))
+    let provider_repo = catalog
+        .resolve(RepoSelector::NameOrPath(args.provider.clone()))
         .map_err(app_error_to_mcp)?;
-    let consumer_repo = repo_contexts
-        .resolve_repo(RepoSelector::NameOrPath(args.consumer.clone()))
+    let consumer_repo = catalog
+        .resolve(RepoSelector::NameOrPath(args.consumer.clone()))
         .map_err(app_error_to_mcp)?;
     let provider_artifacts = provider_repo
         .versioned_artifacts_dir
@@ -586,7 +596,7 @@ fn shape_check_sync(
         }));
     }
 
-    let (synced_at, stale) = group_freshness(&args.group);
+    let (synced_at, stale) = group_freshness(&args.group, catalog);
     json_result(&serde_json::json!({
         "provider": args.provider,
         "consumer": args.consumer,

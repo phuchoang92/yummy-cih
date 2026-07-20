@@ -37,16 +37,23 @@ pub(crate) struct ResolvedRepo {
     pub(crate) registry_entry: cih_core::RegistryEntry,
     pub(crate) canonical_path: PathBuf,
     pub(crate) versioned_artifacts_dir: Option<PathBuf>,
+    pub(crate) community_artifacts_dir: Option<PathBuf>,
 }
 
 impl ResolvedRepo {
-    fn from_entry(entry: cih_core::RegistryEntry) -> Self {
+    pub(crate) fn from_entry(entry: cih_core::RegistryEntry) -> Self {
         let canonical_path = normalize_path(Path::new(&entry.path));
         let versioned_artifacts_dir = nonempty_path(&entry.artifacts_dir).map(normalize_path);
+        let community_artifacts_dir = entry
+            .community_artifacts_dir
+            .as_deref()
+            .and_then(nonempty_path)
+            .map(normalize_path);
         Self {
             registry_entry: entry,
             canonical_path,
             versioned_artifacts_dir,
+            community_artifacts_dir,
         }
     }
 
@@ -61,6 +68,41 @@ impl ResolvedRepo {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RepoCatalogSnapshot {
+    primary_graph_key: String,
+    registry: Arc<cih_core::Registry>,
+    groups: Arc<cih_core::GroupRegistry>,
+}
+
+impl RepoCatalogSnapshot {
+    fn new(
+        primary_graph_key: String,
+        registry: Arc<cih_core::Registry>,
+        groups: Arc<cih_core::GroupRegistry>,
+    ) -> Self {
+        Self {
+            primary_graph_key,
+            registry,
+            groups,
+        }
+    }
+
+    pub(crate) fn resolve(&self, selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
+        resolve_entry(&self.registry, &selector, &self.primary_graph_key)
+            .cloned()
+            .map(ResolvedRepo::from_entry)
+    }
+
+    pub(crate) fn registry(&self) -> &cih_core::Registry {
+        &self.registry
+    }
+
+    pub(crate) fn groups(&self) -> &cih_core::GroupRegistry {
+        &self.groups
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RepoContext {
     pub(crate) repo: ResolvedRepo,
@@ -70,6 +112,8 @@ pub(crate) struct RepoContext {
 
 #[async_trait]
 pub(crate) trait RepoContextProvider: Send + Sync {
+    fn catalog_snapshot(&self) -> RepoCatalogSnapshot;
+
     fn resolve_repo(&self, selector: RepoSelector) -> Result<ResolvedRepo, AppError>;
 
     async fn resolve(&self, selector: RepoSelector) -> Result<Arc<RepoContext>, AppError>;
@@ -81,6 +125,8 @@ trait RepoCatalog: Send + Sync {
         selector: &RepoSelector,
         primary_graph_key: &str,
     ) -> Result<cih_core::RegistryEntry, AppError>;
+
+    fn snapshot(&self) -> (Arc<cih_core::Registry>, Arc<cih_core::GroupRegistry>);
 }
 
 struct RegistryRepoCatalog;
@@ -92,32 +138,44 @@ impl RepoCatalog for RegistryRepoCatalog {
         primary_graph_key: &str,
     ) -> Result<cih_core::RegistryEntry, AppError> {
         let registry = cih_core::Registry::load_cached();
-        if registry.entries.is_empty() {
-            return Err(AppError::InvalidInput {
+        resolve_entry(&registry, selector, primary_graph_key).cloned()
+    }
+
+    fn snapshot(&self) -> (Arc<cih_core::Registry>, Arc<cih_core::GroupRegistry>) {
+        (
+            cih_core::Registry::load_cached(),
+            cih_core::GroupRegistry::load_cached(),
+        )
+    }
+}
+
+fn resolve_entry<'a>(
+    registry: &'a cih_core::Registry,
+    selector: &RepoSelector,
+    primary_graph_key: &str,
+) -> Result<&'a cih_core::RegistryEntry, AppError> {
+    if registry.entries.is_empty() {
+        return Err(AppError::InvalidInput {
+            field: "repo",
+            message: "no repos in registry; run `cih-engine analyze <repo>` first".into(),
+        });
+    }
+    match selector {
+        RepoSelector::Default => registry
+            .entries
+            .iter()
+            .find(|entry| entry.graph_key == primary_graph_key)
+            .ok_or_else(|| AppError::InvalidInput {
                 field: "repo",
-                message: "no repos in registry; run `cih-engine analyze <repo>` first".into(),
-            });
-        }
-        let entry = match selector {
-            RepoSelector::Default => registry
-                .entries
-                .iter()
-                .find(|entry| entry.graph_key == primary_graph_key)
-                .ok_or_else(|| AppError::InvalidInput {
-                    field: "repo",
-                    message: format!(
-                        "no repo registered for graph_key '{primary_graph_key}'; \
-                         pass `repo` explicitly"
-                    ),
-                })?,
-            RepoSelector::NameOrPath(value) => {
-                registry.find(value).ok_or_else(|| AppError::NotFound {
-                    entity: "repo",
-                    key: value.clone(),
-                })?
-            }
-        };
-        Ok(entry.clone())
+                message: format!(
+                    "no repo registered for graph_key '{primary_graph_key}'; \
+                     pass `repo` explicitly"
+                ),
+            }),
+        RepoSelector::NameOrPath(value) => registry.find(value).ok_or_else(|| AppError::NotFound {
+            entity: "repo",
+            key: value.clone(),
+        }),
     }
 }
 
@@ -223,6 +281,11 @@ impl DefaultRepoContextProvider {
 
 #[async_trait]
 impl RepoContextProvider for DefaultRepoContextProvider {
+    fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
+        let (registry, groups) = self.catalog.snapshot();
+        RepoCatalogSnapshot::new(self.primary_graph_key.clone(), registry, groups)
+    }
+
     fn resolve_repo(&self, selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
         self.catalog
             .resolve(&selector, &self.primary_graph_key)
@@ -342,6 +405,20 @@ mod tests {
                 entity: "repo",
                 key: format!("{selector:?}"),
             })
+        }
+
+        fn snapshot(&self) -> (Arc<cih_core::Registry>, Arc<cih_core::GroupRegistry>) {
+            let entries = self
+                .entries
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .cloned()
+                .collect();
+            (
+                Arc::new(cih_core::Registry { entries }),
+                Arc::new(cih_core::GroupRegistry::default()),
+            )
         }
     }
 
@@ -472,6 +549,38 @@ mod tests {
 
         assert_eq!(repo.graph_key(), "graph");
         assert_eq!(repo.canonical_path, temp.path().canonicalize().unwrap());
+        assert_eq!(infra.graph_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(infra.search_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn catalog_snapshot_is_stable_across_later_catalog_refreshes() {
+        let temp = tempfile::tempdir().unwrap();
+        let v1 = temp.path().join(".cih/artifacts/v1");
+        let v2 = temp.path().join(".cih/artifacts/v2");
+        std::fs::create_dir_all(&v1).unwrap();
+        std::fs::create_dir_all(&v2).unwrap();
+        let catalog = Arc::new(TestCatalog::new([entry(
+            "repo",
+            temp.path(),
+            "old-key",
+            &v1,
+        )]));
+        let infra = infrastructure(0, Duration::ZERO);
+        let provider = provider("primary", catalog.clone(), infra.clone());
+
+        let snapshot = provider.catalog_snapshot();
+        catalog.replace(entry("repo", temp.path(), "new-key", &v2));
+
+        let old = snapshot
+            .resolve(RepoSelector::NameOrPath("repo".into()))
+            .unwrap();
+        let new = provider
+            .catalog_snapshot()
+            .resolve(RepoSelector::NameOrPath("repo".into()))
+            .unwrap();
+        assert_eq!(old.graph_key(), "old-key");
+        assert_eq!(new.graph_key(), "new-key");
         assert_eq!(infra.graph_calls.load(Ordering::SeqCst), 0);
         assert_eq!(infra.search_calls.load(Ordering::SeqCst), 0);
     }

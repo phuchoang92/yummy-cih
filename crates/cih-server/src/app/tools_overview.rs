@@ -35,9 +35,10 @@ impl CihServer {
     ) -> Result<CallToolResult, McpError> {
         let context = self.resolve(&args.repo).await?;
         let entry = &context.repo.registry_entry;
-        let reg = cih_core::Registry::load_cached();
+        let catalog = self.catalog_snapshot();
+        let reg = catalog.registry();
         let registry_stale = reg.is_stale(&entry.name);
-        let groups = overview::group_sections(&entry.name, &reg);
+        let groups = overview::group_sections(&entry.name, reg, catalog.groups());
         let wiki = crate::wiki::list_pages(&self.wiki, &context.repo).await?;
         let response = overview::compose(overview::ComposeCtx {
             store: context.store.as_ref(),

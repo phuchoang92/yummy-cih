@@ -1,4 +1,4 @@
-use cih_core::{EdgeKind, NodeKind, Registry};
+use cih_core::{EdgeKind, NodeKind};
 use rmcp::{
     model::{
         AnnotateAble, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParam,
@@ -7,6 +7,9 @@ use rmcp::{
     },
     ErrorData as McpError,
 };
+
+use crate::repo_context::{RepoCatalogSnapshot, RepoSelector, ResolvedRepo};
+use crate::utils::app_error_to_mcp;
 
 fn annotated_resource(uri: &str, name: &str, description: &str) -> rmcp::model::Resource {
     RawResource {
@@ -27,11 +30,11 @@ const RESOURCE_PAGE_SIZE: usize = 100;
 
 /// Build the static list of resources from the registry, paginated by `request`.
 pub fn list_resources(
+    catalog: &RepoCatalogSnapshot,
     request: Option<PaginatedRequestParam>,
 ) -> Result<ListResourcesResult, McpError> {
-    let reg = Registry::load();
     let mut resources = Vec::new();
-    for entry in &reg.entries {
+    for entry in &catalog.registry().entries {
         let n = &entry.name;
         resources.push(annotated_resource(
             &format!("cih://repo/{n}/context"),
@@ -152,7 +155,10 @@ pub fn list_resource_templates(
 }
 
 /// Serve one resource by URI.
-pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceResult, McpError> {
+pub fn read_resource(
+    catalog: &RepoCatalogSnapshot,
+    request: ReadResourceRequestParam,
+) -> Result<ReadResourceResult, McpError> {
     let uri = &request.uri;
 
     // Parse cih://repo/{name}/{section}[?cursor=...&limit=...]
@@ -177,23 +183,26 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
                 None,
             ));
         }
-        return read_wiki_page(name, slug, uri);
+        let repo = catalog
+            .resolve(RepoSelector::NameOrPath(name.to_string()))
+            .map_err(app_error_to_mcp)?;
+        return read_wiki_page(&repo, slug, uri);
     }
 
     let (name, section) = rest
         .rsplit_once('/')
         .ok_or_else(|| McpError::invalid_params(format!("malformed CIH URI: {uri}"), None))?;
 
-    let reg = Registry::load();
-    let entry = reg
-        .find(name)
-        .ok_or_else(|| crate::utils::repo_not_found(name))?;
+    let repo = catalog
+        .resolve(RepoSelector::NameOrPath(name.to_string()))
+        .map_err(app_error_to_mcp)?;
+    let entry = &repo.registry_entry;
 
     let text = match section {
         "communities" => {
-            read_community_nodes(entry, NodeKind::Community, "communities", uri, &page)?
+            read_community_nodes(&repo, NodeKind::Community, "communities", uri, &page)?
         }
-        "processes" => read_community_nodes(entry, NodeKind::Process, "processes", uri, &page)?,
+        "processes" => read_community_nodes(&repo, NodeKind::Process, "processes", uri, &page)?,
         section if query.is_some() => {
             return Err(McpError::invalid_params(
                 format!("section '{section}' is not paged — drop the query string"),
@@ -317,12 +326,13 @@ pub fn split_wiki_uri(rest: &str) -> Option<(&str, &str)> {
 
 /// Serve one wiki page as markdown. Uncached like the other resource reads:
 /// registry → `<repo>/.cih/wiki/manifest.json` → slug lookup → page file.
-fn read_wiki_page(name: &str, slug: &str, uri: &str) -> Result<ReadResourceResult, McpError> {
-    let reg = Registry::load();
-    let entry = reg
-        .find(name)
-        .ok_or_else(|| crate::utils::repo_not_found(name))?;
-    let wiki_dir = std::path::Path::new(&entry.path).join(".cih").join("wiki");
+fn read_wiki_page(
+    repo: &ResolvedRepo,
+    slug: &str,
+    uri: &str,
+) -> Result<ReadResourceResult, McpError> {
+    let name = &repo.registry_entry.name;
+    let wiki_dir = repo.canonical_path.join(".cih").join("wiki");
     let manifest_raw = std::fs::read_to_string(wiki_dir.join("manifest.json")).map_err(|_| {
         McpError::invalid_params(
             format!("no generated wiki for '{name}' — run `cih-engine wiki` first"),
@@ -378,13 +388,13 @@ fn resource_byte_budget() -> usize {
 /// fails loudly instead of silently paging a different dataset. Order is file
 /// order — deterministic per artifact version.
 fn read_community_nodes(
-    entry: &cih_core::RegistryEntry,
+    repo: &ResolvedRepo,
     kind: NodeKind,
     section: &str,
     resource_uri: &str,
     page: &PageQuery,
 ) -> Result<String, McpError> {
-    let dir = entry
+    let dir = repo
         .community_artifacts_dir
         .as_deref()
         .ok_or_else(|| McpError::invalid_params("discover not run for this repo yet", None))?;
@@ -426,7 +436,7 @@ fn read_community_nodes(
     let path = std::path::Path::new(dir).join("nodes.jsonl");
     let scan = scan_jsonl_candidates(&path, kind.label(), offset, limit.saturating_add(1))?;
     render_resource_page(
-        entry,
+        &repo.registry_entry,
         section,
         &version,
         offset,
@@ -665,6 +675,7 @@ mod tests {
         serialized_resource_result_len, split_wiki_uri, PageQuery, ResourceCursor,
         RESOURCE_PAGE_SIZE,
     };
+    use crate::repo_context::ResolvedRepo;
     use cih_core::NodeKind;
     use std::io::Write;
 
@@ -782,7 +793,7 @@ mod tests {
         let dir = tmp.path().join("deadbeef"); // versioned-dir basename = cursor stamp
         std::fs::create_dir(&dir).unwrap();
         write_fixture(&dir, 3);
-        let entry = entry_with_dir(&dir);
+        let repo = ResolvedRepo::from_entry(entry_with_dir(&dir));
         let page = |cursor: Option<&str>, limit| PageQuery {
             cursor: cursor.map(str::to_string),
             limit,
@@ -790,7 +801,7 @@ mod tests {
 
         // First page mints a version-stamped cursor and a ready-to-use next_uri.
         let text = read_community_nodes(
-            &entry,
+            &repo,
             NodeKind::Community,
             "communities",
             "cih://repo/r/communities?limit=2",
@@ -808,7 +819,7 @@ mod tests {
 
         // The minted cursor pages on to the final page.
         let text = read_community_nodes(
-            &entry,
+            &repo,
             NodeKind::Community,
             "communities",
             "cih://repo/r/communities?cursor=v1:deadbeef:communities:2&limit=2",
@@ -822,7 +833,7 @@ mod tests {
 
         // A cursor from a different artifact version fails loudly.
         let err = read_community_nodes(
-            &entry,
+            &repo,
             NodeKind::Community,
             "communities",
             "cih://repo/r/communities?cursor=v1:cafebabe:communities:2",
@@ -833,7 +844,7 @@ mod tests {
 
         // A malformed cursor is invalid_params, not a silent first page.
         let err = read_community_nodes(
-            &entry,
+            &repo,
             NodeKind::Community,
             "communities",
             "cih://repo/r/communities?cursor=nonsense",
@@ -845,7 +856,7 @@ mod tests {
 
         // A typed cursor cannot be reused for a different resource kind.
         let err = read_community_nodes(
-            &entry,
+            &repo,
             NodeKind::Process,
             "processes",
             "cih://repo/r/processes?cursor=v1:deadbeef:communities:2",

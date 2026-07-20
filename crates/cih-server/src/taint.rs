@@ -14,7 +14,8 @@ use serde::Serialize;
 use crate::args::TaintPathsArgs;
 use crate::artifact_cache::ArtifactCache;
 use crate::blocking::{blocking_timeout, run_blocking_heavy};
-use crate::utils::{json_result, resolve_repo};
+use crate::repo_context::ResolvedRepo;
+use crate::utils::json_result;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;
@@ -59,7 +60,7 @@ fn parse_category(s: &str) -> Result<Option<SinkCategory>, String> {
 }
 
 pub async fn taint_paths(
-    graph_key: &str,
+    repo: ResolvedRepo,
     args: TaintPathsArgs,
     artifacts: &ArtifactCache,
 ) -> Result<CallToolResult, McpError> {
@@ -72,8 +73,16 @@ pub async fn taint_paths(
     };
     let refine = args.refine;
 
-    let (repo_path, artifacts_dir) =
-        resolve_repo(&args.repo, graph_key).map_err(|e| McpError::invalid_params(e, None))?;
+    let repo_path = repo.canonical_path;
+    let artifacts_dir = repo.versioned_artifacts_dir.ok_or_else(|| {
+        McpError::invalid_params(
+            format!(
+                "repo '{}' has no graph artifacts; run `cih-engine analyze` first",
+                repo.registry_entry.name
+            ),
+            None,
+        )
+    })?;
 
     // The analysis is synchronous and CPU-bound (and reads source files when
     // refining) — keep it off the async runtime threads. The artifact load (a
@@ -81,8 +90,8 @@ pub async fn taint_paths(
     let artifacts = artifacts.clone();
     let out = run_blocking_heavy(blocking_timeout(), "taint analysis", move || {
         run_and_shape(
-            &repo_path,
-            &artifacts_dir,
+            &repo_path.to_string_lossy(),
+            &artifacts_dir.to_string_lossy(),
             &artifacts,
             category,
             min_confidence,

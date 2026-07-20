@@ -19,7 +19,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<GroupContractsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::group_contracts(args).await
+        contracts::group_contracts(args, self.repo_context_provider()).await
     }
 
     #[tool(

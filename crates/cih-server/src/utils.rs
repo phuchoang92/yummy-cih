@@ -11,13 +11,7 @@ pub fn to_mcp(e: GraphStoreError) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
-/// Standard "unknown repo" error: the client named a `repo` that is not in the
-/// registry. This is client input, so it maps to `invalid_params` (not
-/// `internal_error`) — use this everywhere to keep the failure code consistent.
-pub fn repo_not_found(name: &str) -> McpError {
-    McpError::invalid_params(format!("repo '{name}' not in registry"), None)
-}
-
+/// Map transport-independent application failures at the MCP boundary.
 pub(crate) fn app_error_to_mcp(error: AppError) -> McpError {
     match error {
         AppError::InvalidInput { field, message } => {
@@ -81,33 +75,6 @@ pub fn load_artifact_edges(artifacts_dir: &str) -> std::io::Result<Vec<Edge>> {
         version: VersionId::new(String::new()),
     }
     .read_edges()
-}
-
-/// Resolve `repo` (name/path, or empty for the active graph key) to its full
-/// registry entry.
-pub fn resolve_repo_entry(repo: &str, graph_key: &str) -> Result<cih_core::RegistryEntry, String> {
-    let reg = cih_core::Registry::load_cached();
-    if reg.entries.is_empty() {
-        return Err("no repos in registry — run `cih-engine analyze <repo>` first".to_string());
-    }
-    let entry = if repo.is_empty() {
-        reg.entries
-            .iter()
-            .find(|e| e.graph_key == graph_key)
-            .ok_or_else(|| {
-                format!("no repo registered for graph_key '{graph_key}'; pass `repo` explicitly")
-            })?
-    } else {
-        reg.find(repo)
-            .ok_or_else(|| format!("repo '{repo}' not in registry"))?
-    };
-    Ok(entry.clone())
-}
-
-/// Resolve `repo` (name/path, or empty for the active graph key) to
-/// `(repo_path, artifacts_dir)` via the registry.
-pub fn resolve_repo(repo: &str, graph_key: &str) -> Result<(String, String), String> {
-    resolve_repo_entry(repo, graph_key).map(|entry| (entry.path, entry.artifacts_dir))
 }
 
 pub fn node_prop_str_owned(node: &Node, key: &str) -> Option<String> {

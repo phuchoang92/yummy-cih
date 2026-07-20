@@ -593,9 +593,12 @@ fn build_wiki_pages(listing: &WikiListing, item_cap: usize) -> Section<WikiPages
 /// Assemble the group block from the registries — mirrors how `status` builds
 /// its group view (`groups_containing`, not just the server's `--group`), so a
 /// repo's group facts appear even when the server isn't group-fronted (D6).
-pub(crate) fn group_sections(repo_name: &str, reg: &cih_core::Registry) -> Vec<GroupOut> {
-    let group_registry = cih_core::GroupRegistry::load_cached();
-    group_registry
+pub(crate) fn group_sections(
+    repo_name: &str,
+    reg: &cih_core::Registry,
+    groups: &cih_core::GroupRegistry,
+) -> Vec<GroupOut> {
+    groups
         .groups_containing(repo_name)
         .map(|group| {
             let state =

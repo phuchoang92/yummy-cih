@@ -63,8 +63,20 @@
 > filesystem work now also runs on the blocking pool. The obsolete
 > `find_repo_path` helper and wiki-owned graph-key resolver were removed.
 > Provider tests verify identity-only resolution performs zero graph/search
-> initializations. Taint resolution and registry-wide resource/catalog
-> operations remain follow-up work, so Milestone 2 is not yet complete.
+> initializations.
+> Catalog-snapshot migration slice completed 2026-07-20: added provider-owned
+> `RepoCatalogSnapshot` with immutable `Arc` snapshots of the repository and
+> group registries plus typed selector resolution; normalized community
+> artifact paths in `ResolvedRepo`; and migrated taint, MCP resource
+> list/read, `list_repos`, `status`, overview group facts, and all contract
+> freshness/member lookups. Each cross-repository operation now observes one
+> catalog snapshot inside its blocking task. Missing-repository errors at
+> migrated MCP boundaries use `AppError`, and the obsolete
+> `repo_not_found`/`resolve_repo_entry`/tuple `resolve_repo` helpers were
+> removed. Snapshot tests prove in-flight stability across catalog refresh and
+> zero graph/search initialization. The remaining S6 contract gap is
+> consistent fan-out of one failed single-flight initialization to all current
+> waiters; later callers already retry.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  
@@ -963,10 +975,10 @@ the cache identities, and registry lookup remains fresh on every resolve.
 `detect_changes` is the first application capability to consume the resolved
 canonical path directly. File, wiki (MCP and HTTP), and cross-repository
 capabilities now consume identity-only resolved contexts without initializing
-unused graph/search infrastructure. Taint resolution remains a direct
-single-repository consumer to migrate; registry-wide group freshness,
-resource pagination, and catalog listing require a separate snapshot/query
-contract rather than repeated single-entry resolution.
+unused graph/search infrastructure. Taint and registry-wide resource/catalog
+consumers now use `ResolvedRepo` and `RepoCatalogSnapshot`; administrative
+indexing and pattern operations retain direct registry access because they
+apply mutation/validation policy rather than ordinary read-side resolution.
 
 ### 14.1 RepoContextProvider
 
@@ -976,6 +988,8 @@ of `CihServer`:
 ```rust
 #[async_trait]
 pub trait RepoContextProvider: Send + Sync {
+    fn catalog_snapshot(&self) -> RepoCatalogSnapshot;
+
     fn resolve_repo(&self, selector: RepoSelector)
         -> Result<ResolvedRepo, AppError>;
 
@@ -996,6 +1010,7 @@ pub struct RepoContext {
 - canonical path;
 - graph key;
 - versioned artifact directory;
+- versioned community artifact directory;
 - unversioned artifact root;
 - index timestamp and version.
 
