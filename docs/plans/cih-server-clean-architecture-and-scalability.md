@@ -1529,12 +1529,14 @@ Implementation progress (2026-07-20):
   `trace_flow_x`, and `shape_check`) to validated commands, typed outputs, and
   `AppError`;
 - [x] migrate `taint_paths` to a typed application service;
+- [x] migrate `detect_changes` to a validated command, typed output, explicit
+  work budget, injected Git-diff port, and `AppError` boundary;
 - [x] inject the migrated services into `CihServer` and keep RMCP result/error
   mapping in the existing tool adapters;
 - [x] add direct application tests, stable JSON-shape tests, and MCP dispatch
   regression coverage for the migrated slice;
-- [ ] migrate `detect_changes`, `architecture_overview`, and indexing behind the
-  same service boundary;
+- [ ] migrate `architecture_overview` and indexing behind the same service
+  boundary;
 - [ ] reorganize the tool adapters from `app/tools_*` to `transport::mcp`;
 - [ ] pass narrow application services to browser/HTTP routes.
 

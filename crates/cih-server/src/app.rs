@@ -30,6 +30,9 @@ use rmcp::{
     tool, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
 
+use crate::application::change_detection::{
+    ChangeDetectionService, ChangeScope, DetectChangesCommand,
+};
 use crate::application::contracts::ContractService;
 use crate::application::taint::TaintService;
 use crate::args::*;
@@ -40,9 +43,7 @@ use crate::repo_context::{
 };
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{app_error_to_mcp, json_result, text_result, to_mcp};
-use crate::{
-    artifact_cache, changes, feature, files, indexing, resources, search, symbol, wiki, xflow,
-};
+use crate::{artifact_cache, feature, files, indexing, resources, search, symbol, wiki, xflow};
 
 use crate::search::{QueryArgs, QueryResult, SearchCache, SearchState};
 
@@ -78,6 +79,7 @@ pub(crate) struct CihServer {
     read_file_limits: files::ReadFileLimits,
     wiki: wiki::WikiSearchState,
     /// Typed application services used by the MCP adapters.
+    change_detection_service: ChangeDetectionService,
     contract_service: ContractService,
     taint_service: TaintService,
     tool_router: ToolRouter<CihServer>,
@@ -124,6 +126,7 @@ impl CihServer {
         let contract_service =
             ContractService::new(repo_contexts.clone(), xflow, artifacts.clone());
         let taint_service = TaintService::new(artifacts);
+        let change_detection_service = ChangeDetectionService::new();
         Self {
             store,
             search,
@@ -136,6 +139,7 @@ impl CihServer {
             indexer,
             read_file_limits,
             wiki,
+            change_detection_service,
             contract_service,
             taint_service,
             tool_router: Self::tool_router()
@@ -428,10 +432,22 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<DetectChangesArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let scope = match args.scope {
+            DiffScope::Working => ChangeScope::Working,
+            DiffScope::Staged => ChangeScope::Staged,
+            DiffScope::BaseRef => ChangeScope::BaseRef,
+        };
+        let command =
+            DetectChangesCommand::try_new(scope, args.base_ref).map_err(app_error_to_mcp)?;
         // Resolve so the graph queried matches the repo being diffed (a
         // non-primary `repo` must hit its own graph, not the primary's).
         let rc = self.resolve(&args.repo).await?;
-        changes::detect_changes(&rc, args).await
+        let output = self
+            .change_detection_service
+            .execute(&rc, command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 
     #[tool(

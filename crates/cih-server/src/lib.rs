@@ -20,7 +20,6 @@ pub mod wiki;
 
 pub(crate) mod artifact_cache;
 pub(crate) mod blocking;
-pub(crate) mod changes;
 pub(crate) mod config;
 pub(crate) mod coverage;
 pub(crate) mod feature;

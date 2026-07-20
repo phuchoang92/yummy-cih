@@ -193,6 +193,27 @@ async fn dispatch_taint_validation_returns_error_before_repo_resolution() {
 }
 
 #[tokio::test]
+async fn dispatch_detect_changes_validates_base_ref_before_repo_resolution() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "detect_changes".into(),
+            arguments: Some(
+                serde_json::json!({ "scope": "base_ref" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "base_ref scope without a ref must fail through MCP dispatch"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn dispatch_list_repos_returns_success_envelope() {
     // `list_repos` only reads the registry (read-only); assert the success
     // envelope shape, independent of registry contents.
