@@ -5,8 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::app_error::AppError;
-use crate::repo_context::{RepoContextProvider, RepoSelector, ResolvedRepo};
+use crate::domain::error::AppError;
+use crate::domain::repository::{RepoSelector, ResolvedRepo};
+use crate::ports::repo_context_provider::RepoContextProvider;
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
@@ -77,12 +78,17 @@ pub(crate) struct WikiSearchHit {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct WikiSearchDocument {
-    pub(crate) repo: String,
-    pub(crate) graph_version: String,
-    pub(crate) generated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) graph_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) generated_at: Option<String>,
     pub(crate) query: String,
     pub(crate) page_count: usize,
     pub(crate) hits: Vec<WikiSearchHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<&'static str>,
 }
 
 #[async_trait]
@@ -94,6 +100,56 @@ pub(crate) trait WikiSearchRepository: Send + Sync {
         facets: &WikiSearchFacets,
         limit: usize,
     ) -> Result<WikiSearchDocument, AppError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WikiPageCommand {
+    repo: RepoSelector,
+    slug: String,
+}
+
+impl WikiPageCommand {
+    pub(crate) fn try_new(repo: String, slug: String) -> Result<Self, AppError> {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            return Err(AppError::InvalidInput {
+                field: "slug",
+                message: "page slug is required".into(),
+            });
+        }
+        Ok(Self {
+            repo: RepoSelector::from_wire(&repo),
+            slug: slug.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+pub(crate) trait WikiPageRepository: Send + Sync {
+    async fn get_page(&self, repo: &ResolvedRepo, slug: &str) -> Result<String, AppError>;
+}
+
+#[derive(Clone)]
+pub(crate) struct WikiPageService {
+    repo_contexts: Arc<dyn RepoContextProvider>,
+    repository: Arc<dyn WikiPageRepository>,
+}
+
+impl WikiPageService {
+    pub(crate) fn new(
+        repo_contexts: Arc<dyn RepoContextProvider>,
+        repository: Arc<dyn WikiPageRepository>,
+    ) -> Self {
+        Self {
+            repo_contexts,
+            repository,
+        }
+    }
+
+    pub(crate) async fn get(&self, command: WikiPageCommand) -> Result<String, AppError> {
+        let repo = self.repo_contexts.resolve_repo(command.repo)?;
+        self.repository.get_page(&repo, &command.slug).await
+    }
 }
 
 #[derive(Clone)]
@@ -129,7 +185,8 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::repo_context::{RepoCatalogSnapshot, RepoContext};
+    use crate::domain::repository::RepoCatalogSnapshot;
+    use crate::ports::repo_context_provider::RepoContext;
 
     struct FixedRepoContexts {
         repo: ResolvedRepo,
@@ -166,12 +223,13 @@ mod tests {
             assert_eq!(facets.kind.as_deref(), Some("dev"));
             assert_eq!(limit, MAX_LIMIT);
             Ok(WikiSearchDocument {
-                repo: "demo".into(),
-                graph_version: "v1".into(),
-                generated_at: "now".into(),
+                repo: Some("demo".into()),
+                graph_version: Some("v1".into()),
+                generated_at: Some("now".into()),
                 query: query.into(),
                 page_count: 1,
                 hits: Vec::new(),
+                source: None,
             })
         }
     }
@@ -226,7 +284,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output.repo, "demo");
-        assert_eq!(output.graph_version, "v1");
+        assert_eq!(output.repo.as_deref(), Some("demo"));
+        assert_eq!(output.graph_version.as_deref(), Some("v1"));
     }
 }

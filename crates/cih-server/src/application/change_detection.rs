@@ -8,9 +8,10 @@ use cih_core::Node;
 use cih_graph_store::Direction;
 use serde::Serialize;
 
-use crate::app_error::AppError;
-use crate::blocking::{blocking_timeout, run_blocking, BlockingError};
-use crate::repo_context::RepoContext;
+use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking, BlockingError};
+use crate::domain::completeness::Completeness;
+use crate::domain::error::AppError;
+use crate::ports::repo_context_provider::RepoContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeScope {
@@ -201,39 +202,12 @@ fn canonicalize_candidates(mut nodes: Vec<Node>) -> Vec<Node> {
     nodes
 }
 
-#[derive(Debug, Serialize)]
-pub(crate) struct ChangeCompleteness {
-    /// True only when every changed symbol's blast radius was computed.
-    complete: bool,
-    total_candidates: usize,
-    analyzed: usize,
-    omitted: usize,
-    failed: usize,
-    /// Why analysis is incomplete: `symbol_budget` and/or `traversal_failed`.
-    reasons: Vec<&'static str>,
-}
-
 /// Accounting for a budgeted run: `attempted = min(total, budget)` traversals
 /// ran, of which `failed` errored; the rest of `total` was omitted. Invariant:
 /// `complete == (omitted + failed == 0)` — a response can never claim
 /// completeness while any candidate was skipped.
-fn completeness(total: usize, attempted: usize, failed: usize) -> ChangeCompleteness {
-    let omitted = total.saturating_sub(attempted);
-    let mut reasons = Vec::new();
-    if omitted > 0 {
-        reasons.push("symbol_budget");
-    }
-    if failed > 0 {
-        reasons.push("traversal_failed");
-    }
-    ChangeCompleteness {
-        complete: omitted == 0 && failed == 0,
-        total_candidates: total,
-        analyzed: attempted.saturating_sub(failed),
-        omitted,
-        failed,
-        reasons,
-    }
+fn completeness(total: usize, attempted: usize, failed: usize) -> Completeness {
+    Completeness::from_work(total, attempted, failed)
 }
 
 #[derive(Debug, Serialize)]
@@ -261,7 +235,7 @@ pub(crate) struct DetectChangesOutput {
     partial: bool,
     /// Changed symbols with no computed blast radius (omitted + failed).
     incomplete_symbols: usize,
-    completeness: ChangeCompleteness,
+    completeness: Completeness,
 }
 
 impl ChangeDetectionService {
@@ -400,7 +374,7 @@ mod tests {
         )
         .expect("lazy graph store");
         RepoContext {
-            repo: crate::repo_context::ResolvedRepo::from_entry(RegistryEntry {
+            repo: crate::domain::repository::ResolvedRepo::from_entry(RegistryEntry {
                 name: "fixture".into(),
                 path: repo_path.display().to_string(),
                 graph_key: "cih_change_detection_test".into(),
@@ -411,7 +385,9 @@ mod tests {
                 stats: Default::default(),
             }),
             store,
-            search: crate::search::SearchState::new(None, None),
+            search: Arc::new(
+                crate::infrastructure::search_provider::SearchState::new(None, None),
+            ),
         }
     }
 

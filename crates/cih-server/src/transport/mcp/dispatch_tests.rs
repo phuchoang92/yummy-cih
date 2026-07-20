@@ -2,7 +2,7 @@
 //! actual `ServerHandler` + tool router over an in-memory transport pair (rmcp's
 //! own test pattern, `rmcp/tests/test_tool_macros.rs`). This verifies the
 //! request → dispatch → response envelope that the registration guard in
-//! `app::tests` can't.
+//! `server::tests` can't.
 //!
 //! Hermetic: store construction via `connect_store` is lazy (the adapter
 //! connects on first query), and none of the tools dispatched here reach a
@@ -17,8 +17,10 @@ use cih_graph_store::GraphStore;
 use rmcp::model::{CallToolRequestParam, ClientInfo};
 use rmcp::{ClientHandler, ServiceExt};
 
-use crate::app::CihServer;
-use crate::{files, wiki};
+use super::CihServer;
+use crate::application::files::ReadFileLimits;
+use crate::bootstrap::assemble_services;
+use crate::infrastructure::wiki_repository::WikiSearchState;
 
 #[derive(Clone, Default)]
 struct DummyClient;
@@ -41,7 +43,7 @@ async fn serve_test_server() -> TestClient {
         &cih_store_factory::StoreOptions::default(),
     )
     .expect("lazy store construction");
-    let server = CihServer::new(
+    let services = assemble_services(
         store,
         None,
         None,
@@ -50,12 +52,13 @@ async fn serve_test_server() -> TestClient {
         "falkor".into(),
         "redis://127.0.0.1:6380".into(),
         (4, Duration::from_secs(5)),
-        files::ReadFileLimits {
+        ReadFileLimits {
             max_bytes: 1 << 20,
             max_lines: 2000,
         },
-        wiki::WikiSearchState::new(),
+        WikiSearchState::new(),
     );
+    let server = CihServer::new(services);
     let (server_t, client_t) = tokio::io::duplex(8192);
     tokio::spawn(async move {
         let _ = server.serve(server_t).await?.waiting().await;
@@ -73,7 +76,7 @@ fn empty_args() -> serde_json::Map<String, serde_json::Value> {
 
 #[tokio::test]
 async fn tools_list_returns_full_surface_with_schemas() {
-    // Regression guard: the hand-expanded `call_tool` in `app.rs` must be paired
+    // Regression guard: the hand-expanded `call_tool` in `server.rs` must be paired
     // with a `list_tools` override, or `tools/list` falls back to the trait
     // default (an empty list) and discovery-based clients see zero tools.
     let client = serve_test_server().await;

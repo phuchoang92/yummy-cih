@@ -11,10 +11,12 @@ use std::sync::Arc;
 use cih_taint::{run_taint_analysis, SinkCategory, TaintAnalysisInput, TaintPhaseConfig};
 use serde::Serialize;
 
-use crate::app_error::AppError;
-use crate::artifact_cache::{ArtifactRepository, ArtifactSnapshot};
-use crate::blocking::{blocking_timeout, run_blocking_heavy, BlockingError};
-use crate::repo_context::ResolvedRepo;
+use crate::infrastructure::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
+use crate::infrastructure::blocking_runtime::{
+    blocking_timeout, run_blocking_heavy, BlockingError,
+};
+use crate::domain::error::AppError;
+use crate::domain::repository::ResolvedRepo;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;
@@ -278,7 +280,7 @@ mod tests {
     use cih_core::{Edge, EdgeKind, GraphArtifacts, Node, NodeId, NodeKind, Range, VersionId};
 
     use super::*;
-    use crate::artifact_cache::ArtifactCache;
+    use crate::infrastructure::artifact_repository::ArtifactCache;
 
     const CONTROLLER: &str = "Method:com.acme.OrderController#create/1";
     const SERVICE: &str = "Method:com.acme.OrderService#save/1";

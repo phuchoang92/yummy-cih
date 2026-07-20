@@ -5,36 +5,44 @@
 //! tests (`args`, `browser`, `patterns`, `search`, `utils`, `viz`, `wiki`).
 //! Everything else is crate-private wiring.
 
-mod app;
 mod application;
-mod startup;
+mod bootstrap;
+mod domain;
+mod infrastructure;
+mod ports;
 mod transport;
 
-pub(crate) mod app_error;
 pub mod args;
-pub mod browser;
-pub mod patterns;
-pub mod search;
 pub mod utils;
 pub mod viz;
-pub mod wiki;
 
-pub(crate) mod artifact_cache;
-pub(crate) mod blocking;
 pub(crate) mod config;
-pub(crate) mod coverage;
-pub(crate) mod feature;
-pub(crate) mod files;
-pub(crate) mod indexing;
-pub(crate) mod jobs;
 pub(crate) mod layout;
-pub(crate) mod mtime_cache;
-pub(crate) mod repo_context;
-pub(crate) mod resources;
-pub(crate) mod server;
-pub(crate) mod single_flight;
-pub(crate) mod symbol;
-pub(crate) mod weighted_cache;
-pub(crate) mod xflow;
 
-pub use startup::run;
+pub use bootstrap::run;
+
+/// Compatibility exports for graph-browser helpers used by downstream tests.
+pub mod browser {
+    pub use crate::transport::http::browser::{
+        bounded_depth, limit_or_default, overview_limit, parse_graph_direction, render_flow_graph,
+        INDEX_HTML, OVERVIEW_DEFAULT_EDGES, OVERVIEW_DEFAULT_NODES, OVERVIEW_MAX_EDGES,
+        OVERVIEW_MAX_NODES,
+    };
+}
+
+/// Stable public search helpers; implementation lives in infrastructure.
+pub mod search {
+    pub use crate::infrastructure::search_provider::query_limit;
+}
+
+/// Stable public wiki parsing/search helpers; implementation lives in infrastructure.
+pub mod wiki {
+    pub use crate::infrastructure::wiki_repository::{
+        load_wiki_index, make_snippet, strip_front_matter, PageMeta, WikiFacets, WikiHit,
+        WikiIndex, DEFAULT_LIMIT, MAX_LIMIT, SNIPPET_MAX_CHARS,
+    };
+    pub(crate) use crate::infrastructure::wiki_repository::{
+        read_page_raw, Manifest, WikiBundlePageRepository, WikiBundleSearchRepository,
+        WikiOverviewRepository, WikiSearchState,
+    };
+}

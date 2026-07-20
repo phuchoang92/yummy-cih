@@ -11,8 +11,8 @@ use cih_graph_store::{
 use cih_search::SearchHit;
 use serde::Serialize;
 
-use crate::app_error::AppError;
-use crate::search::SearchState;
+use crate::domain::error::AppError;
+use crate::ports::search_provider::SearchProvider;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct BrowserSearchResult {
@@ -34,11 +34,11 @@ pub(crate) struct BrowserCommunities {
 #[derive(Clone)]
 pub(crate) struct GraphBrowserService {
     store: Arc<dyn GraphStore>,
-    search: SearchState,
+    search: Arc<dyn SearchProvider>,
 }
 
 impl GraphBrowserService {
-    pub(crate) fn new(store: Arc<dyn GraphStore>, search: SearchState) -> Self {
+    pub(crate) fn new(store: Arc<dyn GraphStore>, search: Arc<dyn SearchProvider>) -> Self {
         Self { store, search }
     }
 

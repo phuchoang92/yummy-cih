@@ -23,8 +23,9 @@ use cih_graph_store::{
     KindCount, Result as StoreResult, RouteInfo,
 };
 
-use crate::app_error::AppError;
-use crate::repo_context::{RepoContextProvider, RepoSelector, ResolvedRepo};
+use crate::domain::error::AppError;
+use crate::domain::repository::{RepoSelector, ResolvedRepo};
+use crate::ports::repo_context_provider::RepoContextProvider;
 
 /// Hard response-size backstop. Approximate by design: a small margin is
 /// reserved so the drop warning itself cannot push the response back over.
@@ -1199,7 +1200,8 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_context::{RepoCatalogSnapshot, RepoContext};
+    use crate::domain::repository::RepoCatalogSnapshot;
+    use crate::ports::repo_context_provider::RepoContext;
     use async_trait::async_trait;
     use cih_core::{Node, NodeId, NodeKind, RegistryEntry, RegistryStats};
     use cih_graph_store::{
@@ -1545,7 +1547,9 @@ mod tests {
         let context = Arc::new(RepoContext {
             repo: ResolvedRepo::from_entry(registry_entry.clone()),
             store: Arc::new(populated_store()),
-            search: crate::search::SearchState::new(None, None),
+            search: Arc::new(
+                crate::infrastructure::search_provider::SearchState::new(None, None),
+            ),
         });
         let catalog = RepoCatalogSnapshot::for_test(
             "demo".into(),

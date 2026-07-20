@@ -1,6 +1,21 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryArgs {
+    /// Natural language or symbol keyword query.
+    pub q: String,
+    /// Maximum number of fused hits to return (default 10, pass 0 for default).
+    #[serde(default)]
+    pub limit: usize,
+    /// Include a one-hop subgraph around the top results.
+    #[serde(default)]
+    pub expand: bool,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
+}
+
 /// Traversal direction for impact analysis. An unknown string fails
 /// deserialization (it used to silently run `upstream`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
@@ -13,6 +28,16 @@ pub enum DirectionArg {
     Downstream,
     /// Both directions.
     Both,
+}
+
+impl From<DirectionArg> for cih_graph_store::Direction {
+    fn from(direction: DirectionArg) -> Self {
+        match direction {
+            DirectionArg::Upstream => Self::Upstream,
+            DirectionArg::Downstream => Self::Downstream,
+            DirectionArg::Both => Self::Both,
+        }
+    }
 }
 
 /// Scope of the git diff for `detect_changes`. An unknown string fails

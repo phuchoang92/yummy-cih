@@ -1,12 +1,13 @@
 //! Typed repository-indexing application service.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::app_error::AppError;
+use crate::domain::error::AppError;
+use crate::domain::indexing::{IndexJobSnapshot, IndexJobSpec};
+use crate::ports::index_target_resolver::IndexTargetResolver;
+use crate::ports::job_scheduler::IndexJobScheduler;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IndexRepositoryCommand {
@@ -79,85 +80,6 @@ fn validate_job_id(job_id: String) -> Result<String, AppError> {
         });
     }
     Ok(job_id.to_string())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedRepoTarget {
-    pub(crate) canonical_path: PathBuf,
-    pub(crate) graph_key: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct IndexJobSpec {
-    pub(crate) target: ResolvedRepoTarget,
-    pub(crate) languages: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct IndexSchedulerReceipt {
-    pub(crate) job_id: String,
-    pub(crate) deduplicated: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum IndexJobSnapshot {
-    Queued {
-        queued_at_secs: u64,
-    },
-    Running {
-        started_at_secs: u64,
-    },
-    Done {
-        started_at_secs: u64,
-        finished_at_secs: u64,
-        output: String,
-        output_truncated: bool,
-    },
-    Failed {
-        started_at_secs: u64,
-        finished_at_secs: u64,
-        error: String,
-    },
-    TimedOut {
-        started_at_secs: u64,
-        finished_at_secs: u64,
-        timeout_secs: u64,
-    },
-    Cancelled {
-        cancelled_at_secs: u64,
-    },
-}
-
-impl IndexJobSnapshot {
-    pub(crate) fn status_label(&self) -> &'static str {
-        match self {
-            Self::Queued { .. } => "queued",
-            Self::Running { .. } => "running",
-            Self::Done { .. } => "done",
-            Self::Failed { .. } => "failed",
-            Self::TimedOut { .. } => "timed_out",
-            Self::Cancelled { .. } => "cancelled",
-        }
-    }
-}
-
-#[async_trait]
-pub(crate) trait IndexTargetResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        repo_path: &str,
-        requested_graph_key: &str,
-    ) -> Result<ResolvedRepoTarget, AppError>;
-}
-
-#[async_trait]
-pub(crate) trait IndexJobScheduler: Send + Sync {
-    async fn submit(&self, spec: IndexJobSpec) -> Result<IndexSchedulerReceipt, AppError>;
-
-    async fn status(&self, job_id: &str) -> Result<IndexJobSnapshot, AppError>;
-
-    async fn cancel(&self, job_id: &str) -> Result<(), AppError>;
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -259,9 +181,12 @@ impl IndexingService {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     use super::*;
+    use crate::domain::indexing::{IndexSchedulerReceipt, ResolvedRepoTarget};
 
     struct FixedTargetResolver {
         target: ResolvedRepoTarget,
