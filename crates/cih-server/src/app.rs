@@ -48,18 +48,6 @@ use crate::{artifact_cache, feature, files, indexing, resources, search, symbol,
 
 use crate::search::{QueryArgs, QueryResult, SearchCache, SearchState};
 
-/// Tool handlers split out of this god-module into per-theme `#[tool_router]`
-/// impl blocks; each emits a `*_router()` merged in [`CihServer::new`].
-mod tools_admin;
-mod tools_crossrepo;
-mod tools_files;
-mod tools_overview;
-mod tools_testing;
-mod tools_wiki;
-
-#[cfg(test)]
-mod dispatch_tests;
-
 #[derive(Clone)]
 pub(crate) struct CihServer {
     /// Primary read services retained for the HTTP graph browser.
@@ -150,19 +138,13 @@ impl CihServer {
             contract_service,
             indexing_service,
             taint_service,
-            tool_router: Self::tool_router()
-                + Self::files_router()
-                + Self::crossrepo_router()
-                + Self::testing_router()
-                + Self::wiki_router()
-                + Self::overview_router()
-                + Self::admin_router(),
+            tool_router: Self::tool_router() + crate::transport::mcp::router(),
         }
     }
 
     /// Resolve a tool's repository selector through the central application
     /// provider. MCP mapping stays at this transport boundary.
-    fn resolve_repo(&self, repo: &str) -> Result<ResolvedRepo, McpError> {
+    pub(crate) fn resolve_repo(&self, repo: &str) -> Result<ResolvedRepo, McpError> {
         self.repo_contexts
             .resolve_repo(RepoSelector::from_wire(repo))
             .map_err(app_error_to_mcp)
@@ -172,7 +154,7 @@ impl CihServer {
         self.repo_contexts.catalog_snapshot()
     }
 
-    async fn resolve(&self, repo: &str) -> Result<Arc<RepoContext>, McpError> {
+    pub(crate) async fn resolve(&self, repo: &str) -> Result<Arc<RepoContext>, McpError> {
         self.repo_contexts
             .resolve(RepoSelector::from_wire(repo))
             .await
@@ -181,6 +163,34 @@ impl CihServer {
 
     pub(crate) fn repo_context_provider(&self) -> Arc<dyn RepoContextProvider> {
         self.repo_contexts.clone()
+    }
+
+    pub(crate) fn graph_key(&self) -> &str {
+        &self.graph_key
+    }
+
+    pub(crate) fn read_file_limits(&self) -> files::ReadFileLimits {
+        self.read_file_limits
+    }
+
+    pub(crate) fn wiki_state(&self) -> &wiki::WikiSearchState {
+        &self.wiki
+    }
+
+    pub(crate) fn architecture_overview_service(&self) -> &ArchitectureOverviewService {
+        &self.architecture_overview_service
+    }
+
+    pub(crate) fn contract_service(&self) -> &ContractService {
+        &self.contract_service
+    }
+
+    pub(crate) fn indexing_service(&self) -> &IndexingService {
+        &self.indexing_service
+    }
+
+    pub(crate) fn taint_service(&self) -> &TaintService {
+        &self.taint_service
     }
 
     async fn resolve_symbol(
@@ -753,16 +763,9 @@ mod tests {
 
     #[test]
     fn split_routers_register_all_tools_without_dropping_any() {
-        // Guards the app.rs tool split: the per-theme `#[tool_router]` impls must
-        // merge into the same tool surface, with the moved tools still present.
-        // Keep the router list here in sync with `CihServer::new`.
-        let router = CihServer::tool_router()
-            + CihServer::files_router()
-            + CihServer::crossrepo_router()
-            + CihServer::testing_router()
-            + CihServer::wiki_router()
-            + CihServer::overview_router()
-            + CihServer::admin_router();
+        // Guards the transport split: the per-theme `#[tool_router]` impls must
+        // merge into the same tool surface, with every moved tool still present.
+        let router = CihServer::tool_router() + crate::transport::mcp::router();
         assert_eq!(
             router.list_all().len(),
             31,
@@ -797,13 +800,7 @@ mod tests {
     /// drift like the former `trace_flow(name=...)` (real arg: `entry_point`).
     #[test]
     fn instruction_examples_match_tool_schemas() {
-        let router = CihServer::tool_router()
-            + CihServer::files_router()
-            + CihServer::crossrepo_router()
-            + CihServer::testing_router()
-            + CihServer::wiki_router()
-            + CihServer::overview_router()
-            + CihServer::admin_router();
+        let router = CihServer::tool_router() + crate::transport::mcp::router();
         let tools = router.list_all();
         let schemas: std::collections::HashMap<String, serde_json::Value> = tools
             .iter()

@@ -1,10 +1,9 @@
-//! Testing / coverage / taint MCP tools, split out of the `app.rs` god-module.
-//! Merged into the dispatcher via `+ Self::testing_router()` in `CihServer::new`.
+//! Testing, coverage, and taint MCP adapters.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::CihServer;
+use crate::app::CihServer;
 use crate::application::taint::TaintPathsCommand;
 use crate::args::{RegressionScopeArgs, TaintPathsArgs, TestCoverageArgs, UntestedPathsArgs};
 use crate::coverage;
@@ -66,7 +65,7 @@ impl CihServer {
                 .map_err(app_error_to_mcp)?;
         let repo = self.resolve_repo(&args.repo)?;
         let output = self
-            .taint_service
+            .taint_service()
             .taint_paths(repo, command)
             .await
             .map_err(app_error_to_mcp)?;

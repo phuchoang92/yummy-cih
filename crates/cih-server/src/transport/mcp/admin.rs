@@ -1,10 +1,9 @@
-//! Indexing / resolve-pattern admin MCP tools, split out of the `app.rs`
-//! god-module. Merged via `+ Self::admin_router()` in `CihServer::new`.
+//! Indexing and resolve-pattern MCP adapters.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::CihServer;
+use crate::app::CihServer;
 use crate::application::indexing::{
     CancelIndexCommand, IndexRepositoryCommand, IndexStatusCommand,
 };
@@ -33,7 +32,7 @@ impl CihServer {
             IndexRepositoryCommand::try_new(args.repo_path, args.languages, args.graph_key)
                 .map_err(app_error_to_mcp)?;
         let output = self
-            .indexing_service
+            .indexing_service()
             .start(command)
             .await
             .map_err(app_error_to_mcp)?;
@@ -51,7 +50,7 @@ impl CihServer {
     ) -> Result<CallToolResult, McpError> {
         let command = IndexStatusCommand::try_new(args.job_id).map_err(app_error_to_mcp)?;
         let output = self
-            .indexing_service
+            .indexing_service()
             .status(command)
             .await
             .map_err(app_error_to_mcp)?;
@@ -70,7 +69,7 @@ impl CihServer {
     ) -> Result<CallToolResult, McpError> {
         let command = CancelIndexCommand::try_new(args.job_id).map_err(app_error_to_mcp)?;
         let output = self
-            .indexing_service
+            .indexing_service()
             .cancel(command)
             .await
             .map_err(app_error_to_mcp)?;
@@ -93,7 +92,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<AddResolvePatternArgs>,
     ) -> Result<CallToolResult, McpError> {
-        patterns::add_resolve_pattern(&self.graph_key, &self.indexing_service, args).await
+        patterns::add_resolve_pattern(self.graph_key(), self.indexing_service(), args).await
     }
 
     #[tool(
@@ -105,6 +104,6 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ListResolvePatternsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        patterns::list_resolve_patterns(&self.graph_key, args).await
+        patterns::list_resolve_patterns(self.graph_key(), args).await
     }
 }

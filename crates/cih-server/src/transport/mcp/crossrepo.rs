@@ -1,10 +1,9 @@
-//! Cross-repo / contract MCP tools, split out of the `app.rs` tool god-module.
-//! Merged into the dispatcher via `+ Self::crossrepo_router()` in `CihServer::new`.
+//! Cross-repository contract MCP adapters.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::CihServer;
+use crate::app::CihServer;
 use crate::application::contracts::{
     ApiImpactCommand, GroupContractsCommand, ShapeCheckCommand, TraceFlowXCommand,
 };
@@ -25,7 +24,7 @@ impl CihServer {
         let command =
             GroupContractsCommand::try_new(args.group, args.kind).map_err(app_error_to_mcp)?;
         let output = self
-            .contract_service
+            .contract_service()
             .group_contracts(command)
             .await
             .map_err(app_error_to_mcp)?;
@@ -50,7 +49,7 @@ impl CihServer {
         )
         .map_err(app_error_to_mcp)?;
         let output = self
-            .contract_service
+            .contract_service()
             .api_impact(command)
             .await
             .map_err(app_error_to_mcp)?;
@@ -78,7 +77,7 @@ impl CihServer {
         )
         .map_err(app_error_to_mcp)?;
         let output = self
-            .contract_service
+            .contract_service()
             .trace_flow_x(command)
             .await
             .map_err(app_error_to_mcp)?;
@@ -98,7 +97,7 @@ impl CihServer {
         let command = ShapeCheckCommand::try_new(args.group, args.provider, args.consumer)
             .map_err(app_error_to_mcp)?;
         let output = self
-            .contract_service
+            .contract_service()
             .shape_check(command)
             .await
             .map_err(app_error_to_mcp)?;

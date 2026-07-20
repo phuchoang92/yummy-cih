@@ -8,6 +8,7 @@
 mod app;
 mod application;
 mod startup;
+mod transport;
 
 pub(crate) mod app_error;
 pub mod args;

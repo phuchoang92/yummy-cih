@@ -17,7 +17,7 @@ use cih_graph_store::GraphStore;
 use rmcp::model::{CallToolRequestParam, ClientInfo};
 use rmcp::{ClientHandler, ServiceExt};
 
-use super::CihServer;
+use crate::app::CihServer;
 use crate::{files, wiki};
 
 #[derive(Clone, Default)]

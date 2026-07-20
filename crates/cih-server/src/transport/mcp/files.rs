@@ -1,13 +1,9 @@
-//! File-access MCP tools (`read_file`, `grep_files`), split out of the `app.rs`
-//! tool god-module. The `#[tool_router(router = files_router)]` macro emits a
-//! `files_router()` that `CihServer::new` merges into the dispatcher with
-//! `+ Self::files_router()`. Handlers reach `CihServer`'s private fields/helpers
-//! because this is a descendant module of `app`.
+//! File-access MCP adapters (`read_file`, `grep_files`).
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::CihServer;
+use crate::app::CihServer;
 use crate::args::{GrepFilesArgs, ReadFileArgs};
 use crate::files;
 
@@ -25,7 +21,7 @@ impl CihServer {
         Parameters(args): Parameters<ReadFileArgs>,
     ) -> Result<CallToolResult, McpError> {
         let repo = self.resolve_repo(&args.repo)?;
-        files::read_file(repo.canonical_path, self.read_file_limits, args).await
+        files::read_file(repo.canonical_path, self.read_file_limits(), args).await
     }
 
     #[tool(

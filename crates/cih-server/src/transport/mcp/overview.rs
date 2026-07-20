@@ -6,7 +6,7 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::CihServer;
+use crate::app::CihServer;
 use crate::application::architecture_overview::ArchitectureOverviewCommand;
 use crate::args::ArchitectureOverviewArgs;
 use crate::utils::{app_error_to_mcp, json_result};
@@ -36,7 +36,7 @@ impl CihServer {
         let command = ArchitectureOverviewCommand::try_new(args.repo, args.sections, args.limit)
             .map_err(app_error_to_mcp)?;
         let response = self
-            .architecture_overview_service
+            .architecture_overview_service()
             .execute(command)
             .await
             .map_err(app_error_to_mcp)?;

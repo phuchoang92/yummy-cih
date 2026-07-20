@@ -187,7 +187,7 @@ the wrong graph.
 
 **Review note (2026-07-20):** S9 is broader than the anchor suggests — the same
 `self.graph_key` mis-targeting flows through `add_resolve_pattern`'s reindex
-path (`app/tools_admin.rs` → `patterns::add_resolve_pattern`), so both call
+path (formerly `app/tools_admin.rs` → `patterns::add_resolve_pattern`), so both call
 sites are in scope. Because this is live data corruption (indexing any
 non-primary path writes that repository into the primary graph via the
 `CIH_GRAPH_KEY` env var), the *targeting* fix is pulled forward into the first
@@ -208,7 +208,7 @@ The proposal is based on these baseline implementation points:
 | S6 | `app::CihServer::store_for`, `app::CihServer::search_for` |
 | S7 | `utils::parse_direction`, `symbol::git_changed_files`, `args.rs`, `app::CihServer::get_info` |
 | S8 | use-case modules importing `rmcp::ErrorData` and returning `CallToolResult` |
-| S9 | `app::tools_admin::index_repo` passing `self.graph_key` into `indexing::index_repo`; also `app::tools_admin::add_resolve_pattern` passing `self.graph_key` into `patterns::add_resolve_pattern` |
+| S9 | former `app::tools_admin::index_repo` passing `self.graph_key` into `indexing::index_repo`; also former `app::tools_admin::add_resolve_pattern` passing `self.graph_key` into `patterns::add_resolve_pattern` |
 
 ## 3. Goals
 
@@ -1539,7 +1539,8 @@ Implementation progress (2026-07-20):
   wiki repository port;
 - [x] migrate indexing start/status/cancel behind a typed application service,
   target-resolver port, and job-scheduler port;
-- [ ] reorganize the tool adapters from `app/tools_*` to `transport::mcp`;
+- [x] reorganize the split tool adapters from `app/tools_*` into a centralized
+  `transport::mcp` namespace and router assembler;
 - [ ] pass narrow application services to browser/HTTP routes.
 
 Exit criteria:

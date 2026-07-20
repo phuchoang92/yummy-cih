@@ -1,7 +1,7 @@
 # architecture_overview — resolved design decisions
 
 **Status:** design resolved 2026-07-19; **v1 implemented 2026-07-19**
-(`crates/cih-server/src/overview.rs` + `app/tools_overview.rs`). The overview
+(`application/architecture_overview.rs` + `transport/mcp/overview.rs`). The overview
 ships the fix-A provenance vocabulary internally (per-section `source`, hoisted
 clocks, backfill-shaped warnings); fix A proper — labels on `status`/`route_map`/
 wiki responses and registry-stat backfill at load time — remains open and should
@@ -27,7 +27,7 @@ size-capped orientation that seeds the narrow tools.
 ### D1 — Surface: tool only
 
 `architecture_overview(repo?: string, sections?: string[], limit?: int)` as a new
-tool router (`crates/cih-server/src/app/tools_overview.rs`) over a shared module
+tool router (`crates/cih-server/src/transport/mcp/overview.rs`) over a shared module
 (`crates/cih-server/src/overview.rs`). No MCP resource in v1: agents choose from
 the tool list and rarely enumerate resources, and `resources::read_resource` is a
 stateless filesystem reader by design (`resources.rs:141`) — a live-graph resource

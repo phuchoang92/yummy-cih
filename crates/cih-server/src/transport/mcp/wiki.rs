@@ -1,10 +1,9 @@
-//! Wiki MCP tools (`search_wiki`, `get_wiki_page`), split out of the `app.rs`
-//! god-module. Merged via `+ Self::wiki_router()` in `CihServer::new`.
+//! Wiki MCP adapters (`search_wiki`, `get_wiki_page`).
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::CihServer;
+use crate::app::CihServer;
 use crate::args::{GetWikiPageArgs, SearchWikiArgs};
 use crate::wiki;
 
@@ -23,7 +22,7 @@ impl CihServer {
         Parameters(args): Parameters<SearchWikiArgs>,
     ) -> Result<CallToolResult, McpError> {
         let repo = self.resolve_repo(&args.repo)?;
-        wiki::search_wiki(&self.wiki, &repo, args).await
+        wiki::search_wiki(self.wiki_state(), &repo, args).await
     }
 
     #[tool(
@@ -36,6 +35,6 @@ impl CihServer {
         Parameters(args): Parameters<GetWikiPageArgs>,
     ) -> Result<CallToolResult, McpError> {
         let repo = self.resolve_repo(&args.repo)?;
-        wiki::get_wiki_page(&self.wiki, &repo, args).await
+        wiki::get_wiki_page(self.wiki_state(), &repo, args).await
     }
 }
