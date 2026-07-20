@@ -24,7 +24,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<IndexRepoArgs>,
     ) -> Result<CallToolResult, McpError> {
-        indexing::index_repo(&self.backend, &self.falkor_url, &self.jobs, args).await
+        indexing::index_repo(&self.backend, &self.falkor_url, &self.indexer, args).await
     }
 
     #[tool(
@@ -68,7 +68,7 @@ impl CihServer {
             &self.backend,
             &self.falkor_url,
             &self.graph_key,
-            &self.jobs,
+            &self.indexer,
             args,
         )
         .await

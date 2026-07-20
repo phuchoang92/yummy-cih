@@ -31,6 +31,7 @@ pub(crate) mod mtime_cache;
 pub(crate) mod overview;
 pub(crate) mod resources;
 pub(crate) mod server;
+pub(crate) mod single_flight;
 pub(crate) mod symbol;
 pub(crate) mod taint;
 pub(crate) mod xflow;

@@ -77,9 +77,11 @@ those page types and slugs. Adding a new concept requires changes to the page
 enumeration, render dispatch, and manifest generation — and those changes are
 duplicated across two code paths that must move in lockstep: the batch emission
 pipeline (`cih-wiki/src/lib.rs`) and the live single-page path (`render.rs`),
-guarded only by the `resident_parity` tests. Sidebar and search indexing are
-manifest-generic and usually unaffected; the dual-path duplication is the real
-change tax.
+guarded only by the `resident_parity` tests — and that guard is an ignored,
+env-gated comparison requiring a prebuilt fixture wiki
+(`CIH_TEST_REPO`/`CIH_TEST_WIKI`); it does not run in CI. Sidebar and search
+indexing are manifest-generic and usually unaffected; the dual-path duplication is
+the real change tax.
 
 The resident serving path improves per-page latency but retains a complete node and
 edge graph and constructs additional `WikiGraph`, render-context, page-index, page
@@ -307,7 +309,8 @@ LLM-specific retry logic. Provider-neutral DTOs such as `ChangeEnvelope`,
 
 Extract the generic LLM adapter core from `cih-engine` (`src/llm/`) so the docs
 pipeline and other CLI commands share one implementation. `cih-server` must not
-depend on `cih-llm`: the server stays LLM-egress-free (SECURITY.md, §15.10).
+depend on `cih-llm`: the server stays LLM-egress-free (`docs/SECURITY.md` §2, and
+§15.10 below).
 
 Existing code that moves as-is:
 
@@ -364,6 +367,13 @@ CI must additionally run a transitive dependency assertion equivalent to
 `cargo tree -p cih-server -i cih-llm` and fail when `cih-llm` is reachable. There is
 no `cih-docs` feature that enables LLM support, so a server feature combination
 cannot accidentally cross the egress boundary.
+
+`cih-docs`'s `cih-embed` dependency is optional, enabled only by the
+`local-semantic`/`pgvector-semantic` features: `cih-embed` pulls `fastembed` with
+ONNX/ORT, so an unconditional dependency would drag the native runtime into every
+binary linking `cih-docs` and break the no-model build guarantee (§12.7). CI
+asserts this with the same mechanism — `cargo tree -p cih-server -i fastembed`
+(and `-i ort`) must fail on reachability for the default feature set.
 
 ## 8. Universal Evidence Layer
 
@@ -1172,7 +1182,7 @@ CREATE TABLE evidence (
   confidence REAL NOT NULL,
   snippet_hash BLOB,
   metadata_json TEXT NOT NULL,
-  UNIQUE (adapter, repo, source_version, local_key)
+  UNIQUE (adapter, repo, local_key)
 );
 
 CREATE TABLE block_evidence (
@@ -1381,9 +1391,17 @@ application because SQLite cannot enforce cross-database generation references.
 operation and follows an explicit retention/export policy.
 
 Evidence IDs are globally stable hashes of `(adapter namespace, repo identity,
-source_version, adapter-local key)`. `local_key` preserves the adapter identity used
-to derive the hash. Evidence rows intentionally carry no generation-lifecycle
-columns and are replaced wholesale when their source version changes.
+adapter-local key)`. `local_key` preserves the adapter identity used to derive the
+hash. `source_version` records the source version last observed and is deliberately
+excluded from the identity hash: a version-qualified identity would rotate every
+evidence ID on any repository change, invalidating every stored `EvidenceRef` and
+`block_evidence` row and making the Changed and Renamed evidence sets of §13.3 —
+and the 1-percent incremental budget of §3.2 — unattainable. Identity is stable
+across versions; re-extraction upserts the row, refreshing `source_version`,
+locations, and hashes, and the adapter-level content fingerprint decides whether
+the evidence counts as Changed. Evidence rows intentionally carry no
+generation-lifecycle columns; rows whose `local_key` disappears from the new
+source version are deleted together with their join rows.
 
 ### 12.4 FTS schema
 
@@ -1455,6 +1473,10 @@ Pruning an old generation therefore cannot remove document history. Configured
 history retention may archive revisions, but it cannot silently remove revisions
 referenced by unresolved reviews, comments, publication conflicts, or audit
 records.
+A revision may outlive the generation packs holding its evidence: revision
+payloads retain enough locator fields (adapter, `local_key`, file, and line span)
+that evidence references render as labeled but unresolvable once their generation
+is pruned — never as broken links, and never silently dropped.
 
 ### 12.7 Vector index
 
@@ -1594,9 +1616,19 @@ Pass 1: metadata and nodes
 Pass 2: edges
 
 - Stream graph edges.
-- Insert normalized technical relations.
+- Insert normalized technical relations for projector-relevant edge kinds only:
+  containment, route and entrypoint membership, API exposure, event production and
+  consumption, data access, test coverage, and cross-service contracts. Raw call
+  and reference edges are not re-materialized as `relations` rows; they stay in
+  `GraphArtifacts` and are reached through query descriptors or the optional
+  `GraphStore`.
 - Accumulate only bounded high-level statistics in memory.
 - Write large relation sets directly to temporary SQLite tables.
+
+Phase 0 measures the resulting `relations` row count and pack size on the 5M-edge
+benchmark service; those numbers are inputs to the storage ADR. A policy that
+materializes a large fraction of raw edges re-creates the graph inside every pack
+and cannot meet the §3.2 build and size budgets.
 
 Pass 3: technical assets
 
@@ -1915,12 +1947,12 @@ proposal:
     ],
     "rationale": "The new endpoint extends the existing refund process."
   },
-    "facts": [
-      {
-        "claim_id": "refund-api-created",
-        "truth_status": "inferred",
-        "text": "A refund can be requested for an existing payment.",
-        "evidence_ids": ["evidence-id"]
+  "facts": [
+    {
+      "claim_id": "refund-api-created",
+      "truth_status": "inferred",
+      "text": "A refund can be requested for an existing payment.",
+      "evidence_ids": ["evidence-id"]
     }
   ],
   "blocks": [
@@ -2053,8 +2085,8 @@ Review resolution creates an auditable change set. It does not mutate rows direc
 
 ### 15.10 LLM egress boundary
 
-SECURITY.md documents that `cih-server` performs no LLM egress; this system keeps
-that invariant:
+`docs/SECURITY.md` (§2, "LLM data egress") documents that `cih-server` performs no
+LLM egress; this system keeps that invariant:
 
 - All LLM calls run in the CLI/engine process (`cih docs document`).
 - The server's `propose_documentation_change` builds change envelopes and
@@ -2136,7 +2168,9 @@ Default limits:
 - Maximum 100.
 - Top 50 from each internal retriever.
 - Maximum one graph hop for search expansion.
-- Maximum four service searches concurrently.
+- Maximum four service searches concurrently. This deliberately matches the
+  default of four active service-pack handles (§12.9); raising one default
+  without the other turns workspace-wide searches into pack-open and LRU churn.
 
 ### 16.4 Search response
 
@@ -2528,6 +2562,22 @@ cih docs export --group <group> --format markdown|html
 `curated` is the default. `full` includes generated technical entity views and
 requires explicit selection because output may be very large.
 
+### 20.6 `cih docs gc`
+
+```text
+cih docs gc [--group <group>] [--repo <repo>] [--dry-run] [--json]
+```
+
+Applies the retention policy: prunes inactive generations past the retention
+window, archives document revisions according to configured history retention,
+and removes expired proposal envelopes and terminal job rows past their TTL/cap
+policies. Protected references are always honored — a generation or revision
+referenced by an unresolved review, comment, publication conflict, apply-journal
+entry, or audit record is never pruned (§12.6, §18.3). The active generation and
+its immediate parent are never candidates. `gc` serializes on the same advisory
+`write.lock` as other generation producers (§12.10). `--dry-run` reports what
+would be removed without removing it.
+
 ## 21. UI Design
 
 ### 21.1 Application structure
@@ -2888,6 +2938,10 @@ Deliverables:
 - Architecture decision records for keys, ontology, packs, AI authority, and vector
   backend.
 - New crate skeletons and layering enforcement.
+- Storage dependency selection: SQLite binding, migration approach, and USearch
+  binding. The workspace currently contains no SQLite or USearch usage anywhere —
+  the pack storage stack is net-new, and Phase 0/1 estimates must account for
+  that.
 - Physical incremental-pack prototype covering copy-on-write and portable-copy
   paths, checksum/fsync cost, and staged vector updates.
 
@@ -3184,6 +3238,8 @@ Service benchmark:
 - 500k nodes.
 - 5m edges.
 - Representative APIs, events, data, processes, and tests.
+- Materialized `relations` row count and pack size relative to the raw edge count
+  (edge-materialization policy check, §13.1 pass 2).
 - Full and incremental builds.
 - Copy-on-write and portable-copy incremental publication paths.
 - Checksum, fsync, FTS update, staged-vector update, and compaction costs.

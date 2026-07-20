@@ -7,6 +7,10 @@ use serde::Serialize;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum JobState {
+    /// Admitted but waiting for a running slot (`CIH_INDEX_MAX_CONCURRENT`).
+    Queued {
+        queued_at_secs: u64,
+    },
     Running {
         started_at_secs: u64,
     },
@@ -14,19 +18,29 @@ pub enum JobState {
         started_at_secs: u64,
         finished_at_secs: u64,
         output: String,
+        /// True when captured output hit the retention cap
+        /// (`CIH_INDEX_OUTPUT_CAP_BYTES`) and was truncated.
+        output_truncated: bool,
     },
     Failed {
         started_at_secs: u64,
         finished_at_secs: u64,
         error: String,
     },
+    /// The engine exceeded `CIH_INDEX_TIMEOUT_SECS` and was killed.
+    TimedOut {
+        started_at_secs: u64,
+        finished_at_secs: u64,
+        timeout_secs: u64,
+    },
 }
 
 pub type Jobs = Arc<tokio::sync::RwLock<HashMap<String, JobState>>>;
 
 /// Upper bound on retained job entries. Once exceeded, the oldest terminal
-/// (`Done`/`Failed`) jobs are evicted first so the map can't grow unbounded on a
-/// long-lived server. `Running` jobs are never evicted.
+/// (`Done`/`Failed`/`TimedOut`) jobs are evicted first so the map can't grow
+/// unbounded on a long-lived server. `Queued`/`Running` jobs are never evicted
+/// (their count is bounded by the scheduler's admission capacity).
 const MAX_RETAINED_JOBS: usize = 256;
 
 /// Monotonic per-process counter appended to the job id so two `index_repo`
@@ -57,8 +71,11 @@ pub fn evict_terminal(jobs: &mut HashMap<String, JobState>) {
             }
             | JobState::Failed {
                 finished_at_secs, ..
+            }
+            | JobState::TimedOut {
+                finished_at_secs, ..
             } => Some((id.clone(), *finished_at_secs)),
-            JobState::Running { .. } => None,
+            JobState::Queued { .. } | JobState::Running { .. } => None,
         })
         .collect();
     terminal.sort_by_key(|&(_, finished)| finished);

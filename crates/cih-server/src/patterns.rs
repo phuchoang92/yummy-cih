@@ -9,7 +9,6 @@ use cih_patterns::{load_patterns, patterns_path, to_toml, RouteRule};
 
 use crate::args::{AddResolvePatternArgs, ListResolvePatternsArgs};
 use crate::indexing;
-use crate::jobs::Jobs;
 use crate::utils::json_result;
 
 /// Resolve a repo name/path (or the active graph key) to its filesystem root via the registry.
@@ -44,7 +43,7 @@ pub async fn add_resolve_pattern(
     backend: &str,
     falkor_url: &str,
     graph_key: &str,
-    jobs: &Jobs,
+    scheduler: &indexing::IndexScheduler,
     args: AddResolvePatternArgs,
 ) -> Result<CallToolResult, McpError> {
     if args.kind != "route" {
@@ -89,10 +88,10 @@ pub async fn add_resolve_pattern(
     // to that entry's own key (never the server's primary key).
     let mut job_id = None;
     if args.reindex {
-        if let Ok((id, _)) =
-            indexing::start_index_job(backend, falkor_url, "", jobs, &root, "").await
+        if let Ok(receipt) =
+            indexing::start_index_job(backend, falkor_url, "", scheduler, &root, "").await
         {
-            job_id = Some(id);
+            job_id = Some(receipt.job_id);
         }
     }
 

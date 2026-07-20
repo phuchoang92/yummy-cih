@@ -11,13 +11,11 @@
 //! docs.rs for the version you resolve — the tool BODIES (the `self.store.*`
 //! calls) are SDK-agnostic and stay as-is.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
-
+use crate::single_flight::SingleFlight;
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 use anyhow::Result;
 use cih_embed::EmbedStore;
@@ -37,7 +35,9 @@ use crate::args::*;
 use crate::jobs::Jobs;
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{json_result, text_result, to_mcp};
-use crate::{artifact_cache, changes, feature, files, resources, search, symbol, wiki, xflow};
+use crate::{
+    artifact_cache, changes, feature, files, indexing, resources, search, symbol, wiki, xflow,
+};
 
 use crate::search::{QueryArgs, QueryResult, SearchState};
 
@@ -89,10 +89,14 @@ pub(crate) struct CihServer {
     /// Shared pgvector handle, cloned into each member repo's `SearchState`.
     embed_store: Option<Arc<EmbedStore>>,
     /// Lazily-connected graph store per graph key — one server, many graphs.
-    stores: Arc<RwLock<HashMap<String, Arc<dyn GraphStore>>>>,
-    /// Per-repo BM25 search state, keyed by the unversioned artifacts dir.
-    searches: Arc<RwLock<HashMap<String, SearchState>>>,
+    /// Single-flight: concurrent misses connect + `ensure_schema` once.
+    stores: Arc<SingleFlight<Arc<dyn GraphStore>>>,
+    /// Per-repo BM25 search state, keyed by the unversioned artifacts dir
+    /// (single-flight like `stores`).
+    searches: Arc<SingleFlight<SearchState>>,
     jobs: Jobs,
+    /// Admission-controlled runner for `cih-engine analyze` jobs (shares `jobs`).
+    indexer: indexing::IndexScheduler,
     read_file_limits: files::ReadFileLimits,
     wiki: wiki::WikiSearchState,
     /// Cross-call artifact-graph cache for cross-repo tools (trace_flow_x,
@@ -122,12 +126,14 @@ impl CihServer {
         let search = SearchState::new(artifacts_dir.clone(), embed_store.clone());
         // Seed the caches with the primary so the default (empty-repo) path
         // reuses the already schema-initialised connection + BM25 state.
-        let mut stores = HashMap::new();
-        stores.insert(graph_key.clone(), store.clone());
-        let mut searches = HashMap::new();
-        if let Some(dir) = &artifacts_dir {
-            searches.insert(dir.to_string_lossy().into_owned(), search.clone());
-        }
+        let stores = Arc::new(SingleFlight::with([(graph_key.clone(), store.clone())]));
+        let searches = Arc::new(SingleFlight::with(
+            artifacts_dir
+                .iter()
+                .map(|dir| (dir.to_string_lossy().into_owned(), search.clone())),
+        ));
+        let jobs: Jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let indexer = indexing::IndexScheduler::new(jobs.clone());
         Self {
             store,
             search,
@@ -137,9 +143,10 @@ impl CihServer {
             falkor_url,
             store_limits,
             embed_store,
-            stores: Arc::new(RwLock::new(stores)),
-            searches: Arc::new(RwLock::new(searches)),
-            jobs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            stores,
+            searches,
+            jobs,
+            indexer,
             read_file_limits,
             wiki,
             xflow: xflow::XflowState::new(),
@@ -172,43 +179,47 @@ impl CihServer {
     }
 
     /// Get-or-connect a graph store for `graph_key` (cached across calls).
+    /// Single-flight: a burst of concurrent misses connects and runs
+    /// `ensure_schema` once; a failure is not cached, so the next call retries.
     /// Single-shot `ensure_schema` (unlike startup's retry loop): per-key
     /// connects happen while serving traffic, where failing fast is correct.
     async fn store_for(&self, graph_key: &str) -> Result<Arc<dyn GraphStore>, McpError> {
-        if let Some(store) = self.stores.read().await.get(graph_key) {
-            return Ok(store.clone());
-        }
-        let store = cih_store_factory::connect_store(
-            &self.backend,
-            &self.falkor_url,
-            graph_key,
-            &cih_store_factory::StoreOptions {
-                query_limit: Some(self.store_limits),
-            },
-        )
-        .map_err(|e| McpError::internal_error(format!("connect graph '{graph_key}': {e}"), None))?;
-        store.ensure_schema().await.map_err(|e| {
-            McpError::internal_error(format!("schema init for graph '{graph_key}': {e}"), None)
-        })?;
         self.stores
-            .write()
+            .get_or_try_init(graph_key, || async {
+                let store = cih_store_factory::connect_store(
+                    &self.backend,
+                    &self.falkor_url,
+                    graph_key,
+                    &cih_store_factory::StoreOptions {
+                        query_limit: Some(self.store_limits),
+                    },
+                )
+                .map_err(|e| {
+                    McpError::internal_error(format!("connect graph '{graph_key}': {e}"), None)
+                })?;
+                store.ensure_schema().await.map_err(|e| {
+                    McpError::internal_error(
+                        format!("schema init for graph '{graph_key}': {e}"),
+                        None,
+                    )
+                })?;
+                Ok(store)
+            })
             .await
-            .insert(graph_key.to_string(), store.clone());
-        Ok(store)
     }
 
-    /// Get-or-build a `SearchState` for a repo. The registry's `artifacts_dir`
-    /// is the *versioned* dir (`.cih/artifacts/<hash>`); BM25 wants the
-    /// unversioned parent, which `SearchState`/`latest_in_dir` resolve.
+    /// Get-or-build a `SearchState` for a repo (single-flight, like
+    /// [`store_for`](Self::store_for)). The registry's `artifacts_dir` is the
+    /// *versioned* dir (`.cih/artifacts/<hash>`); BM25 wants the unversioned
+    /// parent, which `SearchState`/`latest_in_dir` resolve.
     async fn search_for(&self, versioned_artifacts_dir: &str) -> SearchState {
         let dir = unversioned_artifacts_dir(versioned_artifacts_dir);
         let key = dir.to_string_lossy().into_owned();
-        if let Some(search) = self.searches.read().await.get(&key) {
-            return search.clone();
-        }
-        let search = SearchState::new(Some(dir), self.embed_store.clone());
-        self.searches.write().await.insert(key, search.clone());
-        search
+        self.searches
+            .get_or_init(&key, || async {
+                SearchState::new(Some(dir), self.embed_store.clone())
+            })
+            .await
     }
 
     async fn resolve_symbol(
@@ -755,8 +766,8 @@ impl ServerHandler for CihServer {
         request: ReadResourceRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        // Resource reads scan artifact files — blocking pool, not the worker.
-        crate::blocking::run_blocking(
+        // Resource reads scan artifact files — heavy lane, not the worker.
+        crate::blocking::run_blocking_heavy(
             crate::blocking::blocking_timeout(),
             "resource read",
             move || resources::read_resource(request),

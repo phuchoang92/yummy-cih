@@ -10,8 +10,18 @@
 > communities/processes resources are streamed, item- and byte-bounded, and
 > paged by version-stamped cursor (`CIH_RESOURCE_MAX_BYTES`); `format` args are
 > typed per-tool enums (empty string still accepted as the documented default).
-> Still open from §9.2: the blocking-lane semaphore/queue-timeout extension —
-> scheduled with Milestone 2.  
+> Milestone 2 core completed 2026-07-20: `store_for`/`search_for` are
+> single-flight (new `single_flight.rs`, per-key async gates, failures never
+> cached); the §9.2 heavy blocking lane exists (`run_blocking_heavy`,
+> `CIH_BLOCKING_MAX_CONCURRENT` default 2, queue timeout 5 s, typed
+> `Saturated` rejection, permit held by the running closure per §9.3) and
+> gates contracts/resources/taint; `IndexScheduler` gives index jobs admission
+> control (running cap 1, queue 16, one active job per repo with dedup), a
+> deadline that kills the child (`CIH_INDEX_TIMEOUT_SECS`, default 30 min),
+> capped output retention with truncation flags, and `queued`/`timed_out` job
+> states. Still open from §13: an explicit cancel operation and old-version
+> search/wiki cache eviction (Milestone 3's weighted-cache work); registry
+> freshness needs no invalidation (mtime-checked cache).  
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  

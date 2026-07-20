@@ -1,29 +1,142 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
 use rmcp::{model::CallToolResult, ErrorData as McpError};
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::args::IndexRepoArgs;
 use crate::jobs::{evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs};
 use crate::utils::json_result;
 
+/// Admission-controlled runner for `cih-engine analyze` jobs (S5): a global
+/// running-cap semaphore, a bounded admission queue, one active job per
+/// canonical repo (duplicate submissions coalesce onto the active job), a hard
+/// deadline that kills the child, and capped output capture. Registry
+/// freshness after a successful job needs no explicit invalidation:
+/// `Registry::load_cached` is mtime-checked and the engine's save bumps it.
+#[derive(Clone)]
+pub struct IndexScheduler {
+    jobs: Jobs,
+    /// Bounds concurrently *running* engine processes.
+    running: Arc<Semaphore>,
+    /// Canonical repo path → active (queued or running) job id.
+    active: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// Queued + running bound: running cap + queue capacity.
+    admission_capacity: usize,
+    job_timeout: Duration,
+    output_cap: usize,
+}
+
+impl IndexScheduler {
+    /// Limits from env: `CIH_INDEX_MAX_CONCURRENT` (default 1),
+    /// `CIH_INDEX_QUEUE_CAPACITY` (default 16), `CIH_INDEX_TIMEOUT_SECS`
+    /// (default 1800, 0 disables), `CIH_INDEX_OUTPUT_CAP_BYTES` (default 1 MiB).
+    pub fn new(jobs: Jobs) -> Self {
+        let usize_env = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(default)
+        };
+        let timeout_secs = std::env::var("CIH_INDEX_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30 * 60);
+        let timeout = if timeout_secs == 0 {
+            Duration::from_secs(365 * 24 * 60 * 60)
+        } else {
+            Duration::from_secs(timeout_secs)
+        };
+        Self::with_limits(
+            jobs,
+            usize_env("CIH_INDEX_MAX_CONCURRENT", 1),
+            usize_env("CIH_INDEX_QUEUE_CAPACITY", 16),
+            timeout,
+            usize_env("CIH_INDEX_OUTPUT_CAP_BYTES", 1024 * 1024),
+        )
+    }
+
+    pub fn with_limits(
+        jobs: Jobs,
+        max_concurrent: usize,
+        queue_capacity: usize,
+        job_timeout: Duration,
+        output_cap: usize,
+    ) -> Self {
+        Self {
+            jobs,
+            running: Arc::new(Semaphore::new(max_concurrent)),
+            active: Arc::new(Mutex::new(HashMap::new())),
+            admission_capacity: max_concurrent + queue_capacity,
+            job_timeout,
+            output_cap,
+        }
+    }
+
+    /// Admission decision under the active-jobs lock: duplicates coalesce onto
+    /// the existing job, a full queue rejects, otherwise the repo is claimed.
+    async fn admit(&self, canonical: &Path, job_id: &str) -> Admission {
+        let mut active = self.active.lock().await;
+        if let Some(existing) = active.get(canonical) {
+            return Admission::Duplicate(existing.clone());
+        }
+        if active.len() >= self.admission_capacity {
+            return Admission::QueueFull {
+                active: active.len(),
+                capacity: self.admission_capacity,
+            };
+        }
+        active.insert(canonical.to_path_buf(), job_id.to_string());
+        Admission::Admitted
+    }
+}
+
+enum Admission {
+    /// This repo already has a queued/running job — reuse its id.
+    Duplicate(String),
+    QueueFull {
+        active: usize,
+        capacity: usize,
+    },
+    Admitted,
+}
+
+/// Receipt for a submitted (or coalesced) index job.
+pub struct JobReceipt {
+    pub job_id: String,
+    pub repo: String,
+    /// True when the repo already had an active job and no new one was started.
+    pub deduped: bool,
+}
+
 pub async fn index_repo(
     backend: &str,
     falkor_url: &str,
-    jobs: &Jobs,
+    scheduler: &IndexScheduler,
     args: IndexRepoArgs,
 ) -> Result<CallToolResult, McpError> {
-    let (job_id, canonical) = start_index_job(
+    let receipt = start_index_job(
         backend,
         falkor_url,
         &args.graph_key,
-        jobs,
+        scheduler,
         &args.repo_path,
         &args.languages,
     )
     .await?;
+    let job_id = &receipt.job_id;
     json_result(&serde_json::json!({
         "job_id": job_id,
-        "status": "running",
-        "repo": canonical,
-        "message": format!("Indexing started. Poll with index_status(job_id=\"{job_id}\")."),
+        "status": if receipt.deduped { "already_active" } else { "queued" },
+        "repo": receipt.repo,
+        "message": if receipt.deduped {
+            format!("This repo already has an active index job. Poll index_status(job_id=\"{job_id}\").")
+        } else {
+            format!("Indexing queued. Poll with index_status(job_id=\"{job_id}\").")
+        },
     }))
 }
 
@@ -34,15 +147,15 @@ pub async fn index_repo(
 /// loaded any `repo_path` into the primary graph.
 fn resolve_target_graph_key(
     reg: &cih_core::Registry,
-    canonical: &std::path::Path,
+    canonical: &Path,
     explicit: &str,
 ) -> Result<String, String> {
     let explicit = explicit.trim();
     let owner = reg.entries.iter().find(|e| {
-        std::path::Path::new(&e.path)
+        Path::new(&e.path)
             .canonicalize()
             .map(|p| p == canonical)
-            .unwrap_or_else(|_| std::path::Path::new(&e.path) == canonical)
+            .unwrap_or_else(|_| Path::new(&e.path) == canonical)
     });
     match owner {
         Some(entry) => {
@@ -75,19 +188,19 @@ fn resolve_target_graph_key(
 }
 
 /// Validate `repo_path`, resolve the target graph key (see
-/// [`resolve_target_graph_key`]), spawn a background `cih-engine analyze`, and
-/// return `(job_id, canonical repo path)`. Shared by the `index_repo` tool and
-/// `add_resolve_pattern`'s reindex. `requested_graph_key` is the caller's
-/// explicit key ("" = resolve from the registry).
+/// [`resolve_target_graph_key`]), and submit a `cih-engine analyze` job to the
+/// scheduler. Shared by the `index_repo` tool and `add_resolve_pattern`'s
+/// reindex. `requested_graph_key` is the caller's explicit key ("" = resolve
+/// from the registry).
 pub async fn start_index_job(
     backend: &str,
     falkor_url: &str,
     requested_graph_key: &str,
-    jobs: &Jobs,
+    scheduler: &IndexScheduler,
     repo_path: &str,
     languages: &str,
-) -> Result<(String, String), McpError> {
-    let repo = std::path::Path::new(repo_path);
+) -> Result<JobReceipt, McpError> {
+    let repo = Path::new(repo_path);
     if !repo.is_dir() {
         return Err(McpError::invalid_params(
             format!("'{repo_path}' does not exist or is not a directory"),
@@ -105,32 +218,79 @@ pub async fn start_index_job(
             .map_err(|e| McpError::invalid_params(e, None))?;
 
     let job_id = new_job_id();
-    let started_at_secs = unix_now_secs();
+    match scheduler.admit(&canonical, &job_id).await {
+        Admission::Duplicate(existing) => {
+            return Ok(JobReceipt {
+                job_id: existing,
+                repo: repo_str,
+                deduped: true,
+            });
+        }
+        Admission::QueueFull { active, capacity } => {
+            return Err(McpError::internal_error(
+                format!(
+                    "index queue full ({active} active jobs, capacity {capacity}) — \
+                     retry after a job finishes (poll index_status)"
+                ),
+                None,
+            ));
+        }
+        Admission::Admitted => {}
+    }
     {
-        let mut jobs_lock = jobs.write().await;
-        jobs_lock.insert(job_id.clone(), JobState::Running { started_at_secs });
+        let mut jobs_lock = scheduler.jobs.write().await;
+        jobs_lock.insert(
+            job_id.clone(),
+            JobState::Queued {
+                queued_at_secs: unix_now_secs(),
+            },
+        );
         evict_terminal(&mut jobs_lock);
     }
 
     let engine = find_engine_binary();
     let backend = backend.to_string();
     let falkor_url = falkor_url.to_string();
-    let jobs = jobs.clone();
-    let job_id2 = job_id.clone();
     let languages = languages.to_string();
+    let sched = scheduler.clone();
+    let job_id2 = job_id.clone();
+    let canonical2 = canonical.clone();
 
     tokio::spawn(async move {
+        // Queued until a running slot frees. The semaphore is never closed;
+        // if it somehow is, fail the job rather than hang it.
+        let permit = match sched.running.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(closed) => {
+                let now = unix_now_secs();
+                sched.jobs.write().await.insert(
+                    job_id2,
+                    JobState::Failed {
+                        started_at_secs: now,
+                        finished_at_secs: now,
+                        error: format!("scheduler unavailable: {closed}"),
+                    },
+                );
+                sched.active.lock().await.remove(&canonical2);
+                return;
+            }
+        };
+        let started_at_secs = unix_now_secs();
+        sched
+            .jobs
+            .write()
+            .await
+            .insert(job_id2.clone(), JobState::Running { started_at_secs });
+
         let mut cmd = tokio::process::Command::new(&engine);
         cmd.arg("analyze")
-            .arg(&repo_str)
+            .arg(canonical2.display().to_string())
             .arg("--all")
             .env("CIH_GRAPH_BACKEND", &backend)
             .env("FALKOR_URL", &falkor_url)
             .env("CIH_GRAPH_KEY", &graph_key)
             .env("NO_COLOR", "1")
-            .env("RUST_LOG", "warn,cih_engine=info")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .env("RUST_LOG", "warn,cih_engine=info");
         if !languages.is_empty() {
             for lang in languages.split(',') {
                 let l = lang.trim();
@@ -140,62 +300,158 @@ pub async fn start_index_job(
             }
         }
 
-        let result = cmd.output().await;
+        let outcome = run_engine(cmd, sched.job_timeout, sched.output_cap).await;
         let finished_at_secs = unix_now_secs();
-        let mut jobs = jobs.write().await;
-        match result {
-            Ok(out) if out.status.success() => {
-                let output = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                jobs.insert(
-                    job_id2,
-                    JobState::Done {
-                        started_at_secs,
-                        finished_at_secs,
-                        output,
-                    },
-                );
-            }
-            Ok(out) => {
-                let stderr: String = String::from_utf8_lossy(&out.stderr)
+        let state = match outcome {
+            EngineOutcome::Exited {
+                success: true,
+                stdout,
+                truncated,
+                ..
+            } => JobState::Done {
+                started_at_secs,
+                finished_at_secs,
+                output: stdout.trim().to_string(),
+                output_truncated: truncated,
+            },
+            EngineOutcome::Exited {
+                code,
+                stdout,
+                stderr,
+                ..
+            } => {
+                let stderr: String = stderr
                     .lines()
                     .filter(|l| !l.contains('\x1b'))
                     .collect::<Vec<_>>()
                     .join("\n");
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let error = format!(
-                    "cih-engine exited {}: {}\n{}",
-                    out.status.code().unwrap_or(-1),
-                    stderr.trim(),
-                    stdout,
-                );
-                jobs.insert(
-                    job_id2,
-                    JobState::Failed {
-                        started_at_secs,
-                        finished_at_secs,
-                        error,
-                    },
-                );
+                JobState::Failed {
+                    started_at_secs,
+                    finished_at_secs,
+                    error: format!(
+                        "cih-engine exited {code}: {}\n{}",
+                        stderr.trim(),
+                        stdout.trim()
+                    ),
+                }
             }
-            Err(e) => {
-                jobs.insert(
-                    job_id2,
-                    JobState::Failed {
-                        started_at_secs,
-                        finished_at_secs,
-                        error: format!("failed to launch {}: {e}", engine.display()),
-                    },
-                );
-            }
-        }
+            EngineOutcome::TimedOut => JobState::TimedOut {
+                started_at_secs,
+                finished_at_secs,
+                timeout_secs: sched.job_timeout.as_secs(),
+            },
+            EngineOutcome::LaunchFailed(error) => JobState::Failed {
+                started_at_secs,
+                finished_at_secs,
+                error,
+            },
+        };
+        sched.jobs.write().await.insert(job_id2, state);
+        sched.active.lock().await.remove(&canonical2);
+        drop(permit);
     });
 
-    Ok((job_id, canonical.display().to_string()))
+    Ok(JobReceipt {
+        job_id,
+        repo: repo_str,
+        deduped: false,
+    })
+}
+
+#[derive(Debug)]
+enum EngineOutcome {
+    Exited {
+        code: i32,
+        success: bool,
+        stdout: String,
+        stderr: String,
+        /// True when either stream hit the retention cap.
+        truncated: bool,
+    },
+    TimedOut,
+    LaunchFailed(String),
+}
+
+/// Run the engine with piped, cap-retained output and a hard deadline. On
+/// deadline the child is killed (`kill_on_drop` is the backstop). Streams are
+/// drained past the cap so a chatty child never blocks on a full pipe — only
+/// retention is capped, per §13.4 of the design record.
+async fn run_engine(
+    mut cmd: tokio::process::Command,
+    deadline: Duration,
+    output_cap: usize,
+) -> EngineOutcome {
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let program = format!("{:?}", cmd.as_std().get_program());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return EngineOutcome::LaunchFailed(format!("failed to launch {program}: {e}")),
+    };
+    let out_task = child
+        .stdout
+        .take()
+        .map(|s| tokio::spawn(read_capped(s, output_cap)));
+    let err_task = child
+        .stderr
+        .take()
+        .map(|s| tokio::spawn(read_capped(s, output_cap)));
+    let collect = |task: Option<tokio::task::JoinHandle<(String, bool)>>| async {
+        match task {
+            Some(t) => t.await.unwrap_or_default(),
+            None => (String::new(), false),
+        }
+    };
+    match tokio::time::timeout(deadline, child.wait()).await {
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            EngineOutcome::TimedOut
+        }
+        Ok(Err(e)) => EngineOutcome::LaunchFailed(format!("failed waiting on {program}: {e}")),
+        Ok(Ok(status)) => {
+            let (stdout, out_truncated) = collect(out_task).await;
+            let (stderr, err_truncated) = collect(err_task).await;
+            EngineOutcome::Exited {
+                code: status.code().unwrap_or(-1),
+                success: status.success(),
+                stdout,
+                stderr,
+                truncated: out_truncated || err_truncated,
+            }
+        }
+    }
+}
+
+/// Read a stream retaining at most `cap` bytes; the remainder is drained (so
+/// the child never blocks) and flagged as truncated.
+async fn read_capped<R>(mut reader: R, cap: usize) -> (String, bool)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut retained: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = cap.saturating_sub(retained.len());
+                let take = n.min(room);
+                retained.extend_from_slice(&chunk[..take]);
+                if take < n {
+                    truncated = true;
+                }
+            }
+        }
+    }
+    (String::from_utf8_lossy(&retained).into_owned(), truncated)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_target_graph_key;
+    use super::*;
     use cih_core::{Registry, RegistryEntry};
 
     fn entry(name: &str, path: &str, graph_key: &str) -> RegistryEntry {
@@ -209,6 +465,16 @@ mod tests {
             last_git_head: None,
             stats: Default::default(),
         }
+    }
+
+    fn test_scheduler(max_concurrent: usize, queue_capacity: usize) -> IndexScheduler {
+        IndexScheduler::with_limits(
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            max_concurrent,
+            queue_capacity,
+            Duration::from_secs(60),
+            64 * 1024,
+        )
     }
 
     /// A registered path uses its own registry key — never the server primary.
@@ -270,5 +536,124 @@ mod tests {
         };
         let err = resolve_target_graph_key(&reg, &canonical, "primary").unwrap_err();
         assert!(err.contains("already owned by repo 'other'"), "{err}");
+    }
+
+    /// §13.2: one active job per repo — a duplicate submission coalesces onto
+    /// the existing job instead of starting a second engine run.
+    #[tokio::test]
+    async fn duplicate_submissions_coalesce_onto_the_active_job() {
+        let sched = test_scheduler(1, 4);
+        let repo = Path::new("/tmp/repo-a");
+        assert!(matches!(
+            sched.admit(repo, "job-1").await,
+            Admission::Admitted
+        ));
+        match sched.admit(repo, "job-2").await {
+            Admission::Duplicate(existing) => assert_eq!(existing, "job-1"),
+            other => panic!("expected Duplicate, got {}", admission_name(&other)),
+        }
+        // After the job completes (repo released), a new one is admitted.
+        sched.active.lock().await.remove(repo);
+        assert!(matches!(
+            sched.admit(repo, "job-3").await,
+            Admission::Admitted
+        ));
+    }
+
+    /// §13.2: queued + running jobs are bounded; overflow is rejected.
+    #[tokio::test]
+    async fn admission_rejects_when_the_queue_is_full() {
+        let sched = test_scheduler(1, 1); // capacity: 1 running + 1 queued
+        assert!(matches!(
+            sched.admit(Path::new("/tmp/a"), "job-a").await,
+            Admission::Admitted
+        ));
+        assert!(matches!(
+            sched.admit(Path::new("/tmp/b"), "job-b").await,
+            Admission::Admitted
+        ));
+        match sched.admit(Path::new("/tmp/c"), "job-c").await {
+            Admission::QueueFull { active, capacity } => {
+                assert_eq!((active, capacity), (2, 2));
+            }
+            other => panic!("expected QueueFull, got {}", admission_name(&other)),
+        }
+    }
+
+    fn admission_name(a: &Admission) -> &'static str {
+        match a {
+            Admission::Duplicate(_) => "Duplicate",
+            Admission::QueueFull { .. } => "QueueFull",
+            Admission::Admitted => "Admitted",
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_run_captures_output_and_exit() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("echo out; echo err 1>&2");
+        match run_engine(cmd, Duration::from_secs(30), 64 * 1024).await {
+            EngineOutcome::Exited {
+                success,
+                stdout,
+                stderr,
+                truncated,
+                ..
+            } => {
+                assert!(success);
+                assert_eq!(stdout.trim(), "out");
+                assert_eq!(stderr.trim(), "err");
+                assert!(!truncated);
+            }
+            other => panic!("expected Exited, got {other:?}"),
+        }
+    }
+
+    /// §13.2: the deadline kills the child — the call returns promptly, not
+    /// after the child's natural runtime.
+    #[tokio::test]
+    async fn engine_run_deadline_kills_the_child() {
+        let start = std::time::Instant::now();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 30");
+        let outcome = run_engine(cmd, Duration::from_millis(100), 1024).await;
+        assert!(matches!(outcome, EngineOutcome::TimedOut), "{outcome:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "deadline must fire, not the 30s sleep"
+        );
+    }
+
+    /// §13.4: retention is capped (with the truncation flag) but the child is
+    /// fully drained, so a chatty child can't wedge on a full pipe.
+    #[tokio::test]
+    async fn engine_run_caps_retained_output() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("i=0; while [ $i -lt 5000 ]; do echo xxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done");
+        match run_engine(cmd, Duration::from_secs(30), 1000).await {
+            EngineOutcome::Exited {
+                success,
+                stdout,
+                truncated,
+                ..
+            } => {
+                assert!(success);
+                assert!(truncated, "100KB of output vs a 1000-byte cap");
+                assert!(stdout.len() <= 1000, "retained {} bytes", stdout.len());
+            }
+            other => panic!("expected Exited, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_run_launch_failure_is_reported() {
+        let cmd = tokio::process::Command::new("/nonexistent/cih-engine-test-binary");
+        match run_engine(cmd, Duration::from_secs(5), 1024).await {
+            EngineOutcome::LaunchFailed(msg) => {
+                assert!(msg.contains("failed to launch"), "{msg}");
+            }
+            other => panic!("expected LaunchFailed, got {other:?}"),
+        }
     }
 }

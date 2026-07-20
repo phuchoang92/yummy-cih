@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::args::TaintPathsArgs;
 use crate::artifact_cache::ArtifactCache;
-use crate::blocking::{blocking_timeout, run_blocking};
+use crate::blocking::{blocking_timeout, run_blocking_heavy};
 use crate::utils::{json_result, resolve_repo};
 
 const DEFAULT_LIMIT: usize = 50;
@@ -79,7 +79,7 @@ pub async fn taint_paths(
     // refining) — keep it off the async runtime threads. The artifact load (a
     // cache miss) also happens inside the blocking task.
     let artifacts = artifacts.clone();
-    let out = run_blocking(blocking_timeout(), "taint analysis", move || {
+    let out = run_blocking_heavy(blocking_timeout(), "taint analysis", move || {
         run_and_shape(
             &repo_path,
             &artifacts_dir,

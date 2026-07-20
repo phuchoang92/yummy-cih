@@ -5,7 +5,7 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
 use crate::artifact_cache::ArtifactCache;
-use crate::blocking::{blocking_timeout, run_blocking};
+use crate::blocking::{blocking_timeout, run_blocking_heavy};
 use crate::utils::{
     json_result, node_prop_str_owned, parse_contract_kind_filter, short_class_name,
     strip_response_wrapper,
@@ -59,7 +59,7 @@ fn group_freshness(group_name: &str) -> (Option<String>, bool) {
 /// `run_blocking` closure owns the whole phase — a cold multi-thousand-node
 /// artifact parse must never run on a Tokio worker.
 pub async fn group_contracts(args: GroupContractsArgs) -> Result<CallToolResult, McpError> {
-    run_blocking(blocking_timeout(), "group_contracts load", move || {
+    run_blocking_heavy(blocking_timeout(), "group_contracts load", move || {
         group_contracts_sync(args)
     })
     .await?
@@ -109,7 +109,7 @@ pub async fn api_impact(
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
     let xflow = xflow.clone();
-    run_blocking(blocking_timeout(), "api_impact artifact load", move || {
+    run_blocking_heavy(blocking_timeout(), "api_impact artifact load", move || {
         api_impact_sync(args, &xflow)
     })
     .await?
@@ -255,7 +255,7 @@ pub async fn trace_flow_x(
 ) -> Result<CallToolResult, McpError> {
     let graph_key = graph_key.to_string();
     let xflow = xflow.clone();
-    run_blocking(
+    run_blocking_heavy(
         blocking_timeout(),
         "trace_flow_x artifact load",
         move || trace_flow_x_sync(args, &graph_key, &xflow),
@@ -366,7 +366,7 @@ pub async fn shape_check(
     artifacts: &ArtifactCache,
 ) -> Result<CallToolResult, McpError> {
     let artifacts = artifacts.clone();
-    run_blocking(blocking_timeout(), "shape_check artifact load", move || {
+    run_blocking_heavy(blocking_timeout(), "shape_check artifact load", move || {
         shape_check_sync(args, &artifacts)
     })
     .await?
