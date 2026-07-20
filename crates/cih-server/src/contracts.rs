@@ -5,6 +5,7 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
 use crate::artifact_cache::ArtifactCache;
+use crate::blocking::{blocking_timeout, run_blocking};
 use crate::utils::{
     json_result, node_prop_str_owned, parse_contract_kind_filter, short_class_name,
     strip_response_wrapper,
@@ -53,7 +54,18 @@ fn group_freshness(group_name: &str) -> (Option<String>, bool) {
     (synced_at, stale)
 }
 
+/// The handlers below are thin async shims: each body is synchronous cold I/O
+/// (contracts file reads, artifact graph loads) plus pure compute, so one
+/// `run_blocking` closure owns the whole phase — a cold multi-thousand-node
+/// artifact parse must never run on a Tokio worker.
 pub async fn group_contracts(args: GroupContractsArgs) -> Result<CallToolResult, McpError> {
+    run_blocking(blocking_timeout(), "group_contracts load", move || {
+        group_contracts_sync(args)
+    })
+    .await?
+}
+
+fn group_contracts_sync(args: GroupContractsArgs) -> Result<CallToolResult, McpError> {
     let path = cih_core::contracts_path(&args.group).ok_or_else(|| {
         McpError::internal_error("cannot determine HOME for group contracts path", None)
     })?;
@@ -96,6 +108,14 @@ pub async fn api_impact(
     args: ApiImpactArgs,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
+    let xflow = xflow.clone();
+    run_blocking(blocking_timeout(), "api_impact artifact load", move || {
+        api_impact_sync(args, &xflow)
+    })
+    .await?
+}
+
+fn api_impact_sync(args: ApiImpactArgs, xflow: &XflowState) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
     let method = args.method.to_ascii_uppercase();
     let target_key = format!(
@@ -233,6 +253,21 @@ pub async fn trace_flow_x(
     graph_key: &str,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
+    let graph_key = graph_key.to_string();
+    let xflow = xflow.clone();
+    run_blocking(
+        blocking_timeout(),
+        "trace_flow_x artifact load",
+        move || trace_flow_x_sync(args, &graph_key, &xflow),
+    )
+    .await?
+}
+
+fn trace_flow_x_sync(
+    args: TraceFlowXArgs,
+    graph_key: &str,
+    xflow: &XflowState,
+) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
     let registry = Registry::load_cached();
     let entry = crate::utils::resolve_repo_entry(&args.repo, graph_key)
@@ -327,6 +362,17 @@ pub async fn trace_flow_x(
 }
 
 pub async fn shape_check(
+    args: ShapeCheckArgs,
+    artifacts: &ArtifactCache,
+) -> Result<CallToolResult, McpError> {
+    let artifacts = artifacts.clone();
+    run_blocking(blocking_timeout(), "shape_check artifact load", move || {
+        shape_check_sync(args, &artifacts)
+    })
+    .await?
+}
+
+fn shape_check_sync(
     args: ShapeCheckArgs,
     artifacts: &ArtifactCache,
 ) -> Result<CallToolResult, McpError> {

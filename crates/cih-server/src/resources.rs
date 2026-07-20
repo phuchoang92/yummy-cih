@@ -41,12 +41,18 @@ pub fn list_resources(
         resources.push(annotated_resource(
             &format!("cih://repo/{n}/communities"),
             &format!("{n}/communities"),
-            &format!("Community cluster nodes for repo '{n}'"),
+            &format!(
+                "Community cluster nodes for repo '{n}' (paged: append \
+                 ?cursor=...&limit=... — the response carries next_cursor/next_uri)"
+            ),
         ));
         resources.push(annotated_resource(
             &format!("cih://repo/{n}/processes"),
             &format!("{n}/processes"),
-            &format!("Process trace nodes for repo '{n}'"),
+            &format!(
+                "Process trace nodes for repo '{n}' (paged: append \
+                 ?cursor=...&limit=... — the response carries next_cursor/next_uri)"
+            ),
         ));
         resources.push(annotated_resource(
             &format!("cih://repo/{n}/schema"),
@@ -102,7 +108,11 @@ pub fn list_resource_templates(
             uri_template: "cih://repo/{name}/communities".to_string(),
             name: "repo-communities".to_string(),
             title: Some("Repo communities".to_string()),
-            description: Some("Community cluster nodes for an indexed repo".to_string()),
+            description: Some(
+                "Community cluster nodes for an indexed repo — paged: the bare URI is the \
+                 first page; follow the response's next_uri (?cursor=...&limit=...) for more"
+                    .to_string(),
+            ),
             mime_type: Some("application/json".to_string()),
         }
         .no_annotation(),
@@ -110,7 +120,11 @@ pub fn list_resource_templates(
             uri_template: "cih://repo/{name}/processes".to_string(),
             name: "repo-processes".to_string(),
             title: Some("Repo processes".to_string()),
-            description: Some("Process trace nodes for an indexed repo".to_string()),
+            description: Some(
+                "Process trace nodes for an indexed repo — paged: the bare URI is the \
+                 first page; follow the response's next_uri (?cursor=...&limit=...) for more"
+                    .to_string(),
+            ),
             mime_type: Some("application/json".to_string()),
         }
         .no_annotation(),
@@ -141,14 +155,28 @@ pub fn list_resource_templates(
 pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceResult, McpError> {
     let uri = &request.uri;
 
-    // Parse cih://repo/{name}/{section}
+    // Parse cih://repo/{name}/{section}[?cursor=...&limit=...]
     let rest = uri
         .strip_prefix("cih://repo/")
         .ok_or_else(|| McpError::invalid_params(format!("unknown URI scheme: {uri}"), None))?;
 
+    // Split the pagination query off before any path parsing so sections and
+    // wiki slugs never see it.
+    let (rest, query) = match rest.split_once('?') {
+        Some((path, q)) => (path, Some(q)),
+        None => (rest, None),
+    };
+    let page = parse_page_query(query)?;
+
     // Wiki page URIs must be handled before the generic name/section split:
     // slugs contain slashes, which rsplit_once would misattribute to the name.
     if let Some((name, slug)) = split_wiki_uri(rest) {
+        if query.is_some() {
+            return Err(McpError::invalid_params(
+                "wiki page resources are not paged — drop the query string".to_string(),
+                None,
+            ));
+        }
         return read_wiki_page(name, slug, uri);
     }
 
@@ -162,10 +190,16 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
         .ok_or_else(|| crate::utils::repo_not_found(name))?;
 
     let text = match section {
+        "communities" => read_community_nodes(entry, NodeKind::Community, "communities", &page)?,
+        "processes" => read_community_nodes(entry, NodeKind::Process, "processes", &page)?,
+        section if query.is_some() => {
+            return Err(McpError::invalid_params(
+                format!("section '{section}' is not paged — drop the query string"),
+                None,
+            ));
+        }
         "context" => serde_json::to_string_pretty(entry)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-        "communities" => read_community_nodes(entry, NodeKind::Community)?,
-        "processes" => read_community_nodes(entry, NodeKind::Process)?,
         "schema" => schema_json(),
         _ => {
             return Err(McpError::invalid_params(
@@ -178,6 +212,44 @@ pub fn read_resource(request: ReadResourceRequestParam) -> Result<ReadResourceRe
     Ok(ReadResourceResult {
         contents: vec![ResourceContents::text(text, uri)],
     })
+}
+
+/// Pagination options parsed from a resource URI's query string.
+struct PageQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+fn parse_page_query(query: Option<&str>) -> Result<PageQuery, McpError> {
+    let mut page = PageQuery {
+        cursor: None,
+        limit: None,
+    };
+    let Some(query) = query else { return Ok(page) };
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("cursor", v)) if !v.is_empty() => page.cursor = Some(v.to_string()),
+            Some(("limit", v)) => {
+                let n: usize = v.parse().map_err(|_| {
+                    McpError::invalid_params(format!("invalid resource limit '{v}'"), None)
+                })?;
+                if n == 0 {
+                    return Err(McpError::invalid_params(
+                        "resource limit must be >= 1".to_string(),
+                        None,
+                    ));
+                }
+                page.limit = Some(n);
+            }
+            _ => {
+                return Err(McpError::invalid_params(
+                    format!("unknown resource query parameter '{pair}' (supported: cursor, limit)"),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(page)
 }
 
 /// Split `"{name}/wiki/{slug}"` on the FIRST `/wiki/` into `(name, slug)`.
@@ -225,25 +297,153 @@ fn read_wiki_page(name: &str, slug: &str, uri: &str) -> Result<ReadResourceResul
     })
 }
 
+/// Default and hard-max page sizes for paged resource bodies (design record
+/// §11.2).
+const RESOURCE_ITEM_DEFAULT: usize = 100;
+const RESOURCE_ITEM_MAX: usize = 500;
+
+/// Byte budget per resource page, read once from `CIH_RESOURCE_MAX_BYTES`
+/// (unset/invalid/0 = 256 KiB). A page stops before exceeding it and hands
+/// back `next_cursor` instead.
+fn resource_byte_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("CIH_RESOURCE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(256 * 1024)
+    })
+}
+
+/// One bounded page of Community/Process nodes. The artifact is never
+/// collected whole (S3): the JSONL is streamed and only the current page is
+/// retained, capped by item limit and byte budget. The cursor is stamped with
+/// the versioned artifacts dir's basename so a cursor minted before a re-index
+/// fails loudly instead of silently paging a different dataset. Order is file
+/// order — deterministic per artifact version.
 fn read_community_nodes(
     entry: &cih_core::RegistryEntry,
     kind: NodeKind,
+    section: &str,
+    page: &PageQuery,
 ) -> Result<String, McpError> {
     let dir = entry
         .community_artifacts_dir
         .as_deref()
         .ok_or_else(|| McpError::invalid_params("discover not run for this repo yet", None))?;
+    let version = std::path::Path::new(dir)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unversioned".to_string());
+    let offset = match &page.cursor {
+        None => 0,
+        Some(c) => {
+            let malformed = || {
+                McpError::invalid_params(
+                    format!("malformed resource cursor '{c}' — use the response's next_cursor"),
+                    None,
+                )
+            };
+            let (v, off) = c.rsplit_once(':').ok_or_else(malformed)?;
+            let off: usize = off.parse().map_err(|_| malformed())?;
+            if v != version {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "stale cursor: artifacts were re-indexed (cursor version '{v}', \
+                         current '{version}') — restart from the base URI"
+                    ),
+                    None,
+                ));
+            }
+            off
+        }
+    };
+    let limit = page
+        .limit
+        .unwrap_or(RESOURCE_ITEM_DEFAULT)
+        .min(RESOURCE_ITEM_MAX);
     let path = std::path::Path::new(dir).join("nodes.jsonl");
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        McpError::internal_error(format!("cannot read {}: {e}", path.display()), None)
-    })?;
-    let label = kind.label();
-    let nodes: Vec<serde_json::Value> = raw
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .filter(|v: &serde_json::Value| v.get("kind").and_then(|k| k.as_str()) == Some(label))
-        .collect();
-    serde_json::to_string_pretty(&nodes).map_err(|e| McpError::internal_error(e.to_string(), None))
+    let scan = scan_jsonl_page(&path, kind.label(), offset, limit, resource_byte_budget())?;
+    let count = scan.items.len();
+    let next_cursor = scan.next_offset.map(|o| format!("{version}:{o}"));
+    let next_uri = next_cursor.as_ref().map(|c| {
+        format!(
+            "cih://repo/{}/{section}?cursor={c}&limit={limit}",
+            entry.name
+        )
+    });
+    let out = serde_json::json!({
+        "items": scan.items,
+        "count": count,
+        "truncated": next_cursor.is_some(),
+        "truncated_by": scan.stop,
+        "next_cursor": next_cursor,
+        "next_uri": next_uri,
+        "source_version": version,
+    });
+    serde_json::to_string_pretty(&out).map_err(|e| McpError::internal_error(e.to_string(), None))
+}
+
+/// A streamed page of JSONL records.
+struct JsonlPage {
+    items: Vec<serde_json::Value>,
+    /// Offset (in matching records) of the first item of the next page.
+    next_offset: Option<usize>,
+    /// What ended the page early: "limit" or "bytes".
+    stop: Option<&'static str>,
+}
+
+/// Stream one page out of a JSONL file: skip `offset` records whose `kind`
+/// equals `label`, then take up to `limit` of them while their raw line bytes
+/// fit `byte_budget` (the first record of a page is always served, so an
+/// oversize record cannot wedge pagination). Holds only the current page.
+fn scan_jsonl_page(
+    path: &std::path::Path,
+    label: &str,
+    offset: usize,
+    limit: usize,
+    byte_budget: usize,
+) -> Result<JsonlPage, McpError> {
+    use std::io::BufRead;
+    let read_err =
+        |e| McpError::internal_error(format!("cannot read {}: {e}", path.display()), None);
+    let file = std::fs::File::open(path).map_err(read_err)?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = JsonlPage {
+        items: Vec::new(),
+        next_offset: None,
+        stop: None,
+    };
+    let mut matched = 0usize;
+    let mut bytes = 0usize;
+    for line in reader.lines() {
+        let line = line.map_err(read_err)?;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v.get("kind").and_then(|k| k.as_str()) != Some(label) {
+            continue;
+        }
+        let index = matched;
+        matched += 1;
+        if index < offset {
+            continue;
+        }
+        if out.items.len() >= limit {
+            out.next_offset = Some(index);
+            out.stop = Some("limit");
+            break;
+        }
+        if !out.items.is_empty() && bytes + line.len() > byte_budget {
+            out.next_offset = Some(index);
+            out.stop = Some("bytes");
+            break;
+        }
+        bytes += line.len();
+        out.items.push(v);
+    }
+    Ok(out)
 }
 
 fn schema_json() -> String {
@@ -299,12 +499,148 @@ fn schema_json() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{annotated_resource, paginate_resources, split_wiki_uri, RESOURCE_PAGE_SIZE};
+    use super::{
+        annotated_resource, paginate_resources, parse_page_query, read_community_nodes,
+        scan_jsonl_page, split_wiki_uri, PageQuery, RESOURCE_PAGE_SIZE,
+    };
+    use cih_core::NodeKind;
+    use std::io::Write;
 
     fn sample(n: usize) -> Vec<rmcp::model::Resource> {
         (0..n)
             .map(|i| annotated_resource(&format!("cih://r/{i}"), &format!("r{i}"), "d"))
             .collect()
+    }
+
+    /// nodes.jsonl with `n` Community records plus one non-matching Method row.
+    fn write_fixture(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+        let path = dir.join("nodes.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..n {
+            writeln!(
+                f,
+                r#"{{"id":"Community:c{i}","kind":"Community","name":"c{i}"}}"#
+            )
+            .unwrap();
+        }
+        writeln!(f, r#"{{"id":"Method:m","kind":"Method","name":"m"}}"#).unwrap();
+        path
+    }
+
+    fn entry_with_dir(dir: &std::path::Path) -> cih_core::RegistryEntry {
+        cih_core::RegistryEntry {
+            name: "r".into(),
+            path: String::new(),
+            graph_key: "r".into(),
+            artifacts_dir: String::new(),
+            community_artifacts_dir: Some(dir.display().to_string()),
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        }
+    }
+
+    #[test]
+    fn jsonl_page_respects_offset_and_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_fixture(tmp.path(), 5);
+        let p1 = scan_jsonl_page(&path, "Community", 0, 2, usize::MAX).unwrap();
+        assert_eq!(p1.items.len(), 2);
+        assert_eq!(p1.next_offset, Some(2));
+        assert_eq!(p1.stop, Some("limit"));
+        let p2 = scan_jsonl_page(&path, "Community", 2, 2, usize::MAX).unwrap();
+        assert_eq!(p2.items[0]["id"], "Community:c2");
+        let p3 = scan_jsonl_page(&path, "Community", 4, 2, usize::MAX).unwrap();
+        assert_eq!(p3.items.len(), 1);
+        assert_eq!(p3.next_offset, None, "final page has no next cursor");
+        // Non-matching kinds are invisible to paging.
+        let all = scan_jsonl_page(&path, "Community", 0, 500, usize::MAX).unwrap();
+        assert_eq!(all.items.len(), 5);
+    }
+
+    #[test]
+    fn jsonl_page_stops_at_byte_budget_but_serves_at_least_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_fixture(tmp.path(), 5);
+        let p = scan_jsonl_page(&path, "Community", 0, 500, 1).unwrap();
+        assert_eq!(p.items.len(), 1, "oversize first record is still served");
+        assert_eq!(p.stop, Some("bytes"));
+        assert_eq!(p.next_offset, Some(1));
+    }
+
+    #[test]
+    fn page_query_parses_and_rejects_unknowns() {
+        let q = parse_page_query(Some("cursor=v:2&limit=10")).unwrap();
+        assert_eq!(q.cursor.as_deref(), Some("v:2"));
+        assert_eq!(q.limit, Some(10));
+        assert!(parse_page_query(None).unwrap().cursor.is_none());
+        assert!(parse_page_query(Some("limit=0")).is_err());
+        assert!(parse_page_query(Some("limit=abc")).is_err());
+        assert!(parse_page_query(Some("bogus=1")).is_err());
+    }
+
+    #[test]
+    fn community_pages_stamp_and_validate_the_artifact_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("deadbeef"); // versioned-dir basename = cursor stamp
+        std::fs::create_dir(&dir).unwrap();
+        write_fixture(&dir, 3);
+        let entry = entry_with_dir(&dir);
+        let page = |cursor: Option<&str>, limit| PageQuery {
+            cursor: cursor.map(str::to_string),
+            limit,
+        };
+
+        // First page mints a version-stamped cursor and a ready-to-use next_uri.
+        let text = read_community_nodes(
+            &entry,
+            NodeKind::Community,
+            "communities",
+            &page(None, Some(2)),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["next_cursor"], "deadbeef:2");
+        assert!(v["next_uri"]
+            .as_str()
+            .unwrap()
+            .contains("communities?cursor=deadbeef:2"));
+
+        // The minted cursor pages on to the final page.
+        let text = read_community_nodes(
+            &entry,
+            NodeKind::Community,
+            "communities",
+            &page(Some("deadbeef:2"), Some(2)),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["next_cursor"], serde_json::Value::Null);
+        assert_eq!(v["truncated"], false);
+
+        // A cursor from a different artifact version fails loudly.
+        let err = read_community_nodes(
+            &entry,
+            NodeKind::Community,
+            "communities",
+            &page(Some("cafebabe:2"), None),
+        )
+        .unwrap_err();
+        assert!(err.message.contains("stale cursor"), "{}", err.message);
+
+        // A malformed cursor is invalid_params, not a silent first page.
+        let err = read_community_nodes(
+            &entry,
+            NodeKind::Community,
+            "communities",
+            &page(Some("nonsense"), None),
+        )
+        .unwrap_err();
+        assert!(err.message.contains("malformed"), "{}", err.message);
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
     #[test]

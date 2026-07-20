@@ -28,6 +28,56 @@ pub enum DiffScope {
     BaseRef,
 }
 
+/// Output format for `impact`. A typo fails deserialization (it used to
+/// silently fall back to JSON); the empty string stays accepted because the
+/// tool docs long said "pass empty for default".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactFormat {
+    /// Default JSON impact report.
+    #[default]
+    #[serde(alias = "")]
+    Json,
+    /// D3 force-directed diagram JSON.
+    Diagram,
+}
+
+/// Output format for `communities` (same contract as [`ImpactFormat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunitiesFormat {
+    /// Default JSON community list.
+    #[default]
+    #[serde(alias = "")]
+    Json,
+    /// D3 service-map diagram JSON.
+    Diagram,
+}
+
+/// Output format for `route_map` (same contract as [`ImpactFormat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteMapFormat {
+    /// Default JSON route list.
+    #[default]
+    #[serde(alias = "")]
+    Json,
+    /// OpenAPI 3.0.3 JSON.
+    Openapi,
+}
+
+/// Output format for `trace_flow` (same contract as [`ImpactFormat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceFlowFormat {
+    /// Default JSON step list.
+    #[default]
+    #[serde(alias = "")]
+    Json,
+    /// Mermaid flowchart string.
+    Mermaid,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextArgs {
     /// Symbol id (e.g. `Method:com.acme.UserService#save`) or short name
@@ -51,7 +101,7 @@ pub struct ImpactArgs {
     pub max_depth: u32,
     /// Output format. Omit or pass empty for default JSON. Pass `"diagram"` for D3 force-directed JSON.
     #[serde(default)]
-    pub format: String,
+    pub format: ImpactFormat,
     /// Target service: a group member's registry name; empty = primary repo.
     #[serde(default)]
     pub repo: String,
@@ -64,7 +114,7 @@ pub struct CommunitiesArgs {
     pub limit: usize,
     /// Output format. Omit or pass empty for default JSON. Pass `"diagram"` for D3 service-map JSON.
     #[serde(default)]
-    pub format: String,
+    pub format: CommunitiesFormat,
     /// Target service: a group member's registry name; empty = primary repo.
     #[serde(default)]
     pub repo: String,
@@ -80,7 +130,7 @@ pub struct RouteMapArgs {
     pub limit: usize,
     /// Output format. Omit or pass empty for default JSON. Pass `"openapi"` for OpenAPI 3.0.3 JSON.
     #[serde(default)]
-    pub format: String,
+    pub format: RouteMapFormat,
     /// Target service: a group member's registry name; empty = primary repo.
     #[serde(default)]
     pub repo: String,
@@ -153,7 +203,7 @@ pub struct TraceFlowArgs {
     pub max_depth: u32,
     /// Output format. Omit or pass empty for default JSON. Pass `"mermaid"` for a Mermaid flowchart string.
     #[serde(default)]
-    pub format: String,
+    pub format: TraceFlowFormat,
     /// Target service: a group member's registry name; empty = primary repo.
     #[serde(default)]
     pub repo: String,

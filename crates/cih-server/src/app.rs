@@ -280,7 +280,7 @@ impl CihServer {
             )
             .await
             .map_err(to_mcp)?;
-        if args.format == "diagram" {
+        if args.format == ImpactFormat::Diagram {
             return json_result(&render_d3_impact(&res));
         }
         json_result(&res)
@@ -296,7 +296,7 @@ impl CihServer {
         if args.limit > 0 {
             communities.truncate(args.limit);
         }
-        if args.format == "diagram" {
+        if args.format == CommunitiesFormat::Diagram {
             let edges = rc.store.community_graph().await.map_err(to_mcp)?;
             return json_result(&render_community_diagram(&communities, &edges));
         }
@@ -382,7 +382,7 @@ impl CihServer {
         let rc = self.resolve(&args.repo).await?;
         let routes: Vec<cih_graph_store::RouteInfo> =
             rc.store.route_map(prefix, limit).await.map_err(to_mcp)?;
-        if args.format == "openapi" {
+        if args.format == RouteMapFormat::Openapi {
             return json_result(&render_openapi(&routes));
         }
         json_result(&routes)
@@ -506,7 +506,7 @@ impl CihServer {
         })
         .clamp(1, 10);
         let steps = rc.store.flow_downstream(&id, depth).await.map_err(to_mcp)?;
-        if args.format == "mermaid" {
+        if args.format == TraceFlowFormat::Mermaid {
             return text_result(render_mermaid_flow(&id, &steps));
         }
         json_result(&serde_json::json!({
@@ -755,7 +755,13 @@ impl ServerHandler for CihServer {
         request: ReadResourceRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        resources::read_resource(request)
+        // Resource reads scan artifact files — blocking pool, not the worker.
+        crate::blocking::run_blocking(
+            crate::blocking::blocking_timeout(),
+            "resource read",
+            move || resources::read_resource(request),
+        )
+        .await?
     }
 }
 #[cfg(test)]

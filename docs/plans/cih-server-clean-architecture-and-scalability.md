@@ -1,10 +1,17 @@
 # CIH Server Clean Architecture, Scalability, and Maintainability Proposal
 
-> **Status:** PROPOSED - reviewed 2026-07-20; Section 29 first slice
+> **Status:** IN PROGRESS - reviewed 2026-07-20; Section 29 first slice
 > implemented 2026-07-20 (S9 graph-key targeting at both sites,
 > `detect_changes` completeness + budgeted batching, typed
 > `DiffScope`/`DirectionArg`, git diff via the blocking pool, `trace_flow`
-> instruction fix, instruction/schema validation test); milestones not started  
+> instruction fix, instruction/schema validation test). Milestone 1 completed
+> 2026-07-20: cross-repo handlers (`group_contracts`/`api_impact`/
+> `trace_flow_x`/`shape_check`) and `read_resource` run through `run_blocking`;
+> communities/processes resources are streamed, item- and byte-bounded, and
+> paged by version-stamped cursor (`CIH_RESOURCE_MAX_BYTES`); `format` args are
+> typed per-tool enums (empty string still accepted as the documented default).
+> Still open from §9.2: the blocking-lane semaphore/queue-timeout extension —
+> scheduled with Milestone 2.  
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  

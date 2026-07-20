@@ -1,8 +1,9 @@
 use cih_core::ContractMatchKind;
 use cih_graph_store::Direction;
 use cih_server::args::{
-    DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs, RegressionScopeArgs,
-    RouteMapArgs, TraceFlowArgs, UntestedPathsArgs,
+    DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs, ImpactFormat,
+    RegressionScopeArgs, RouteMapArgs, RouteMapFormat, TraceFlowArgs, TraceFlowFormat,
+    UntestedPathsArgs,
 };
 use cih_server::utils::parse_contract_kind_filter;
 
@@ -79,7 +80,7 @@ fn trace_flow_args_defaults() {
     let args: TraceFlowArgs = serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
     assert_eq!(args.entry_point, "Route:GET /");
     assert_eq!(args.max_depth, 0);
-    assert!(args.format.is_empty());
+    assert_eq!(args.format, TraceFlowFormat::Json);
 }
 
 #[test]
@@ -87,7 +88,7 @@ fn impact_args_accepts_format_diagram() {
     let args: ImpactArgs =
         serde_json::from_str(r#"{"name":"OrderService","format":"diagram"}"#).unwrap();
     assert_eq!(args.name, "OrderService");
-    assert_eq!(args.format, "diagram");
+    assert_eq!(args.format, ImpactFormat::Diagram);
 }
 
 #[test]
@@ -96,7 +97,24 @@ fn trace_flow_args_accepts_format_mermaid() {
         serde_json::from_str(r#"{"entry_point":"Route:GET /api/checkout","format":"mermaid"}"#)
             .unwrap();
     assert_eq!(args.entry_point, "Route:GET /api/checkout");
-    assert_eq!(args.format, "mermaid");
+    assert_eq!(args.format, TraceFlowFormat::Mermaid);
+}
+
+#[test]
+fn format_args_keep_the_empty_string_default_but_reject_typos() {
+    // The docs long said "pass empty for default" — the empty string must keep
+    // deserializing to JSON even though format is an enum now.
+    let args: ImpactArgs = serde_json::from_str(r#"{"name":"X","format":""}"#).unwrap();
+    assert_eq!(args.format, ImpactFormat::Json);
+    let args: RouteMapArgs = serde_json::from_str(r#"{"format":""}"#).unwrap();
+    assert_eq!(args.format, RouteMapFormat::Json);
+    // A typo is an error now — it used to silently produce default JSON.
+    assert!(serde_json::from_str::<ImpactArgs>(r#"{"name":"X","format":"diagam"}"#).is_err());
+    assert!(serde_json::from_str::<RouteMapArgs>(r#"{"format":"mermaid"}"#).is_err());
+    assert!(serde_json::from_str::<TraceFlowArgs>(
+        r#"{"entry_point":"Route:GET /","format":"openapi"}"#
+    )
+    .is_err());
 }
 
 #[test]
