@@ -85,10 +85,12 @@ pub async fn add_resolve_pattern(
     }
 
     // Trigger a background re-index so the live graph reflects the new pattern.
+    // No explicit graph key: `root` came from the registry, so the job resolves
+    // to that entry's own key (never the server's primary key).
     let mut job_id = None;
     if args.reindex {
         if let Ok((id, _)) =
-            indexing::start_index_job(backend, falkor_url, graph_key, jobs, &root, "").await
+            indexing::start_index_job(backend, falkor_url, "", jobs, &root, "").await
         {
             job_id = Some(id);
         }

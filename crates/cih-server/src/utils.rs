@@ -26,11 +26,13 @@ pub fn text_result(s: String) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(s)]))
 }
 
-pub fn parse_direction(direction: Option<&str>) -> Direction {
-    match direction {
-        Some("downstream") => Direction::Downstream,
-        Some("both") => Direction::Both,
-        _ => Direction::Upstream,
+impl From<crate::args::DirectionArg> for Direction {
+    fn from(d: crate::args::DirectionArg) -> Self {
+        match d {
+            crate::args::DirectionArg::Upstream => Direction::Upstream,
+            crate::args::DirectionArg::Downstream => Direction::Downstream,
+            crate::args::DirectionArg::Both => Direction::Both,
+        }
     }
 }
 

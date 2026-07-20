@@ -16,20 +16,15 @@ impl CihServer {
             Runs scan → parse → resolve → load into the live FalkorDB graph. \
             Returns immediately with a `job_id`; use index_status(job_id=...) to poll for completion. \
             Typical time: 5–120 seconds depending on repo size. \
+            An already-registered repo re-indexes under its own graph key; a NEW repo requires an \
+            explicit `graph_key` (a fresh one — keys owned by other repos are rejected). \
             Example: index_repo(repo_path='/home/user/my-service')"
     )]
     async fn index_repo(
         &self,
         Parameters(args): Parameters<IndexRepoArgs>,
     ) -> Result<CallToolResult, McpError> {
-        indexing::index_repo(
-            &self.backend,
-            &self.falkor_url,
-            &self.graph_key,
-            &self.jobs,
-            args,
-        )
-        .await
+        indexing::index_repo(&self.backend, &self.falkor_url, &self.jobs, args).await
     }
 
     #[tool(

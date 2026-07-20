@@ -3,9 +3,20 @@
 Status: Proposed
 
 Date: 2026-07-19
+Last revised: 2026-07-20
 
 Target: Replace the current hardcoded wiki generation and Docusaurus viewer with a
 versioned, scalable knowledge system for source code and technical assets.
+
+Related plans:
+
+- `docs/plans/wiki-render-factoring.md` (P2.5a render-core factoring) and
+  `docs/plans/read-path-latency.md` (P3.8 resident serving) describe the current
+  pipeline that this plan replaces.
+- `docs/plans/cih-server-clean-architecture-and-scalability.md` defines the
+  server-side application ports, request budgets, bounded scheduler, completeness
+  metadata, and transport boundaries reused by this system. This plan extends those
+  contracts rather than creating a second server architecture.
 
 ## 1. Executive Summary
 
@@ -62,9 +73,13 @@ source code
 `cih-wiki` currently defines page subjects such as system index, route index,
 feature PO page, feature BA page, developer class page, controller page, API flow
 page, scheduled flow, listener flow, and community pages. A `PageIndex` enumerates
-those page types and slugs. Adding a new concept often requires changes to page
-enumeration, render context, Markdown rendering, manifest generation, sidebar
-generation, search indexing, and Docusaurus behavior.
+those page types and slugs. Adding a new concept requires changes to the page
+enumeration, render dispatch, and manifest generation — and those changes are
+duplicated across two code paths that must move in lockstep: the batch emission
+pipeline (`cih-wiki/src/lib.rs`) and the live single-page path (`render.rs`),
+guarded only by the `resident_parity` tests. Sidebar and search indexing are
+manifest-generic and usually unaffected; the dual-path duplication is the real
+change tax.
 
 The resident serving path improves per-page latency but retains a complete node and
 edge graph and constructs additional `WikiGraph`, render-context, page-index, page
@@ -85,7 +100,9 @@ body, and search structures. Multiple repositories can multiply that memory.
 
 ### 2.3 Scale problems
 
-- Full `Vec<Node>` and `Vec<Edge>` loading increases peak memory.
+- The wiki consumer loads full `Vec<Node>` and `Vec<Edge>` copies, increasing
+  peak memory. (The artifact layer already exposes streaming reads; `cih-wiki`
+  does not use them.)
 - Derived maps clone identifiers and node values.
 - Rendering every page up front produces work that most users never request.
 - Static site generation and local client-side indexing scale with page count.
@@ -130,10 +147,13 @@ The design target is:
 - 10,000,000 total graph nodes across a maximum-scale workspace.
 - Thousands of high-level knowledge objects and millions of technical evidence
   records without millions of rendered pages.
-- Full service-pack build in 10 minutes or less on the agreed benchmark host.
+- Full service-pack build in 10 minutes or less on the benchmark host fixed in
+  Phase 0.
 - Full service-pack build below 1 GiB peak RSS.
 - No-change index check in 2 seconds or less.
-- A change affecting 1 percent of evidence reindexed in 60 seconds or less.
+- A change affecting 1 percent of evidence reindexed and published in 60 seconds
+  or less in the mandatory FTS-only profile. Phase 0 fixes a separate optional
+  local-semantic budget after measuring the selected vector backend.
 - Warm object retrieval p95 below 200 ms.
 - Workspace navigation p95 below 100 ms.
 - Workspace search p95 below 500 ms.
@@ -262,7 +282,8 @@ Storage-layer implementations:
 
 #### `cih-docs`
 
-Product and orchestration logic:
+Deterministic product and application logic that is safe for both `cih-engine` and
+`cih-server`:
 
 - Artifact-backed evidence adapter.
 - Technical-asset adapters.
@@ -271,27 +292,47 @@ Product and orchestration logic:
 - Incremental projection.
 - Role-view assembly.
 - Overlay parsing and precedence.
-- AI documentation workflow.
+- Change-envelope construction.
+- Deterministic proposal construction.
+- Change-set schema validation and apply planning.
 - Markdown and HTML export.
 - Confluence publication mapping.
 - Legacy wiki migration and slug adapters.
 
+`cih-docs` contains no provider client, credential resolution, prompt execution, or
+LLM-specific retry logic. Provider-neutral DTOs such as `ChangeEnvelope`,
+`DocumentationProposal`, and `DocumentationChangeSet` live in `cih-knowledge`.
+
 #### `cih-llm`
 
-Extract the existing generic LLM provider code from `cih-engine` so both the CLI
-and server can use the same:
+Extract the generic LLM adapter core from `cih-engine` (`src/llm/`) so the docs
+pipeline and other CLI commands share one implementation. `cih-server` must not
+depend on `cih-llm`: the server stays LLM-egress-free (SECURITY.md, §15.10).
+
+Existing code that moves as-is:
 
 - Provider enum and configuration.
 - OpenAI-compatible, Anthropic, Bedrock, DeepSeek, Gemini, and custom HTTP adapters.
 - API-key resolution.
-- Retry, timeout, and concurrency handling.
-- Base-URL validation.
-- Dry-run and evidence-debug modes.
-- Structured JSON response validation.
+- Timeout handling and base-URL validation.
+
+New work consolidated into the crate (not existing generic features today):
+
+- A shared retry layer (retry loops are currently duplicated at the
+  `wiki/*_enrich.rs` call sites) and request concurrency limits (none exist).
+- Dry-run and evidence-debug modes (dry-run is currently command-scoped only).
+- Generic schema-validated JSON responses (current validation is
+  response-type-specific in `llm/grouping.rs`).
+
+`llm/grouping.rs` and `llm/evidence.rs` depend on `cih-wiki` and stay behind in
+`cih-engine`. Transport remains blocking `ureq`, which is fine for CLI use;
+revisit only if an async context ever needs the crate.
 
 #### Existing crates
 
-- `cih-engine` owns CLI orchestration and pack-building commands.
+- `cih-engine` owns CLI orchestration, pack-building commands, and the AI
+  documentation agent. The agent combines deterministic services from `cih-docs`
+  with provider calls from `cih-llm`.
 - `cih-server` owns HTTP, MCP, authentication, jobs, and runtime composition.
 - `cih-search` supplies reciprocal-rank fusion and common ranking types.
 - `cih-embed` supplies embedding models and the existing pgvector adapter.
@@ -302,19 +343,27 @@ and server can use the same:
 ### 7.2 Dependency direction
 
 ```text
-cih-core --------------------+
-cih-knowledge ---------------+--> cih-doc-store
-      |                      |
-      +----------------------+--> cih-docs
-cih-search / cih-embed ------+
-cih-llm ---------------------+
-                                 |
-                                 +--> cih-engine
-                                 +--> cih-server
+dependency                         consumer
+----------                         --------
+cih-core ------------------------> cih-knowledge
+cih-knowledge -------------------> cih-doc-store
+cih-knowledge -------------------> cih-docs
+cih-search / cih-embed ----------> cih-docs
+
+cih-doc-store / cih-docs --------> cih-engine
+cih-llm -------------------------> cih-engine
+
+cih-doc-store / cih-docs --------> cih-server
 ```
 
-The workspace layering check must include the new crates and reject reverse
-dependencies.
+The workspace layering check (`scripts/check_layering.py`, CI-enforced) must
+include the new crates and reject reverse dependencies. Its `LAYERS` map currently
+omits the existing members `cih-ladybug` and `cih-store-factory`; bring it up to
+date in the same change. `cih-llm` is consumed by `cih-engine` only (§15.10).
+CI must additionally run a transitive dependency assertion equivalent to
+`cargo tree -p cih-server -i cih-llm` and fail when `cih-llm` is reachable. There is
+no `cih-docs` feature that enables LLM support, so a server feature combination
+cannot accidentally cross the egress boundary.
 
 ## 8. Universal Evidence Layer
 
@@ -337,7 +386,11 @@ Conceptual Rust interface:
 pub trait EvidenceAdapter: Send + Sync {
     fn namespace(&self) -> &'static str;
     fn schema_version(&self) -> u32;
-    fn discover(&self, context: &EvidenceContext) -> Result<Vec<EvidenceInput>>;
+    fn discover(
+        &self,
+        context: &EvidenceContext,
+        sink: &mut dyn EvidenceInputSink,
+    ) -> Result<DiscoveryReport>;
     fn fingerprint(&self, input: &EvidenceInput) -> Result<ContentHash>;
     fn extract(
         &self,
@@ -346,6 +399,12 @@ pub trait EvidenceAdapter: Send + Sync {
     ) -> Result<ExtractionReport>;
 }
 ```
+
+Discovery is streaming. `EvidenceInputSink` applies configured path-count,
+individual-file-size, total-byte, and cancellation budgets without retaining all
+discovered paths. `DiscoveryReport` records emitted, skipped, unsupported, and
+budget-rejected counts. A budget rejection produces explicit incomplete coverage;
+it never silently presents a partial scan as complete.
 
 `ExtractionReport` includes:
 
@@ -360,11 +419,15 @@ pub trait EvidenceAdapter: Send + Sync {
 
 ### 8.3 First-party adapters
 
-The first release will provide:
+Adapters are delivered incrementally (§27): the MVP ships only the first two
+below; the remainder land in Phase 5.
 
 1. `GraphArtifactsAdapter`
-   - Streams `nodes.jsonl` and `edges.jsonl`.
-   - Reads graph and community versions.
+   - Streams `nodes.jsonl` and `edges.jsonl` via the existing
+     `stream_nodes()`/`stream_edges()` iterators (`cih-core/src/artifacts.rs`).
+   - Reads the graph version from the artifacts; the community version comes from
+     the registry's community-artifacts sibling directory (`GraphArtifacts`
+     itself carries only the graph version).
    - Emits code entities, APIs, events, processes, data access, tests, and source
      evidence.
    - Never calls `read_nodes` or `read_edges` for a full in-memory copy.
@@ -809,7 +872,10 @@ Default workspace configuration:
 ```
 
 `cih docs init --group <group> --config <path>` may record a source-controlled
-configuration path in group metadata.
+configuration path in group metadata (a new field on `GroupEntry` in
+`cih-core/src/group.rs`; none exists today). A per-group configuration layer is
+itself new: the current settings ladder is flag > env > `<repo>/cih.toml` >
+`~/.cih/config.toml` > default, with no group layer.
 
 Per-repository configuration:
 
@@ -962,6 +1028,8 @@ Service pack:
 ```text
 <repo>/.cih/docs/v1/
   current.json
+  state.sqlite
+  write.lock
   <generation>/
     manifest.json
     service.sqlite
@@ -974,6 +1042,8 @@ Workspace pack:
 ```text
 ~/.cih/groups/<group>/docs/v1/
   current.json
+  state.sqlite
+  write.lock
   <generation>/
     manifest.json
     workspace.sqlite
@@ -1022,12 +1092,20 @@ CREATE TABLE meta (
   value TEXT NOT NULL
 );
 
-CREATE TABLE objects (
+CREATE TABLE object_refs (
   key TEXT PRIMARY KEY,
+  ref_scope TEXT NOT NULL CHECK (ref_scope IN ('local', 'external')),
+  kind_hint TEXT
+);
+
+CREATE TABLE objects (
+  key TEXT PRIMARY KEY REFERENCES object_refs(key)
+    DEFERRABLE INITIALLY DEFERRED,
   kind TEXT NOT NULL,
   title TEXT NOT NULL,
   summary TEXT,
-  primary_parent TEXT,
+  primary_parent TEXT REFERENCES object_refs(key)
+    DEFERRABLE INITIALLY DEFERRED,
   lifecycle TEXT NOT NULL,
   authority TEXT NOT NULL,
   truth_status TEXT NOT NULL,
@@ -1039,7 +1117,7 @@ CREATE TABLE objects (
 );
 
 CREATE TABLE object_facets (
-  object_key TEXT NOT NULL,
+  object_key TEXT NOT NULL REFERENCES objects(key) ON DELETE CASCADE,
   facet TEXT NOT NULL,
   value TEXT NOT NULL,
   PRIMARY KEY (object_key, facet, value)
@@ -1047,8 +1125,10 @@ CREATE TABLE object_facets (
 
 CREATE TABLE relations (
   id TEXT PRIMARY KEY,
-  source_key TEXT NOT NULL,
-  target_key TEXT NOT NULL,
+  source_key TEXT NOT NULL REFERENCES object_refs(key)
+    DEFERRABLE INITIALLY DEFERRED,
+  target_key TEXT NOT NULL REFERENCES object_refs(key)
+    DEFERRABLE INITIALLY DEFERRED,
   kind TEXT NOT NULL,
   authority TEXT NOT NULL,
   truth_status TEXT NOT NULL,
@@ -1061,7 +1141,7 @@ CREATE TABLE relations (
 
 CREATE TABLE blocks (
   id TEXT PRIMARY KEY,
-  object_key TEXT NOT NULL,
+  object_key TEXT NOT NULL REFERENCES objects(key) ON DELETE CASCADE,
   section TEXT NOT NULL,
   ordinal INTEGER NOT NULL,
   audiences_json TEXT NOT NULL,
@@ -1081,6 +1161,7 @@ CREATE TABLE evidence (
   id TEXT PRIMARY KEY,
   repo TEXT NOT NULL,
   source_version TEXT NOT NULL,
+  local_key TEXT NOT NULL,
   graph_node_id TEXT,
   file TEXT,
   start_line INTEGER,
@@ -1090,25 +1171,28 @@ CREATE TABLE evidence (
   adapter TEXT NOT NULL,
   confidence REAL NOT NULL,
   snippet_hash BLOB,
-  metadata_json TEXT NOT NULL
+  metadata_json TEXT NOT NULL,
+  UNIQUE (adapter, repo, source_version, local_key)
 );
 
 CREATE TABLE block_evidence (
-  block_id TEXT NOT NULL,
-  evidence_id TEXT NOT NULL,
-  claim_id TEXT,
+  block_id TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+  evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
+  -- NOT NULL: SQLite permits NULLs in rowid-table primary keys, and NULL != NULL
+  -- would allow duplicate rows.
+  claim_id TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (block_id, evidence_id, claim_id)
 );
 
 CREATE TABLE relation_evidence (
-  relation_id TEXT NOT NULL,
-  evidence_id TEXT NOT NULL,
+  relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
+  evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
   PRIMARY KEY (relation_id, evidence_id)
 );
 
 CREATE TABLE aliases (
   alias TEXT PRIMARY KEY,
-  object_key TEXT NOT NULL,
+  object_key TEXT NOT NULL REFERENCES object_refs(key),
   alias_kind TEXT NOT NULL
 );
 
@@ -1116,17 +1200,22 @@ CREATE TABLE comments (
   id TEXT PRIMARY KEY,
   object_key TEXT NOT NULL,
   block_id TEXT,
-  author TEXT,
+  author_principal_id TEXT,
+  author_display TEXT,
   body TEXT NOT NULL,
   state TEXT NOT NULL,
+  created_generation TEXT NOT NULL REFERENCES generation_history(generation),
   created_at TEXT NOT NULL,
+  resolved_by_principal_id TEXT,
+  resolved_generation TEXT REFERENCES generation_history(generation),
   resolved_at TEXT
 );
 
 CREATE TABLE change_sets (
   id TEXT PRIMARY KEY,
   idempotency_key TEXT NOT NULL UNIQUE,
-  base_generation TEXT NOT NULL,
+  base_generation TEXT NOT NULL REFERENCES generation_history(generation),
+  target_generation TEXT REFERENCES generation_history(generation),
   status TEXT NOT NULL,
   instruction TEXT,
   metadata_json TEXT NOT NULL,
@@ -1135,7 +1224,7 @@ CREATE TABLE change_sets (
 );
 
 CREATE TABLE change_operations (
-  change_set_id TEXT NOT NULL,
+  change_set_id TEXT NOT NULL REFERENCES change_sets(id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL,
   operation_type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
@@ -1144,11 +1233,13 @@ CREATE TABLE change_operations (
 
 CREATE TABLE reviews (
   id TEXT PRIMARY KEY,
-  change_set_id TEXT NOT NULL,
+  change_set_id TEXT NOT NULL REFERENCES change_sets(id) ON DELETE CASCADE,
   review_type TEXT NOT NULL,
   status TEXT NOT NULL,
   payload_json TEXT NOT NULL,
+  created_generation TEXT NOT NULL REFERENCES generation_history(generation),
   created_at TEXT NOT NULL,
+  resolved_generation TEXT REFERENCES generation_history(generation),
   resolved_at TEXT,
   resolution_json TEXT
 );
@@ -1164,14 +1255,14 @@ CREATE TABLE projection_state (
 
 CREATE TABLE legacy_slugs (
   slug TEXT PRIMARY KEY,
-  object_key TEXT NOT NULL,
+  object_key TEXT NOT NULL REFERENCES object_refs(key),
   preferred_role TEXT
 );
 
 CREATE TABLE vector_keys (
   vector_id INTEGER PRIMARY KEY,
-  object_key TEXT NOT NULL,
-  block_id TEXT,
+  object_key TEXT NOT NULL REFERENCES object_refs(key),
+  block_id TEXT REFERENCES blocks(id) ON DELETE CASCADE,
   model TEXT NOT NULL,
   content_hash BLOB NOT NULL
 );
@@ -1188,21 +1279,117 @@ CREATE TABLE publication_targets (
 );
 
 CREATE TABLE publication_items (
-  target_id TEXT NOT NULL,
+  target_id TEXT NOT NULL REFERENCES publication_targets(id) ON DELETE CASCADE,
   object_key TEXT NOT NULL,
   remote_id TEXT NOT NULL,
   remote_version TEXT,
   published_hash BLOB NOT NULL,
-  published_generation TEXT NOT NULL,
+  published_generation TEXT NOT NULL REFERENCES generation_history(generation),
   status TEXT NOT NULL,
   last_error TEXT,
   PRIMARY KEY (target_id, object_key)
 );
 ```
 
+Additional mutable workflow tables:
+
+```sql
+CREATE TABLE generation_history (
+  generation TEXT PRIMARY KEY,
+  parent_generation TEXT REFERENCES generation_history(generation),
+  manifest_hash BLOB NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  activated_at TEXT,
+  pruned_at TEXT
+);
+
+CREATE TABLE proposal_envelopes (
+  id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  base_generation TEXT NOT NULL REFERENCES generation_history(generation),
+  principal_id TEXT NOT NULL,
+  envelope_json TEXT NOT NULL,
+  envelope_hash BLOB NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT
+);
+
+CREATE TABLE apply_journal (
+  id TEXT PRIMARY KEY,
+  change_set_id TEXT NOT NULL REFERENCES change_sets(id),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  base_generation TEXT NOT NULL REFERENCES generation_history(generation),
+  target_generation TEXT NOT NULL REFERENCES generation_history(generation),
+  phase TEXT NOT NULL,
+  mutation_hash BLOB NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE document_revisions (
+  entity_kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  generation TEXT NOT NULL REFERENCES generation_history(generation),
+  content_hash BLOB NOT NULL,
+  payload_json TEXT NOT NULL,
+  authority TEXT NOT NULL,
+  source_change_set_id TEXT REFERENCES change_sets(id),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (entity_kind, entity_id, generation)
+);
+
+CREATE TABLE jobs (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  idempotency_key TEXT,
+  request_json TEXT NOT NULL,
+  request_hash BLOB NOT NULL,
+  status TEXT NOT NULL,
+  progress_phase TEXT NOT NULL,
+  result_ref TEXT,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deadline_at TEXT,
+  UNIQUE (kind, idempotency_key)
+);
+
+CREATE TABLE audit_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  occurred_at TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  credential_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  target_id TEXT,
+  request_hash BLOB NOT NULL,
+  outcome TEXT NOT NULL
+);
+```
+
+The `comments`, `change_sets`, `change_operations`, `reviews`,
+`publication_targets`, `publication_items`, `generation_history`,
+`proposal_envelopes`, `apply_journal`, `document_revisions`, and `jobs` tables live
+in the mutable `state.sqlite` beside `current.json`, not in the immutable
+generation database (§12.10). Foreign keys among those state tables are enforced;
+references from state to pack objects or generations are validated by the
+application because SQLite cannot enforce cross-database generation references.
+`audit_events` also lives in `state.sqlite`; it is append-only under normal
+operation and follows an explicit retention/export policy.
+
+Evidence IDs are globally stable hashes of `(adapter namespace, repo identity,
+source_version, adapter-local key)`. `local_key` preserves the adapter identity used
+to derive the hash. Evidence rows intentionally carry no generation-lifecycle
+columns and are replaced wholesale when their source version changes.
+
 ### 12.4 FTS schema
 
-Use contentless FTS5 tables maintained in the same transaction as source rows:
+Use plain FTS5 tables maintained in the same transaction as source rows (not
+contentless: contentless tables cannot return column values for excerpts and
+restrict deletes):
 
 ```sql
 CREATE VIRTUAL TABLE search_fts USING fts5(
@@ -1227,6 +1414,7 @@ full source bodies by default.
 
 Required indexes:
 
+- `object_refs(ref_scope, kind_hint)`
 - `objects(primary_parent, kind, lifecycle)`
 - `relations(source_key, kind, deleted_generation)`
 - `relations(target_key, kind, deleted_generation)`
@@ -1235,11 +1423,40 @@ Required indexes:
 - `block_evidence(evidence_id)`
 - `reviews(status, created_at)`
 - `publication_items(status)`
+- `proposal_envelopes(status, created_at)`
+- `apply_journal(phase, updated_at)`
+- `document_revisions(entity_kind, entity_id, created_at)`
+- `jobs(status, updated_at)`
+- `audit_events(principal_id, occurred_at)`
+- `audit_events(action, occurred_at)`
 
-Foreign keys are enforced inside a pack. Workspace-to-service references use stable
-keys rather than cross-database foreign keys.
+Every SQLite connection executes `PRAGMA foreign_keys = ON`. Pack-local and
+cross-pack object keys are first registered in `object_refs`; `ref_scope =
+'external'` references are checked against the workspace/service manifests during
+build validation. Object and relation insertion uses deferred transactions so
+self-references and cycles permitted by the ontology can be inserted before commit.
+`PRAGMA foreign_key_check`, a check that every `local` reference has a matching
+`objects` row, and an external-reference validation pass are mandatory before
+publication.
 
-### 12.6 Vector index
+### 12.6 Revision history
+
+V1 history covers document-visible knowledge objects, blocks, reviewed placements,
+comments, and applied change sets. It does not retain a revision for every
+technical symbol or evidence row.
+
+Before activation, changed document-visible rows are appended to
+`document_revisions` with the target generation and complete typed payload. The
+first accepted generation seeds one baseline revision for each document-visible
+entity. The history API reads these revisions instead of depending on old pack
+directories.
+Generation retention remains useful for rollback but is not the history contract.
+Pruning an old generation therefore cannot remove document history. Configured
+history retention may archive revisions, but it cannot silently remove revisions
+referenced by unresolved reviews, comments, publication conflicts, or audit
+records.
+
+### 12.7 Vector index
 
 The local semantic feature uses a USearch HNSW sidecar:
 
@@ -1248,6 +1465,9 @@ The local semantic feature uses a USearch HNSW sidecar:
 - Memory-mapped read-only serving.
 - Atomic replacement with the containing generation.
 - No in-place mutation of an active index.
+- Incremental insert, replacement, and deletion are required against a staging
+  copy. Phase 0 must verify that the selected USearch binding preserves key
+  replacement and deletion semantics before the backend decision is accepted.
 - Default embedding model: `all-MiniLM-L6-v2`.
 - Only titles, summaries, and bounded knowledge blocks are embedded by default.
 - Source symbols are embedded only when explicitly enabled.
@@ -1261,7 +1481,13 @@ The feature is optional:
 The standalone no-model build must not include ONNX/ORT or native vector
 dependencies.
 
-### 12.7 Generation and atomicity
+If the selected vector binding cannot update a staging copy correctly or within its
+Phase 0 budget, the build publishes the new generation without a vector sidecar and
+marks semantic search `Rebuilding`. FTS and graph/context ranking remain available.
+A later semantic-enrichment build publishes another complete generation. Stale
+vectors are never queried against changed blocks.
+
+### 12.8 Generation and atomicity
 
 Build sequence:
 
@@ -1272,14 +1498,16 @@ Build sequence:
 5. Run integrity, schema, referential, count, and checksum validation.
 6. Write `manifest.json`.
 7. Fsync files and generation directory where supported.
-8. Atomically replace `current.json` using temporary-file rename.
+8. Atomically replace `current.json` using temporary-file rename. On Windows this
+   requires `ReplaceFile`/`MOVEFILE_REPLACE_EXISTING` semantics; a plain rename
+   does not replace an existing file there.
 9. Leave the previous generation available for rollback.
 10. Prune old generations only after retention policy permits it.
 
 Readers open the generation named by one snapshot of `current.json`. They never
 follow a moving file during a request.
 
-### 12.8 Runtime pack manager
+### 12.9 Runtime pack manager
 
 The server maintains:
 
@@ -1293,6 +1521,62 @@ The server maintains:
 - Generation-aware cache keys.
 
 Eviction never interrupts an active request; pack handles are reference counted.
+
+The manager checks a cheap fingerprint of `current.json` before admitting a request
+and may also use a filesystem watcher as an optimization. A pointer change opens
+and validates the target pack through single flight, atomically swaps the active
+reference, and lets in-flight requests finish on the old reference. A corrupt or
+missing target leaves the last valid pack active and raises a readiness diagnostic.
+
+### 12.10 Mutable state and write path
+
+Generations are immutable; collaboration and workflow state is not. The mutable
+tables (§12.3: comments, change sets, reviews, publication state) live in a
+separate `state.sqlite` beside `current.json`, outside any generation directory.
+
+Rules:
+
+- `state.sqlite` is the only database opened for writing during serving.
+- State rows reference generations by ID and survive generation replacement.
+- Applying a change set never mutates the active generation: it produces a new
+  generation through the incremental build path (§13.3) and activates it through
+  the protocol below.
+- Generation producers (`cih docs index`, `cih docs sync`, change-set apply,
+  review resolution) serialize on the advisory `write.lock` beside
+  `current.json`. The lock is an operating-system advisory file lock, not an
+  existence check; process exit releases it automatically. Lock metadata contains
+  PID, host, start time, and operation ID for diagnostics. A second producer fails
+  fast with a clear diagnostic rather than queueing silently.
+- Readers never open `state.sqlite` transactionally with a pack; cross-database
+  consistency is by generation ID reference, not joint transactions.
+
+Change-set activation protocol:
+
+1. Acquire `write.lock`, validate the base generation, and build and validate target
+   generation `G` without changing `current.json`.
+2. In one `state.sqlite` transaction, register `G` in `generation_history`, insert
+   the `apply_journal` row as `Prepared`, append revision rows, and store all
+   generation-qualified workflow effects. Prepared rows are not treated as
+   generally active; their visibility is resolved against the active generation.
+3. Atomically replace `current.json` with `G`.
+4. In one idempotent `state.sqlite` transaction, mark the journal `Committed`,
+   finalize the change-set/review status, and set `G` Active.
+5. Release `write.lock`. Cleanup of the previous generation occurs only under the
+   normal retention policy.
+
+Startup and pre-write reconciliation runs before accepting another producer:
+
+- `Prepared` and `current == base`: resume validation and activation, or mark the
+  journal Aborted and discard the unreferenced staging generation.
+- `Prepared` and `current == target`: idempotently run the finalization transaction.
+- `Committed` and `current == target`: no action.
+- Any other pointer/journal combination is quarantined as a blocking consistency
+  error; it is never guessed or silently overwritten.
+
+State readers use the active generation plus journal phase when resolving
+generation-qualified rows, so a crash after pointer replacement cannot expose a
+new pack with logically unrelated workflow state. Fault-injection tests kill the
+process before and after every step.
 
 ## 13. Knowledge Compilation
 
@@ -1387,6 +1671,31 @@ Incremental logic:
 9. Publish a complete immutable generation.
 
 The output remains a complete generation even when the work was incremental.
+
+Physical staging strategy:
+
+1. Open one snapshot of the active generation and create the target directory.
+2. Clone `service.sqlite` or `workspace.sqlite` with a platform copy-on-write
+   facility when available: APFS `clonefile`, Linux reflink, or Windows block clone.
+3. When copy-on-write is unavailable, use the SQLite backup API or a verified file
+   copy while the source remains read-only. This cost is part of the incremental
+   budget; it is not excluded from benchmarks.
+4. Apply deletes and upserts to the staging database in bounded transactions.
+   Update affected FTS rows and run `PRAGMA optimize`; do not run a full `VACUUM`
+   on every incremental build.
+5. Clone and update the vector sidecar only in staging. If the vector backend
+   cannot meet correctness or budget requirements, follow the FTS-only
+   `Rebuilding` fallback in §12.7.
+6. Run the complete publication validation, checksum, and fsync sequence from
+   §12.8 before replacing `current.json`.
+7. Schedule compaction when freelist or file-amplification thresholds are exceeded;
+   compaction produces another immutable generation and is never hidden inside a
+   latency-sensitive incremental request.
+
+Phase 0 benchmarks this exact path on every supported filesystem profile. If the
+fallback copy cannot meet the mandatory 60-second target, Phase 1 cannot declare
+the pack format accepted: the storage ADR must introduce table/file sharding or
+another measured strategy before implementation proceeds.
 
 ### 13.4 Rename and deletion
 
@@ -1527,18 +1836,25 @@ resolved.
 ### 15.2 Change envelope
 
 ```rust
+pub struct BoundedCollection<T> {
+    pub items: Vec<T>,
+    pub total_count: u64,
+    pub complete: bool,
+    pub continuation: Option<LocalQueryRef>,
+}
+
 pub struct ChangeEnvelope {
     pub workspace: WorkspaceId,
-    pub repositories: Vec<RepositoryVersion>,
+    pub repositories: BoundedCollection<RepositoryVersion>,
     pub base_document_generation: GenerationId,
     pub instruction: String,
-    pub added: Vec<EvidenceRef>,
-    pub changed: Vec<EvidenceRef>,
-    pub deleted: Vec<EvidenceRef>,
-    pub renamed: Vec<RenameEvidence>,
-    pub affected_objects: Vec<KnowledgeKey>,
-    pub affected_processes: Vec<KnowledgeKey>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub added: BoundedCollection<EvidenceRef>,
+    pub changed: BoundedCollection<EvidenceRef>,
+    pub deleted: BoundedCollection<EvidenceRef>,
+    pub renamed: BoundedCollection<RenameEvidence>,
+    pub affected_objects: BoundedCollection<KnowledgeKey>,
+    pub affected_processes: BoundedCollection<KnowledgeKey>,
+    pub diagnostics: BoundedCollection<Diagnostic>,
 }
 ```
 
@@ -1553,6 +1869,15 @@ The envelope includes bounded summaries of:
 - Configuration and deployment changes.
 - Existing placement and neighboring knowledge objects.
 
+The local envelope is capped by both serialized bytes and item count: defaults are
+4 MiB total and 2,000 items per collection. `total_count`, `complete`, and
+`continuation` preserve completeness information when the cap is reached.
+Continuation references are local, generation-bound query descriptors; they are
+not expanded automatically into an LLM prompt. The provider request receives a
+second bounded selection, default 512 KiB, chosen by deterministic relevance and
+coverage rules. A request that cannot represent enough evidence to support a safe
+change produces a diagnostic or review item instead of silently dropping scope.
+
 ### 15.3 AI pipeline
 
 1. Resolve instruction scope.
@@ -1561,12 +1886,15 @@ The envelope includes bounded summaries of:
 4. Retrieve at most 20 placement candidates.
 5. Select at most 8 candidates for LLM adjudication.
 6. Ask the LLM for schema-constrained placement and missing-information output.
-7. Generate role-neutral facts before role-specific prose.
+7. Generate role-neutral Inferred facts before role-specific prose. Observed facts
+   come only from deterministic projectors and attestations.
 8. Generate or update stable blocks only.
 9. Validate every object, relation, claim, and evidence reference.
 10. Compute confidence and review requirements.
 11. Create a `DocumentationChangeSet`.
-12. Auto-apply eligible operations in one transaction.
+12. Auto-apply eligible operations by producing a new generation through the
+    incremental build path (§13.3), serialized with other generation producers
+    (§12.10).
 13. Place remaining operations in the review inbox.
 14. Rebuild affected search and role-view cache entries.
 
@@ -1587,12 +1915,12 @@ proposal:
     ],
     "rationale": "The new endpoint extends the existing refund process."
   },
-  "facts": [
-    {
-      "claim_id": "refund-api-created",
-      "truth_status": "observed",
-      "text": "A refund can be requested for an existing payment.",
-      "evidence_ids": ["evidence-id"]
+    "facts": [
+      {
+        "claim_id": "refund-api-created",
+        "truth_status": "inferred",
+        "text": "A refund can be requested for an existing payment.",
+        "evidence_ids": ["evidence-id"]
     }
   ],
   "blocks": [
@@ -1609,7 +1937,9 @@ proposal:
 }
 ```
 
-Unknown keys and unsupported object references fail validation.
+Unknown keys and unsupported object references fail validation. LLM output that
+claims `truth_status: observed` also fails validation; evidence-ID existence alone
+does not establish that evidence entails generated prose.
 
 ### 15.5 Documentation change set
 
@@ -1642,7 +1972,10 @@ Before apply:
 - Referenced objects and evidence exist.
 - New relations do not create forbidden primary-parent cycles.
 - Block payloads match their type schema.
-- Every Observed claim has evidence.
+- Every Observed claim has a deterministic attestation containing projector
+  version, claim-template ID, source evidence fields, and a reproducible claim
+  hash.
+- AI-originated facts are Inferred or Intended, never Observed.
 - Inferred claims are labeled.
 - Human and pinned authority rules are respected.
 - Replacement base hashes match current blocks.
@@ -1651,7 +1984,18 @@ Before apply:
 - Content and instruction sizes are within limits.
 - Idempotency key has not already been applied.
 
-Any failure leaves the active generation unchanged.
+Any validation or pre-activation failure leaves the active generation unchanged.
+Once pointer activation succeeds, a finalization failure is recovered
+idempotently through `apply_journal` (§12.10); it does not roll the pointer back
+without an explicit rollback operation.
+
+Placement confidence and factual truth are independent. A `0.94` placement score
+may allow generated placement while the associated prose remains Inferred. An AI
+block may auto-update only a matching AI block when its base hash matches, all
+references validate, no Human or Pinned authority is affected, and the
+content-confidence policy passes. AI content cannot become Observed through
+auto-apply. Deterministic projectors are the only automatic source of Observed
+claims.
 
 ### 15.7 Idempotency
 
@@ -1701,9 +2045,49 @@ Review resolution creates an auditable change set. It does not mutate rows direc
 - Malformed JSON: one repair attempt using the validation errors, then fail closed.
 - Truncated response: fail closed.
 - Hallucinated key or evidence: reject.
+- Valid evidence ID with an unsupported or non-entailed claim: keep the claim
+  Inferred or reject it; never upgrade it to Observed.
 - Low confidence: review or Unclassified.
 - Stale base generation: rebase deterministic evidence and request explicit retry.
 - Secret detection: redact or omit the affected snippet and report it.
+
+### 15.10 LLM egress boundary
+
+SECURITY.md documents that `cih-server` performs no LLM egress; this system keeps
+that invariant:
+
+- All LLM calls run in the CLI/engine process (`cih docs document`).
+- The server's `propose_documentation_change` builds change envelopes and
+  deterministic proposals only; it never calls an LLM provider and holds no LLM
+  credentials.
+- `apply_documentation_change` validates and applies change sets built elsewhere.
+- `cih-server` does not depend on `cih-llm`.
+
+### 15.11 Server/CLI proposal handoff
+
+The handoff is an explicit durable protocol:
+
+1. `propose_documentation_change` or `POST /proposals` resolves scope, builds the
+   deterministic bounded envelope, stores it in `proposal_envelopes`, and returns a
+   proposal ID and envelope hash.
+2. The CLI retrieves the envelope through
+   `GET /proposals/<id>/envelope`, or calls the same application service directly
+   when operating in local-filesystem mode.
+3. `cih-engine` sends the bounded provider context to `cih-llm`, validates the
+   provider response locally, and constructs a complete
+   `DocumentationChangeSet`.
+4. The CLI submits that typed change set through `POST /change-sets`. The server
+   verifies proposal ID, envelope hash, base generations, schema, principal,
+   idempotency key, and size limits before storing it and returning the change-set
+   ID. Local-filesystem mode uses the same application service and `write.lock`; it
+   does not write SQLite tables directly.
+5. `apply_documentation_change` or `POST /changes/apply` accepts the stored
+   change-set ID and runs the activation protocol in §12.10.
+
+Proposal envelopes expire according to configuration only when no submitted change
+set, unresolved review, or active job references them. A client cannot submit
+unrestricted SQL, rendered Markdown mutations, or a provider response in place of
+the typed change-set schema.
 
 ## 16. Search and Retrieval
 
@@ -1809,6 +2193,9 @@ pub struct ViewRequest {
 }
 ```
 
+`locale` is reserved for future localization; the first release renders only the
+workspace `canonical_language`.
+
 ### 17.2 View response
 
 ```rust
@@ -1821,9 +2208,15 @@ pub struct DocumentView {
     pub evidence_summary: EvidenceSummary,
     pub freshness: Freshness,
     pub available_actions: Vec<ViewAction>,
+    pub history: Option<Page<RevisionSummary>>,
     pub generation: GenerationId,
 }
 ```
+
+When `include_history` is true, the response includes only the first bounded page
+of document-visible revisions from `document_revisions` (§12.6). Further history
+uses its own cursor. History is not reconstructed by scanning or retaining every
+old pack generation.
 
 ### 17.3 Assembly order
 
@@ -1869,9 +2262,11 @@ GET /object?key=<knowledge-key>&role=<role>
 GET /section?key=<knowledge-key>&section=<id>&role=<role>
 GET /relations?key=<knowledge-key>&kind=<kind>&direction=<direction>&cursor=<cursor>
 GET /evidence?key=<knowledge-key>&block=<block-id>&cursor=<cursor>
+GET /history?key=<knowledge-key>&entity=<optional-id>&cursor=<cursor>
 GET /search?q=<query>&workspace=<id>&role=<role>&filters...
 GET /changes?workspace=<id>&since=<generation>&cursor=<cursor>
 GET /change?id=<change-set-id>
+GET /proposals/<id>/envelope
 GET /reviews?workspace=<id>&status=<status>&cursor=<cursor>
 GET /review?id=<review-id>
 GET /status?workspace=<id>
@@ -1885,6 +2280,7 @@ opaque, generation-bound, and invalidated when filters change.
 
 ```text
 POST /proposals
+POST /change-sets
 POST /changes/apply
 POST /reviews/resolve
 POST /comments
@@ -1895,8 +2291,7 @@ POST /publications/confluence
 
 Write routes require:
 
-- Configured API token.
-- Authenticated request.
+- Authenticated principal with the required capability.
 - Request body size limit.
 - Idempotency key where applicable.
 - CSRF-safe API usage.
@@ -1905,9 +2300,39 @@ Write routes require:
 The server refuses to enable AI apply or publication writes when running in an
 explicitly open unauthenticated posture.
 
+The read/write split is new machinery: today one bearer token gates every route
+uniformly, and no distinct write-token concept exists.
+
+V1 introduces a minimal principal model, not enterprise RBAC:
+
+```rust
+pub struct Principal {
+    pub principal_id: String,
+    pub credential_id: String,
+    pub capabilities: BTreeSet<Capability>, // Read, Write, Publish, Admin
+}
+```
+
+Configured bearer tokens are stored or compared as secret hashes and map to stable
+principal and credential IDs. The existing single-token configuration maps to a
+`local-admin` principal for backward-compatible local deployment. Optional named
+tokens allow separate read, write, and publish capabilities. Rate limits and audit
+records use `principal_id`; credential IDs permit token rotation without changing
+authorship. Comment authorship is server-derived from the authenticated principal,
+while an optional display label is explicitly unverified metadata.
+
 ### 18.3 Async jobs
 
-Long operations use the existing server job abstraction:
+Long operations use the bounded scheduler architecture from
+`cih-server-clean-architecture-and-scalability.md`. Before Phase 3, its
+`IndexJobScheduler` is generalized to a `JobScheduler` with indexing,
+documentation proposal, apply, export, and publication job kinds. There is one
+scheduler and one `JobRepository`; this subsystem does not add another shared jobs
+map.
+
+Today jobs are in-memory and MCP-only (`index_repo`/`index_status`, states
+Running/Done/Failed). The HTTP surface below, durable `jobs` rows (§12.3), and the
+additional states are new:
 
 ```text
 POST /proposals -> 202 { job_id }
@@ -1922,8 +2347,26 @@ Job states:
 - Completed
 - Failed
 - Cancelled
+- Interrupted
 
 Progress reports stable phases rather than unbounded log text.
+
+Admission is bounded globally, per principal, and per repository/workspace.
+Queued jobs have deadlines and cancellation tokens. Durable rows store bounded,
+sanitized request data, request hashes, progress phases, status, and result
+references, not credentials, unbounded logs, or provider payloads. The stored
+request is sufficient to re-admit a Queued idempotent job after restart.
+
+On restart:
+
+- Queued jobs within their deadline are re-admitted.
+- Running jobs become Interrupted and are retried only when the operation is
+  declared idempotent and its deadline remains valid.
+- Apply jobs reconcile `apply_journal` before changing job state.
+- Non-idempotent publication jobs resume from `publication_items` or fail with a
+  stable manual-intervention code.
+- Terminal job rows follow bounded TTL/cap policies, except while referenced by an
+  unresolved review, change set, publication conflict, or apply journal.
 
 ## 19. MCP Interface
 
@@ -1965,7 +2408,23 @@ Progress reports stable phases rather than unbounded log text.
 
 - Inputs: instruction, workspace, optional repository, since ref, route, symbol,
   proposal-only flag.
-- Returns: job or completed proposal.
+- Returns: job or durable deterministic proposal ID, envelope hash, completeness,
+  and diagnostics.
+- Deterministic proposal generation only; LLM adjudication runs in the CLI
+  (§15.10).
+
+`get_documentation_proposal`
+
+- Inputs: proposal ID.
+- Returns: the bounded generation-bound envelope required by the CLI agent.
+- Read classification, but requires the same workspace scope as the proposal.
+
+`submit_documentation_change`
+
+- Inputs: proposal ID, envelope hash, and typed `DocumentationChangeSet`.
+- Returns: stored change-set ID and validation summary.
+- External write classification.
+- Requires explicit client approval.
 
 `apply_documentation_change`
 
@@ -1984,6 +2443,9 @@ Progress reports stable phases rather than unbounded log text.
 - Inputs: target, workspace, object filters, dry-run.
 - External write classification.
 - Requires explicit client approval for non-dry-run.
+
+Write classification is a new convention: existing tools declare no rmcp
+`ToolAnnotations`; the write tools above introduce them.
 
 ### 19.3 Compatibility tools
 
@@ -2254,11 +2716,13 @@ This avoids creating four Confluence pages for every role.
 ### 24.1 Server security
 
 - Read routes use existing bearer-token policy.
-- Write and external-publication routes require a configured token.
+- Write and external-publication routes require a principal capability (§18.2).
 - Request bodies remain size-limited.
-- Long-running jobs have per-user/per-server concurrency limits.
+- Long-running jobs have per-principal, per-repository/workspace, and per-server
+  concurrency limits.
 - Error responses omit secrets and raw provider payloads.
-- Audit records contain IDs and hashes, not credentials.
+- Audit records contain principal and credential IDs, object IDs, and hashes, not
+  token values or credentials.
 
 ### 24.2 AI evidence policy
 
@@ -2354,6 +2818,8 @@ Readiness checks:
 - Preserve addressability, major content, evidence, and MCP behavior.
 - Run old and new outputs from the same graph versions during comparison.
 - Keep rollback available for one compatibility release.
+- Do not switch the default product link or remove Docusaurus until the Phase 6
+  scale, boundedness, recovery, and fault-injection gates pass.
 
 ### 26.2 Legacy mapping
 
@@ -2394,14 +2860,23 @@ Cutover order:
 2. New MCP read tools.
 3. Compatibility wiki MCP adapters.
 4. New embedded UI under `/docs`.
-5. Default product link switches from Docusaurus to `/docs`.
+5. Phase 6 performance, boundedness, recovery, and fault-injection gates pass.
 6. Static export replaces Docusaurus deployment needs.
-7. Keep `cih wiki` compatibility wrapper for one release.
-8. Remove Docusaurus and `docs-viewer`.
-9. Remove resident `OwnedWiki`, `LiveWikiIndex`, and hardcoded page generation after
+7. Default product link switches from Docusaurus to `/docs`.
+8. Keep `cih wiki` compatibility wrapper for one release.
+9. Remove Docusaurus and `docs-viewer`.
+10. Remove resident `OwnedWiki`, `LiveWikiIndex`, and hardcoded page generation after
    no supported caller remains.
 
 ## 27. Delivery Plan
+
+The MVP is Phases 0–3: the minimum end-to-end slice that replaces the wiki for
+daily use (artifact and repository-docs adapters, deterministic projection, role
+views, packs, server reads, UI). Phase 3 makes the new read path available for
+opt-in use; it does not switch the default product link. Phases 4–7 are sequenced
+enhancements. The remaining evidence adapters and Confluence publication are
+explicitly deferred and must not block default read-path cutover after Phase 6
+gates pass.
 
 ### Phase 0: Baseline and architecture contracts
 
@@ -2413,11 +2888,16 @@ Deliverables:
 - Architecture decision records for keys, ontology, packs, AI authority, and vector
   backend.
 - New crate skeletons and layering enforcement.
+- Physical incremental-pack prototype covering copy-on-write and portable-copy
+  paths, checksum/fsync cost, and staged vector updates.
 
 Acceptance:
 
 - Reproducible current memory, page-count, generation-time, and search baselines.
 - Agreement on the benchmark repositories and required role outputs.
+- `cih-server` has no direct or transitive dependency on `cih-llm`.
+- The selected physical pack strategy demonstrates a credible path to both full and
+  incremental budgets; otherwise the storage ADR is revised before Phase 1.
 
 ### Phase 1: Knowledge model and service packs
 
@@ -2428,6 +2908,8 @@ Deliverables:
 - Stable key and kind validation.
 - SQLite migrations.
 - Artifact streaming adapter.
+- Streaming repository-docs adapter with include/ignore, path-count, file-size,
+  total-byte, cancellation, and coverage rules.
 - Technical object, relation, block, and evidence projection.
 - Atomic generation publication.
 - Status and integrity commands.
@@ -2436,6 +2918,7 @@ Acceptance:
 
 - Builds a service pack without a graph database.
 - Does not load all nodes or edges into memory.
+- Does not retain all discovered repository paths or document bodies in memory.
 - Can resolve object, relation, and evidence queries.
 - Survives interrupted builds without changing the active generation.
 
@@ -2464,8 +2947,10 @@ Acceptance:
 Deliverables:
 
 - Knowledge pack manager.
+- Atomic generation refresh with in-flight old-generation handling.
 - HTTP read APIs.
 - MCP read tools.
+- Shared bounded job scheduler and durable job repository foundation.
 - Legacy slug resolver.
 - `cih-ui` document workspace.
 - Lazy navigation, sections, evidence, search, and bounded graph integration.
@@ -2486,9 +2971,11 @@ Deliverables:
 - Change envelopes.
 - Placement engine.
 - Structured AI proposals.
+- Durable proposal retrieval and typed change-set submission handoff.
 - Change-set validation and idempotent apply.
+- Recoverable apply journal and document revision history.
 - Review inbox and UI.
-- Authenticated MCP/HTTP write tools.
+- Minimal principal model and authenticated MCP/HTTP write tools.
 
 Acceptance:
 
@@ -2496,14 +2983,17 @@ Acceptance:
   evidence is strong.
 - Ambiguous and taxonomy-changing scenarios require review.
 - Hallucinated or stale references cannot be applied.
+- AI prose cannot be marked Observed without deterministic attestation.
 - Repeating an instruction is idempotent.
+- Process termination at every activation step converges to one consistent
+  generation and workflow state after restart.
 
 ### Phase 5: Universal technical assets
 
 Deliverables:
 
 - OpenAPI, AsyncAPI, GraphQL, database, configuration, container, Kubernetes,
-  Terraform, and repository-doc adapters.
+  and Terraform adapters.
 - External evidence-bundle import.
 - Coverage reporting.
 - Cross-service workspace compilation.
@@ -2513,7 +3003,28 @@ Acceptance:
 - Mixed-language and mixed-asset fixtures produce normalized knowledge.
 - Unsupported constructs are reported without false absence claims.
 
-### Phase 6: Export, Confluence, and migration
+### Phase 6: Scale and safety hardening
+
+Deliverables:
+
+- Full benchmark runs.
+- Profiling and query-plan review.
+- Cache, LRU, scheduler, and SQLite tuning.
+- Fault injection for generation activation, durable jobs, and optional services.
+- Windows, macOS, and Linux build/test matrix for selected feature profiles.
+- Security and recovery review.
+- Operational runbooks.
+
+Acceptance:
+
+- All mandatory FTS-profile performance budgets pass.
+- The Phase 0 local-semantic budget passes when that feature is enabled.
+- No unbounded endpoint, discovery path, envelope, job queue, log, or cache remains.
+- Restart recovery converges every apply-journal and durable-job fault scenario.
+- Corrupt and unavailable optional components degrade safely.
+- The system is approved to become the default only after these gates pass.
+
+### Phase 7: Export, Confluence, migration, and cutover
 
 Deliverables:
 
@@ -2521,32 +3032,18 @@ Deliverables:
 - Confluence publisher and publication state.
 - Wiki migration command.
 - Dual-run reports.
-- Default UI cutover.
-- Docusaurus removal after compatibility release.
+- Default UI cutover after the Phase 6 gate.
+- Docusaurus removal after the compatibility release.
 
 Acceptance:
 
 - Curated exports are complete and navigable.
-- Confluence publication is idempotent and conflict-safe.
+- Confluence publication is idempotent and conflict-safe when enabled; Confluence
+  availability is not a cutover prerequisite.
 - All current supported wiki slugs resolve.
 - Rollback works during the compatibility window.
-
-### Phase 7: Scale hardening
-
-Deliverables:
-
-- Full benchmark runs.
-- Profiling and query-plan review.
-- Cache and LRU tuning.
-- Fault injection.
-- Windows, macOS, and Linux build/test matrix for selected feature profiles.
-- Operational runbooks.
-
-Acceptance:
-
-- All performance budgets pass.
-- No unbounded endpoint or cache remains.
-- Corrupt and unavailable optional components degrade safely.
+- Docusaurus is removed only after no supported workflow depends on it and all
+  default-use acceptance criteria (§29) pass.
 
 ## 28. Test Strategy
 
@@ -2554,8 +3051,10 @@ Acceptance:
 
 - Knowledge kind and key validation.
 - Stable ID generation.
+- Globally namespaced evidence-ID generation and collision fixtures.
 - Alias and merge behavior.
 - Primary-parent cycle prevention.
+- Pack-local foreign keys and external-reference validation.
 - Authority precedence.
 - Truth-state transitions.
 - Block schema validation.
@@ -2564,6 +3063,10 @@ Acceptance:
 - Placement thresholds and sticky placement.
 - Idempotency keys.
 - Change-set validation.
+- Apply-journal transition and reconciliation tables.
+- Observed-claim attestation and rejection of AI-originated Observed claims.
+- Bounded collection byte/item limits and completeness metadata.
+- Principal capability and credential-rotation behavior.
 - SQLite migrations.
 - FTS indexing.
 - Vector-key mapping.
@@ -2578,6 +3081,8 @@ Each adapter requires:
 - Malformed input.
 - Unsupported construct.
 - Oversized input.
+- Streaming discovery with a large path count and bounded RSS.
+- Path-count, per-file, total-byte, and cancellation budget exhaustion.
 - Incremental unchanged input.
 - Changed and deleted input.
 - Coverage report assertions.
@@ -2615,7 +3120,9 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 12. Same instruction is repeated.
 13. Base generation changes before apply.
 14. LLM returns an unknown evidence ID.
-15. External requirement conflicts with code.
+15. LLM cites a valid evidence ID that does not entail its claim.
+16. LLM attempts to mark generated prose Observed.
+17. External requirement conflicts with code.
 
 ### 28.5 Search tests
 
@@ -2641,6 +3148,7 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 - Large virtualized lists.
 - Evidence and relation pagination.
 - Review diff and resolution.
+- Paginated history remains available after old generation directories are pruned.
 - Mobile and desktop layouts.
 - Keyboard and screen-reader navigation.
 - Bounded graph expansion.
@@ -2648,7 +3156,11 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 
 ### 28.7 Failure tests
 
-- Process killed during each build phase.
+- Process killed during each build phase and every apply-journal transition.
+- Crash before pointer activation reconciles to the base generation.
+- Crash after pointer activation but before journal finalization reconciles to the
+  target generation without applying state twice.
+- Pointer/journal disagreement is quarantined instead of guessed.
 - Invalid active pointer.
 - Missing or corrupt SQLite file.
 - Checksum mismatch.
@@ -2660,6 +3172,9 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 - Disk full.
 - Concurrent index attempts.
 - Concurrent apply with stale base.
+- Server restart with Queued, Running, AwaitingReview, and terminal jobs.
+- Expired job deadline, queue saturation, cancellation, and retained-history caps.
+- Stale diagnostic lock metadata with and without an active OS file lock.
 - Confluence permission, version, and rate-limit errors.
 
 ### 28.8 Performance tests
@@ -2670,6 +3185,8 @@ Service benchmark:
 - 5m edges.
 - Representative APIs, events, data, processes, and tests.
 - Full and incremental builds.
+- Copy-on-write and portable-copy incremental publication paths.
+- Checksum, fsync, FTS update, staged-vector update, and compaction costs.
 - Object, relation, evidence, FTS, and semantic queries.
 
 Workspace benchmark:
@@ -2680,6 +3197,7 @@ Workspace benchmark:
 - PO, BA, Tester, and Dev search workloads.
 - LRU churn.
 - Concurrent users.
+- Per-principal and global scheduler saturation.
 
 Record:
 
@@ -2688,6 +3206,7 @@ Record:
 - Peak RSS.
 - Disk size.
 - Read/write volume.
+- Staging copy and file-amplification volume.
 - p50/p95/p99 latency.
 - Cache hit ratio.
 - Search recall against the evaluation set.
@@ -2699,20 +3218,27 @@ The replacement is ready for default use only when:
 1. Documentation builds from `GraphArtifacts` without a graph database.
 2. Primary navigation remains business/service oriented on the largest fixture.
 3. PO, BA, Tester, and Dev views share one canonical object.
-4. Every Observed generated claim has evidence.
+4. Every Observed generated claim has evidence and a reproducible deterministic
+   attestation; AI-originated prose cannot declare itself Observed.
 5. Human and pinned blocks survive regeneration unchanged.
 6. Full and incremental performance budgets pass.
 7. Search works without embeddings and improves when semantic search is enabled.
-8. No endpoint returns an unbounded collection.
-9. AI high-confidence placement meets the agreed precision target.
+8. No endpoint, adapter discovery path, change envelope, job queue, retained job
+   history, log buffer, or cache is unbounded.
+9. AI high-confidence placement meets the precision target fixed in Phase 0.
 10. Ambiguous and taxonomy-changing operations enter review.
-11. AI change application is transactional and idempotent.
+11. AI change application is crash-consistent, recoverable, generation-safe, and
+    idempotent across `state.sqlite` and `current.json`.
 12. Unsupported extraction is visible.
 13. Static Markdown and HTML exports resolve internal links.
 14. Confluence publication is optional, idempotent, and conflict-safe.
 15. Existing MCP wiki tools and legacy slugs remain functional during migration.
 16. The system can roll back to the previous pack generation.
 17. Docusaurus removal does not remove a supported user workflow.
+18. Document history remains queryable after pack-generation retention pruning.
+19. Durable jobs recover according to policy after server restart.
+20. `cih-server` has no direct or transitive `cih-llm` dependency and performs no
+    LLM egress.
 
 ## 30. Risks and Mitigations
 
@@ -2720,11 +3246,17 @@ The replacement is ready for default use only when:
 | --- | --- |
 | Automatic taxonomy becomes unstable | Sticky placement, pins, reviewed mutations, aliases, and score thresholds |
 | AI places content incorrectly | Deterministic candidates first, bounded options, evidence, confidence, and review |
+| AI cites real but irrelevant evidence | AI prose remains Inferred; only deterministic attestations can create Observed claims |
 | Business meaning cannot be derived from code | Separate Observed from Intended; support human taxonomy and requirements |
 | SQLite packs become too large | Lightweight technical entities, no rendered symbol pages, indexes, sharding by service |
+| Portable incremental copy exceeds the budget | Phase 0 physical prototype is a gate; revise the ADR to shard before Phase 1 |
+| Pointer and mutable workflow state diverge after a crash | Prepared journal, generation-qualified state, startup reconciliation, and quarantine |
+| Restart retries duplicate a side effect | Durable job intent, operation-specific idempotency, apply-journal reconciliation, and publication state |
+| Revision history grows without bound | Document-visible revision scope plus explicit retention/archive policy and protected references |
 | Search fan-out opens every service | Workspace-first retrieval, bounded service expansion, LRU and concurrency limits |
 | Vector dependency breaks standalone builds | Feature-gated local semantic adapter and complete FTS fallback |
 | Native vector library has platform issues | CI matrix; slim profile excludes it; active pack never depends on vector availability |
+| Second native dependency (USearch beside lbug) slows builds and CI | Feature-gated; slim/no-model builds exclude it; CI budgets a reduced matrix for the semantic profile |
 | Adapter failure creates false claims | Coverage states and fail-closed claim generation |
 | Human content is overwritten | Authority model and content-hash preconditions |
 | Confluence edits are lost | CIH-managed page ownership and remote-version conflict checks |
@@ -2748,8 +3280,12 @@ The following defaults are fixed for the first implementation:
 - Feature-gated USearch local semantic index.
 - `GraphArtifacts` as the indexing source.
 - `GraphStore` as an optional runtime query collaborator.
-- High-confidence automatic generated-content updates.
+- High-confidence automatic generated placement and matching AI-block updates;
+  only deterministic projectors create Observed claims.
 - Review required for taxonomy changes.
+- Durable bounded jobs and crash-recoverable generation activation.
+- Minimal capability-bearing principals without an enterprise RBAC platform.
+- Scale and recovery gates before default UI cutover or Docusaurus removal.
 - Repository-owned Markdown overlays.
 - Optional Confluence Cloud publication.
 - No full rich editor, RBAC platform, or bidirectional Confluence body sync in V1.

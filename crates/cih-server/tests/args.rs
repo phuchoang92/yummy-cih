@@ -1,17 +1,44 @@
 use cih_core::ContractMatchKind;
 use cih_graph_store::Direction;
 use cih_server::args::{
-    DetectChangesArgs, FeatureMapArgs, ImpactArgs, RegressionScopeArgs, RouteMapArgs,
-    TraceFlowArgs, UntestedPathsArgs,
+    DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs, RegressionScopeArgs,
+    RouteMapArgs, TraceFlowArgs, UntestedPathsArgs,
 };
-use cih_server::utils::{parse_contract_kind_filter, parse_direction};
+use cih_server::utils::parse_contract_kind_filter;
 
 #[test]
-fn direction_parse_unknown_falls_back_to_upstream() {
-    assert_eq!(parse_direction(Some("downstream")), Direction::Downstream);
-    assert_eq!(parse_direction(Some("both")), Direction::Both);
-    assert_eq!(parse_direction(Some("sideways")), Direction::Upstream);
-    assert_eq!(parse_direction(None), Direction::Upstream);
+fn direction_arg_is_typed_and_rejects_unknown_values() {
+    // Valid values deserialize; omitted defaults to upstream.
+    let args: ImpactArgs =
+        serde_json::from_str(r#"{"name":"X","direction":"downstream"}"#).unwrap();
+    assert_eq!(args.direction, DirectionArg::Downstream);
+    let args: ImpactArgs = serde_json::from_str(r#"{"name":"X"}"#).unwrap();
+    assert_eq!(args.direction, DirectionArg::Upstream);
+    assert_eq!(Direction::from(DirectionArg::Both), Direction::Both);
+    assert_eq!(
+        Direction::from(DirectionArg::Downstream),
+        Direction::Downstream
+    );
+    assert_eq!(Direction::from(DirectionArg::Upstream), Direction::Upstream);
+    // A typo is an error now — it used to silently run `upstream`.
+    assert!(serde_json::from_str::<ImpactArgs>(r#"{"name":"X","direction":"sideways"}"#).is_err());
+    assert!(serde_json::from_str::<ImpactArgs>(r#"{"name":"X","direction":""}"#).is_err());
+}
+
+#[test]
+fn diff_scope_is_typed_and_rejects_unknown_values() {
+    for (raw, want) in [
+        ("working", DiffScope::Working),
+        ("staged", DiffScope::Staged),
+        ("base_ref", DiffScope::BaseRef),
+    ] {
+        let args: DetectChangesArgs =
+            serde_json::from_str(&format!(r#"{{"scope":"{raw}"}}"#)).unwrap();
+        assert_eq!(args.scope, want);
+    }
+    // A typo is an error now — it used to silently run the `working` diff.
+    assert!(serde_json::from_str::<DetectChangesArgs>(r#"{"scope":"stagd"}"#).is_err());
+    assert!(serde_json::from_str::<DetectChangesArgs>(r#"{}"#).is_err());
 }
 
 #[test]
@@ -24,7 +51,7 @@ fn route_map_args_default_limit_is_zero() {
 #[test]
 fn detect_changes_args_defaults() {
     let args: DetectChangesArgs = serde_json::from_str(r#"{"scope":"working"}"#).unwrap();
-    assert_eq!(args.scope, "working");
+    assert_eq!(args.scope, DiffScope::Working);
     assert!(args.base_ref.is_empty());
     assert!(args.repo.is_empty());
 }
@@ -96,26 +123,13 @@ fn untested_paths_args_defaults() {
 }
 
 #[test]
-// Mirrors the production `git diff` arg match in changes.rs; base_ref is a
-// literal None here because the test pins scope="staged".
-#[allow(clippy::unnecessary_literal_unwrap)]
-fn git_diff_staged_args_are_correct() {
-    let scope = "staged";
-    let base_ref: Option<&str> = None;
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("diff").arg("--name-only");
-    match scope {
-        "staged" => {
-            cmd.arg("--cached").arg("HEAD");
-        }
-        "base_ref" => {
-            cmd.arg(base_ref.unwrap_or("main"));
-        }
-        _ => {
-            cmd.arg("HEAD");
-        }
-    }
-    // structural test only — verifies no panic in argument setup
+fn index_repo_args_graph_key_defaults_empty() {
+    let args: cih_server::args::IndexRepoArgs =
+        serde_json::from_str(r#"{"repo_path":"/tmp/x"}"#).unwrap();
+    assert!(args.graph_key.is_empty());
+    let args: cih_server::args::IndexRepoArgs =
+        serde_json::from_str(r#"{"repo_path":"/tmp/x","graph_key":"svc"}"#).unwrap();
+    assert_eq!(args.graph_key, "svc");
 }
 
 #[test]

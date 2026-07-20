@@ -36,7 +36,7 @@ use rmcp::{
 use crate::args::*;
 use crate::jobs::Jobs;
 use crate::symbol::{AmbiguousResult, SymbolResolution};
-use crate::utils::{json_result, parse_direction, text_result, to_mcp};
+use crate::utils::{json_result, text_result, to_mcp};
 use crate::{artifact_cache, changes, feature, files, resources, search, symbol, wiki, xflow};
 
 use crate::search::{QueryArgs, QueryResult, SearchState};
@@ -267,16 +267,11 @@ impl CihServer {
                 ));
             }
         };
-        let dir = parse_direction(if args.direction.is_empty() {
-            None
-        } else {
-            Some(args.direction.as_str())
-        });
         let res = rc
             .store
             .impact(
                 &id,
-                dir,
+                args.direction.into(),
                 if args.max_depth == 0 {
                     4
                 } else {
@@ -621,6 +616,48 @@ impl CihServer {
     }
 }
 
+/// Agent-facing server instructions returned by `get_info`. Every
+/// `tool(arg=...)` example in here (and in tool descriptions) is validated
+/// against the live tool schemas by `instruction_examples_match_tool_schemas`,
+/// so an argument rename fails the build instead of teaching clients a
+/// hallucinated call.
+const INSTRUCTIONS: &str =
+    "Code Intelligence Hub (CIH) — structural call-graph intelligence for indexed repositories.\n\
+     \n\
+     ## Always use CIH tools instead of grep/read when possible.\n\
+     \n\
+     ## NodeId format\n\
+     Full form: `Kind:fully.qualified.Name` (e.g. `Class:org.phuc.commerce.order.OrderService`, `Route:POST /api/v1/orders`).\n\
+     Short names (e.g. `OrderService`) also work and trigger interactive disambiguation.\n\
+     \n\
+     ## IMPORTANT: Always call `list_repos()` first to get the exact repo name before calling any other CIH tool.\n\
+     \n\
+     ## Core workflow\n\
+     1. `list_repos` — see what is indexed\n\
+     2. `architecture_overview(repo=...)` — one-call orientation: modules with anchor symbols, route groups, entrypoints, wiki pointers. Start here in an unfamiliar repo; it replaces chaining status/communities/route_map/search_wiki\n\
+     3. `search_code(query=...)` — find symbols by keyword\n\
+     4. `context(name=...)` — callers, callees, which routes reach a symbol\n\
+     5. `impact(name=..., direction=\"upstream\")` — blast radius before changing something; add format=\"diagram\" for a visual\n\
+     6. `trace_flow(entry_point=\"Route:METHOD /path\")` — follow an HTTP request end-to-end; add format=\"mermaid\" for a diagram\n\
+     7. `route_map()` — all HTTP routes; add format=\"openapi\" for an OpenAPI spec\n\
+     8. `communities()` — module/service groupings across the codebase\n\
+     \n\
+     ## Indexing\n\
+     `index_repo(repo_path=\"/abs/path\")` → returns job_id → poll with `index_status(job_id=...)`.\n\
+     \n\
+     ## Wiki\n\
+     `search_wiki(query=..., kind=\"po\"|\"ba\"|\"dev\")` — search the generated role-based docs \
+     (persona pages carry their persona as the kind); \
+     `get_wiki_page(slug=...)` — fetch a page's markdown. \
+     Pages are also readable as `cih://repo/{name}/wiki/{slug}` resources.\n\
+     \n\
+     ## Other tools\n\
+     `feature_map`, `query`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
+     `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`, `grep_files`.\n\
+     \n\
+     ## Security\n\
+     `taint_paths(category=\"sql\"|\"exec\"|\"file\"|\"html\")` — source→sink flows from HTTP/event entry points; refine=true for flow-sensitive confirmation.";
+
 /// Whether per-tool timing is logged. Read once from `CIH_TOOL_TIMING`
 /// (truthy = `1`/`true`); off by default, so the log is silent unless enabled.
 fn tool_timing_enabled() -> bool {
@@ -693,44 +730,7 @@ impl ServerHandler for CihServer {
                 version: env!("CARGO_PKG_VERSION").into(),
                 ..Default::default()
             },
-            instructions: Some(
-                "Code Intelligence Hub (CIH) — structural call-graph intelligence for indexed repositories.\n\
-                 \n\
-                 ## Always use CIH tools instead of grep/read when possible.\n\
-                 \n\
-                 ## NodeId format\n\
-                 Full form: `Kind:fully.qualified.Name` (e.g. `Class:org.phuc.commerce.order.OrderService`, `Route:POST /api/v1/orders`).\n\
-                 Short names (e.g. `OrderService`) also work and trigger interactive disambiguation.\n\
-                 \n\
-                 ## IMPORTANT: Always call `list_repos()` first to get the exact repo name before calling any other CIH tool.\n\
-                 \n\
-                 ## Core workflow\n\
-                 1. `list_repos` — see what is indexed\n\
-                 2. `architecture_overview(repo=...)` — one-call orientation: modules with anchor symbols, route groups, entrypoints, wiki pointers. Start here in an unfamiliar repo; it replaces chaining status/communities/route_map/search_wiki\n\
-                 3. `search_code(query=...)` — find symbols by keyword\n\
-                 4. `context(name=...)` — callers, callees, which routes reach a symbol\n\
-                 5. `impact(name=..., direction=\"upstream\")` — blast radius before changing something; add format=\"diagram\" for a visual\n\
-                 6. `trace_flow(name=\"Route:METHOD /path\")` — follow an HTTP request end-to-end; add format=\"mermaid\" for a diagram\n\
-                 7. `route_map()` — all HTTP routes; add format=\"openapi\" for an OpenAPI spec\n\
-                 8. `communities()` — module/service groupings across the codebase\n\
-                 \n\
-                 ## Indexing\n\
-                 `index_repo(repo_path=\"/abs/path\")` → returns job_id → poll with `index_status(job_id=...)`.\n\
-                 \n\
-                 ## Wiki\n\
-                 `search_wiki(query=..., kind=\"po\"|\"ba\"|\"dev\")` — search the generated role-based docs \
-                 (persona pages carry their persona as the kind); \
-                 `get_wiki_page(slug=...)` — fetch a page's markdown. \
-                 Pages are also readable as `cih://repo/{name}/wiki/{slug}` resources.\n\
-                 \n\
-                 ## Other tools\n\
-                 `feature_map`, `query`, `detect_changes`, `group_contracts`, `api_impact`, `shape_check`,\n\
-                 `test_coverage`, `regression_scope`, `untested_paths`, `find_duplicates`, `complexity_hotspots`, `read_file`, `grep_files`.\n\
-                 \n\
-                 ## Security\n\
-                 `taint_paths(category=\"sql\"|\"exec\"|\"file\"|\"html\")` — source→sink flows from HTTP/event entry points; refine=true for flow-sensitive confirmation."
-                    .into(),
-            ),
+            instructions: Some(INSTRUCTIONS.into()),
         }
     }
 
@@ -802,6 +802,71 @@ mod tests {
                 "overview next-hint references unregistered tool: {tool}"
             );
         }
+    }
+
+    /// Every `tool(arg=...)` example in the server instructions and in tool
+    /// descriptions must name a real tool argument — this is what catches
+    /// drift like the former `trace_flow(name=...)` (real arg: `entry_point`).
+    #[test]
+    fn instruction_examples_match_tool_schemas() {
+        let router = CihServer::tool_router()
+            + CihServer::files_router()
+            + CihServer::crossrepo_router()
+            + CihServer::testing_router()
+            + CihServer::wiki_router()
+            + CihServer::overview_router()
+            + CihServer::admin_router();
+        let tools = router.list_all();
+        let schemas: std::collections::HashMap<String, serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                (
+                    t.name.to_string(),
+                    serde_json::to_value(t.input_schema.as_ref()).expect("schema serializes"),
+                )
+            })
+            .collect();
+        let mut texts = vec![super::INSTRUCTIONS.to_string()];
+        texts.extend(
+            tools
+                .iter()
+                .filter_map(|t| t.description.as_ref().map(|d| d.to_string())),
+        );
+
+        let call_re = regex::Regex::new(r"\b([a-z_][a-z0-9_]*)\(([^()]*)\)").unwrap();
+        let mut checked = 0usize;
+        for text in &texts {
+            for cap in call_re.captures_iter(text) {
+                let Some(schema) = schemas.get(&cap[1]) else {
+                    continue; // not a tool call (prose that happens to parenthesize)
+                };
+                let props = schema.get("properties").and_then(|p| p.as_object());
+                for part in cap[2].split(',') {
+                    if !part.contains('=') {
+                        continue;
+                    }
+                    let arg = part.split('=').next().unwrap_or("").trim();
+                    if arg.is_empty()
+                        || !arg
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        continue;
+                    }
+                    checked += 1;
+                    assert!(
+                        props.is_some_and(|p| p.contains_key(arg)),
+                        "example `{}({arg}=...)` names an argument that is not in the tool's \
+                         schema — fix the instructions/description or the args struct",
+                        &cap[1]
+                    );
+                }
+            }
+        }
+        // The regex must actually be finding examples, or this test is vacuous.
+        assert!(checked >= 10, "only {checked} examples validated");
+        // Regression pin for the drift this test was added to catch.
+        assert!(super::INSTRUCTIONS.contains("trace_flow(entry_point="));
     }
 
     #[test]

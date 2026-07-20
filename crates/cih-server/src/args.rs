@@ -1,6 +1,33 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Traversal direction for impact analysis. An unknown string fails
+/// deserialization (it used to silently run `upstream`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectionArg {
+    /// Callers / blast radius (default).
+    #[default]
+    Upstream,
+    /// Callees.
+    Downstream,
+    /// Both directions.
+    Both,
+}
+
+/// Scope of the git diff for `detect_changes`. An unknown string fails
+/// deserialization (it used to silently run `working`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffScope {
+    /// All uncommitted changes vs HEAD.
+    Working,
+    /// Index vs HEAD.
+    Staged,
+    /// HEAD vs a branch/commit — requires the `base_ref` argument.
+    BaseRef,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextArgs {
     /// Symbol id (e.g. `Method:com.acme.UserService#save`) or short name
@@ -18,7 +45,7 @@ pub struct ImpactArgs {
     pub name: String,
     /// `upstream` (callers / blast radius, default), `downstream`, or `both`.
     #[serde(default)]
-    pub direction: String,
+    pub direction: DirectionArg,
     /// Max traversal depth (default 4, pass 0 for default).
     #[serde(default)]
     pub max_depth: u32,
@@ -69,7 +96,7 @@ pub struct StatusArgs {
 pub struct DetectChangesArgs {
     /// Scope of the git diff: `working` (all uncommitted vs HEAD),
     /// `staged` (index vs HEAD), or `base_ref` (HEAD vs a branch/commit).
-    pub scope: String,
+    pub scope: DiffScope,
     /// Git ref for `base_ref` scope (e.g. `main` or a commit SHA). Leave empty for non-base_ref scopes.
     #[serde(default)]
     pub base_ref: String,
@@ -226,6 +253,11 @@ pub struct IndexRepoArgs {
     /// Languages to index, comma-separated (e.g. "java,typescript"). Leave empty for all detected.
     #[serde(default)]
     pub languages: String,
+    /// Graph key to load the repo under. Leave empty for an already-registered
+    /// repo (its registry key is used). Required for a path not yet in the
+    /// registry; a key owned by a different repo is rejected.
+    #[serde(default)]
+    pub graph_key: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

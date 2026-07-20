@@ -7,14 +7,13 @@ use crate::utils::json_result;
 pub async fn index_repo(
     backend: &str,
     falkor_url: &str,
-    graph_key: &str,
     jobs: &Jobs,
     args: IndexRepoArgs,
 ) -> Result<CallToolResult, McpError> {
     let (job_id, canonical) = start_index_job(
         backend,
         falkor_url,
-        graph_key,
+        &args.graph_key,
         jobs,
         &args.repo_path,
         &args.languages,
@@ -28,12 +27,62 @@ pub async fn index_repo(
     }))
 }
 
-/// Validate `repo_path`, spawn a background `cih-engine analyze`, and return `(job_id, canonical
-/// repo path)`. Shared by the `index_repo` tool and `add_resolve_pattern`'s reindex.
+/// Resolve the graph key an index job for `canonical` must target: a
+/// registered path always uses its own registry key, an unregistered path
+/// requires an explicit new key, and a key owned by a different repo is
+/// rejected. The server's primary key is never applied implicitly — doing so
+/// loaded any `repo_path` into the primary graph.
+fn resolve_target_graph_key(
+    reg: &cih_core::Registry,
+    canonical: &std::path::Path,
+    explicit: &str,
+) -> Result<String, String> {
+    let explicit = explicit.trim();
+    let owner = reg.entries.iter().find(|e| {
+        std::path::Path::new(&e.path)
+            .canonicalize()
+            .map(|p| p == canonical)
+            .unwrap_or_else(|_| std::path::Path::new(&e.path) == canonical)
+    });
+    match owner {
+        Some(entry) => {
+            if !explicit.is_empty() && explicit != entry.graph_key {
+                return Err(format!(
+                    "repo '{}' is registered under graph key '{}'; omit `graph_key` or pass \
+                     that key (got '{explicit}')",
+                    entry.name, entry.graph_key
+                ));
+            }
+            Ok(entry.graph_key.clone())
+        }
+        None => {
+            if explicit.is_empty() {
+                return Err(
+                    "repo is not in the registry; pass an explicit `graph_key` to index it \
+                     under (a new key — not one owned by another repo)"
+                        .to_string(),
+                );
+            }
+            if let Some(other) = reg.entries.iter().find(|e| e.graph_key == explicit) {
+                return Err(format!(
+                    "graph key '{explicit}' is already owned by repo '{}' ({}); choose a new key",
+                    other.name, other.path
+                ));
+            }
+            Ok(explicit.to_string())
+        }
+    }
+}
+
+/// Validate `repo_path`, resolve the target graph key (see
+/// [`resolve_target_graph_key`]), spawn a background `cih-engine analyze`, and
+/// return `(job_id, canonical repo path)`. Shared by the `index_repo` tool and
+/// `add_resolve_pattern`'s reindex. `requested_graph_key` is the caller's
+/// explicit key ("" = resolve from the registry).
 pub async fn start_index_job(
     backend: &str,
     falkor_url: &str,
-    graph_key: &str,
+    requested_graph_key: &str,
     jobs: &Jobs,
     repo_path: &str,
     languages: &str,
@@ -49,6 +98,11 @@ pub async fn start_index_job(
         McpError::invalid_params(format!("cannot canonicalize repo_path: {e}"), None)
     })?;
     let repo_str = canonical.display().to_string();
+    // Fresh (non-cached) registry read: indexing is rare and a just-finished
+    // job may have added the entry this resolution depends on.
+    let graph_key =
+        resolve_target_graph_key(&cih_core::Registry::load(), &canonical, requested_graph_key)
+            .map_err(|e| McpError::invalid_params(e, None))?;
 
     let job_id = new_job_id();
     let started_at_secs = unix_now_secs();
@@ -61,7 +115,6 @@ pub async fn start_index_job(
     let engine = find_engine_binary();
     let backend = backend.to_string();
     let falkor_url = falkor_url.to_string();
-    let graph_key = graph_key.to_string();
     let jobs = jobs.clone();
     let job_id2 = job_id.clone();
     let languages = languages.to_string();
@@ -138,4 +191,84 @@ pub async fn start_index_job(
     });
 
     Ok((job_id, canonical.display().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_target_graph_key;
+    use cih_core::{Registry, RegistryEntry};
+
+    fn entry(name: &str, path: &str, graph_key: &str) -> RegistryEntry {
+        RegistryEntry {
+            name: name.to_string(),
+            path: path.to_string(),
+            graph_key: graph_key.to_string(),
+            artifacts_dir: String::new(),
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        }
+    }
+
+    /// A registered path uses its own registry key — never the server primary.
+    #[test]
+    fn registered_path_uses_its_registry_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let reg = Registry {
+            entries: vec![entry("svc", &canonical.display().to_string(), "svc-key")],
+        };
+        assert_eq!(
+            resolve_target_graph_key(&reg, &canonical, "").unwrap(),
+            "svc-key"
+        );
+        // An explicit key matching the registry entry is accepted too.
+        assert_eq!(
+            resolve_target_graph_key(&reg, &canonical, "svc-key").unwrap(),
+            "svc-key"
+        );
+    }
+
+    #[test]
+    fn registered_path_rejects_conflicting_explicit_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let reg = Registry {
+            entries: vec![entry("svc", &canonical.display().to_string(), "svc-key")],
+        };
+        let err = resolve_target_graph_key(&reg, &canonical, "primary").unwrap_err();
+        assert!(
+            err.contains("registered under graph key 'svc-key'"),
+            "{err}"
+        );
+    }
+
+    /// The S9 regression: an unregistered path must not silently land under
+    /// any implicit key — the caller has to name a fresh one.
+    #[test]
+    fn unregistered_path_requires_explicit_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let reg = Registry {
+            entries: vec![entry("other", "/somewhere/else", "primary")],
+        };
+        let err = resolve_target_graph_key(&reg, &canonical, "").unwrap_err();
+        assert!(err.contains("pass an explicit `graph_key`"), "{err}");
+        assert_eq!(
+            resolve_target_graph_key(&reg, &canonical, "new-key").unwrap(),
+            "new-key"
+        );
+    }
+
+    #[test]
+    fn unregistered_path_rejects_key_owned_by_another_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let reg = Registry {
+            entries: vec![entry("other", "/somewhere/else", "primary")],
+        };
+        let err = resolve_target_graph_key(&reg, &canonical, "primary").unwrap_err();
+        assert!(err.contains("already owned by repo 'other'"), "{err}");
+    }
 }

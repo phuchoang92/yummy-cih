@@ -86,16 +86,17 @@ pub fn find_repo_path(repo: Option<&str>, graph_key: &str) -> std::result::Resul
 /// Run `git diff --name-only` and return repo-relative file paths.
 pub fn git_changed_files(
     repo_path: &str,
-    scope: &str,
+    scope: crate::args::DiffScope,
     base_ref: Option<&str>,
 ) -> std::result::Result<Vec<String>, String> {
+    use crate::args::DiffScope;
     let mut cmd = std::process::Command::new("git");
     cmd.arg("diff").arg("--name-only");
     match scope {
-        "staged" => {
+        DiffScope::Staged => {
             cmd.arg("--cached").arg("HEAD");
         }
-        "base_ref" => {
+        DiffScope::BaseRef => {
             let r = base_ref
                 .ok_or_else(|| "`base_ref` scope requires the `base_ref` argument".to_string())?;
             // Reject refs that could be parsed as git options (e.g. `--output=…`),
@@ -106,7 +107,7 @@ pub fn git_changed_files(
             }
             cmd.arg(r);
         }
-        _ => {
+        DiffScope::Working => {
             cmd.arg("HEAD");
         }
     }
@@ -130,14 +131,22 @@ pub fn git_changed_files(
 #[cfg(test)]
 mod tests {
     use super::git_changed_files;
+    use crate::args::DiffScope;
 
     #[test]
     fn base_ref_rejects_option_like_ref() {
         // A ref that could be parsed as a git option must be refused *before* git
         // runs, so `detect_changes` can't be turned into an arbitrary-file write
         // via e.g. `--output=`.
-        let err = git_changed_files(".", "base_ref", Some("--output=/tmp/pwn"))
+        let err = git_changed_files(".", DiffScope::BaseRef, Some("--output=/tmp/pwn"))
             .expect_err("option-like ref must be rejected");
         assert!(err.contains("must not begin with '-'"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn base_ref_scope_requires_the_ref_argument() {
+        let err = git_changed_files(".", DiffScope::BaseRef, None)
+            .expect_err("missing base_ref must be rejected");
+        assert!(err.contains("requires the `base_ref` argument"), "{err}");
     }
 }
