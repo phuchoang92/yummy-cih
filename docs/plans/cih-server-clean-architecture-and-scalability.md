@@ -53,9 +53,18 @@
 > the provider's canonical repository path instead of reloading the registry.
 > Contract tests cover 32-way same-key coalescing, retry after failure,
 > independent different-key initialization, equivalent artifact-path
-> normalization, and catalog refresh. File, wiki, and cross-repository
-> registry resolution remains follow-up work, so Milestone 2 is not yet
-> complete.
+> normalization, and catalog refresh.
+> Repository-identity migration slice completed 2026-07-20: added the
+> identity-only `RepoContextProvider::resolve_repo` operation so file and
+> artifact capabilities do not initialize unused graph/search infrastructure;
+> migrated file tools, wiki MCP tools, the wiki HTTP route,
+> `architecture_overview` wiki lookup, and cross-repository caller/trace/shape
+> lookups to resolved canonical paths and artifact directories. `read_file`
+> filesystem work now also runs on the blocking pool. The obsolete
+> `find_repo_path` helper and wiki-owned graph-key resolver were removed.
+> Provider tests verify identity-only resolution performs zero graph/search
+> initializations. Taint resolution and registry-wide resource/catalog
+> operations remain follow-up work, so Milestone 2 is not yet complete.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  
@@ -952,8 +961,12 @@ per-key single-flight gates; successful results are cached, failed
 initializations can be retried, graph keys and normalized artifact roots are
 the cache identities, and registry lookup remains fresh on every resolve.
 `detect_changes` is the first application capability to consume the resolved
-canonical path directly. The remaining direct registry consumers are tracked
-as follow-up migration work.
+canonical path directly. File, wiki (MCP and HTTP), and cross-repository
+capabilities now consume identity-only resolved contexts without initializing
+unused graph/search infrastructure. Taint resolution remains a direct
+single-repository consumer to migrate; registry-wide group freshness,
+resource pagination, and catalog listing require a separate snapshot/query
+contract rather than repeated single-entry resolution.
 
 ### 14.1 RepoContextProvider
 
@@ -963,6 +976,9 @@ of `CihServer`:
 ```rust
 #[async_trait]
 pub trait RepoContextProvider: Send + Sync {
+    fn resolve_repo(&self, selector: RepoSelector)
+        -> Result<ResolvedRepo, AppError>;
+
     async fn resolve(&self, selector: RepoSelector)
         -> Result<Arc<RepoContext>, AppError>;
 }

@@ -24,7 +24,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ReadFileArgs>,
     ) -> Result<CallToolResult, McpError> {
-        files::read_file(&self.graph_key, self.read_file_limits, args).await
+        let repo = self.resolve_repo(&args.repo)?;
+        files::read_file(repo.canonical_path, self.read_file_limits, args).await
     }
 
     #[tool(
@@ -38,6 +39,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<GrepFilesArgs>,
     ) -> Result<CallToolResult, McpError> {
-        files::grep_files(&self.graph_key, args).await
+        let repo = self.resolve_repo(&args.repo)?;
+        files::grep_files(repo.canonical_path, args).await
     }
 }

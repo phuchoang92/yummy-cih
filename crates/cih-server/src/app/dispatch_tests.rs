@@ -54,7 +54,7 @@ async fn serve_test_server() -> TestClient {
             max_bytes: 1 << 20,
             max_lines: 2000,
         },
-        wiki::WikiSearchState::new("cih_dispatch_test".into()),
+        wiki::WikiSearchState::new(),
     );
     let (server_t, client_t) = tokio::io::duplex(8192);
     tokio::spawn(async move {

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind, Registry};
 use rmcp::{model::CallToolResult, ErrorData as McpError};
@@ -6,9 +7,10 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
 use crate::artifact_cache::ArtifactCache;
 use crate::blocking::{blocking_timeout, run_blocking_heavy};
+use crate::repo_context::{RepoContextProvider, RepoSelector};
 use crate::utils::{
-    json_result, node_prop_str_owned, parse_contract_kind_filter, short_class_name,
-    strip_response_wrapper,
+    app_error_to_mcp, json_result, node_prop_str_owned, parse_contract_kind_filter,
+    short_class_name, strip_response_wrapper,
 };
 use crate::xflow::{self, XflowState};
 
@@ -106,16 +108,21 @@ fn group_contracts_sync(args: GroupContractsArgs) -> Result<CallToolResult, McpE
 
 pub async fn api_impact(
     args: ApiImpactArgs,
+    repo_contexts: Arc<dyn RepoContextProvider>,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
     let xflow = xflow.clone();
     run_blocking_heavy(blocking_timeout(), "api_impact artifact load", move || {
-        api_impact_sync(args, &xflow)
+        api_impact_sync(args, repo_contexts.as_ref(), &xflow)
     })
     .await?
 }
 
-fn api_impact_sync(args: ApiImpactArgs, xflow: &XflowState) -> Result<CallToolResult, McpError> {
+fn api_impact_sync(
+    args: ApiImpactArgs,
+    repo_contexts: &dyn RepoContextProvider,
+    xflow: &XflowState,
+) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
     let method = args.method.to_ascii_uppercase();
     let target_key = format!(
@@ -129,12 +136,6 @@ fn api_impact_sync(args: ApiImpactArgs, xflow: &XflowState) -> Result<CallToolRe
         args.caller_depth
     })
     .clamp(1, 6);
-    let registry = if args.include_callers {
-        Some(Registry::load_cached())
-    } else {
-        None
-    };
-
     let mut consumers = Vec::new();
     for item in &contracts {
         if item.kind != ContractMatchKind::HttpRoute || item.match_key != target_key {
@@ -146,9 +147,9 @@ fn api_impact_sync(args: ApiImpactArgs, xflow: &XflowState) -> Result<CallToolRe
             "consumer_repo": item.consumer_repo,
             "consumer_endpoint": item.consumer_id,
         });
-        if let Some(registry) = &registry {
+        if args.include_callers {
             row["consumer_callers"] = match consumer_callers(
-                registry,
+                repo_contexts,
                 xflow,
                 &item.consumer_repo,
                 &item.consumer_id,
@@ -181,17 +182,21 @@ struct ConsumerCaller {
 /// Reverse-CALLS walk in the consumer repo: methods that (transitively) reach
 /// the `ExternalCall` site, each with its enclosing route when one handles it.
 fn consumer_callers(
-    registry: &Registry,
+    repo_contexts: &dyn RepoContextProvider,
     xflow: &XflowState,
     consumer_repo: &str,
     consumer_endpoint: &str,
     depth_limit: u32,
 ) -> Result<Vec<ConsumerCaller>, String> {
-    let entry = registry
-        .find(consumer_repo)
-        .ok_or_else(|| format!("consumer '{consumer_repo}' not in registry"))?;
+    let repo = repo_contexts
+        .resolve_repo(RepoSelector::NameOrPath(consumer_repo.to_string()))
+        .map_err(|error| error.to_string())?;
+    let artifacts_dir = repo
+        .versioned_artifacts_dir
+        .as_deref()
+        .ok_or_else(|| format!("consumer '{consumer_repo}' has no artifact directory"))?;
     let graph = xflow
-        .graph_for(&entry.artifacts_dir)
+        .graph_for(&artifacts_dir.to_string_lossy())
         .map_err(|e| format!("consumer artifacts unreadable: {e}"))?;
 
     // Direct callers: ExternalCall edges into the endpoint node.
@@ -250,29 +255,28 @@ pub(crate) fn validate_group_member(
 /// first registry entry bound to the server's graph key.
 pub async fn trace_flow_x(
     args: TraceFlowXArgs,
-    graph_key: &str,
+    repo_contexts: Arc<dyn RepoContextProvider>,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
-    let graph_key = graph_key.to_string();
     let xflow = xflow.clone();
     run_blocking_heavy(
         blocking_timeout(),
         "trace_flow_x artifact load",
-        move || trace_flow_x_sync(args, &graph_key, &xflow),
+        move || trace_flow_x_sync(args, repo_contexts.as_ref(), &xflow),
     )
     .await?
 }
 
 fn trace_flow_x_sync(
     args: TraceFlowXArgs,
-    graph_key: &str,
+    repo_contexts: &dyn RepoContextProvider,
     xflow: &XflowState,
 ) -> Result<CallToolResult, McpError> {
     let contracts = load_group_contracts(&args.group)?;
-    let registry = Registry::load_cached();
-    let entry = crate::utils::resolve_repo_entry(&args.repo, graph_key)
-        .map_err(|e| McpError::invalid_params(e, None))?;
-    let start_repo = entry.name.clone();
+    let repo = repo_contexts
+        .resolve_repo(RepoSelector::from_wire(&args.repo))
+        .map_err(app_error_to_mcp)?;
+    let start_repo = repo.registry_entry.name.clone();
 
     let groups = cih_core::GroupRegistry::load_cached();
     let group_entry = groups.find(&args.group).ok_or_else(|| {
@@ -287,7 +291,15 @@ fn trace_flow_x_sync(
     validate_group_member(&args.group, &group_entry.repos, &start_repo)
         .map_err(|e| McpError::invalid_params(e, None))?;
 
-    let start_graph = xflow.graph_for(&entry.artifacts_dir).map_err(|e| {
+    let start_artifacts = repo.versioned_artifacts_dir.as_deref().ok_or_else(|| {
+        McpError::invalid_params(
+            format!("repo '{start_repo}' has no artifact directory; re-run analyze"),
+            None,
+        )
+    })?;
+    let start_graph = xflow
+        .graph_for(&start_artifacts.to_string_lossy())
+        .map_err(|e| {
         McpError::invalid_params(
             format!(
                 "cannot load artifacts for '{start_repo}': {e} — re-run `cih-engine analyze {start_repo}`"
@@ -328,10 +340,16 @@ fn trace_flow_x_sync(
     })
     .clamp(1, 5);
 
-    let artifacts_by_repo: HashMap<String, String> = registry
-        .entries
+    let artifacts_by_repo: HashMap<String, String> = group_entry
+        .repos
         .iter()
-        .map(|e| (e.name.clone(), e.artifacts_dir.clone()))
+        .filter_map(|name| {
+            let repo = repo_contexts
+                .resolve_repo(RepoSelector::NameOrPath(name.clone()))
+                .ok()?;
+            let dir = repo.versioned_artifacts_dir?;
+            Some((repo.registry_entry.name, dir.to_string_lossy().into_owned()))
+        })
         .collect();
     let mut source = |repo: &str| {
         let dir = artifacts_by_repo.get(repo)?;
@@ -363,17 +381,19 @@ fn trace_flow_x_sync(
 
 pub async fn shape_check(
     args: ShapeCheckArgs,
+    repo_contexts: Arc<dyn RepoContextProvider>,
     artifacts: &ArtifactCache,
 ) -> Result<CallToolResult, McpError> {
     let artifacts = artifacts.clone();
     run_blocking_heavy(blocking_timeout(), "shape_check artifact load", move || {
-        shape_check_sync(args, &artifacts)
+        shape_check_sync(args, repo_contexts.as_ref(), &artifacts)
     })
     .await?
 }
 
 fn shape_check_sync(
     args: ShapeCheckArgs,
+    repo_contexts: &dyn RepoContextProvider,
     artifacts: &ArtifactCache,
 ) -> Result<CallToolResult, McpError> {
     let contracts_file = cih_core::contracts_path(&args.group).ok_or_else(|| {
@@ -408,31 +428,36 @@ fn shape_check_sync(
         }));
     }
 
-    let reg = Registry::load_cached();
-    let provider_entry = reg.find(&args.provider).ok_or_else(|| {
-        McpError::invalid_params(
-            format!(
-                "provider '{}' not in registry; run analyze first",
-                args.provider
-            ),
-            None,
-        )
-    })?;
-    let consumer_entry = reg.find(&args.consumer).ok_or_else(|| {
-        McpError::invalid_params(
-            format!(
-                "consumer '{}' not in registry; run analyze first",
-                args.consumer
-            ),
-            None,
-        )
-    })?;
+    let provider_repo = repo_contexts
+        .resolve_repo(RepoSelector::NameOrPath(args.provider.clone()))
+        .map_err(app_error_to_mcp)?;
+    let consumer_repo = repo_contexts
+        .resolve_repo(RepoSelector::NameOrPath(args.consumer.clone()))
+        .map_err(app_error_to_mcp)?;
+    let provider_artifacts = provider_repo
+        .versioned_artifacts_dir
+        .as_deref()
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                format!("provider '{}' has no artifact directory", args.provider),
+                None,
+            )
+        })?;
+    let consumer_artifacts = consumer_repo
+        .versioned_artifacts_dir
+        .as_deref()
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                format!("consumer '{}' has no artifact directory", args.consumer),
+                None,
+            )
+        })?;
 
     let provider_bundle = artifacts
-        .bundle(&provider_entry.artifacts_dir)
+        .bundle(&provider_artifacts.to_string_lossy())
         .map_err(|e| McpError::internal_error(format!("provider artifacts: {e}"), None))?;
     let consumer_bundle = artifacts
-        .bundle(&consumer_entry.artifacts_dir)
+        .bundle(&consumer_artifacts.to_string_lossy())
         .map_err(|e| McpError::internal_error(format!("consumer artifacts: {e}"), None))?;
     let provider_nodes = &provider_bundle.nodes;
     let consumer_nodes = &consumer_bundle.nodes;

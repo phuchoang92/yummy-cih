@@ -53,7 +53,7 @@ pub async fn run() -> Result<()> {
     let graph_key = cfg.graph_key.clone();
     // One shared state: the axum /wiki/search route and the MCP wiki tools use
     // the same mtime-invalidated index cache.
-    let wiki_state = wiki::WikiSearchState::new(cfg.graph_key.clone());
+    let wiki_state = wiki::WikiSearchState::new();
     let cih = CihServer::new(
         store.clone(),
         cfg.artifacts_dir.clone(),
@@ -77,6 +77,7 @@ pub async fn run() -> Result<()> {
         cih.search.clone(),
         cfg.artifacts_dir.clone(),
     );
+    let repo_contexts = cih.repo_context_provider();
 
     let service = StreamableHttpService::new(
         move || Ok(cih.clone()),
@@ -100,7 +101,7 @@ pub async fn run() -> Result<()> {
         .allow_origin(tower_http::cors::Any)
         .allow_methods([axum::http::Method::GET])
         .allow_headers([axum::http::header::AUTHORIZATION]);
-    let wiki_routes = wiki::router(wiki_state)
+    let wiki_routes = wiki::router(wiki_state, repo_contexts)
         .layer(middleware::from_fn_with_state(
             cfg.api_token.clone(),
             server::auth_middleware,

@@ -1,8 +1,9 @@
+use std::path::PathBuf;
+
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 
 use crate::args::{GrepFilesArgs, ReadFileArgs};
 use crate::blocking::{blocking_timeout, run_blocking};
-use crate::symbol::find_repo_path;
 use crate::utils::json_result;
 
 /// Caps applied by `read_file` to keep large files out of the agent's context.
@@ -15,20 +16,10 @@ pub struct ReadFileLimits {
 }
 
 pub async fn read_file(
-    graph_key: &str,
+    repo_root: PathBuf,
     limits: ReadFileLimits,
     args: ReadFileArgs,
 ) -> Result<CallToolResult, McpError> {
-    let repo_root = find_repo_path(
-        if args.repo.is_empty() {
-            None
-        } else {
-            Some(args.repo.as_str())
-        },
-        graph_key,
-    )
-    .map_err(|e| McpError::invalid_params(e, None))?;
-
     let clean = std::path::Path::new(&args.path);
     if clean
         .components()
@@ -40,27 +31,27 @@ pub async fn read_file(
         ));
     }
 
-    let full_path = std::path::Path::new(&repo_root).join(clean);
+    let path_label = args.path;
+    let start_line = args.start_line;
+    let end_line = args.end_line;
+    let value = run_blocking(blocking_timeout(), "read file", move || {
+        let full_path = repo_root.join(&path_label);
 
-    // Canonicalize both paths to resolve symlinks before the containment check.
-    // This prevents a symlink inside the repo from pointing outside the root.
-    let canon_root = std::path::Path::new(&repo_root)
-        .canonicalize()
-        .map_err(|e| McpError::invalid_params(format!("cannot resolve repo root: {e}"), None))?;
-    let canon_path = full_path.canonicalize().map_err(|e| {
-        McpError::invalid_params(format!("cannot resolve '{}': {e}", args.path), None)
-    })?;
-    if !canon_path.starts_with(&canon_root) {
-        return Err(McpError::invalid_params("path escapes repo root", None));
-    }
+        // Resolve symlinks before the containment check so an in-repo symlink
+        // cannot point outside the repository root.
+        let canon_root = repo_root.canonicalize().map_err(|e| {
+            McpError::invalid_params(format!("cannot resolve repo root: {e}"), None)
+        })?;
+        let canon_path = full_path.canonicalize().map_err(|e| {
+            McpError::invalid_params(format!("cannot resolve '{path_label}': {e}"), None)
+        })?;
+        if !canon_path.starts_with(&canon_root) {
+            return Err(McpError::invalid_params("path escapes repo root", None));
+        }
 
-    let value = read_sliced(
-        &canon_path,
-        &args.path,
-        limits,
-        args.start_line,
-        args.end_line,
-    )?;
+        read_sliced(&canon_path, &path_label, limits, start_line, end_line)
+    })
+    .await??;
     json_result(&value)
 }
 
@@ -156,20 +147,13 @@ pub struct GrepMatch {
     pub text: String,
 }
 
-pub async fn grep_files(graph_key: &str, args: GrepFilesArgs) -> Result<CallToolResult, McpError> {
+pub async fn grep_files(
+    repo_root: PathBuf,
+    args: GrepFilesArgs,
+) -> Result<CallToolResult, McpError> {
     // Validate the cheap, registry-free inputs first.
     let regex = compile_pattern(&args.pattern)?;
     let glob = compile_glob(&args.glob)?;
-
-    let repo_root = find_repo_path(
-        if args.repo.is_empty() {
-            None
-        } else {
-            Some(args.repo.as_str())
-        },
-        graph_key,
-    )
-    .map_err(|e| McpError::invalid_params(e, None))?;
 
     let limit = if args.limit == 0 {
         GREP_DEFAULT_LIMIT
@@ -180,9 +164,8 @@ pub async fn grep_files(graph_key: &str, args: GrepFilesArgs) -> Result<CallTool
 
     // The walk is synchronous filesystem I/O over the whole repo — keep it off
     // the async workers.
-    let root = std::path::PathBuf::from(&repo_root);
     let (matches, truncated) = run_blocking(blocking_timeout(), "grep", move || {
-        grep_dir(&root, &regex, glob.as_ref(), limit)
+        grep_dir(&repo_root, &regex, glob.as_ref(), limit)
     })
     .await?;
 

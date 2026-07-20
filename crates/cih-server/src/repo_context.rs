@@ -70,6 +70,8 @@ pub(crate) struct RepoContext {
 
 #[async_trait]
 pub(crate) trait RepoContextProvider: Send + Sync {
+    fn resolve_repo(&self, selector: RepoSelector) -> Result<ResolvedRepo, AppError>;
+
     async fn resolve(&self, selector: RepoSelector) -> Result<Arc<RepoContext>, AppError>;
 }
 
@@ -221,9 +223,14 @@ impl DefaultRepoContextProvider {
 
 #[async_trait]
 impl RepoContextProvider for DefaultRepoContextProvider {
+    fn resolve_repo(&self, selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
+        self.catalog
+            .resolve(&selector, &self.primary_graph_key)
+            .map(ResolvedRepo::from_entry)
+    }
+
     async fn resolve(&self, selector: RepoSelector) -> Result<Arc<RepoContext>, AppError> {
-        let entry = self.catalog.resolve(&selector, &self.primary_graph_key)?;
-        let repo = ResolvedRepo::from_entry(entry);
+        let repo = self.resolve_repo(selector)?;
         let graph_key = repo.graph_key().to_string();
         let graph_key_for_init = graph_key.clone();
         let infrastructure = self.infrastructure.clone();
@@ -443,6 +450,30 @@ mod tests {
             unversioned_artifacts_dir(Path::new("/a/.cih/artifacts/deadbeef")),
             unversioned_artifacts_dir(Path::new("/b/.cih/artifacts/deadbeef"))
         );
+    }
+
+    #[test]
+    fn identity_only_resolution_does_not_initialize_infrastructure() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join(".cih/artifacts/v1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let catalog = Arc::new(TestCatalog::new([entry(
+            "repo",
+            temp.path(),
+            "graph",
+            &artifacts,
+        )]));
+        let infra = infrastructure(0, Duration::ZERO);
+        let provider = provider("primary", catalog, infra.clone());
+
+        let repo = provider
+            .resolve_repo(RepoSelector::NameOrPath("repo".into()))
+            .unwrap();
+
+        assert_eq!(repo.graph_key(), "graph");
+        assert_eq!(repo.canonical_path, temp.path().canonicalize().unwrap());
+        assert_eq!(infra.graph_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(infra.search_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -31,7 +31,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ApiImpactArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::api_impact(args, &self.xflow).await
+        contracts::api_impact(args, self.repo_context_provider(), &self.xflow).await
     }
 
     #[tool(
@@ -46,7 +46,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TraceFlowXArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::trace_flow_x(args, &self.graph_key, &self.xflow).await
+        contracts::trace_flow_x(args, self.repo_context_provider(), &self.xflow).await
     }
 
     #[tool(
@@ -59,6 +59,6 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ShapeCheckArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::shape_check(args, &self.artifacts).await
+        contracts::shape_check(args, self.repo_context_provider(), &self.artifacts).await
     }
 }

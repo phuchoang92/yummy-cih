@@ -38,7 +38,7 @@ impl CihServer {
         let reg = cih_core::Registry::load_cached();
         let registry_stale = reg.is_stale(&entry.name);
         let groups = overview::group_sections(&entry.name, &reg);
-        let wiki = crate::wiki::list_pages(&self.wiki, &args.repo).await?;
+        let wiki = crate::wiki::list_pages(&self.wiki, &context.repo).await?;
         let response = overview::compose(overview::ComposeCtx {
             store: context.store.as_ref(),
             entry,

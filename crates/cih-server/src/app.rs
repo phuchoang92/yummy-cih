@@ -33,7 +33,7 @@ use rmcp::{
 use crate::args::*;
 use crate::jobs::Jobs;
 use crate::repo_context::{
-    DefaultRepoContextProvider, RepoContext, RepoContextProvider, RepoSelector,
+    DefaultRepoContextProvider, RepoContext, RepoContextProvider, RepoSelector, ResolvedRepo,
 };
 use crate::symbol::{AmbiguousResult, SymbolResolution};
 use crate::utils::{app_error_to_mcp, json_result, text_result, to_mcp};
@@ -138,11 +138,21 @@ impl CihServer {
 
     /// Resolve a tool's repository selector through the central application
     /// provider. MCP mapping stays at this transport boundary.
+    fn resolve_repo(&self, repo: &str) -> Result<ResolvedRepo, McpError> {
+        self.repo_contexts
+            .resolve_repo(RepoSelector::from_wire(repo))
+            .map_err(app_error_to_mcp)
+    }
+
     async fn resolve(&self, repo: &str) -> Result<Arc<RepoContext>, McpError> {
         self.repo_contexts
             .resolve(RepoSelector::from_wire(repo))
             .await
             .map_err(app_error_to_mcp)
+    }
+
+    pub(crate) fn repo_context_provider(&self) -> Arc<dyn RepoContextProvider> {
+        self.repo_contexts.clone()
     }
 
     async fn resolve_symbol(

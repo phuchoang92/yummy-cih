@@ -23,9 +23,11 @@ use rmcp::{model::CallToolResult, ErrorData as McpError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::app_error::AppError;
 use crate::args::{GetWikiPageArgs, SearchWikiArgs};
 use crate::blocking::{blocking_timeout, run_blocking};
-use crate::utils::{json_result, resolve_repo, text_result};
+use crate::repo_context::{RepoContextProvider, RepoSelector, ResolvedRepo};
+use crate::utils::{json_result, text_result};
 
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_LIMIT: usize = 50;
@@ -264,19 +266,15 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     format!("{cut}…")
 }
 
-/// Errors from wiki lookup/search, mapped to HTTP statuses by the axum handler
-/// and to `McpError`s by the MCP tools.
+/// Errors from wiki lookup/search, mapped by the HTTP and MCP adapters.
 pub(crate) enum WikiError {
-    BadRequest(String),
     NotFound(String),
     Internal(String),
 }
 
 fn wiki_err_to_mcp(err: WikiError) -> McpError {
     match err {
-        WikiError::BadRequest(msg) | WikiError::NotFound(msg) => {
-            McpError::invalid_params(msg, None)
-        }
+        WikiError::NotFound(msg) => McpError::invalid_params(msg, None),
         WikiError::Internal(msg) => McpError::internal_error(msg, None),
     }
 }
@@ -425,7 +423,6 @@ fn gate_for(gates: &WikiGates, key: &Path) -> Arc<tokio::sync::Mutex<()>> {
 
 #[derive(Clone)]
 pub(crate) struct WikiSearchState {
-    graph_key: String,
     cache: Arc<tokio::sync::RwLock<HashMap<PathBuf, Arc<WikiIndex>>>>,
     /// Resident renderers for live on-demand page rendering (P3.8), keyed by
     /// repo path, invalidated on node, edge, or enrichment mtime changes.
@@ -443,9 +440,8 @@ pub(crate) struct WikiSearchState {
 }
 
 impl WikiSearchState {
-    pub(crate) fn new(graph_key: String) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            graph_key,
             cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             render_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             live_search_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -458,9 +454,11 @@ impl WikiSearchState {
     /// Resolve `repo` to its live search index, building it (renders all pages)
     /// and caching it on first use, mtime-invalidated. `Ok(None)` when the repo
     /// has no graph artifacts (caller falls back to the on-disk index).
-    async fn live_index_for(&self, repo: &str) -> Result<Option<Arc<LiveWikiIndex>>, WikiError> {
-        let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
-        let repo_path = PathBuf::from(repo_path);
+    async fn live_index_for(
+        &self,
+        repo: &ResolvedRepo,
+    ) -> Result<Option<Arc<LiveWikiIndex>>, WikiError> {
+        let repo_path = repo.canonical_path.clone();
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
@@ -506,10 +504,9 @@ impl WikiSearchState {
     /// and `render_slug` run on `spawn_blocking`.
     pub(crate) async fn resident_for(
         &self,
-        repo: &str,
+        repo: &ResolvedRepo,
     ) -> Result<Option<Arc<cih_wiki::OwnedWiki>>, WikiError> {
-        let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
-        let repo_path = PathBuf::from(repo_path);
+        let repo_path = repo.canonical_path.clone();
         // No graph artifacts ⇒ nothing to render (caller falls back to on-disk).
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
@@ -552,12 +549,10 @@ impl WikiSearchState {
         Ok(Some(owned))
     }
 
-    /// Resolve `repo` (registry name/path, or empty for the active graph key)
-    /// to its cached wiki index. The single entry point shared by the axum
-    /// handler and the MCP tools.
-    pub(crate) async fn index_for(&self, repo: &str) -> Result<Arc<WikiIndex>, WikiError> {
-        let (repo_path, _) = resolve_repo(repo, &self.graph_key).map_err(WikiError::BadRequest)?;
-        let wiki_dir = Path::new(&repo_path).join(".cih").join("wiki");
+    /// Return the cached wiki index for an already-resolved repository. The
+    /// single entry point is shared by the Axum handler and MCP tools.
+    pub(crate) async fn index_for(&self, repo: &ResolvedRepo) -> Result<Arc<WikiIndex>, WikiError> {
+        let wiki_dir = repo.canonical_path.join(".cih").join("wiki");
         if !wiki_dir.join("manifest.json").is_file() {
             return Err(WikiError::NotFound(format!(
                 "no generated wiki at {} — run `cih-engine wiki <repo>` first",
@@ -623,23 +618,38 @@ pub(crate) struct WikiSearchParams {
     limit: Option<usize>,
 }
 
-pub(crate) fn router(state: WikiSearchState) -> Router {
+#[derive(Clone)]
+struct WikiRouterState {
+    wiki: WikiSearchState,
+    repo_contexts: Arc<dyn RepoContextProvider>,
+}
+
+pub(crate) fn router(wiki: WikiSearchState, repo_contexts: Arc<dyn RepoContextProvider>) -> Router {
     Router::new()
         .route("/wiki/search", get(wiki_search_handler))
-        .with_state(state)
+        .with_state(WikiRouterState {
+            wiki,
+            repo_contexts,
+        })
 }
 
 async fn wiki_search_handler(
-    State(state): State<WikiSearchState>,
+    State(state): State<WikiRouterState>,
     Query(params): Query<WikiSearchParams>,
 ) -> Response {
     let query = params.q.trim();
     if query.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "missing query parameter 'q'");
     }
-    let index = match state.index_for(&params.repo).await {
+    let repo = match state
+        .repo_contexts
+        .resolve_repo(RepoSelector::from_wire(&params.repo))
+    {
+        Ok(repo) => repo,
+        Err(error) => return app_error_response(error),
+    };
+    let index = match state.wiki.index_for(&repo).await {
         Ok(index) => index,
-        Err(WikiError::BadRequest(msg)) => return error_response(StatusCode::BAD_REQUEST, &msg),
         Err(WikiError::NotFound(msg)) => return error_response(StatusCode::NOT_FOUND, &msg),
         Err(WikiError::Internal(msg)) => {
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg)
@@ -669,6 +679,38 @@ fn error_response(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
+fn app_error_response(error: AppError) -> Response {
+    match error {
+        AppError::InvalidInput { field, message } => error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid {field}: {message}"),
+        ),
+        AppError::NotFound { entity, key } => error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("{entity} '{key}' not found"),
+        ),
+        AppError::Unavailable {
+            dependency,
+            message,
+            retryable,
+        } => {
+            tracing::error!(
+                dependency,
+                error = %message,
+                retryable,
+                "wiki repository dependency unavailable"
+            );
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "{dependency} unavailable{}",
+                    if retryable { "; retry shortly" } else { "" }
+                ),
+            )
+        }
+    }
+}
+
 /// MCP tool body for `search_wiki`.
 ///
 /// P3.8: searches a **live** index built from the resident graph (no
@@ -676,6 +718,7 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 /// when the repo has no graph artifacts.
 pub(crate) async fn search_wiki(
     state: &WikiSearchState,
+    repo: &ResolvedRepo,
     args: SearchWikiArgs,
 ) -> Result<CallToolResult, McpError> {
     let query = args.query.trim();
@@ -698,11 +741,7 @@ pub(crate) async fn search_wiki(
     };
 
     // Live index first.
-    if let Some(live) = state
-        .live_index_for(&args.repo)
-        .await
-        .map_err(wiki_err_to_mcp)?
-    {
+    if let Some(live) = state.live_index_for(repo).await.map_err(wiki_err_to_mcp)? {
         let hits = live.search(query, &facets, limit);
         return json_result(&json!({
             "query": query,
@@ -713,7 +752,7 @@ pub(crate) async fn search_wiki(
     }
 
     // Fallback: on-disk generated bundle.
-    let index = state.index_for(&args.repo).await.map_err(wiki_err_to_mcp)?;
+    let index = state.index_for(repo).await.map_err(wiki_err_to_mcp)?;
     let hits = index.search(query, &facets, limit);
     json_result(&json!({
         "repo": index.repo_name,
@@ -742,7 +781,7 @@ pub(crate) struct WikiListing {
 /// when the repo has neither (the overview degrades the section explicitly).
 pub(crate) async fn list_pages(
     state: &WikiSearchState,
-    repo: &str,
+    repo: &ResolvedRepo,
 ) -> Result<Option<WikiListing>, McpError> {
     match state.live_index_for(repo).await {
         Ok(Some(live)) => {
@@ -778,14 +817,11 @@ pub(crate) async fn list_pages(
 /// isn't a live page.
 pub(crate) async fn get_wiki_page(
     state: &WikiSearchState,
+    repo: &ResolvedRepo,
     args: GetWikiPageArgs,
 ) -> Result<CallToolResult, McpError> {
     // Live render first.
-    if let Some(owned) = state
-        .resident_for(&args.repo)
-        .await
-        .map_err(wiki_err_to_mcp)?
-    {
+    if let Some(owned) = state.resident_for(repo).await.map_err(wiki_err_to_mcp)? {
         let slug = args.slug.clone();
         let rendered = run_blocking(blocking_timeout(), "wiki render", move || {
             owned.render_slug(&slug)
@@ -797,7 +833,7 @@ pub(crate) async fn get_wiki_page(
         // Slug not a live page → fall through to on-disk (e.g. legacy bundle).
     }
 
-    let index = state.index_for(&args.repo).await.map_err(wiki_err_to_mcp)?;
+    let index = state.index_for(repo).await.map_err(wiki_err_to_mcp)?;
     let page = index.page_by_slug(&args.slug).ok_or_else(|| {
         McpError::invalid_params(
             format!(

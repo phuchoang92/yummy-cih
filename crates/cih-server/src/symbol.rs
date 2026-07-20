@@ -61,28 +61,6 @@ pub async fn resolve_symbol(
     })
 }
 
-/// Find repo path: explicit `repo` arg → registry by name/path; or fallback to
-/// first registry entry whose `graph_key` matches the server's active key.
-pub fn find_repo_path(repo: Option<&str>, graph_key: &str) -> std::result::Result<String, String> {
-    let reg = cih_core::Registry::load();
-    if reg.entries.is_empty() {
-        return Err("no repos in registry — run `cih-engine analyze <repo>` first".to_string());
-    }
-    if let Some(name_or_path) = repo {
-        reg.find(name_or_path)
-            .map(|e| e.path.clone())
-            .ok_or_else(|| format!("repo '{name_or_path}' not in registry"))
-    } else {
-        reg.entries
-            .iter()
-            .find(|e| e.graph_key == graph_key)
-            .map(|e| e.path.clone())
-            .ok_or_else(|| {
-                format!("no repo registered for graph_key '{graph_key}'; pass `repo` explicitly")
-            })
-    }
-}
-
 /// Run `git diff --name-only` and return repo-relative file paths.
 pub fn git_changed_files(
     repo_path: &str,

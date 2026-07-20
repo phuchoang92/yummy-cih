@@ -22,7 +22,8 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<SearchWikiArgs>,
     ) -> Result<CallToolResult, McpError> {
-        wiki::search_wiki(&self.wiki, args).await
+        let repo = self.resolve_repo(&args.repo)?;
+        wiki::search_wiki(&self.wiki, &repo, args).await
     }
 
     #[tool(
@@ -34,6 +35,7 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<GetWikiPageArgs>,
     ) -> Result<CallToolResult, McpError> {
-        wiki::get_wiki_page(&self.wiki, args).await
+        let repo = self.resolve_repo(&args.repo)?;
+        wiki::get_wiki_page(&self.wiki, &repo, args).await
     }
 }
