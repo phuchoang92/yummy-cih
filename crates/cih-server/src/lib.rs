@@ -2,7 +2,7 @@
 //!
 //! The public surface is deliberately small: [`run`] (the server entry point
 //! used by the `cih-server` binary) plus the modules exercised by integration
-//! tests (`args`, `browser`, `patterns`, `search`, `utils`, `viz`, `wiki`).
+//! tests (`args`, `browser`, `search`, `utils`, `viz`, `wiki`).
 //! Everything else is crate-private wiring.
 
 mod application;
@@ -12,7 +12,6 @@ mod infrastructure;
 mod ports;
 mod transport;
 
-pub mod args;
 pub mod utils;
 pub mod viz;
 
@@ -20,6 +19,11 @@ pub(crate) mod config;
 pub(crate) mod layout;
 
 pub use bootstrap::run;
+
+/// Compatibility exports for MCP argument DTOs used by downstream clients.
+pub mod args {
+    pub use crate::transport::mcp::args::*;
+}
 
 /// Compatibility exports for graph-browser helpers used by downstream tests.
 pub mod browser {
@@ -40,9 +44,5 @@ pub mod wiki {
     pub use crate::infrastructure::wiki_repository::{
         load_wiki_index, make_snippet, strip_front_matter, PageMeta, WikiFacets, WikiHit,
         WikiIndex, DEFAULT_LIMIT, MAX_LIMIT, SNIPPET_MAX_CHARS,
-    };
-    pub(crate) use crate::infrastructure::wiki_repository::{
-        read_page_raw, Manifest, WikiBundlePageRepository, WikiBundleSearchRepository,
-        WikiOverviewRepository, WikiSearchState,
     };
 }

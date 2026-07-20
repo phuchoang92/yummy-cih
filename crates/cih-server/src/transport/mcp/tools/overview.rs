@@ -9,7 +9,7 @@ use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 use super::super::error::{app_error_to_mcp, json_result};
 use super::super::CihServer;
 use crate::application::architecture_overview::ArchitectureOverviewCommand;
-use crate::args::ArchitectureOverviewArgs;
+use crate::transport::mcp::args::ArchitectureOverviewArgs;
 
 #[tool_router(router = overview_router, vis = "pub(crate)")]
 impl CihServer {

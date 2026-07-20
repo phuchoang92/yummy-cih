@@ -1,3 +1,5 @@
+//! RMCP request argument DTOs.
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

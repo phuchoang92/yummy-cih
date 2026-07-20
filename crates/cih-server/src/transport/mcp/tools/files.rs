@@ -6,7 +6,7 @@ use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 use super::super::error::{app_error_to_mcp, json_result};
 use super::super::CihServer;
 use crate::application::files::{GrepFilesCommand, ReadFileCommand};
-use crate::args::{GrepFilesArgs, ReadFileArgs};
+use crate::transport::mcp::args::{GrepFilesArgs, ReadFileArgs};
 
 #[tool_router(router = files_router, vis = "pub(crate)")]
 impl CihServer {

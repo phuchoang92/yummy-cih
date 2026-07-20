@@ -9,7 +9,9 @@ use crate::application::taint::TaintPathsCommand;
 use crate::application::testing::{
     RegressionScopeCommand, TestCoverageCommand, UntestedPathsCommand,
 };
-use crate::args::{RegressionScopeArgs, TaintPathsArgs, TestCoverageArgs, UntestedPathsArgs};
+use crate::transport::mcp::args::{
+    RegressionScopeArgs, TaintPathsArgs, TestCoverageArgs, UntestedPathsArgs,
+};
 
 #[tool_router(router = testing_router, vis = "pub(crate)")]
 impl CihServer {

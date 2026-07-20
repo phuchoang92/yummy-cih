@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::application::app_services::RepoContextService;
 use crate::domain::error::AppError;
 use crate::domain::repository::RepoSelector;
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 
 #[derive(Clone)]
 pub(crate) struct FileService {
@@ -271,7 +271,7 @@ fn invalid(field: &'static str, message: impl Into<String>) -> AppError {
     }
 }
 
-fn blocking_error(error: crate::infrastructure::blocking_runtime::BlockingError) -> AppError {
+fn blocking_error(error: crate::ports::blocking_runtime::BlockingError) -> AppError {
     AppError::Unavailable {
         dependency: "blocking runtime",
         message: error.to_string(),

@@ -8,7 +8,9 @@ use super::super::CihServer;
 use crate::application::contracts::{
     ApiImpactCommand, GroupContractsCommand, ShapeCheckCommand, TraceFlowXCommand,
 };
-use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
+use crate::transport::mcp::args::{
+    ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs,
+};
 
 #[tool_router(router = crossrepo_router, vis = "pub(crate)")]
 impl CihServer {

@@ -1,14 +1,12 @@
-//! Runtime config + the GraphStore factory (ports & adapters wiring).
+//! Runtime configuration and validated environment policy.
 //!
 //! `CIH_GRAPH_BACKEND` selects the adapter — `falkor` now (dev / open-source),
 //! `neptune` at go-live, `postgres` as the ~$0 fallback. Swapping backends is a
 //! one-line env change; nothing else in the server cares which store it is.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use cih_graph_store::GraphStore;
 
 #[derive(Clone)]
 pub struct Config {
@@ -234,37 +232,6 @@ pub fn store_options(cfg: &Config) -> cih_store_factory::StoreOptions {
             std::time::Duration::from_millis(cfg.query_queue_timeout_ms),
         )),
     }
-}
-
-/// Build the configured `GraphStore` via the shared factory, then initialize
-/// its schema with a retry loop that rides out DB startup races. Schema init
-/// stays caller policy: per-key stores connected while serving traffic do a
-/// single-shot `ensure_schema` instead (`RepoContextProvider`).
-pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
-    let store = cih_store_factory::connect_store(
-        &cfg.backend,
-        &cfg.falkor_url,
-        &cfg.graph_key,
-        &store_options(cfg),
-    )?;
-    let mut last_err = None;
-    for attempt in 1u32..=5 {
-        match store.ensure_schema().await {
-            Ok(_) => {
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                tracing::warn!(attempt, error = %e, "graph store not ready, retrying in 2s");
-                last_err = Some(e);
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        }
-    }
-    if let Some(e) = last_err {
-        return Err(anyhow::anyhow!("graph schema init failed: {e}"));
-    }
-    Ok(store)
 }
 
 #[cfg(test)]

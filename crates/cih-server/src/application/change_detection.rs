@@ -10,15 +10,9 @@ use serde::Serialize;
 
 use crate::domain::completeness::Completeness;
 use crate::domain::error::AppError;
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking, BlockingError};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking, BlockingError};
+use crate::ports::changed_files_source::{ChangeScope, ChangedFilesSource};
 use crate::ports::repo_context_provider::RepoContext;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChangeScope {
-    Working,
-    Staged,
-    BaseRef,
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct DetectChangesCommand {
@@ -83,28 +77,6 @@ impl DetectChangesBudget {
     }
 }
 
-trait ChangedFilesSource: Send + Sync {
-    fn changed_files(
-        &self,
-        repo_path: &str,
-        scope: ChangeScope,
-        base_ref: Option<&str>,
-    ) -> Result<Vec<String>, String>;
-}
-
-struct GitChangedFilesSource;
-
-impl ChangedFilesSource for GitChangedFilesSource {
-    fn changed_files(
-        &self,
-        repo_path: &str,
-        scope: ChangeScope,
-        base_ref: Option<&str>,
-    ) -> Result<Vec<String>, String> {
-        git_changed_files(repo_path, scope, base_ref)
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct ChangeDetectionService {
     changed_files: Arc<dyn ChangedFilesSource>,
@@ -112,9 +84,9 @@ pub(crate) struct ChangeDetectionService {
 }
 
 impl ChangeDetectionService {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(changed_files: Arc<dyn ChangedFilesSource>) -> Self {
         Self {
-            changed_files: Arc::new(GitChangedFilesSource),
+            changed_files,
             budget: DetectChangesBudget::from_env(),
         }
     }
@@ -129,44 +101,6 @@ impl ChangeDetectionService {
             budget,
         }
     }
-}
-
-fn git_changed_files(
-    repo_path: &str,
-    scope: ChangeScope,
-    base_ref: Option<&str>,
-) -> Result<Vec<String>, String> {
-    let mut command = std::process::Command::new("git");
-    command.arg("diff").arg("--name-only");
-    match scope {
-        ChangeScope::Staged => {
-            command.arg("--cached").arg("HEAD");
-        }
-        ChangeScope::BaseRef => {
-            let base_ref = base_ref
-                .ok_or_else(|| "`base_ref` scope requires the `base_ref` argument".to_string())?;
-            command.arg(base_ref);
-        }
-        ChangeScope::Working => {
-            command.arg("HEAD");
-        }
-    }
-    command.arg("--").current_dir(repo_path);
-    let output = command
-        .output()
-        .map_err(|error| format!("git diff failed: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git diff error: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(String::from)
-        .collect())
 }
 
 fn blocking_error(error: BlockingError) -> AppError {

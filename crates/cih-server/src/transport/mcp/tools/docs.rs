@@ -6,7 +6,7 @@ use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 use super::super::error::{app_error_to_mcp, json_result, text_result};
 use super::super::CihServer;
 use crate::application::wiki_search::{WikiPageCommand, WikiSearchCommand};
-use crate::args::{GetWikiPageArgs, SearchWikiArgs};
+use crate::transport::mcp::args::{GetWikiPageArgs, SearchWikiArgs};
 
 #[tool_router(router = wiki_router, vis = "pub(crate)")]
 impl CihServer {

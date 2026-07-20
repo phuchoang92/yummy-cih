@@ -75,6 +75,26 @@ graph, and **taint analysis** (`cih-taint`) walks source→sink flows for securi
 Both binaries — `cih-engine` (CLI) and `cih-server` (MCP) — are **thin shims** over
 their library crates (`cih_engine` / `cih_server`).
 
+## Adding a cih-server capability
+
+Follow the existing request path:
+
+1. Add the protocol DTO to `transport/mcp/args.rs`.
+2. Add a validated command and typed output to the owning `application`
+   capability.
+3. Depend on a `ports` trait when the use case needs files, processes,
+   persistence, registry data, or another external system.
+4. Implement that port under `infrastructure` and wire it once in
+   `bootstrap::assemble_services`.
+5. Keep the MCP or HTTP adapter limited to conversion, one application call,
+   and response/error mapping.
+6. Add direct application tests, serialization contract coverage, and adapter
+   dispatch coverage when the tool surface changes.
+
+Do not import `rmcp` or Axum outside `transport`, and do not import
+`infrastructure` from production `application` code. The
+`architecture_boundaries` integration test enforces these rules.
+
 ## Suggested reading order
 
 To understand the concepts without drowning, read in dependency order — each builds
@@ -86,8 +106,9 @@ on the last:
    file become nodes + unresolved references.
 3. **`cih-resolve/src/index.rs` + `emit.rs`** — how references become edges.
 4. **`cih-falkor/src/lib.rs`** (+ `bulk.rs`) — how the graph is loaded and queried.
-5. **`cih-server/src/app.rs`** — how a tool call (`trace_flow`, `impact`) becomes a
-   graph query and an answer.
+5. **`cih-server/src/transport/mcp/tools/graph.rs`** and
+   **`cih-server/src/application/graph/mod.rs`** — how a tool call becomes a
+   validated application command, graph query, and typed answer.
 6. **`cih-engine/src/cmd/analyze.rs`** — how it's all wired end-to-end.
 
 ## Where things live

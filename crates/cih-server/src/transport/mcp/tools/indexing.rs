@@ -11,7 +11,7 @@ use crate::application::admin::resolve_patterns::{
 use crate::application::indexing::{
     CancelIndexCommand, IndexRepositoryCommand, IndexStatusCommand,
 };
-use crate::args::{
+use crate::transport::mcp::args::{
     AddResolvePatternArgs, IndexCancelArgs, IndexRepoArgs, IndexStatusArgs, ListResolvePatternsArgs,
 };
 

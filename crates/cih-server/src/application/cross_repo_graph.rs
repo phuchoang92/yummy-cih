@@ -1,4 +1,4 @@
-//! Cross-repo flow tracing over per-repo graph artifacts (the `shape_check`
+//! Application-level cross-repo flow tracing over per-repo graph artifacts (the `shape_check`
 //! pattern — no multi-graph server, no merged graph). A pure BFS core walks
 //! one repo's `ArtifactGraph`, hops to sibling repos through the group's
 //! precomputed `ContractMatch` rows, and carries explicit budgets. Entirely
@@ -17,14 +17,14 @@ use serde::Serialize;
 
 use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
-use crate::infrastructure::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
+use crate::ports::artifact_repository::{ArtifactIndexes, ArtifactRepository, ArtifactSnapshot};
 use crate::utils::node_prop_str_owned;
 
 // ── Artifact graph ───────────────────────────────────────────────────────────
 
 pub(crate) struct ArtifactGraph {
     snapshot: Arc<ArtifactSnapshot>,
-    indexes: Arc<crate::infrastructure::artifact_repository::ArtifactIndexes>,
+    indexes: Arc<ArtifactIndexes>,
 }
 
 impl ArtifactGraph {
@@ -450,7 +450,8 @@ pub(crate) fn resolve_entry(graph: &ArtifactGraph, entry: &str) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::artifact_repository::{ArtifactCache, ArtifactRepository};
+    use crate::infrastructure::artifact_repository::ArtifactCache;
+    use crate::ports::artifact_repository::ArtifactRepository;
     use cih_core::{NodeId, NodeKind, Range};
     use std::collections::HashMap;
 

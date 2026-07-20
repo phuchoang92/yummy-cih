@@ -1,5 +1,35 @@
 # Architecture — parser assumptions & known limitations
 
+## CIH server architecture
+
+`cih-server` uses a clean, ports-and-adapters structure. The dependency flow is:
+
+```text
+MCP / HTTP transport -> application services -> domain + ports
+                                                 ^
+                                                 |
+                                      infrastructure adapters
+```
+
+- `bootstrap.rs` is the composition root. It reads configuration, constructs
+  concrete adapters, assembles `AppServices`, and starts HTTP/MCP transports.
+- `transport/mcp` owns RMCP request DTOs, tool routers, resources, and
+  `AppError` mapping. `transport/http` owns Axum handlers and route state.
+- `application` owns validated commands, orchestration, and typed outputs. A
+  use case must be callable without RMCP or Axum.
+- `domain` owns protocol-independent identities, errors, completeness, and job
+  state.
+- `ports` define repository, search, artifact, indexing, source-control, and
+  bounded-work boundaries consumed by application services.
+- `infrastructure` implements those boundaries with registries, graph stores,
+  files, caches, Git, wiki bundles, and local index processes.
+
+Production dependencies are enforced by
+`cih-server/tests/architecture_boundaries.rs`: domain cannot depend inward;
+application cannot import transport or infrastructure; ports cannot import
+adapters or transports. Public `args`, `browser`, `search`, and `wiki` modules
+in `lib.rs` are compatibility facades only.
+
 CIH builds its graph from tree-sitter parses plus a set of framework/SQL
 heuristics. The heuristics are deliberately conservative: when a fact can't be
 established statically, CIH prefers to emit nothing (or mark it uncertain) rather

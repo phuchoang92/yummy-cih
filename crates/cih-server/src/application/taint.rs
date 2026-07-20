@@ -13,10 +13,8 @@ use serde::Serialize;
 
 use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
-use crate::infrastructure::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
-use crate::infrastructure::blocking_runtime::{
-    blocking_timeout, run_blocking_heavy, BlockingError,
-};
+use crate::ports::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking_heavy, BlockingError};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;

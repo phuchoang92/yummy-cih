@@ -1,14 +1,14 @@
 //! CIH MCP server transport, tool routing, resources, and protocol metadata.
 //!
-//! Exposes the code-intelligence graph as MCP tools that map 1:1 onto
-//! `GraphStore` methods. The graph backend (FalkorDB now, Neptune at go-live)
-//! is selected by `CIH_GRAPH_BACKEND` and injected as `Arc<dyn GraphStore>`.
+//! Exposes code-intelligence application services as MCP tools. Storage,
+//! repository, search, and artifact adapters are assembled in `bootstrap` and
+//! reached only through the injected `AppServices`.
 //!
 //! ⚠️ rmcp version note: the `#[tool_router]` / `#[tool]` / `ServerHandler`
 //! macros and the `StreamableHttpService` constructor shape move between rmcp
 //! releases. If `cargo build` flags the wiring below, reconcile it against
-//! docs.rs for the version you resolve — the tool BODIES (the `self.store.*`
-//! calls) are SDK-agnostic and stay as-is.
+//! docs.rs for the version you resolve. Protocol-specific changes stay in this
+//! transport namespace.
 
 use std::sync::Arc;
 
@@ -236,12 +236,13 @@ impl ServerHandler for CihServer {
     ) -> Result<ReadResourceResult, McpError> {
         // Resource reads scan artifact files — heavy lane, not the worker.
         let catalog = self.catalog_snapshot();
-        crate::infrastructure::blocking_runtime::run_blocking_heavy(
-            crate::infrastructure::blocking_runtime::blocking_timeout(),
+        crate::ports::blocking_runtime::run_blocking_heavy(
+            crate::ports::blocking_runtime::blocking_timeout(),
             "resource read",
             move || super::resources::read_resource(&catalog, request),
         )
-        .await?
+        .await
+        .map_err(|error| McpError::internal_error(error.to_string(), None))?
     }
 }
 #[cfg(test)]

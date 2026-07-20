@@ -6,7 +6,7 @@ use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 use super::super::error::{app_error_to_mcp, json_result};
 use super::super::CihServer;
 use crate::application::admin::RepoStatusCommand;
-use crate::args::{ListReposArgs, StatusArgs};
+use crate::transport::mcp::args::{ListReposArgs, StatusArgs};
 
 #[tool_router(router = repository_admin_router, vis = "pub(crate)")]
 impl CihServer {

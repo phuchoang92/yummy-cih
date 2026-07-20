@@ -4,19 +4,17 @@
 //! and cross-repo flow. Adjacency indexes are lazy and store positions only,
 //! avoiding the second full-node representation previously owned by xflow.
 
-use std::collections::HashMap;
-use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use cih_core::{Edge, Node};
 
 use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking_heavy};
 use crate::infrastructure::cache::mtime::{CacheMetrics, MtimeCache};
+use crate::ports::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking_heavy};
 use crate::utils::{load_artifact_edges, load_artifact_nodes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,199 +61,16 @@ impl ArtifactFreshness {
     }
 }
 
-pub(crate) struct ArtifactIndexes {
-    pub(crate) node_by_id: HashMap<String, usize>,
-    pub(crate) outgoing_edges: HashMap<String, Vec<usize>>,
-    pub(crate) incoming_edges: HashMap<String, Vec<usize>>,
-}
-
-impl ArtifactIndexes {
-    fn build(nodes: &[Node], edges: &[Edge]) -> Self {
-        let node_by_id = nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node.id.as_str().to_string(), index))
-            .collect();
-        let mut outgoing_edges: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut incoming_edges: HashMap<String, Vec<usize>> = HashMap::new();
-        for (index, edge) in edges.iter().enumerate() {
-            outgoing_edges
-                .entry(edge.src.as_str().to_string())
-                .or_default()
-                .push(index);
-            incoming_edges
-                .entry(edge.dst.as_str().to_string())
-                .or_default()
-                .push(index);
-        }
-        Self {
-            node_by_id,
-            outgoing_edges,
-            incoming_edges,
-        }
-    }
-}
-
-pub(crate) struct ArtifactSnapshot {
-    pub(crate) version: String,
-    pub(crate) nodes: Arc<[Node]>,
-    pub(crate) edges: Arc<[Edge]>,
-    freshness: ArtifactFreshness,
-    indexes: OnceLock<Arc<ArtifactIndexes>>,
-}
-
-impl ArtifactSnapshot {
-    fn from_parts(
-        version: String,
-        nodes: Vec<Node>,
-        edges: Vec<Edge>,
-        freshness: ArtifactFreshness,
-    ) -> Self {
-        Self {
-            version,
-            nodes: nodes.into(),
-            edges: edges.into(),
-            freshness,
-            indexes: OnceLock::new(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_memory(nodes: Vec<Node>, edges: Vec<Edge>) -> Self {
-        let snapshot = Self::from_parts(
-            "memory".to_string(),
-            nodes,
-            edges,
-            ArtifactFreshness {
-                nodes: FileIdentity {
-                    modified: None,
-                    len: None,
-                },
-                edges: FileIdentity {
-                    modified: None,
-                    len: None,
-                },
-            },
-        );
-        snapshot.ensure_indexes_blocking();
-        snapshot
-    }
-
-    fn ensure_indexes_blocking(&self) -> &Arc<ArtifactIndexes> {
-        self.indexes
-            .get_or_init(|| Arc::new(ArtifactIndexes::build(&self.nodes, &self.edges)))
-    }
-
-    pub(crate) fn indexes(&self) -> &Arc<ArtifactIndexes> {
-        self.indexes
-            .get()
-            .expect("indexed snapshot must be prepared by ArtifactRepository")
-    }
-
-    pub(crate) fn estimated_weight_bytes(&self) -> usize {
-        let base = size_of::<Self>()
-            .saturating_add(self.version.capacity())
-            .saturating_add(self.nodes.len().saturating_mul(size_of::<Node>()))
-            .saturating_add(self.edges.len().saturating_mul(size_of::<Edge>()));
-        let node_dynamic = self.nodes.iter().fold(0usize, |total, node| {
-            total
-                .saturating_add(node.id.as_str().len())
-                .saturating_add(node.name.capacity())
-                .saturating_add(node.qualified_name.as_ref().map_or(0, String::capacity))
-                .saturating_add(node.file.capacity())
-                .saturating_add(node.props.as_ref().map_or(0, json_weight))
-        });
-        let edge_dynamic = self.edges.iter().fold(0usize, |total, edge| {
-            total
-                .saturating_add(edge.src.as_str().len())
-                .saturating_add(edge.dst.as_str().len())
-                .saturating_add(edge.reason.capacity())
-                .saturating_add(edge.props.as_ref().map_or(0, json_weight))
-        });
-        let node_index_estimate = self
-            .nodes
-            .iter()
-            .map(|node| {
-                node.id
-                    .as_str()
-                    .len()
-                    .saturating_add(size_of::<(String, usize)>().saturating_mul(2))
-            })
-            .fold(0usize, usize::saturating_add);
-        // Price adjacency conservatively as though every endpoint creates a
-        // map key. Real graphs usually reuse endpoints, so this leaves room
-        // for hash buckets and Vec over-allocation without scanning indexes.
-        let adjacency_index_estimate = self
-            .edges
-            .iter()
-            .map(|edge| {
-                edge.src
-                    .as_str()
-                    .len()
-                    .saturating_add(edge.dst.as_str().len())
-                    .saturating_add(size_of::<(String, Vec<usize>)>().saturating_mul(4))
-                    .saturating_add(size_of::<usize>().saturating_mul(2))
-            })
-            .fold(0usize, usize::saturating_add);
-        base.saturating_add(node_dynamic)
-            .saturating_add(edge_dynamic)
-            .saturating_add(node_index_estimate)
-            .saturating_add(adjacency_index_estimate)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn indexes_initialized(&self) -> bool {
-        self.indexes.get().is_some()
-    }
-}
-
-fn json_weight(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            size_of::<serde_json::Value>()
-        }
-        serde_json::Value::String(value) => {
-            size_of::<serde_json::Value>().saturating_add(value.capacity())
-        }
-        serde_json::Value::Array(values) => values.iter().fold(
-            size_of::<serde_json::Value>().saturating_add(
-                values
-                    .capacity()
-                    .saturating_mul(size_of::<serde_json::Value>()),
-            ),
-            |total, value| total.saturating_add(json_weight(value)),
-        ),
-        serde_json::Value::Object(values) => {
-            values
-                .iter()
-                .fold(size_of::<serde_json::Value>(), |total, (key, value)| {
-                    total
-                        .saturating_add(key.capacity())
-                        .saturating_add(json_weight(value))
-                })
-        }
-    }
-}
-
 /// Cross-call cache of parsed artifacts, keyed by artifacts dir, with
 /// single-flight loads (concurrent first-time loads for the same dir coalesce).
 #[derive(Clone, Default)]
 pub(crate) struct ArtifactCache {
-    cache: Arc<MtimeCache<ArtifactSnapshot>>,
+    cache: Arc<MtimeCache<CachedArtifactSnapshot>>,
 }
 
-#[async_trait]
-pub(crate) trait ArtifactRepository: Send + Sync {
-    async fn snapshot(&self, repo: &ResolvedRepo) -> Result<Arc<ArtifactSnapshot>, AppError>;
-
-    async fn indexed_snapshot(
-        &self,
-        repo: &ResolvedRepo,
-    ) -> Result<Arc<ArtifactSnapshot>, AppError>;
-
-    fn invalidate_repo(&self, repo_path: &Path) -> usize;
-
-    fn metrics(&self) -> CacheMetrics;
+struct CachedArtifactSnapshot {
+    freshness: ArtifactFreshness,
+    snapshot: Arc<ArtifactSnapshot>,
 }
 
 impl ArtifactCache {
@@ -277,22 +92,25 @@ impl ArtifactCache {
             .unwrap_or_else(|_| PathBuf::from(artifacts_dir));
         let key = dir.to_string_lossy().into_owned();
         let freshness = ArtifactFreshness::probe(&dir);
-        self.cache.get_or_load_weighted(
-            &key,
-            |snapshot| snapshot.freshness == freshness && freshness.is_complete(),
-            || {
-                let nodes = load_artifact_nodes(&key)?;
-                let edges = load_artifact_edges(&key)?;
-                let version = dir
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "unversioned".to_string());
-                Ok(ArtifactSnapshot::from_parts(
-                    version, nodes, edges, freshness,
-                ))
-            },
-            ArtifactSnapshot::estimated_weight_bytes,
-        )
+        self.cache
+            .get_or_load_weighted(
+                &key,
+                |cached| cached.freshness == freshness && freshness.is_complete(),
+                || {
+                    let nodes = load_artifact_nodes(&key)?;
+                    let edges = load_artifact_edges(&key)?;
+                    let version = dir
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "unversioned".to_string());
+                    Ok(CachedArtifactSnapshot {
+                        freshness,
+                        snapshot: Arc::new(ArtifactSnapshot::from_parts(version, nodes, edges)),
+                    })
+                },
+                |cached| cached.snapshot.estimated_weight_bytes(),
+            )
+            .map(|cached| cached.snapshot.clone())
     }
 
     async fn load_for_repo(
@@ -346,6 +164,10 @@ impl ArtifactCache {
         );
         Ok(snapshot)
     }
+
+    pub(crate) fn metrics(&self) -> CacheMetrics {
+        self.cache.metrics()
+    }
 }
 
 #[async_trait]
@@ -378,16 +200,12 @@ impl ArtifactRepository for ArtifactCache {
         }
         removed
     }
-
-    fn metrics(&self) -> CacheMetrics {
-        self.cache.metrics()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_core::{EdgeKind, NodeId, NodeKind, Range};
+    use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 
     fn write_fixture(dir: &std::path::Path, edges: &[Edge]) {
         let node = Node {

@@ -5,12 +5,13 @@ use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
 use super::super::error::{app_error_to_mcp, json_result, text_result};
 use super::super::CihServer;
-use crate::application::change_detection::{ChangeScope, DetectChangesCommand};
+use crate::application::change_detection::DetectChangesCommand;
 use crate::application::graph::{
     CommunitiesCommand, ComplexityHotspotsCommand, ContextCommand, DetectChangesForRepoCommand,
     FindDuplicatesCommand, ImpactCommand, RouteMapCommand, SymbolQueryOutput, TraceFlowCommand,
 };
-use crate::args::{
+use crate::ports::changed_files_source::ChangeScope;
+use crate::transport::mcp::args::{
     CommunitiesArgs, CommunitiesFormat, ComplexityHotspotsArgs, ContextArgs, DetectChangesArgs,
     DiffScope, FindDuplicatesArgs, ImpactArgs, ImpactFormat, RouteMapArgs, RouteMapFormat,
     TraceFlowArgs, TraceFlowFormat,

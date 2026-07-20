@@ -1,6 +1,7 @@
 # CIH Server Clean Architecture, Scalability, and Maintainability Proposal
 
-> **Status:** IN PROGRESS - reviewed 2026-07-20; Section 29 first slice
+> **Status:** MILESTONES 1-4 COMPLETE; MILESTONE 5 OPEN - reviewed 2026-07-20;
+> Section 29 first slice
 > implemented 2026-07-20 (S9 graph-key targeting at both sites,
 > `detect_changes` completeness + budgeted batching, typed
 > `DiffScope`/`DirectionArg`, git diff via the blocking pool, `trace_flow`
@@ -106,6 +107,17 @@
 > and the production provider contract proves 32 concurrent failed resolves
 > perform one graph initialization, return the same `AppError`, then retry
 > successfully. This closes the remaining S6 concurrency contract.
+> Clean-architecture migration completed 2026-07-20: `bootstrap.rs` is the
+> composition root; MCP and HTTP adapters live under `transport`; validated
+> commands and typed outputs live under capability-oriented `application`
+> services; protocol-independent state lives under `domain`; external
+> boundaries live under `ports`; and concrete caches, registry/search/wiki,
+> graph-store, Git, artifact, and index-job adapters live under
+> `infrastructure`. `CihServer` retains only `Arc<AppServices>` and its RMCP
+> router. All 31 tools delegate to typed services. A source-level architecture
+> test prevents domain/application/port dependency regressions. Milestone 5's
+> 500k-node benchmarks and disk-backed/indexed optimizations remain separate
+> performance work and are not claimed complete by this migration.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  
@@ -123,7 +135,7 @@
 `cih-server` already has several strong foundations:
 
 - `GraphStore` is an injected port rather than a concrete database dependency.
-- `startup.rs` acts as a composition root.
+- `bootstrap.rs` acts as a composition root.
 - graph query concurrency is bounded by store-level semaphores;
 - CPU-heavy work has an existing `run_blocking` mechanism;
 - tool routers have started moving into capability-oriented modules;
@@ -320,10 +332,10 @@ reserved for external boundaries or test substitution. Concrete use-case
 structs keep call sites clear and avoid type-erasure or object-safety
 complexity.
 
-## 6. Proposed Module Structure
+## 6. Adopted Module Structure
 
-The end state may use the following layout. Migration can move one capability
-at a time.
+The server now uses the following physical layout. Closely related use cases
+share a module until splitting them removes real complexity.
 
 ```text
 crates/cih-server/src/
@@ -334,6 +346,7 @@ crates/cih-server/src/
     mod.rs
     mcp/
       mod.rs
+      args.rs
       server.rs
       error.rs
       resources.rs
@@ -345,6 +358,8 @@ crates/cih-server/src/
         docs.rs
         files.rs
         admin.rs
+        indexing.rs
+        overview.rs
     http/
       mod.rs
       health.rs
@@ -354,58 +369,57 @@ crates/cih-server/src/
   application/
     mod.rs
     app_services.rs
-    repo_context.rs
+    architecture_overview.rs
+    browser.rs
+    change_detection.rs
+    contracts.rs
+    cross_repo_graph.rs
     graph/
-      context.rs
-      impact.rs
-      communities.rs
-      route_map.rs
-      trace_flow.rs
-      detect_changes.rs
-      architecture_overview.rs
+    indexing.rs
     search/
-    cross_repo/
-      trace_flow.rs
-      api_impact.rs
-      shape_check.rs
+    taint.rs
     testing/
-    docs/
+    wiki_search.rs
     files/
     admin/
-      index_repo.rs
-      index_status.rs
       resolve_patterns.rs
 
   domain/
     mod.rs
     error.rs
-    paging.rs
     completeness.rs
-    limits.rs
-    validation.rs
+    indexing.rs
+    repository.rs
 
   ports/
     mod.rs
-    repo_catalog.rs
     repo_context_provider.rs
     artifact_repository.rs
+    blocking_runtime.rs
+    changed_files_source.rs
+    index_target_resolver.rs
     job_scheduler.rs
-    process_runner.rs
+    search_provider.rs
 
   infrastructure/
     mod.rs
-    registry_catalog.rs
     graph_store_provider.rs
     artifact_repository.rs
+    cache/
+      mtime.rs
+      single_flight.rs
+      weighted.rs
+    git_changed_files.rs
+    index_jobs.rs
     search_provider.rs
     wiki_repository.rs
     local_job_scheduler.rs
-    engine_process_runner.rs
-    blocking_runtime.rs
+    repo_context_provider.rs
 ```
 
-This structure is a direction, not a requirement to create every file before
-moving behavior. Empty layers and pass-through modules should not be added.
+Public `args`, `browser`, `search`, and `wiki` modules in `lib.rs` are narrow
+compatibility facades; production wiring does not depend on them. Empty
+`paging`, `limits`, or `validation` modules were deliberately not created.
 
 ## 7. Standard Request Pattern
 
@@ -1544,6 +1558,17 @@ Implementation progress (2026-07-20):
 - [x] pass `GraphBrowserService`, `WikiSearchService`, and
   `ReadinessService` to browser/HTTP routes instead of raw stores, search
   state, or repository providers.
+- [x] migrate all remaining graph, search, testing, file, repository-admin,
+  wiki-page, and resolve-pattern handlers to typed application services;
+- [x] reduce `CihServer` to `Arc<AppServices>` plus its RMCP router;
+- [x] move MCP arguments, resources, error mapping, and all 31 tool adapters
+  under `transport::mcp`;
+- [x] extract artifact, search, repository-context, indexing, Git-diff, and
+  bounded-work boundaries under `ports`;
+- [x] move concrete graph-store, cache, artifact, search, wiki, Git, and local
+  job implementations under `infrastructure`;
+- [x] add automated domain/application/port dependency-boundary tests and
+  document the adopted feature-slice pattern.
 
 Exit criteria:
 

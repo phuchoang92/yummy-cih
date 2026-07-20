@@ -25,8 +25,8 @@ use crate::application::wiki_search::{
 };
 use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::infrastructure::cache::weighted::{AsyncCacheMetrics, AsyncWeightedCache};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_LIMIT: usize = 50;
@@ -959,7 +959,7 @@ fn wiki_app_error(error: WikiError) -> AppError {
     }
 }
 
-fn blocking_app_error(error: crate::infrastructure::blocking_runtime::BlockingError) -> AppError {
+fn blocking_app_error(error: crate::ports::blocking_runtime::BlockingError) -> AppError {
     AppError::Unavailable {
         dependency: "blocking runtime",
         message: error.to_string(),

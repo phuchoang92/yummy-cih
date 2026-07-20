@@ -1,4 +1,4 @@
-//! Deadlines for the server's blocking loads. Every CPU-/IO-heavy operation runs
+//! Bounded execution boundary for blocking loads. Every CPU-/IO-heavy operation runs
 //! on the Tokio blocking pool via `spawn_blocking`; [`run_blocking`] wraps that
 //! with a timeout so a wedged load (corrupt artifact, pathological regex, a stuck
 //! read) returns a typed error instead of hanging up to the 120 s HTTP
@@ -13,7 +13,6 @@ use std::fmt;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use rmcp::ErrorData as McpError;
 use tokio::sync::Semaphore;
 
 /// Failure of a deadline-guarded blocking task.
@@ -52,14 +51,6 @@ impl fmt::Display for BlockingError {
 }
 
 impl std::error::Error for BlockingError {}
-
-// Lets the McpError tool handlers use `?` directly; `anyhow` sites get `?` for
-// free via the `std::error::Error` impl above.
-impl From<BlockingError> for McpError {
-    fn from(err: BlockingError) -> Self {
-        McpError::internal_error(err.to_string(), None)
-    }
-}
 
 /// Run `f` on the blocking pool with a deadline. Returns the value, or
 /// [`BlockingError`] on timeout or panic. On timeout the underlying task is
@@ -288,33 +279,5 @@ mod tests {
         )
         .await;
         assert_eq!(out.unwrap(), 2);
-    }
-
-    #[test]
-    fn saturated_maps_to_mcp_internal_error_with_label() {
-        let err = BlockingError::Saturated {
-            label: "api_impact artifact load",
-            waited_secs: 5,
-        };
-        let mcp: McpError = err.into();
-        let rendered = format!("{mcp:?}");
-        assert!(
-            rendered.contains("api_impact artifact load"),
-            "got: {rendered}"
-        );
-        assert!(rendered.contains("saturated"), "got: {rendered}");
-    }
-
-    #[test]
-    fn timed_out_maps_to_mcp_internal_error_with_label() {
-        let err = BlockingError::TimedOut {
-            label: "bm25 index build",
-            secs: 90,
-        };
-        let mcp: McpError = err.into();
-        // Debug carries the message regardless of rmcp's exact field accessor.
-        let rendered = format!("{mcp:?}");
-        assert!(rendered.contains("bm25 index build"), "got: {rendered}");
-        assert!(rendered.contains("90s"), "got: {rendered}");
     }
 }

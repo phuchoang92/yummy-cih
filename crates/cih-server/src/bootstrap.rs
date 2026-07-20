@@ -32,6 +32,7 @@ use crate::application::browser::GraphBrowserService;
 use crate::application::browser::ReadinessService;
 use crate::application::change_detection::ChangeDetectionService;
 use crate::application::contracts::ContractService;
+use crate::application::cross_repo_graph::XflowState;
 use crate::application::files::{FileService, ReadFileLimits};
 use crate::application::graph::GraphQueryService;
 use crate::application::indexing::IndexingService;
@@ -39,15 +40,17 @@ use crate::application::search::SearchService;
 use crate::application::taint::TaintService;
 use crate::application::testing::TestingService;
 use crate::application::wiki_search::{WikiPageService, WikiSearchService};
-use crate::config::{build_store, CacheBudgets, Config};
-use crate::infrastructure::artifact_repository::{ArtifactCache, ArtifactRepository};
-use crate::infrastructure::cross_repo_graph::XflowState;
+use crate::config::{CacheBudgets, Config};
+use crate::infrastructure::artifact_repository::ArtifactCache;
+use crate::infrastructure::git_changed_files::GitChangedFilesSource;
+use crate::infrastructure::graph_store_provider::build_store;
 use crate::infrastructure::local_job_scheduler::{IndexScheduler, RegistryIndexTargetResolver};
 use crate::infrastructure::repo_context_provider::DefaultRepoContextProvider;
 use crate::infrastructure::search_provider::{SearchCache, SearchState};
 use crate::infrastructure::wiki_repository::{
     WikiBundlePageRepository, WikiBundleSearchRepository, WikiOverviewRepository, WikiSearchState,
 };
+use crate::ports::artifact_repository::ArtifactRepository;
 use crate::ports::repo_context_provider::RepoContextProvider;
 use crate::transport::http::{browser, health, wiki as wiki_http};
 use crate::transport::mcp::CihServer;
@@ -116,7 +119,10 @@ pub(crate) fn assemble_services(
     Arc::new(AppServices {
         repos: repos.clone(),
         graph: GraphUseCases {
-            queries: GraphQueryService::new(repos.clone(), ChangeDetectionService::new()),
+            queries: GraphQueryService::new(
+                repos.clone(),
+                ChangeDetectionService::new(Arc::new(GitChangedFilesSource)),
+            ),
             architecture_overview,
             browser: browser_service,
         },

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use cih_embed::{EmbedStore, SemanticHit};
 use cih_search::{rrf_merge, SearchHit, SearchIndex};
 
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::infrastructure::cache::weighted::{AsyncCacheMetrics, AsyncWeightedCache};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::ports::search_provider::SearchProvider;
 
 #[derive(Clone)]

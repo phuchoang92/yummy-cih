@@ -4,6 +4,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 
 pub(crate) use server::CihServer;
 
+pub mod args;
 #[cfg(test)]
 mod dispatch_tests;
 mod error;

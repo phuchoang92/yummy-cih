@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use crate::application::browser::{BrowserSearchResult, GraphBrowserService};
 use crate::domain::error::AppError;
-use crate::infrastructure::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::layout;
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::search;
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 

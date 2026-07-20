@@ -6,6 +6,7 @@ pub(crate) mod architecture_overview;
 pub(crate) mod browser;
 pub(crate) mod change_detection;
 pub(crate) mod contracts;
+pub(crate) mod cross_repo_graph;
 pub(crate) mod files;
 pub(crate) mod graph;
 pub(crate) mod indexing;
