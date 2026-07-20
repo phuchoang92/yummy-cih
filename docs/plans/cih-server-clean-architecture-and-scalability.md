@@ -44,6 +44,18 @@
 > resident loading and live search-index construction now also use independent
 > per-repository single-flight gates with post-wait freshness rechecks, and
 > their freshness token now includes both graph files.
+> Repository-context slice completed 2026-07-20: introduced the initial
+> transport-independent `AppError`, `RepoSelector`, `ResolvedRepo`,
+> `RepoContext`, and `RepoContextProvider`; moved graph/search connection,
+> schema initialization, path normalization, and single-flight policy out of
+> `CihServer`; and migrated graph-backed MCP resolution,
+> `architecture_overview`, and `detect_changes`. `detect_changes` now consumes
+> the provider's canonical repository path instead of reloading the registry.
+> Contract tests cover 32-way same-key coalescing, retry after failure,
+> independent different-key initialization, equivalent artifact-path
+> normalization, and catalog refresh. File, wiki, and cross-repository
+> registry resolution remains follow-up work, so Milestone 2 is not yet
+> complete.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  
@@ -931,6 +943,17 @@ missing — `store_for` and `search_for` are check-then-connect with connect and
 `ensure_schema` outside any lock. The artifact and wiki caches already
 coalesce (see 12.1, 12.5), so the scope of this section is store connections
 and search state.
+
+**Implementation status (2026-07-20):** the provider boundary is implemented
+in `repo_context.rs`. `CihServer` delegates graph-backed repository resolution
+to it, while retaining the primary graph/search handles only for the HTTP
+browser composition path. Graph and search initialization use independent
+per-key single-flight gates; successful results are cached, failed
+initializations can be retried, graph keys and normalized artifact roots are
+the cache identities, and registry lookup remains fresh on every resolve.
+`detect_changes` is the first application capability to consume the resolved
+canonical path directly. The remaining direct registry consumers are tracked
+as follow-up migration work.
 
 ### 14.1 RepoContextProvider
 

@@ -5,6 +5,8 @@ use rmcp::{
     ErrorData as McpError,
 };
 
+use crate::app_error::AppError;
+
 pub fn to_mcp(e: GraphStoreError) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
@@ -14,6 +16,31 @@ pub fn to_mcp(e: GraphStoreError) -> McpError {
 /// `internal_error`) — use this everywhere to keep the failure code consistent.
 pub fn repo_not_found(name: &str) -> McpError {
     McpError::invalid_params(format!("repo '{name}' not in registry"), None)
+}
+
+pub(crate) fn app_error_to_mcp(error: AppError) -> McpError {
+    match error {
+        AppError::InvalidInput { field, message } => {
+            McpError::invalid_params(format!("invalid {field}: {message}"), None)
+        }
+        AppError::NotFound { entity, key } => {
+            McpError::invalid_params(format!("{entity} '{key}' not found"), None)
+        }
+        AppError::Unavailable {
+            dependency,
+            message,
+            retryable,
+        } => {
+            tracing::error!(dependency, error = %message, retryable, "application dependency unavailable");
+            McpError::internal_error(
+                format!(
+                    "{dependency} unavailable{}",
+                    if retryable { "; retry shortly" } else { "" }
+                ),
+                None,
+            )
+        }
+    }
 }
 
 pub fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {

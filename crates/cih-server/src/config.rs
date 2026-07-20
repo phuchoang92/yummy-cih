@@ -162,7 +162,7 @@ pub fn store_options(cfg: &Config) -> cih_store_factory::StoreOptions {
 /// Build the configured `GraphStore` via the shared factory, then initialize
 /// its schema with a retry loop that rides out DB startup races. Schema init
 /// stays caller policy: per-key stores connected while serving traffic do a
-/// single-shot `ensure_schema` instead (`store_for`).
+/// single-shot `ensure_schema` instead (`RepoContextProvider`).
 pub async fn build_store(cfg: &Config) -> Result<Arc<dyn GraphStore>> {
     let store = cih_store_factory::connect_store(
         &cfg.backend,

@@ -33,16 +33,15 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ArchitectureOverviewArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let entry = crate::utils::resolve_repo_entry(&args.repo, &self.graph_key)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        let store = self.store_for(&entry.graph_key).await?;
+        let context = self.resolve(&args.repo).await?;
+        let entry = &context.repo.registry_entry;
         let reg = cih_core::Registry::load_cached();
         let registry_stale = reg.is_stale(&entry.name);
         let groups = overview::group_sections(&entry.name, &reg);
         let wiki = crate::wiki::list_pages(&self.wiki, &args.repo).await?;
         let response = overview::compose(overview::ComposeCtx {
-            store: store.as_ref(),
-            entry: &entry,
+            store: context.store.as_ref(),
+            entry,
             registry_stale,
             groups,
             wiki,

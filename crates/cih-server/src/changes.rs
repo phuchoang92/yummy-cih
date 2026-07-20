@@ -1,14 +1,14 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use cih_core::Node;
-use cih_graph_store::{Direction, GraphStore};
+use cih_graph_store::Direction;
 use rmcp::{model::CallToolResult, ErrorData as McpError};
 use serde::Serialize;
 
 use crate::args::DetectChangesArgs;
 use crate::blocking::{blocking_timeout, run_blocking};
-use crate::symbol::{find_repo_path, git_changed_files};
+use crate::repo_context::RepoContext;
+use crate::symbol::git_changed_files;
 use crate::utils::{json_result, to_mcp};
 
 /// Upper bound on changed symbols whose blast radius is traversed, read once
@@ -102,19 +102,11 @@ struct Out {
 }
 
 pub async fn detect_changes(
-    store: &Arc<dyn GraphStore>,
-    graph_key: &str,
+    context: &RepoContext,
     args: DetectChangesArgs,
 ) -> Result<CallToolResult, McpError> {
-    let repo_path = find_repo_path(
-        if args.repo.is_empty() {
-            None
-        } else {
-            Some(args.repo.as_str())
-        },
-        graph_key,
-    )
-    .map_err(|e| McpError::invalid_params(e, None))?;
+    let store = &context.store;
+    let repo_path = context.repo.canonical_path.display().to_string();
 
     // `git diff` is synchronous process I/O — run it on the blocking pool with
     // the standard deadline instead of on the async worker.

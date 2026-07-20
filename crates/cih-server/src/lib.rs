@@ -8,6 +8,7 @@
 mod app;
 mod startup;
 
+pub(crate) mod app_error;
 pub mod args;
 pub mod browser;
 pub mod patterns;
@@ -29,6 +30,7 @@ pub(crate) mod jobs;
 pub(crate) mod layout;
 pub(crate) mod mtime_cache;
 pub(crate) mod overview;
+pub(crate) mod repo_context;
 pub(crate) mod resources;
 pub(crate) mod server;
 pub(crate) mod single_flight;
