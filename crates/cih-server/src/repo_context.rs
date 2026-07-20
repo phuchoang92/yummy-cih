@@ -228,7 +228,7 @@ pub(crate) struct DefaultRepoContextProvider {
     primary_graph_key: String,
     catalog: Arc<dyn RepoCatalog>,
     infrastructure: Arc<dyn RepoInfrastructure>,
-    graphs: SingleFlight<Arc<dyn GraphStore>>,
+    graphs: SingleFlight<Arc<dyn GraphStore>, AppError>,
     searches: SingleFlight<SearchState>,
 }
 
@@ -635,6 +635,50 @@ mod tests {
         let selector = RepoSelector::NameOrPath("repo".into());
         assert!(provider.resolve(selector.clone()).await.is_err());
         assert!(provider.resolve(selector).await.is_ok());
+        assert_eq!(infra.graph_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_failed_resolves_share_error_then_later_resolve_retries() {
+        const CALLERS: usize = 32;
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join(".cih/artifacts/v1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let catalog = Arc::new(TestCatalog::new([entry(
+            "repo",
+            temp.path(),
+            "graph",
+            &artifacts,
+        )]));
+        let infra = infrastructure(1, Duration::from_millis(100));
+        let provider = Arc::new(provider("primary", catalog, infra.clone()));
+        let start = Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
+        let mut tasks = Vec::new();
+        for _ in 0..CALLERS {
+            let provider = provider.clone();
+            let start = start.clone();
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                provider
+                    .resolve(RepoSelector::NameOrPath("repo".into()))
+                    .await
+            }));
+        }
+        start.wait().await;
+
+        for task in tasks {
+            let error = match task.await.unwrap() {
+                Ok(_) => panic!("current waiter unexpectedly retried after the shared failure"),
+                Err(error) => error,
+            };
+            assert_eq!(error.to_string(), "test graph unavailable: planned failure");
+        }
+        assert_eq!(infra.graph_calls.load(Ordering::SeqCst), 1);
+
+        provider
+            .resolve(RepoSelector::NameOrPath("repo".into()))
+            .await
+            .unwrap();
         assert_eq!(infra.graph_calls.load(Ordering::SeqCst), 2);
     }
 

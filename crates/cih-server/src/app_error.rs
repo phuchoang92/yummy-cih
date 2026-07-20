@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum AppError {
     InvalidInput {
         field: &'static str,

@@ -74,9 +74,16 @@
 > migrated MCP boundaries use `AppError`, and the obsolete
 > `repo_not_found`/`resolve_repo_entry`/tuple `resolve_repo` helpers were
 > removed. Snapshot tests prove in-flight stability across catalog refresh and
-> zero graph/search initialization. The remaining S6 contract gap is
-> consistent fan-out of one failed single-flight initialization to all current
-> waiters; later callers already retry.
+> zero graph/search initialization.
+> Single-flight failure fan-out completed 2026-07-20: `SingleFlight` now owns
+> an explicit per-key generation state and publishes one cloned success or
+> failure to every caller registered with that generation. Failed generations
+> are removed before publication, so later requests retry; successful values
+> remain cached; cancellation marks a generation abandoned so the next caller
+> can replace it. Generic tests cover 32-way shared failure and cancellation,
+> and the production provider contract proves 32 concurrent failed resolves
+> perform one graph initialization, return the same `AppError`, then retry
+> successfully. This closes the remaining S6 concurrency contract.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  
@@ -979,6 +986,9 @@ unused graph/search infrastructure. Taint and registry-wide resource/catalog
 consumers now use `ResolvedRepo` and `RepoCatalogSnapshot`; administrative
 indexing and pattern operations retain direct registry access because they
 apply mutation/validation policy rather than ordinary read-side resolution.
+`SingleFlight` now shares both successful and failed generation results with
+current waiters, removes failures before publication, and recovers from a
+cancelled leader; later independent requests still retry.
 
 ### 14.1 RepoContextProvider
 
