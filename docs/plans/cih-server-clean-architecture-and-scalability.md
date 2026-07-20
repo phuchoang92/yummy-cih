@@ -1522,6 +1522,22 @@ Work:
 - reorganize tool routers under `transport::mcp`;
 - pass relevant services to HTTP routes.
 
+Implementation progress (2026-07-20):
+
+- [x] establish `application` as the transport-independent service namespace;
+- [x] migrate cross-repo contract use cases (`group_contracts`, `api_impact`,
+  `trace_flow_x`, and `shape_check`) to validated commands, typed outputs, and
+  `AppError`;
+- [x] migrate `taint_paths` to a typed application service;
+- [x] inject the migrated services into `CihServer` and keep RMCP result/error
+  mapping in the existing tool adapters;
+- [x] add direct application tests, stable JSON-shape tests, and MCP dispatch
+  regression coverage for the migrated slice;
+- [ ] migrate `detect_changes`, `architecture_overview`, and indexing behind the
+  same service boundary;
+- [ ] reorganize the tool adapters from `app/tools_*` to `transport::mcp`;
+- [ ] pass narrow application services to browser/HTTP routes.
+
 Exit criteria:
 
 - application modules compile without rmcp or Axum imports;

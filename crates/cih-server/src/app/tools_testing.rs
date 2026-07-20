@@ -5,8 +5,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
 use super::CihServer;
+use crate::application::taint::TaintPathsCommand;
 use crate::args::{RegressionScopeArgs, TaintPathsArgs, TestCoverageArgs, UntestedPathsArgs};
-use crate::{coverage, taint};
+use crate::coverage;
+use crate::utils::{app_error_to_mcp, json_result};
 
 #[tool_router(router = testing_router, vis = "pub(crate)")]
 impl CihServer {
@@ -59,7 +61,15 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TaintPathsArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let command =
+            TaintPathsCommand::try_new(args.category, args.min_confidence, args.refine, args.limit)
+                .map_err(app_error_to_mcp)?;
         let repo = self.resolve_repo(&args.repo)?;
-        taint::taint_paths(repo, args, &self.artifacts).await
+        let output = self
+            .taint_service
+            .taint_paths(repo, command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 }

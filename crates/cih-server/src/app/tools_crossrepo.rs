@@ -5,8 +5,11 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
 use super::CihServer;
+use crate::application::contracts::{
+    ApiImpactCommand, GroupContractsCommand, ShapeCheckCommand, TraceFlowXCommand,
+};
 use crate::args::{ApiImpactArgs, GroupContractsArgs, ShapeCheckArgs, TraceFlowXArgs};
-use crate::contracts;
+use crate::utils::{app_error_to_mcp, json_result};
 
 #[tool_router(router = crossrepo_router, vis = "pub(crate)")]
 impl CihServer {
@@ -19,7 +22,14 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<GroupContractsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::group_contracts(args, self.repo_context_provider()).await
+        let command =
+            GroupContractsCommand::try_new(args.group, args.kind).map_err(app_error_to_mcp)?;
+        let output = self
+            .contract_service
+            .group_contracts(command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 
     #[tool(
@@ -31,7 +41,20 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ApiImpactArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::api_impact(args, self.repo_context_provider(), &self.xflow).await
+        let command = ApiImpactCommand::try_new(
+            args.group,
+            args.method,
+            args.path,
+            args.include_callers,
+            args.caller_depth,
+        )
+        .map_err(app_error_to_mcp)?;
+        let output = self
+            .contract_service
+            .api_impact(command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 
     #[tool(
@@ -46,7 +69,20 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<TraceFlowXArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::trace_flow_x(args, self.repo_context_provider(), &self.xflow).await
+        let command = TraceFlowXCommand::try_new(
+            args.entry_point,
+            args.repo,
+            args.group,
+            args.max_depth,
+            args.max_hops,
+        )
+        .map_err(app_error_to_mcp)?;
+        let output = self
+            .contract_service
+            .trace_flow_x(command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 
     #[tool(
@@ -59,6 +95,13 @@ impl CihServer {
         &self,
         Parameters(args): Parameters<ShapeCheckArgs>,
     ) -> Result<CallToolResult, McpError> {
-        contracts::shape_check(args, self.repo_context_provider(), &self.artifacts).await
+        let command = ShapeCheckCommand::try_new(args.group, args.provider, args.consumer)
+            .map_err(app_error_to_mcp)?;
+        let output = self
+            .contract_service
+            .shape_check(command)
+            .await
+            .map_err(app_error_to_mcp)?;
+        json_result(&output)
     }
 }

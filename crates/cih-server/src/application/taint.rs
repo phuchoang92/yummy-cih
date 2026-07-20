@@ -1,4 +1,4 @@
-//! `taint_paths` — on-demand source→sink taint analysis over graph artifacts.
+//! Typed `taint_paths` application use case over graph artifacts.
 //!
 //! Runs cih-taint Phase 0 (inter-procedural BFS on the call graph) on every
 //! call, plus phases 1–3 (liveness, CFG, PDG flow-sensitive) when `refine` is
@@ -9,20 +9,67 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cih_taint::{run_taint_analysis, SinkCategory, TaintAnalysisInput, TaintPhaseConfig};
-use rmcp::{model::CallToolResult, ErrorData as McpError};
 use serde::Serialize;
 
-use crate::args::TaintPathsArgs;
+use crate::app_error::AppError;
 use crate::artifact_cache::{ArtifactRepository, ArtifactSnapshot};
-use crate::blocking::{blocking_timeout, run_blocking_heavy};
+use crate::blocking::{blocking_timeout, run_blocking_heavy, BlockingError};
 use crate::repo_context::ResolvedRepo;
-use crate::utils::{app_error_to_mcp, json_result};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 500;
 
+#[derive(Clone)]
+pub(crate) struct TaintService {
+    artifacts: Arc<dyn ArtifactRepository>,
+}
+
+impl TaintService {
+    pub(crate) fn new(artifacts: Arc<dyn ArtifactRepository>) -> Self {
+        Self { artifacts }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TaintPathsCommand {
+    category: Option<SinkCategory>,
+    min_confidence: f32,
+    refine: bool,
+    limit: usize,
+}
+
+impl TaintPathsCommand {
+    pub(crate) fn try_new(
+        category: String,
+        min_confidence: f32,
+        refine: bool,
+        limit: usize,
+    ) -> Result<Self, AppError> {
+        let category = parse_category(&category).map_err(|message| AppError::InvalidInput {
+            field: "category",
+            message,
+        })?;
+        if !min_confidence.is_finite() {
+            return Err(AppError::InvalidInput {
+                field: "min_confidence",
+                message: "must be a finite number".into(),
+            });
+        }
+        Ok(Self {
+            category,
+            min_confidence: min_confidence.clamp(0.0, 1.0),
+            refine,
+            limit: if limit == 0 {
+                DEFAULT_LIMIT
+            } else {
+                limit.min(MAX_LIMIT)
+            },
+        })
+    }
+}
+
 #[derive(Debug, Serialize)]
-struct TaintPathOut {
+pub(crate) struct TaintPathOutput {
     /// Entry-point method the tainted data enters through (HTTP handler, listener).
     source: String,
     /// Method performing the dangerous operation.
@@ -38,13 +85,37 @@ struct TaintPathOut {
 }
 
 #[derive(Debug, Serialize)]
-struct TaintPathsOut {
+pub(crate) struct TaintPathsOutput {
     total_found: usize,
     returned: usize,
     refined: bool,
     min_confidence: f32,
-    paths: Vec<TaintPathOut>,
-    stats: serde_json::Value,
+    paths: Vec<TaintPathOutput>,
+    stats: TaintStats,
+}
+
+#[derive(Debug, Serialize)]
+struct TaintStats {
+    phase0_paths: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cfg: Option<TaintCfgStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pdg: Option<TaintPdgStats>,
+}
+
+#[derive(Debug, Serialize)]
+struct TaintCfgStats {
+    methods_analyzed: usize,
+    ir_unavailable: usize,
+    max_cyclomatic: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TaintPdgStats {
+    methods_analyzed: usize,
+    confirmed_sinks: usize,
+    conditional_sinks: usize,
+    ir_unavailable: usize,
 }
 
 fn parse_category(s: &str) -> Result<Option<SinkCategory>, String> {
@@ -60,39 +131,31 @@ fn parse_category(s: &str) -> Result<Option<SinkCategory>, String> {
     }
 }
 
-pub async fn taint_paths(
-    repo: ResolvedRepo,
-    args: TaintPathsArgs,
-    artifacts: &Arc<dyn ArtifactRepository>,
-) -> Result<CallToolResult, McpError> {
-    let category = parse_category(&args.category).map_err(|e| McpError::invalid_params(e, None))?;
-    let min_confidence = args.min_confidence.clamp(0.0, 1.0);
-    let limit = if args.limit == 0 {
-        DEFAULT_LIMIT
-    } else {
-        args.limit.min(MAX_LIMIT)
-    };
-    let refine = args.refine;
+impl TaintService {
+    pub(crate) async fn taint_paths(
+        &self,
+        repo: ResolvedRepo,
+        command: TaintPathsCommand,
+    ) -> Result<TaintPathsOutput, AppError> {
+        let snapshot = self.artifacts.snapshot(&repo).await?;
+        let repo_path = repo.canonical_path;
 
-    let snapshot = artifacts.snapshot(&repo).await.map_err(app_error_to_mcp)?;
-    let repo_path = repo.canonical_path;
-
-    // The analysis is synchronous and CPU-bound (and reads source files when
-    // refining) — keep it off the async runtime threads. Snapshot loading has
-    // already passed through the asynchronous repository boundary.
-    let out = run_blocking_heavy(blocking_timeout(), "taint analysis", move || {
-        run_and_shape(
-            &repo_path.to_string_lossy(),
-            &snapshot,
-            category,
-            min_confidence,
-            refine,
-            limit,
-        )
-    })
-    .await??;
-
-    json_result(&out)
+        // The analysis is synchronous and CPU-bound (and reads source files when
+        // refining) — keep it off the async runtime threads. Snapshot loading has
+        // already passed through the asynchronous repository boundary.
+        run_blocking_heavy(blocking_timeout(), "taint analysis", move || {
+            run_and_shape(
+                &repo_path.to_string_lossy(),
+                &snapshot,
+                command.category,
+                command.min_confidence,
+                command.refine,
+                command.limit,
+            )
+        })
+        .await
+        .map_err(blocking_error)?
+    }
 }
 
 fn run_and_shape(
@@ -102,7 +165,7 @@ fn run_and_shape(
     min_confidence: f32,
     refine: bool,
     limit: usize,
-) -> Result<TaintPathsOut, McpError> {
+) -> Result<TaintPathsOutput, AppError> {
     let nodes = snapshot.nodes.as_ref();
     let edges = snapshot.edges.as_ref();
 
@@ -130,7 +193,11 @@ fn run_and_shape(
             run_pdg: refine,
         },
     })
-    .map_err(|e| McpError::internal_error(format!("taint analysis failed: {e}"), None))?;
+    .map_err(|error| AppError::Unavailable {
+        dependency: "taint analysis",
+        message: error.to_string(),
+        retryable: false,
+    })?;
 
     let total_found = result.paths.len();
     let mut kept: Vec<_> = result
@@ -147,11 +214,11 @@ fn run_and_shape(
     });
     kept.truncate(limit);
 
-    let paths: Vec<TaintPathOut> = kept
+    let paths: Vec<TaintPathOutput> = kept
         .iter()
         .map(|p| {
             let meta = node_meta.get(p.source.as_str());
-            TaintPathOut {
+            TaintPathOutput {
                 source: p.source.to_string(),
                 sink_method: p.sink_method.to_string(),
                 category: p.category.label(),
@@ -166,25 +233,29 @@ fn run_and_shape(
         .collect();
 
     let stats = if refine {
-        serde_json::json!({
-            "phase0_paths": total_found,
-            "cfg": {
-                "methods_analyzed": result.cfg_stats.methods_analyzed,
-                "ir_unavailable": result.cfg_stats.ir_unavailable,
-                "max_cyclomatic": result.cfg_stats.max_cyclomatic,
-            },
-            "pdg": {
-                "methods_analyzed": result.pdg_stats.methods_analyzed,
-                "confirmed_sinks": result.pdg_stats.confirmed_sinks,
-                "conditional_sinks": result.pdg_stats.conditional_sinks,
-                "ir_unavailable": result.pdg_stats.ir_unavailable,
-            },
-        })
+        TaintStats {
+            phase0_paths: total_found,
+            cfg: Some(TaintCfgStats {
+                methods_analyzed: result.cfg_stats.methods_analyzed,
+                ir_unavailable: result.cfg_stats.ir_unavailable,
+                max_cyclomatic: result.cfg_stats.max_cyclomatic,
+            }),
+            pdg: Some(TaintPdgStats {
+                methods_analyzed: result.pdg_stats.methods_analyzed,
+                confirmed_sinks: result.pdg_stats.confirmed_sinks,
+                conditional_sinks: result.pdg_stats.conditional_sinks,
+                ir_unavailable: result.pdg_stats.ir_unavailable,
+            }),
+        }
     } else {
-        serde_json::json!({ "phase0_paths": total_found })
+        TaintStats {
+            phase0_paths: total_found,
+            cfg: None,
+            pdg: None,
+        }
     };
 
-    Ok(TaintPathsOut {
+    Ok(TaintPathsOutput {
         total_found,
         returned: paths.len(),
         refined: refine,
@@ -194,9 +265,17 @@ fn run_and_shape(
     })
 }
 
+fn blocking_error(error: BlockingError) -> AppError {
+    AppError::Unavailable {
+        dependency: "blocking runtime",
+        message: error.to_string(),
+        retryable: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
+    use cih_core::{Edge, EdgeKind, GraphArtifacts, Node, NodeId, NodeKind, Range, VersionId};
 
     use super::*;
     use crate::artifact_cache::ArtifactCache;
@@ -288,11 +367,16 @@ mod tests {
         category: Option<SinkCategory>,
         min_confidence: f32,
         limit: usize,
-    ) -> TaintPathsOut {
+    ) -> TaintPathsOutput {
         let dir = dir.to_str().unwrap();
+        let artifacts = GraphArtifacts {
+            nodes_path: std::path::Path::new(dir).join("nodes.jsonl"),
+            edges_path: std::path::Path::new(dir).join("edges.jsonl"),
+            version: VersionId::new("fixture"),
+        };
         let snapshot = ArtifactSnapshot::from_memory(
-            crate::utils::load_artifact_nodes(dir).unwrap(),
-            crate::utils::load_artifact_edges(dir).unwrap(),
+            artifacts.read_nodes().unwrap(),
+            artifacts.read_edges().unwrap(),
         );
         run_and_shape(dir, &snapshot, category, min_confidence, false, limit).unwrap()
     }
@@ -397,5 +481,49 @@ mod tests {
         assert_eq!(parse_category("file").unwrap(), Some(SinkCategory::File));
         assert_eq!(parse_category("html").unwrap(), Some(SinkCategory::Html));
         assert!(parse_category("bogus").is_err());
+    }
+
+    #[test]
+    fn command_validates_category_and_applies_limits() {
+        let command = TaintPathsCommand::try_new(" SQL ".into(), 2.0, true, 0).unwrap();
+        assert_eq!(command.category, Some(SinkCategory::Sql));
+        assert_eq!(command.min_confidence, 1.0);
+        assert_eq!(command.limit, DEFAULT_LIMIT);
+
+        let error = TaintPathsCommand::try_new("network".into(), 0.5, false, 10).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::InvalidInput {
+                field: "category",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn service_returns_typed_output() {
+        let dir = fixture_dir("service");
+        let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            name: "fixture".into(),
+            path: dir.display().to_string(),
+            graph_key: "fixture".into(),
+            artifacts_dir: dir.display().to_string(),
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        });
+        let service = TaintService::new(Arc::new(ArtifactCache::new()));
+        let command = TaintPathsCommand::try_new("sql".into(), 0.0, false, 50).unwrap();
+
+        let output = service.taint_paths(repo, command).await.unwrap();
+
+        assert_eq!(output.total_found, 2);
+        assert_eq!(output.returned, 1);
+        assert_eq!(output.paths[0].category, "sql");
+        assert_eq!(
+            serde_json::to_value(output.stats).unwrap(),
+            serde_json::json!({ "phase0_paths": 2 })
+        );
     }
 }

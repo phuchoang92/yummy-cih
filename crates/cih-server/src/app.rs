@@ -30,6 +30,8 @@ use rmcp::{
     tool, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
 
+use crate::application::contracts::ContractService;
+use crate::application::taint::TaintService;
 use crate::args::*;
 use crate::jobs::Jobs;
 use crate::repo_context::{
@@ -75,10 +77,9 @@ pub(crate) struct CihServer {
     indexer: indexing::IndexScheduler,
     read_file_limits: files::ReadFileLimits,
     wiki: wiki::WikiSearchState,
-    /// Cross-repo graph views backed by the shared artifact snapshots below.
-    xflow: xflow::XflowState,
-    /// Process-wide shared snapshots for xflow, taint, and shape checking.
-    artifacts: Arc<dyn artifact_cache::ArtifactRepository>,
+    /// Typed application services used by the MCP adapters.
+    contract_service: ContractService,
+    taint_service: TaintService,
     tool_router: ToolRouter<CihServer>,
 }
 
@@ -120,6 +121,9 @@ impl CihServer {
             Arc::new(artifact_cache::ArtifactCache::new());
         let indexer = indexing::IndexScheduler::new(jobs.clone(), artifacts.clone());
         let xflow = xflow::XflowState::new(artifacts.clone());
+        let contract_service =
+            ContractService::new(repo_contexts.clone(), xflow, artifacts.clone());
+        let taint_service = TaintService::new(artifacts);
         Self {
             store,
             search,
@@ -132,8 +136,8 @@ impl CihServer {
             indexer,
             read_file_limits,
             wiki,
-            xflow,
-            artifacts,
+            contract_service,
+            taint_service,
             tool_router: Self::tool_router()
                 + Self::files_router()
                 + Self::crossrepo_router()

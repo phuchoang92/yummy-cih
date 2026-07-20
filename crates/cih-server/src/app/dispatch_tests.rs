@@ -147,6 +147,52 @@ async fn dispatch_call_that_cannot_resolve_returns_error() {
 }
 
 #[tokio::test]
+async fn dispatch_crossrepo_validation_returns_error() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "api_impact".into(),
+            arguments: Some(
+                serde_json::json!({
+                    "group": "shop",
+                    "method": "CONNECT",
+                    "path": "/orders",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unsupported HTTP methods must fail at the MCP adapter"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_taint_validation_returns_error_before_repo_resolution() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "taint_paths".into(),
+            arguments: Some(
+                serde_json::json!({ "category": "network" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unknown taint categories must fail through MCP dispatch"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn dispatch_list_repos_returns_success_envelope() {
     // `list_repos` only reads the registry (read-only); assert the success
     // envelope shape, independent of registry contents.

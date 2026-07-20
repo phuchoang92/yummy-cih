@@ -6,6 +6,7 @@
 //! Everything else is crate-private wiring.
 
 mod app;
+mod application;
 mod startup;
 
 pub(crate) mod app_error;
@@ -21,7 +22,6 @@ pub(crate) mod artifact_cache;
 pub(crate) mod blocking;
 pub(crate) mod changes;
 pub(crate) mod config;
-pub(crate) mod contracts;
 pub(crate) mod coverage;
 pub(crate) mod feature;
 pub(crate) mod files;
@@ -35,7 +35,6 @@ pub(crate) mod resources;
 pub(crate) mod server;
 pub(crate) mod single_flight;
 pub(crate) mod symbol;
-pub(crate) mod taint;
 pub(crate) mod weighted_cache;
 pub(crate) mod xflow;
 
