@@ -118,6 +118,25 @@
 > test prevents domain/application/port dependency regressions. Milestone 5's
 > 500k-node benchmarks and disk-backed/indexed optimizations remain separate
 > performance work and are not claimed complete by this migration.
+> Milestone 5 in progress. Scale harness landed and *run*: the deterministic
+> 500k-node / 1M-edge fixture and `scale_bench` example drive the production
+> adapters, and the first reference measurements are recorded in
+> `docs/perf/scale-500k.md` (raw report: `docs/perf/scale-500k-local.json`).
+> Resource-page full scans are eliminated (`infrastructure/jsonl_page_index.rs`):
+> a cached, bounded byte-offset index per (file, kind) lets a page seek to its
+> first record, so paging cost is flat in offset instead of linear — measured
+> 15.4 ms to 0.039 ms p95 at the tail page (426x), turning a quadratic walk of a
+> resource into a linear one. Its budget is `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES`
+> (default 16 MiB), validated in the startup cache-budget total (default total
+> raised to 1040 MiB), and the benchmark's tail-page acceptance threshold was
+> tightened from 2000 ms to 5 ms as a regression guard.
+> Two measured findings remain open (details in `docs/perf/scale-500k.md`):
+> BM25 search p95 at 500k documents sits on the Section 21.6 500 ms target
+> (489-511 ms across runs), and the default artifact/search cache budgets are
+> individually smaller than one 500k-node repository, so at that scale both are
+> served without retention. Remaining Milestone 5 work: memory-mapped/persisted
+> artifact indexes, evaluating more cross-repo reads via `GraphStore`,
+> page-level wiki materialization, and a scheduled soak test.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  

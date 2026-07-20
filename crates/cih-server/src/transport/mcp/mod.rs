@@ -8,7 +8,7 @@ pub mod args;
 #[cfg(test)]
 mod dispatch_tests;
 mod error;
-mod resources;
+pub(crate) mod resources;
 mod server;
 mod tools;
 

@@ -1,0 +1,136 @@
+{
+  "generated_at_unix_secs": 1784554225,
+  "machine": {
+    "os": "macos",
+    "architecture": "aarch64",
+    "logical_cpus": 14,
+    "build_profile": "release"
+  },
+  "fixture": {
+    "directory": "target/cih-scale-fixtures/500k-1m",
+    "reused": true,
+    "generation_ms": 0.400708,
+    "nodes": 500000,
+    "edges": 1000000,
+    "communities": 50000,
+    "nodes_bytes": 179234670,
+    "edges_bytes": 164115560,
+    "communities_bytes": 6038890
+  },
+  "memory": {
+    "baseline_rss_bytes": 6979584,
+    "after_artifact_load_rss_bytes": 971587584,
+    "after_artifact_indexes_rss_bytes": 1262485504,
+    "after_search_index_rss_bytes": 1528086528,
+    "observed_peak_rss_bytes": 3020210176,
+    "artifact_estimated_bytes": 798796759,
+    "search_estimated_bytes": 380061908,
+    "wiki_search_estimated_bytes": 14753574
+  },
+  "artifact_load": {
+    "cold_parse_ms": 705.563291,
+    "lazy_index_build_ms": 289.746459,
+    "cache_hits": {
+      "samples": 20,
+      "p50_ms": 0.012416,
+      "p95_ms": 0.029332999999999998,
+      "p99_ms": 0.041208,
+      "max_ms": 0.041208
+    },
+    "event_loop_delay_during_cold_load": {
+      "samples": 141,
+      "p50_ms": 0.10137499999999999,
+      "p95_ms": 0.646792,
+      "p99_ms": 0.648667,
+      "max_ms": 0.6511250000000001
+    }
+  },
+  "search": {
+    "indexed_documents": 500000,
+    "build_ms": 1197.61975,
+    "query": "process order service",
+    "returned_hits": 25,
+    "warm_queries": {
+      "samples": 20,
+      "p50_ms": 476.67695799999996,
+      "p95_ms": 510.718792,
+      "p99_ms": 512.32425,
+      "max_ms": 512.32425
+    }
+  },
+  "wiki_search": {
+    "indexed_documents": 50000,
+    "build_ms": 111.635375,
+    "query": "order processing workflow",
+    "returned_hits": 25,
+    "warm_queries": {
+      "samples": 20,
+      "p50_ms": 2.418167,
+      "p95_ms": 2.577209,
+      "p99_ms": 2.595917,
+      "max_ms": 2.595917
+    }
+  },
+  "resource_scan": {
+    "page_size": 100,
+    "first_page": {
+      "samples": 20,
+      "p50_ms": 0.0415,
+      "p95_ms": 0.052833,
+      "p99_ms": 10.897083,
+      "max_ms": 10.897083
+    },
+    "middle_page": {
+      "samples": 20,
+      "p50_ms": 0.039375,
+      "p95_ms": 0.040291,
+      "p99_ms": 0.043583,
+      "max_ms": 0.043583
+    },
+    "tail_page": {
+      "samples": 20,
+      "p50_ms": 0.038375,
+      "p95_ms": 0.038792,
+      "p99_ms": 0.038833,
+      "max_ms": 0.038833
+    }
+  },
+  "same_key_cold_burst": {
+    "callers": 8,
+    "elapsed_ms": 520.762792,
+    "loader_builds": 1,
+    "all_callers_shared_snapshot": true
+  },
+  "acceptance": [
+    {
+      "name": "artifact_cache_hit_p95",
+      "target": "<= 5.000 ms",
+      "observed": "0.029 ms",
+      "passed": true
+    },
+    {
+      "name": "search_query_p95",
+      "target": "<= 500.000 ms",
+      "observed": "510.719 ms",
+      "passed": false
+    },
+    {
+      "name": "event_loop_delay_p99",
+      "target": "<= 50.000 ms",
+      "observed": "0.649 ms",
+      "passed": true
+    },
+    {
+      "name": "resource_tail_page_p95",
+      "target": "<= 2000.000 ms",
+      "observed": "0.039 ms",
+      "passed": true
+    },
+    {
+      "name": "same_key_cold_load_single_flight",
+      "target": "exactly 1 loader build",
+      "observed": "1 loader builds",
+      "passed": true
+    }
+  ]
+}

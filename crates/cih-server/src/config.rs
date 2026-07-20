@@ -46,13 +46,17 @@ pub const DEFAULT_QUERY_QUEUE_TIMEOUT_MS: u64 = 5000;
 pub const DEFAULT_ARTIFACT_CACHE_MAX_BYTES: usize = 512 * 1024 * 1024;
 pub const DEFAULT_WIKI_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_SEARCH_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
-pub const DEFAULT_TOTAL_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
+/// Default budget for JSONL resource paging indexes (8 bytes per matching
+/// record — two orders of magnitude smaller than the snapshot caches).
+pub const DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_TOTAL_CACHE_MAX_BYTES: usize = 1040 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CacheBudgets {
     pub(crate) artifact_bytes: usize,
     pub(crate) wiki_bytes: usize,
     pub(crate) search_bytes: usize,
+    pub(crate) resource_index_bytes: usize,
     pub(crate) total_bytes: usize,
 }
 
@@ -62,6 +66,7 @@ impl CacheBudgets {
             std::env::var("CIH_ARTIFACT_CACHE_MAX_BYTES").ok(),
             std::env::var("CIH_WIKI_CACHE_MAX_BYTES").ok(),
             std::env::var("CIH_SEARCH_CACHE_MAX_BYTES").ok(),
+            std::env::var("CIH_RESOURCE_INDEX_CACHE_MAX_BYTES").ok(),
             std::env::var("CIH_CACHE_MAX_BYTES").ok(),
         )
     }
@@ -70,6 +75,7 @@ impl CacheBudgets {
         artifact: Option<String>,
         wiki: Option<String>,
         search: Option<String>,
+        resource_index: Option<String>,
         total: Option<String>,
     ) -> Result<Self> {
         let parse = |name: &'static str, value: Option<String>, default: usize| {
@@ -100,21 +106,28 @@ impl CacheBudgets {
                 search,
                 DEFAULT_SEARCH_CACHE_MAX_BYTES,
             )?,
+            resource_index_bytes: parse(
+                "CIH_RESOURCE_INDEX_CACHE_MAX_BYTES",
+                resource_index,
+                DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES,
+            )?,
             total_bytes: parse("CIH_CACHE_MAX_BYTES", total, DEFAULT_TOTAL_CACHE_MAX_BYTES)?,
         };
         let configured = budgets
             .artifact_bytes
             .checked_add(budgets.wiki_bytes)
             .and_then(|sum| sum.checked_add(budgets.search_bytes))
+            .and_then(|sum| sum.checked_add(budgets.resource_index_bytes))
             .ok_or_else(|| anyhow!("configured cache budgets overflow usize"))?;
         if configured > budgets.total_bytes {
             return Err(anyhow!(
                 "configured cache budgets total {configured} bytes, exceeding \
-                 CIH_CACHE_MAX_BYTES={} (artifact={}, wiki={}, search={})",
+                 CIH_CACHE_MAX_BYTES={} (artifact={}, wiki={}, search={}, resource_index={})",
                 budgets.total_bytes,
                 budgets.artifact_bytes,
                 budgets.wiki_bytes,
-                budgets.search_bytes
+                budgets.search_bytes,
+                budgets.resource_index_bytes
             ));
         }
         Ok(budgets)
@@ -236,7 +249,11 @@ pub fn store_options(cfg: &Config) -> cih_store_factory::StoreOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_is_loopback, CacheBudgets};
+    use super::{
+        bind_is_loopback, CacheBudgets, DEFAULT_ARTIFACT_CACHE_MAX_BYTES,
+        DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES, DEFAULT_SEARCH_CACHE_MAX_BYTES,
+        DEFAULT_WIKI_CACHE_MAX_BYTES,
+    };
 
     #[test]
     fn loopback_binds_are_recognized() {
@@ -258,15 +275,34 @@ mod tests {
 
     #[test]
     fn cache_budgets_reject_invalid_or_excessive_totals() {
-        assert!(CacheBudgets::parse(Some("0".into()), None, None, None).is_err());
+        assert!(CacheBudgets::parse(Some("0".into()), None, None, None, None).is_err());
         let error = CacheBudgets::parse(
             Some("8".into()),
             Some("8".into()),
             Some("8".into()),
+            Some("2".into()),
             Some("16".into()),
         )
         .unwrap_err();
         assert!(error.to_string().contains("exceeding CIH_CACHE_MAX_BYTES"));
+        // The paging-index budget counts toward the validated total: the same
+        // partition fits under 17 but overcommits 16.
+        assert!(CacheBudgets::parse(
+            Some("8".into()),
+            Some("4".into()),
+            Some("4".into()),
+            Some("1".into()),
+            Some("17".into()),
+        )
+        .is_ok());
+        assert!(CacheBudgets::parse(
+            Some("8".into()),
+            Some("4".into()),
+            Some("4".into()),
+            Some("1".into()),
+            Some("16".into()),
+        )
+        .is_err());
     }
 
     #[test]
@@ -275,12 +311,37 @@ mod tests {
             Some("8".into()),
             Some("4".into()),
             Some("4".into()),
-            Some("16".into()),
+            Some("1".into()),
+            Some("17".into()),
         )
         .unwrap();
         assert_eq!(budgets.artifact_bytes, 8);
         assert_eq!(budgets.wiki_bytes, 4);
         assert_eq!(budgets.search_bytes, 4);
-        assert_eq!(budgets.total_bytes, 16);
+        assert_eq!(budgets.resource_index_bytes, 1);
+        assert_eq!(budgets.total_bytes, 17);
+    }
+
+    /// The shipped defaults must satisfy their own validation.
+    #[test]
+    fn default_cache_budgets_fit_the_default_total() {
+        let budgets = CacheBudgets::parse(None, None, None, None, None).unwrap();
+        assert_eq!(
+            budgets.artifact_bytes
+                + budgets.wiki_bytes
+                + budgets.search_bytes
+                + budgets.resource_index_bytes,
+            DEFAULT_ARTIFACT_CACHE_MAX_BYTES
+                + DEFAULT_WIKI_CACHE_MAX_BYTES
+                + DEFAULT_SEARCH_CACHE_MAX_BYTES
+                + DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES
+        );
+        assert!(
+            budgets.artifact_bytes
+                + budgets.wiki_bytes
+                + budgets.search_bytes
+                + budgets.resource_index_bytes
+                <= budgets.total_bytes
+        );
     }
 }

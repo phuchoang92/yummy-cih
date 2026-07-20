@@ -73,6 +73,24 @@ impl CacheLimits {
             max_weight_bytes,
         }
     }
+
+    /// Resource paging-index policy. These indexes are two orders of magnitude
+    /// smaller than artifact snapshots (8 bytes per matching record), so they
+    /// get their own modest budget — validated with the others at startup —
+    /// while sharing the entry cap and idle TTL of the artifact family.
+    pub(crate) fn resource_index_from_env() -> Self {
+        let artifact = Self::artifact_from_env();
+        let max_weight_bytes = std::env::var("CIH_RESOURCE_INDEX_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(crate::config::DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES);
+        Self {
+            max_entries: artifact.max_entries,
+            idle_ttl: artifact.idle_ttl,
+            max_weight_bytes,
+        }
+    }
 }
 
 /// A cached value plus its recency bookkeeping. Atomics so a cache *hit* can

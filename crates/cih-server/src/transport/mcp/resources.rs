@@ -458,38 +458,32 @@ struct JsonlCandidates {
     items: Vec<serde_json::Value>,
 }
 
+/// Read the candidate window via the cached byte-offset index, so a page seeks
+/// straight to its first record instead of re-parsing every earlier one
+/// (Milestone 5). Results are identical to a full scan; only the cost differs.
 fn scan_jsonl_candidates(
     path: &std::path::Path,
     label: &str,
     offset: usize,
     candidate_limit: usize,
 ) -> Result<JsonlCandidates, McpError> {
-    use std::io::BufRead;
-    let read_err =
-        |e| McpError::internal_error(format!("cannot read {}: {e}", path.display()), None);
-    let file = std::fs::File::open(path).map_err(read_err)?;
-    let reader = std::io::BufReader::new(file);
-    let mut items = Vec::new();
-    let mut matched = 0usize;
-    for line in reader.lines() {
-        let line = line.map_err(read_err)?;
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if v.get("kind").and_then(|k| k.as_str()) != Some(label) {
-            continue;
-        }
-        let index = matched;
-        matched += 1;
-        if index < offset {
-            continue;
-        }
-        if items.len() >= candidate_limit {
-            break;
-        }
-        items.push(v);
-    }
+    let items =
+        crate::infrastructure::jsonl_page_index::page_records(path, label, offset, candidate_limit)
+            .map_err(|e| {
+                McpError::internal_error(format!("cannot read {}: {e}", path.display()), None)
+            })?;
     Ok(JsonlCandidates { items })
+}
+
+pub(crate) fn benchmark_scan_jsonl_candidates(
+    path: &std::path::Path,
+    label: &str,
+    offset: usize,
+    candidate_limit: usize,
+) -> Result<usize, String> {
+    scan_jsonl_candidates(path, label, offset, candidate_limit)
+        .map(|result| result.items.len())
+        .map_err(|error| error.to_string())
 }
 
 #[derive(serde::Serialize)]

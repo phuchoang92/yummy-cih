@@ -15,6 +15,9 @@ mod transport;
 pub mod utils;
 pub mod viz;
 
+#[doc(hidden)]
+pub mod scale_bench;
+
 pub(crate) mod config;
 pub(crate) mod layout;
 

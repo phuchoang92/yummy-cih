@@ -168,6 +168,7 @@ pub async fn run() -> Result<()> {
         artifact_cache_bytes = cache_budgets.artifact_bytes,
         wiki_cache_bytes = cache_budgets.wiki_bytes,
         search_cache_bytes = cache_budgets.search_bytes,
+        resource_index_cache_bytes = cache_budgets.resource_index_bytes,
         total_cache_bytes = cache_budgets.total_bytes,
         "validated process cache budgets"
     );
