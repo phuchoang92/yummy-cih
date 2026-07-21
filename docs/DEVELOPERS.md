@@ -123,6 +123,17 @@ Performance-sensitive changes to the read path should also be measured, not
 asserted: `cargo run --release -p cih-server --example scale_bench -- --help`
 (see `docs/perf/scale-500k.md` for the reference run and its acceptance targets).
 
+For bounded results, return `ResultBounds` with an exact total only when the
+adapter observed the full collection before truncation. A backend API that
+accepts a limit but returns no total uses `backend_limited`; a short page alone
+is not proof of completeness. Preserve legacy MCP text payloads with
+`json_result_compatible` and place additive metadata in `structuredContent`.
+
+Do not add process I/O to `IndexScheduler`. Admission and job state belong to
+the scheduler; command execution, environment allowlisting, cancellation,
+deadlines, and output caps belong to `EngineProcessRunner`. Scheduler tests use
+a fake runner, while the Tokio adapter owns the child-process contract suite.
+
 ## Suggested reading order
 
 To understand the concepts without drowning, read in dependency order — each builds

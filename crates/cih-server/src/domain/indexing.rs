@@ -4,6 +4,13 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct IndexQueueMetrics {
+    pub(crate) queued: usize,
+    pub(crate) running: usize,
+    pub(crate) rejected: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedRepoTarget {
     pub(crate) canonical_path: PathBuf,

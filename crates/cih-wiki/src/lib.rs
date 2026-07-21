@@ -987,6 +987,11 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // Create directories
     std::fs::create_dir_all(out_dir)?;
+    // Readers treat this marker as an unavailable, retryable publication. It
+    // remains after a failed generation so no reader can combine a previous
+    // manifest with partially replaced pages; a successful rerun clears it.
+    let publishing_marker = out_dir.join(".publishing");
+    std::fs::write(&publishing_marker, input.graph_version.as_bytes())?;
     std::fs::write(
         out_dir.join("module_tree.json"),
         serde_json::to_string_pretty(&module_tree)?,
@@ -1052,7 +1057,8 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
             warnings: Vec::new(),
         };
         let manifest_path = out_dir.join("manifest.json");
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        write_json_atomic(&manifest_path, &manifest)?;
+        std::fs::remove_file(&publishing_marker)?;
         return Ok(WikiOutcome {
             out_dir: out_dir.to_path_buf(),
             manifest_path,
@@ -1178,7 +1184,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
     );
 
     let manifest_path = out_dir.join("manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    write_json_atomic(&manifest_path, &manifest)?;
     if input.generation.html_viewer {
         html::write_html_viewer(out_dir, &manifest)?;
     }
@@ -1189,6 +1195,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
     //   file_to_pages — source file     → [dev page paths]
     let agent_index_path = out_dir.join("agent-index.json");
     write_agent_index(&dev_entries, out_dir, &agent_index_path)?;
+    std::fs::remove_file(&publishing_marker)?;
 
     Ok(WikiOutcome {
         out_dir: out_dir.to_path_buf(),
@@ -1201,6 +1208,16 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         pages_written: flush_stats.written,
         pages_unchanged: flush_stats.unchanged,
     })
+}
+
+fn write_json_atomic(path: &std::path::Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// Remove stale dev-class `.md`/`.json` files left over from a prior run with a

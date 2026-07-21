@@ -11,6 +11,7 @@ use crate::application::app_services::RepoContextService;
 use crate::application::change_detection::{
     ChangeDetectionService, DetectChangesCommand, DetectChangesOutput,
 };
+use crate::domain::completeness::ResultBounds;
 use crate::domain::error::AppError;
 use crate::domain::repository::RepoSelector;
 
@@ -53,7 +54,7 @@ impl GraphQueryService {
     pub(crate) async fn impact(
         &self,
         command: ImpactCommand,
-    ) -> Result<SymbolQueryOutput<Impact>, AppError> {
+    ) -> Result<SymbolQueryOutput<ImpactOutput>, AppError> {
         let repo = self
             .repos
             .resolve(RepoSelector::from_wire(&command.repo))
@@ -63,7 +64,12 @@ impl GraphQueryService {
                 .store
                 .impact(&id, command.direction, command.max_depth)
                 .await
-                .map(SymbolQueryOutput::Resolved)
+                .map(|impact| {
+                    SymbolQueryOutput::Resolved(ImpactOutput {
+                        completeness: ResultBounds::requested_scope(impact.affected.len()),
+                        impact,
+                    })
+                })
                 .map_err(graph_error),
             SymbolResolution::Ambiguous(nodes) => Ok(SymbolQueryOutput::Ambiguous(
                 AmbiguousResult::from_nodes(nodes),
@@ -81,29 +87,41 @@ impl GraphQueryService {
             .resolve(RepoSelector::from_wire(&command.repo))
             .await?;
         let mut communities = repo.store.communities().await.map_err(graph_error)?;
+        let total = communities.len();
         if let Some(limit) = command.limit {
             communities.truncate(limit);
         }
+        let completeness = ResultBounds::exact_limit(total, communities.len(), command.limit);
         let edges = if command.include_edges {
             repo.store.community_graph().await.map_err(graph_error)?
         } else {
             Vec::new()
         };
-        Ok(CommunitiesOutput { communities, edges })
+        Ok(CommunitiesOutput {
+            communities,
+            edges,
+            completeness,
+        })
     }
 
     pub(crate) async fn routes(
         &self,
         command: RouteMapCommand,
-    ) -> Result<Vec<RouteInfo>, AppError> {
+    ) -> Result<RouteMapOutput, AppError> {
         let repo = self
             .repos
             .resolve(RepoSelector::from_wire(&command.repo))
             .await?;
-        repo.store
+        let routes = repo
+            .store
             .route_map(command.prefix.as_deref(), command.limit)
             .await
-            .map_err(graph_error)
+            .map_err(graph_error)?;
+        let completeness = ResultBounds::backend_limited(routes.len(), command.limit);
+        Ok(RouteMapOutput {
+            routes,
+            completeness,
+        })
     }
 
     pub(crate) async fn trace_flow(
@@ -125,6 +143,7 @@ impl GraphQueryService {
                     entry_point: id,
                     depth_limit: command.max_depth,
                     step_count: steps.len(),
+                    completeness: ResultBounds::requested_scope(steps.len()),
                     steps,
                 }))
             }
@@ -155,6 +174,7 @@ impl GraphQueryService {
             .map_err(graph_error)?;
         Ok(ComplexityHotspotsOutput {
             count: hotspots.len(),
+            completeness: ResultBounds::backend_limited(hotspots.len(), command.limit),
             hotspots,
         })
     }
@@ -178,6 +198,7 @@ impl GraphQueryService {
                     query_id: id,
                     min_jaccard: command.min_jaccard,
                     count: similar.len(),
+                    completeness: ResultBounds::backend_limited(similar.len(), command.limit),
                     similar,
                 }))
             }
@@ -292,6 +313,20 @@ impl AmbiguousResult {
 pub(crate) struct CommunitiesOutput {
     pub(crate) communities: Vec<CommunityInfo>,
     pub(crate) edges: Vec<CommunityEdge>,
+    pub(crate) completeness: ResultBounds,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RouteMapOutput {
+    pub(crate) routes: Vec<RouteInfo>,
+    pub(crate) completeness: ResultBounds,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ImpactOutput {
+    #[serde(flatten)]
+    pub(crate) impact: Impact,
+    pub(crate) completeness: ResultBounds,
 }
 
 #[derive(Debug, Serialize)]
@@ -299,12 +334,14 @@ pub(crate) struct TraceFlowOutput {
     pub(crate) entry_point: NodeId,
     pub(crate) depth_limit: u32,
     pub(crate) step_count: usize,
+    pub(crate) completeness: ResultBounds,
     pub(crate) steps: Vec<FlowHop>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ComplexityHotspotsOutput {
     pub(crate) count: usize,
+    pub(crate) completeness: ResultBounds,
     pub(crate) hotspots: Vec<HotspotNode>,
 }
 
@@ -313,6 +350,7 @@ pub(crate) struct FindDuplicatesOutput {
     pub(crate) query_id: NodeId,
     pub(crate) min_jaccard: f32,
     pub(crate) count: usize,
+    pub(crate) completeness: ResultBounds,
     pub(crate) similar: Vec<SimilarMethod>,
 }
 

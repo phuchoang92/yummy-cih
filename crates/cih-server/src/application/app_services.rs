@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::application::admin::resolve_patterns::ResolvePatternService;
-use crate::application::admin::RepositoryAdminService;
+use crate::application::admin::{OperationalMetricsService, RepositoryAdminService};
 use crate::application::architecture_overview::ArchitectureOverviewService;
 use crate::application::browser::GraphBrowserService;
 use crate::application::contracts::ContractService;
@@ -81,6 +81,7 @@ pub(crate) struct AdminUseCases {
     pub(crate) repositories: RepositoryAdminService,
     pub(crate) indexing: IndexingService,
     pub(crate) patterns: ResolvePatternService,
+    pub(crate) operations: OperationalMetricsService,
 }
 
 #[derive(Clone)]

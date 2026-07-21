@@ -136,7 +136,12 @@ impl SearchIndex {
         // Accumulate scores only over docs that contain a query term. Query tokens
         // are iterated in order, so a doc's contributions land in the same order as
         // the previous per-doc loop — identical f32 accumulation, identical output.
-        let mut scores: HashMap<u32, f32> = HashMap::new();
+        // A dense score buffer is substantially cheaper than a HashMap for
+        // common terms that match hundreds of thousands of documents. Keep a
+        // compact touched list so result construction still visits candidates
+        // only, not every indexed document.
+        let mut scores = vec![0.0_f32; self.docs.len()];
+        let mut touched = Vec::new();
         for token in &query_tokens {
             let Some(postings) = self.postings.get(token.as_str()) else {
                 continue;
@@ -144,20 +149,45 @@ impl SearchIndex {
             let df = *self.doc_freq.get(token.as_str()).unwrap_or(&0) as f32;
             let token_idf = idf(n, df);
             for &(doc_idx, tf) in postings {
+                let doc_idx = doc_idx as usize;
                 let tf = tf as f32;
-                let dl = self.doc_len[doc_idx as usize] as f32;
+                let dl = self.doc_len[doc_idx] as f32;
                 let contrib =
                     token_idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg)));
-                *scores.entry(doc_idx).or_insert(0.0) += contrib;
+                if scores[doc_idx] == 0.0 {
+                    touched.push(doc_idx);
+                }
+                scores[doc_idx] += contrib;
             }
         }
 
-        let mut hits: Vec<SearchHit> = scores
+        let mut candidates: Vec<(usize, f32)> = touched
             .into_iter()
+            .map(|doc_idx| (doc_idx, scores[doc_idx]))
             .filter(|&(_, score)| score > 0.0)
-            .map(|(doc_idx, score)| {
-                let doc = &self.docs[doc_idx as usize];
-                SearchHit::from_parts(
+            .collect();
+        let rank_order = |a: &(usize, f32), b: &(usize, f32)| {
+            b.1.total_cmp(&a.1).then_with(|| {
+                self.docs[a.0]
+                    .node_id
+                    .as_str()
+                    .cmp(self.docs[b.0].node_id.as_str())
+            })
+        };
+        // Partition in linear time and sort only the requested top-k. This
+        // preserves the existing deterministic score/node-id ordering.
+        if candidates.len() > limit {
+            candidates.select_nth_unstable_by(limit, rank_order);
+            candidates.truncate(limit);
+        }
+        candidates.sort_by(rank_order);
+
+        candidates
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (doc_idx, score))| {
+                let doc = &self.docs[doc_idx];
+                let mut hit = SearchHit::from_parts(
                     doc.node_id.clone(),
                     doc.kind,
                     doc.name.clone(),
@@ -166,20 +196,11 @@ impl SearchIndex {
                     doc.range,
                     score,
                     "bm25",
-                )
+                );
+                hit.rank = rank + 1;
+                hit
             })
-            .collect();
-
-        hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.node_id.as_str().cmp(b.node_id.as_str()))
-        });
-        hits.truncate(limit);
-        for (idx, hit) in hits.iter_mut().enumerate() {
-            hit.rank = idx + 1;
-        }
-        hits
+            .collect()
     }
 }
 
@@ -285,7 +306,8 @@ impl TextIndex {
 
         let n = self.indexed as f32;
         let avg = self.avg_doc_len.max(1.0);
-        let mut scores: HashMap<u32, f32> = HashMap::new();
+        let mut scores = vec![0.0_f32; self.num_docs];
+        let mut touched = Vec::new();
         for token in &query_tokens {
             let Some(postings) = self.postings.get(token.as_str()) else {
                 continue;
@@ -293,22 +315,31 @@ impl TextIndex {
             let df = *self.doc_freq.get(token.as_str()).unwrap_or(&0) as f32;
             let token_idf = idf(n, df);
             for &(ordinal, tf) in postings {
+                let ordinal = ordinal as usize;
                 let tf = tf as f32;
-                let dl = self.doc_len[ordinal as usize] as f32;
+                let dl = self.doc_len[ordinal] as f32;
                 let contrib =
                     token_idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg)));
-                *scores.entry(ordinal).or_insert(0.0) += contrib;
+                if scores[ordinal] == 0.0 {
+                    touched.push(ordinal);
+                }
+                scores[ordinal] += contrib;
             }
         }
 
-        let mut hits: Vec<(usize, f32)> = scores
+        let mut hits: Vec<(usize, f32)> = touched
             .into_iter()
+            .map(|ordinal| (ordinal, scores[ordinal]))
             .filter(|&(_, score)| score > 0.0)
-            .map(|(ordinal, score)| (ordinal as usize, score))
             .collect();
 
-        hits.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        hits.truncate(limit);
+        let rank_order =
+            |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0));
+        if hits.len() > limit {
+            hits.select_nth_unstable_by(limit, rank_order);
+            hits.truncate(limit);
+        }
+        hits.sort_by(rank_order);
         hits
     }
 }

@@ -1,7 +1,8 @@
-//! Local bounded scheduler and engine process adapter.
+//! Local bounded scheduler for engine indexing jobs.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,8 +11,9 @@ use tokio::sync::{watch, Mutex, Semaphore};
 
 use crate::domain::error::AppError;
 use crate::domain::indexing::{
-    IndexJobSnapshot, IndexJobSpec, IndexSchedulerReceipt, ResolvedRepoTarget,
+    IndexJobSnapshot, IndexJobSpec, IndexQueueMetrics, IndexSchedulerReceipt, ResolvedRepoTarget,
 };
+use crate::infrastructure::engine_process_runner::TokioEngineProcessRunner;
 use crate::infrastructure::index_jobs::{
     evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs,
 };
@@ -19,6 +21,7 @@ use crate::ports::artifact_repository::ArtifactRepository;
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::ports::index_target_resolver::IndexTargetResolver;
 use crate::ports::job_scheduler::IndexJobScheduler;
+use crate::ports::process_runner::{EngineProcessOutcome, EngineProcessRunner, EngineProcessSpec};
 
 /// Admission-controlled runner for `cih-engine analyze` jobs (S5): a global
 /// running-cap semaphore, a bounded admission queue, one active job per
@@ -41,6 +44,8 @@ pub struct IndexScheduler {
     job_timeout: Duration,
     output_cap: usize,
     artifacts: Arc<dyn ArtifactRepository>,
+    process_runner: Arc<dyn EngineProcessRunner>,
+    rejected: Arc<AtomicU64>,
     engine: IndexEngineConfig,
 }
 
@@ -123,6 +128,29 @@ impl IndexScheduler {
         artifacts: Arc<dyn ArtifactRepository>,
         engine: IndexEngineConfig,
     ) -> Self {
+        Self::with_runner_limits(
+            jobs,
+            max_concurrent,
+            queue_capacity,
+            job_timeout,
+            output_cap,
+            artifacts,
+            Arc::new(TokioEngineProcessRunner),
+            engine,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_runner_limits(
+        jobs: Jobs,
+        max_concurrent: usize,
+        queue_capacity: usize,
+        job_timeout: Duration,
+        output_cap: usize,
+        artifacts: Arc<dyn ArtifactRepository>,
+        process_runner: Arc<dyn EngineProcessRunner>,
+        engine: IndexEngineConfig,
+    ) -> Self {
         Self {
             jobs,
             running: Arc::new(Semaphore::new(max_concurrent)),
@@ -132,6 +160,8 @@ impl IndexScheduler {
             job_timeout,
             output_cap,
             artifacts,
+            process_runner,
+            rejected: Arc::new(AtomicU64::new(0)),
             engine,
         }
     }
@@ -176,7 +206,7 @@ impl IndexScheduler {
     /// Register the job (state `queued`, cancel channel) and spawn its
     /// lifecycle: wait for a running slot → run the engine → settle a terminal
     /// state. The caller has already claimed the repo via [`admit`](Self::admit).
-    async fn spawn_job(&self, job_id: String, canonical: PathBuf, cmd: tokio::process::Command) {
+    async fn spawn_job(&self, job_id: String, canonical: PathBuf, spec: EngineProcessSpec) {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         {
             let mut jobs = self.jobs.write().await;
@@ -225,35 +255,29 @@ impl IndexScheduler {
                 .await
                 .insert(job_id.clone(), JobState::Running { started_at_secs });
 
-            // Running phase: on cancel, dropping the unfinished `run_engine`
-            // future kills the child (`kill_on_drop`) and its reader tasks end
-            // on pipe EOF.
-            let outcome = tokio::select! {
-                outcome = run_engine(cmd, sched.job_timeout, sched.output_cap) => Some(outcome),
-                _ = wait_cancelled(cancel_rx) => None,
-            };
+            let outcome = sched.process_runner.run(spec, cancel_rx).await;
             let finished_at_secs = unix_now_secs();
             let state = match outcome {
-                None => JobState::Cancelled {
+                EngineProcessOutcome::Cancelled => JobState::Cancelled {
                     cancelled_at_secs: finished_at_secs,
                 },
-                Some(EngineOutcome::Exited {
+                EngineProcessOutcome::Exited {
                     success: true,
                     stdout,
                     truncated,
                     ..
-                }) => JobState::Done {
+                } => JobState::Done {
                     started_at_secs,
                     finished_at_secs,
                     output: stdout.trim().to_string(),
                     output_truncated: truncated,
                 },
-                Some(EngineOutcome::Exited {
+                EngineProcessOutcome::Exited {
                     code,
                     stdout,
                     stderr,
                     ..
-                }) => {
+                } => {
                     let stderr: String = stderr
                         .lines()
                         .filter(|l| !l.contains('\x1b'))
@@ -269,12 +293,12 @@ impl IndexScheduler {
                         ),
                     }
                 }
-                Some(EngineOutcome::TimedOut) => JobState::TimedOut {
+                EngineProcessOutcome::TimedOut => JobState::TimedOut {
                     started_at_secs,
                     finished_at_secs,
                     timeout_secs: sched.job_timeout.as_secs(),
                 },
-                Some(EngineOutcome::LaunchFailed(error)) => JobState::Failed {
+                EngineProcessOutcome::LaunchFailed(error) => JobState::Failed {
                     started_at_secs,
                     finished_at_secs,
                     error,
@@ -303,6 +327,7 @@ impl IndexScheduler {
             };
         }
         if active.len() >= self.admission_capacity {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
             return Admission::QueueFull {
                 active: active.len(),
                 capacity: self.admission_capacity,
@@ -376,58 +401,6 @@ fn resolve_target_graph_key(
                 ));
             }
             Ok(explicit.to_string())
-        }
-    }
-}
-
-/// Environment forwarded to `cih-engine`. The child starts from a **cleared**
-/// environment and receives only these (plus the job-specific graph settings the
-/// caller sets explicitly), so server-only secrets — notably `CIH_API_TOKEN` —
-/// never reach a subprocess (§20, "child processes receive only an allowlisted
-/// environment").
-///
-/// Keep in sync with what the engine actually reads: adding an engine env var
-/// without adding it here makes it silently unset in server-launched jobs.
-const ENGINE_ENV_ALLOWLIST: &[&str] = &[
-    // OS essentials — the engine shells out (git, gradle, javap) and writes the
-    // registry under `$HOME/.cih`, so clearing these would break indexing.
-    "PATH",
-    "HOME",
-    "TMPDIR",
-    "TMP",
-    "LANG",
-    "LC_ALL",
-    "USER",
-    "LOGNAME",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "RUST_BACKTRACE",
-    // Engine tuning and data sources it reads directly.
-    "CIH_ASCII",
-    "CIH_BULK_BATCH_BYTES",
-    "CIH_FALKOR_CONNECT_TIMEOUT_SECS",
-    "CIH_FALKOR_LOAD_WAIT_SECS",
-    "CIH_PG_URL",
-    "POSTGRES_PASSWORD",
-    "GRADLE_USER_HOME",
-    "HF_HOME",
-    "HF_HUB_OFFLINE",
-    // `analyze --all` ends in the wiki stage, which may call an LLM provider.
-    // These are forwarded deliberately: the child needs them, the server does not.
-    "CIH_LLM_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GEMINI_API_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "AWS_BEARER_TOKEN_BEDROCK",
-];
-
-/// Clear the inherited environment and re-add only [`ENGINE_ENV_ALLOWLIST`].
-fn apply_engine_environment(command: &mut tokio::process::Command) {
-    command.env_clear();
-    for key in ENGINE_ENV_ALLOWLIST {
-        if let Ok(value) = std::env::var(key) {
-            command.env(key, value);
         }
     }
 }
@@ -522,21 +495,30 @@ impl IndexJobScheduler for IndexScheduler {
             Admission::Admitted => {}
         }
 
-        let mut command = tokio::process::Command::new(find_engine_binary());
-        apply_engine_environment(&mut command);
-        command
-            .arg("analyze")
-            .arg(canonical.display().to_string())
-            .arg("--all")
-            .env("CIH_GRAPH_BACKEND", &self.engine.backend)
-            .env("FALKOR_URL", &self.engine.falkor_url)
-            .env("CIH_GRAPH_KEY", &command_key.graph_key)
-            .env("NO_COLOR", "1")
-            .env("RUST_LOG", "warn,cih_engine=info");
+        let mut args = vec![
+            "analyze".to_string(),
+            canonical.display().to_string(),
+            "--all".to_string(),
+        ];
         for language in &command_key.languages {
-            command.arg("--language").arg(language);
+            args.push("--language".to_string());
+            args.push(language.clone());
         }
-        self.spawn_job(job_id.clone(), canonical, command).await;
+        let spec = EngineProcessSpec {
+            program: find_engine_binary(),
+            args,
+            current_dir: canonical.clone(),
+            env: vec![
+                ("CIH_GRAPH_BACKEND".into(), self.engine.backend.clone()),
+                ("FALKOR_URL".into(), self.engine.falkor_url.clone()),
+                ("CIH_GRAPH_KEY".into(), command_key.graph_key.clone()),
+                ("NO_COLOR".into(), "1".into()),
+                ("RUST_LOG".into(), "warn,cih_engine=info".into()),
+            ],
+            deadline: self.job_timeout,
+            output_cap: self.output_cap,
+        };
+        self.spawn_job(job_id.clone(), canonical, spec).await;
 
         Ok(IndexSchedulerReceipt {
             job_id,
@@ -559,6 +541,21 @@ impl IndexJobScheduler for IndexScheduler {
     async fn cancel(&self, job_id: &str) -> Result<(), AppError> {
         self.signal_cancel(job_id).await
     }
+
+    async fn metrics(&self) -> IndexQueueMetrics {
+        let jobs = self.jobs.read().await;
+        IndexQueueMetrics {
+            queued: jobs
+                .values()
+                .filter(|state| matches!(state, JobState::Queued { .. }))
+                .count(),
+            running: jobs
+                .values()
+                .filter(|state| matches!(state, JobState::Running { .. }))
+                .count(),
+            rejected: self.rejected.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// Resolves when the job's cancel signal fires; pends forever if the sender
@@ -574,101 +571,41 @@ async fn wait_cancelled(mut rx: watch::Receiver<bool>) {
     }
 }
 
-#[derive(Debug)]
-enum EngineOutcome {
-    Exited {
-        code: i32,
-        success: bool,
-        stdout: String,
-        stderr: String,
-        /// True when either stream hit the retention cap.
-        truncated: bool,
-    },
-    TimedOut,
-    LaunchFailed(String),
-}
-
-/// Run the engine with piped, cap-retained output and a hard deadline. On
-/// deadline the child is killed (`kill_on_drop` is the backstop). Streams are
-/// drained past the cap so a chatty child never blocks on a full pipe — only
-/// retention is capped, per §13.4 of the design record.
-async fn run_engine(
-    mut cmd: tokio::process::Command,
-    deadline: Duration,
-    output_cap: usize,
-) -> EngineOutcome {
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let program = format!("{:?}", cmd.as_std().get_program());
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => return EngineOutcome::LaunchFailed(format!("failed to launch {program}: {e}")),
-    };
-    let out_task = child
-        .stdout
-        .take()
-        .map(|s| tokio::spawn(read_capped(s, output_cap)));
-    let err_task = child
-        .stderr
-        .take()
-        .map(|s| tokio::spawn(read_capped(s, output_cap)));
-    let collect = |task: Option<tokio::task::JoinHandle<(String, bool)>>| async {
-        match task {
-            Some(t) => t.await.unwrap_or_default(),
-            None => (String::new(), false),
-        }
-    };
-    match tokio::time::timeout(deadline, child.wait()).await {
-        Err(_elapsed) => {
-            let _ = child.kill().await;
-            EngineOutcome::TimedOut
-        }
-        Ok(Err(e)) => EngineOutcome::LaunchFailed(format!("failed waiting on {program}: {e}")),
-        Ok(Ok(status)) => {
-            let (stdout, out_truncated) = collect(out_task).await;
-            let (stderr, err_truncated) = collect(err_task).await;
-            EngineOutcome::Exited {
-                code: status.code().unwrap_or(-1),
-                success: status.success(),
-                stdout,
-                stderr,
-                truncated: out_truncated || err_truncated,
-            }
-        }
-    }
-}
-
-/// Read a stream retaining at most `cap` bytes; the remainder is drained (so
-/// the child never blocks) and flagged as truncated.
-async fn read_capped<R>(mut reader: R, cap: usize) -> (String, bool)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt;
-    let mut retained: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut truncated = false;
-    loop {
-        match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let room = cap.saturating_sub(retained.len());
-                let take = n.min(room);
-                retained.extend_from_slice(&chunk[..take]);
-                if take < n {
-                    truncated = true;
-                }
-            }
-        }
-    }
-    (String::from_utf8_lossy(&retained).into_owned(), truncated)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use cih_core::{Registry, RegistryEntry};
+
+    #[derive(Default)]
+    struct FakeProcessRunner;
+
+    #[async_trait]
+    impl EngineProcessRunner for FakeProcessRunner {
+        async fn run(
+            &self,
+            spec: EngineProcessSpec,
+            mut cancel: watch::Receiver<bool>,
+        ) -> EngineProcessOutcome {
+            if spec.args.first().is_some_and(|arg| arg == "wait") {
+                loop {
+                    if *cancel.borrow() {
+                        return EngineProcessOutcome::Cancelled;
+                    }
+                    if cancel.changed().await.is_err() {
+                        return EngineProcessOutcome::LaunchFailed("cancel channel closed".into());
+                    }
+                }
+            }
+            EngineProcessOutcome::Exited {
+                code: 0,
+                success: true,
+                stdout: "done".into(),
+                stderr: String::new(),
+                truncated: false,
+            }
+        }
+    }
 
     fn entry(name: &str, path: &str, graph_key: &str) -> RegistryEntry {
         RegistryEntry {
@@ -684,13 +621,14 @@ mod tests {
     }
 
     fn test_scheduler(max_concurrent: usize, queue_capacity: usize) -> IndexScheduler {
-        IndexScheduler::with_limits(
+        IndexScheduler::with_runner_limits(
             std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             max_concurrent,
             queue_capacity,
             Duration::from_secs(60),
             64 * 1024,
             Arc::new(crate::infrastructure::artifact_repository::ArtifactCache::default()),
+            Arc::new(FakeProcessRunner),
             IndexEngineConfig {
                 backend: "memory".into(),
                 falkor_url: String::new(),
@@ -843,126 +781,6 @@ mod tests {
         }
     }
 
-    /// §20: the child must not inherit server-only secrets. Runs a real child
-    /// through the same environment construction and inspects what it sees.
-    #[tokio::test]
-    async fn engine_child_gets_only_allowlisted_environment() {
-        // SAFETY: single-threaded test process; the vars are removed below.
-        std::env::set_var("CIH_API_TOKEN", "super-secret-bearer");
-        std::env::set_var("CIH_LLM_API_KEY", "llm-key");
-        std::env::set_var("SOME_UNRELATED_HOST_VAR", "leaky");
-
-        let mut cmd = tokio::process::Command::new("sh");
-        apply_engine_environment(&mut cmd);
-        cmd.arg("-c").arg("env");
-        let outcome = run_engine(cmd, Duration::from_secs(30), 256 * 1024).await;
-
-        std::env::remove_var("CIH_API_TOKEN");
-        std::env::remove_var("CIH_LLM_API_KEY");
-        std::env::remove_var("SOME_UNRELATED_HOST_VAR");
-
-        let EngineOutcome::Exited { stdout, .. } = outcome else {
-            panic!("expected the child to exit, got {outcome:?}");
-        };
-        let seen: std::collections::HashSet<&str> = stdout
-            .lines()
-            .filter_map(|line| line.split_once('='))
-            .map(|(key, _)| key)
-            .collect();
-
-        // The server's bearer token and unrelated host state must not cross.
-        assert!(
-            !seen.contains("CIH_API_TOKEN"),
-            "server bearer token leaked into the engine child: {seen:?}"
-        );
-        assert!(!seen.contains("SOME_UNRELATED_HOST_VAR"));
-        // What the engine genuinely needs must survive, or indexing breaks:
-        // `$HOME/.cih` is where the registry lives and it shells out to git.
-        assert!(seen.contains("HOME"), "HOME must be forwarded: {seen:?}");
-        assert!(seen.contains("PATH"), "PATH must be forwarded: {seen:?}");
-        // Deliberately forwarded: `analyze --all` ends in the wiki stage.
-        assert!(seen.contains("CIH_LLM_API_KEY"));
-        // Everything present must come from the allowlist — except the few
-        // variables the shell itself sets in its own process (they are not
-        // inherited from the server, which is what this guard is about).
-        const SHELL_INJECTED: &[&str] = &["PWD", "SHLVL", "_"];
-        for key in &seen {
-            assert!(
-                ENGINE_ENV_ALLOWLIST.contains(key) || SHELL_INJECTED.contains(key),
-                "unexpected variable in the child environment: {key}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn engine_run_captures_output_and_exit() {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg("echo out; echo err 1>&2");
-        match run_engine(cmd, Duration::from_secs(30), 64 * 1024).await {
-            EngineOutcome::Exited {
-                success,
-                stdout,
-                stderr,
-                truncated,
-                ..
-            } => {
-                assert!(success);
-                assert_eq!(stdout.trim(), "out");
-                assert_eq!(stderr.trim(), "err");
-                assert!(!truncated);
-            }
-            other => panic!("expected Exited, got {other:?}"),
-        }
-    }
-
-    /// §13.2: the deadline kills the child — the call returns promptly, not
-    /// after the child's natural runtime.
-    #[tokio::test]
-    async fn engine_run_deadline_kills_the_child() {
-        let start = std::time::Instant::now();
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg("sleep 30");
-        let outcome = run_engine(cmd, Duration::from_millis(100), 1024).await;
-        assert!(matches!(outcome, EngineOutcome::TimedOut), "{outcome:?}");
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "deadline must fire, not the 30s sleep"
-        );
-    }
-
-    /// §13.4: retention is capped (with the truncation flag) but the child is
-    /// fully drained, so a chatty child can't wedge on a full pipe.
-    #[tokio::test]
-    async fn engine_run_caps_retained_output() {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg("i=0; while [ $i -lt 5000 ]; do echo xxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done");
-        match run_engine(cmd, Duration::from_secs(30), 1000).await {
-            EngineOutcome::Exited {
-                success,
-                stdout,
-                truncated,
-                ..
-            } => {
-                assert!(success);
-                assert!(truncated, "100KB of output vs a 1000-byte cap");
-                assert!(stdout.len() <= 1000, "retained {} bytes", stdout.len());
-            }
-            other => panic!("expected Exited, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn engine_run_launch_failure_is_reported() {
-        let cmd = tokio::process::Command::new("/nonexistent/cih-engine-test-binary");
-        match run_engine(cmd, Duration::from_secs(5), 1024).await {
-            EngineOutcome::LaunchFailed(msg) => {
-                assert!(msg.contains("failed to launch"), "{msg}");
-            }
-            other => panic!("expected LaunchFailed, got {other:?}"),
-        }
-    }
-
     /// Poll until the job reaches a state matching `pred` (bounded wait).
     async fn wait_for(
         sched: &IndexScheduler,
@@ -980,10 +798,15 @@ mod tests {
         panic!("timed out waiting for job '{job_id}' state");
     }
 
-    fn sleeper_cmd(secs: u32) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(format!("sleep {secs}"));
-        cmd
+    fn fake_spec(action: &str) -> EngineProcessSpec {
+        EngineProcessSpec {
+            program: PathBuf::from("fake-cih-engine"),
+            args: vec![action.into()],
+            current_dir: PathBuf::from("/tmp"),
+            env: Vec::new(),
+            deadline: Duration::from_secs(60),
+            output_cap: 1024,
+        }
     }
 
     /// §13: cancelling a running job kills the engine promptly, settles the
@@ -998,7 +821,7 @@ mod tests {
         ));
         let start = std::time::Instant::now();
         sched
-            .spawn_job("job-r".into(), repo.to_path_buf(), sleeper_cmd(30))
+            .spawn_job("job-r".into(), repo.to_path_buf(), fake_spec("wait"))
             .await;
         wait_for(&sched, "job-r", |s| matches!(s, JobState::Running { .. })).await;
         sched.signal_cancel("job-r").await.unwrap();
@@ -1028,7 +851,7 @@ mod tests {
             Admission::Admitted
         ));
         sched
-            .spawn_job("job-q".into(), repo.to_path_buf(), sleeper_cmd(30))
+            .spawn_job("job-q".into(), repo.to_path_buf(), fake_spec("wait"))
             .await;
         wait_for(&sched, "job-q", |s| matches!(s, JobState::Queued { .. })).await;
         sched.signal_cancel("job-q").await.unwrap();
@@ -1048,10 +871,8 @@ mod tests {
             sched.admit(repo, "job-d", &command("")).await,
             Admission::Admitted
         ));
-        let mut quick = tokio::process::Command::new("sh");
-        quick.arg("-c").arg("true");
         sched
-            .spawn_job("job-d".into(), repo.to_path_buf(), quick)
+            .spawn_job("job-d".into(), repo.to_path_buf(), fake_spec("success"))
             .await;
         wait_for(&sched, "job-d", |s| matches!(s, JobState::Done { .. })).await;
         let err = sched.signal_cancel("job-d").await.unwrap_err();
@@ -1083,13 +904,14 @@ mod tests {
         artifacts.snapshot(&repo).await.unwrap();
         assert_eq!(artifacts.metrics().retained_entries, 1);
 
-        let sched = IndexScheduler::with_limits(
+        let sched = IndexScheduler::with_runner_limits(
             Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             1,
             1,
             Duration::from_secs(5),
             1024,
             artifacts.clone(),
+            Arc::new(FakeProcessRunner),
             IndexEngineConfig {
                 backend: "memory".into(),
                 falkor_url: String::new(),
@@ -1102,10 +924,8 @@ mod tests {
                 .await,
             Admission::Admitted
         ));
-        let mut quick = tokio::process::Command::new("sh");
-        quick.arg("-c").arg("true");
         sched
-            .spawn_job("job-invalidate".into(), canonical, quick)
+            .spawn_job("job-invalidate".into(), canonical, fake_spec("success"))
             .await;
         wait_for(&sched, "job-invalidate", |state| {
             matches!(state, JobState::Done { .. })

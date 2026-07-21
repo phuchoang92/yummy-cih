@@ -96,6 +96,23 @@ Other tuning knobs: `CIH_BLOCKING_MAX_CONCURRENT` (2) and
 `CIH_DETECT_CHANGES_MAX_SYMBOLS` (200) caps blast-radius traversals per
 `detect_changes` call.
 
+Operational state is available at authenticated `GET /operations/metrics`.
+Use it to distinguish slow execution from admission pressure: blocking
+`queued`/`active` and cumulative queue wait describe cold read pressure, while
+index `queued`/`running`/`rejected` describes analysis-job pressure. Request
+completion logs use the `request_completed` event and include duration, queue
+wait, response bytes, result count when available, completeness, and a bounded
+error class.
+
+The scheduled `.github/workflows/cih-server-soak.yml` workflow runs both the
+ten-service and fifty-registry-entry matrices. For a local smoke run:
+
+```bash
+CIH_SOAK_DURATION_SECS=60 CIH_SOAK_REPOSITORIES=3 \
+  CIH_SOAK_LARGE_NODES=50000 CIH_SOAK_SMALL_NODES=10000 \
+  cargo run --release -p cih-server --example soak_bench
+```
+
 ### Indexing from the server
 
 `index_repo` spawns `cih-engine analyze` on the host, so it is bounded and

@@ -32,7 +32,6 @@ use crate::application::browser::GraphBrowserService;
 use crate::application::browser::ReadinessService;
 use crate::application::change_detection::ChangeDetectionService;
 use crate::application::contracts::ContractService;
-use crate::application::cross_repo_graph::XflowState;
 use crate::application::files::{FileService, ReadFileLimits};
 use crate::application::graph::GraphQueryService;
 use crate::application::indexing::IndexingService;
@@ -41,6 +40,7 @@ use crate::application::taint::TaintService;
 use crate::application::testing::TestingService;
 use crate::application::wiki_search::{WikiPageService, WikiSearchService};
 use crate::config::{CacheBudgets, Config};
+use crate::infrastructure::artifact_cross_repo_graph::ArtifactCrossRepoGraphProvider;
 use crate::infrastructure::artifact_repository::ArtifactCache;
 use crate::infrastructure::git_changed_files::GitChangedFilesSource;
 use crate::infrastructure::graph_store_provider::build_store;
@@ -95,11 +95,15 @@ pub(crate) fn assemble_services(
         backend,
         falkor_url,
     ));
-    let indexing_service =
-        IndexingService::new(Arc::new(RegistryIndexTargetResolver), index_scheduler);
+    let indexing_service = IndexingService::new(
+        Arc::new(RegistryIndexTargetResolver),
+        index_scheduler.clone(),
+    );
+    let operational_metrics =
+        crate::application::admin::OperationalMetricsService::new(index_scheduler);
     let contract_service = ContractService::new(
         repo_contexts.clone(),
-        XflowState::new(artifacts.clone()),
+        Arc::new(ArtifactCrossRepoGraphProvider::new(artifacts.clone())),
         artifacts.clone(),
     );
     let architecture_overview = ArchitectureOverviewService::new(
@@ -146,6 +150,7 @@ pub(crate) fn assemble_services(
             repositories: RepositoryAdminService::new(repos.clone(), graph_key, group),
             patterns: ResolvePatternService::new(repos.clone(), indexing_service.clone()),
             indexing: indexing_service,
+            operations: operational_metrics,
         },
     })
 }
@@ -207,7 +212,9 @@ pub async fn run() -> Result<()> {
         },
         wiki_state.clone(),
     );
-    let cih = CihServer::new(services.clone());
+    let observability: Arc<dyn crate::ports::observability::ObservabilityPort> =
+        Arc::new(crate::infrastructure::tracing_observability::TracingObservability);
+    let cih = CihServer::with_observability(services.clone(), observability.clone());
     let browser_state =
         browser::BrowserState::new(services.graph.browser.clone(), cfg.artifacts_dir.clone());
     let wiki_search_service = services.docs.wiki_search.clone();
@@ -218,9 +225,25 @@ pub async fn run() -> Result<()> {
         Default::default(),
     );
 
+    let browser_routes = browser::router(browser_state).layer(middleware::from_fn_with_state(
+        observability.clone(),
+        health::observability_middleware,
+    ));
+    // MCP tool calls are observed at the RMCP dispatch boundary. Applying the
+    // HTTP middleware to `/mcp` as well would double-count them.
+    let operations_routes = axum::Router::new()
+        .route(
+            "/operations/metrics",
+            get(health::operational_metrics_handler).with_state(services.admin.operations.clone()),
+        )
+        .layer(middleware::from_fn_with_state(
+            observability.clone(),
+            health::observability_middleware,
+        ));
     let protected = axum::Router::new()
         .nest_service("/mcp", service)
-        .merge(browser::router(browser_state))
+        .merge(browser_routes)
+        .merge(operations_routes)
         .layer(middleware::from_fn_with_state(
             cfg.api_token.clone(),
             health::auth_middleware,
@@ -236,6 +259,10 @@ pub async fn run() -> Result<()> {
         .allow_headers([axum::http::header::AUTHORIZATION]);
     let wiki_routes = wiki_http::router(wiki_search_service)
         .layer(middleware::from_fn_with_state(
+            observability.clone(),
+            health::observability_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
             cfg.api_token.clone(),
             health::auth_middleware,
         ))
@@ -244,7 +271,11 @@ pub async fn run() -> Result<()> {
     let ready_state = ReadinessService::new(store, cfg.artifacts_dir.clone());
     let public = axum::Router::new()
         .route("/health", get(health::health_handler))
-        .route("/ready", get(health::ready_handler).with_state(ready_state));
+        .route("/ready", get(health::ready_handler).with_state(ready_state))
+        .layer(middleware::from_fn_with_state(
+            observability,
+            health::observability_middleware,
+        ));
 
     let app = public
         .merge(protected)

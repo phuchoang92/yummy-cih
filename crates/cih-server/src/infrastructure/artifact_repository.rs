@@ -12,7 +12,11 @@ use async_trait::async_trait;
 
 use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
+use crate::infrastructure::artifact_index_store::FileArtifactIndexStore;
 use crate::infrastructure::cache::mtime::{CacheMetrics, MtimeCache};
+use crate::ports::artifact_index_store::{
+    ArtifactIndexStore, ArtifactSourceIdentity, SourceFileIdentity,
+};
 use crate::ports::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking_heavy};
 use crate::utils::{load_artifact_edges, load_artifact_nodes};
@@ -40,6 +44,15 @@ impl FileIdentity {
     fn exists(self) -> bool {
         self.modified.is_some() && self.len.is_some()
     }
+
+    fn source_identity(self) -> Option<SourceFileIdentity> {
+        let modified = self.modified?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(SourceFileIdentity {
+            len: self.len?,
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,13 +72,21 @@ impl ArtifactFreshness {
     fn is_complete(self) -> bool {
         self.nodes.exists() && self.edges.exists()
     }
+
+    fn source_identity(self) -> Option<ArtifactSourceIdentity> {
+        Some(ArtifactSourceIdentity {
+            nodes: self.nodes.source_identity()?,
+            edges: self.edges.source_identity()?,
+        })
+    }
 }
 
 /// Cross-call cache of parsed artifacts, keyed by artifacts dir, with
 /// single-flight loads (concurrent first-time loads for the same dir coalesce).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ArtifactCache {
     cache: Arc<MtimeCache<CachedArtifactSnapshot>>,
+    index_store: Arc<dyn ArtifactIndexStore>,
 }
 
 struct CachedArtifactSnapshot {
@@ -81,7 +102,36 @@ impl ArtifactCache {
             cache: Arc::new(MtimeCache::with_limits(
                 crate::infrastructure::cache::mtime::CacheLimits::artifact_from_env(),
             )),
+            index_store: Arc::new(FileArtifactIndexStore),
         }
+    }
+
+    fn prepare_indexes_blocking(&self, artifacts_dir: &Path, snapshot: &ArtifactSnapshot) {
+        let Some(source) = ArtifactFreshness::probe(artifacts_dir).source_identity() else {
+            snapshot.ensure_indexes_blocking();
+            return;
+        };
+        let store = self.index_store.clone();
+        snapshot.ensure_indexes_with(|| match store.load(artifacts_dir, source) {
+            Ok(Some(indexes)) => {
+                tracing::debug!(path = %artifacts_dir.display(), "reused persisted artifact index");
+                indexes
+            }
+            Ok(None) | Err(_) => {
+                let indexes = crate::ports::artifact_repository::ArtifactIndexes::build(
+                    &snapshot.nodes,
+                    &snapshot.edges,
+                );
+                if let Err(error) = store.persist(artifacts_dir, source, &indexes) {
+                    tracing::warn!(
+                        path = %artifacts_dir.display(),
+                        error = %error,
+                        "artifact index remains in memory; sidecar could not be persisted"
+                    );
+                }
+                indexes
+            }
+        });
     }
 
     /// Parsed nodes+edges for `artifacts_dir`, reused until either file identity
@@ -129,11 +179,12 @@ impl ArtifactCache {
                     ),
                 })?;
         let cache = self.clone();
+        let artifacts_path = artifacts_dir.clone();
         let snapshot =
             run_blocking_heavy(blocking_timeout(), "artifact snapshot load", move || {
                 let snapshot = cache.snapshot_blocking(&artifacts_dir.to_string_lossy())?;
                 if build_indexes {
-                    snapshot.ensure_indexes_blocking();
+                    cache.prepare_indexes_blocking(&artifacts_path, &snapshot);
                 }
                 Ok::<_, std::io::Error>(snapshot)
             })
@@ -167,6 +218,15 @@ impl ArtifactCache {
 
     pub(crate) fn metrics(&self) -> CacheMetrics {
         self.cache.metrics()
+    }
+}
+
+impl Default for ArtifactCache {
+    fn default() -> Self {
+        Self {
+            cache: Arc::new(MtimeCache::default()),
+            index_store: Arc::new(FileArtifactIndexStore),
+        }
     }
 }
 
@@ -358,5 +418,43 @@ mod tests {
         assert_eq!(indexes.node_by_id["Method:a.B#c/0"], 0);
         assert_eq!(indexes.outgoing_edges["Method:a.B#c/0"], vec![0]);
         assert_eq!(indexes.incoming_edges["Method:a.B#d/0"], vec![0]);
+    }
+
+    #[test]
+    fn persisted_index_is_reused_and_invalidated_with_artifact_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let edge = Edge::new(
+            NodeId::new("Method:a.B#c/0"),
+            NodeId::new("Method:a.B#d/0"),
+            EdgeKind::Calls,
+            1.0,
+            "test".into(),
+        );
+        write_fixture(dir.path(), std::slice::from_ref(&edge));
+        let first_cache = ArtifactCache::default();
+        let first = first_cache
+            .snapshot_blocking(dir.path().to_str().unwrap())
+            .unwrap();
+        first_cache.prepare_indexes_blocking(dir.path(), &first);
+        let sidecar = dir.path().join("cih-server-index-v1.bin");
+        let first_sidecar = std::fs::read(&sidecar).unwrap();
+
+        let restarted = ArtifactCache::default();
+        let warm = restarted
+            .snapshot_blocking(dir.path().to_str().unwrap())
+            .unwrap();
+        restarted.prepare_indexes_blocking(dir.path(), &warm);
+        assert_eq!(warm.indexes().outgoing_edges["Method:a.B#c/0"], vec![0]);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), first_sidecar);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.path().join("edges.jsonl"), "").unwrap();
+        let changed_cache = ArtifactCache::default();
+        let changed = changed_cache
+            .snapshot_blocking(dir.path().to_str().unwrap())
+            .unwrap();
+        changed_cache.prepare_indexes_blocking(dir.path(), &changed);
+        assert!(changed.indexes().outgoing_edges.is_empty());
+        assert_ne!(std::fs::read(sidecar).unwrap(), first_sidecar);
     }
 }

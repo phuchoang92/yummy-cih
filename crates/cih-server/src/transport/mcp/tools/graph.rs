@@ -3,7 +3,7 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::super::error::{app_error_to_mcp, json_result, text_result};
+use super::super::error::{app_error_to_mcp, json_result, json_result_compatible, text_result};
 use super::super::CihServer;
 use crate::application::change_detection::DetectChangesCommand;
 use crate::application::graph::{
@@ -66,7 +66,7 @@ impl CihServer {
             .map_err(app_error_to_mcp)?;
         if format == ImpactFormat::Diagram {
             if let SymbolQueryOutput::Resolved(impact) = &output {
-                return json_result(&render_d3_impact(impact));
+                return json_result(&render_d3_impact(&impact.impact));
             }
         }
         json_result(&output)
@@ -93,7 +93,7 @@ impl CihServer {
                 &output.edges,
             ));
         }
-        json_result(&output.communities)
+        json_result_compatible(&output.communities, &output)
     }
 
     #[tool(
@@ -110,7 +110,7 @@ impl CihServer {
         Parameters(args): Parameters<RouteMapArgs>,
     ) -> Result<CallToolResult, McpError> {
         let format = args.format;
-        let routes = self
+        let output = self
             .graph_queries()
             .routes(RouteMapCommand {
                 repo: args.repo,
@@ -120,9 +120,9 @@ impl CihServer {
             .await
             .map_err(app_error_to_mcp)?;
         if format == RouteMapFormat::Openapi {
-            return json_result(&render_openapi(&routes));
+            return json_result(&render_openapi(&output.routes));
         }
-        json_result(&routes)
+        json_result_compatible(&output.routes, &output)
     }
 
     #[tool(

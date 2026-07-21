@@ -6,24 +6,25 @@ use std::sync::Arc;
 use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind};
 use serde::Serialize;
 
-use crate::application::cross_repo_graph::{self as xflow, XflowState};
+use crate::application::cross_repo_graph as xflow;
 use crate::domain::error::AppError;
 use crate::domain::repository::{RepoCatalogSnapshot, RepoSelector};
 use crate::ports::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking_heavy, BlockingError};
+use crate::ports::cross_repo_graph_provider::{CrossRepoGraph, CrossRepoGraphProvider};
 use crate::ports::repo_context_provider::RepoContextProvider;
 
 #[derive(Clone)]
 pub(crate) struct ContractService {
     repo_contexts: Arc<dyn RepoContextProvider>,
-    xflow: XflowState,
+    xflow: Arc<dyn CrossRepoGraphProvider>,
     artifacts: Arc<dyn ArtifactRepository>,
 }
 
 impl ContractService {
     pub(crate) fn new(
         repo_contexts: Arc<dyn RepoContextProvider>,
-        xflow: XflowState,
+        xflow: Arc<dyn CrossRepoGraphProvider>,
         artifacts: Arc<dyn ArtifactRepository>,
     ) -> Self {
         Self {
@@ -323,7 +324,7 @@ fn api_impact_sync(
     command: ApiImpactCommand,
     catalog: &RepoCatalogSnapshot,
     contracts: &[ContractMatch],
-    graphs: &HashMap<String, Result<Arc<xflow::ArtifactGraph>, String>>,
+    graphs: &HashMap<String, Result<Arc<CrossRepoGraph>, String>>,
 ) -> ApiImpactOutput {
     let target_key = format!(
         "{} {}",
@@ -379,7 +380,7 @@ struct ConsumerCaller {
 /// Reverse-CALLS walk in the consumer repo: methods that (transitively) reach
 /// the `ExternalCall` site, each with its enclosing route when one handles it.
 fn consumer_callers(
-    graph: Option<&Result<Arc<xflow::ArtifactGraph>, String>>,
+    graph: Option<&Result<Arc<CrossRepoGraph>, String>>,
     consumer_repo: &str,
     consumer_endpoint: &str,
     depth_limit: u32,
@@ -464,7 +465,7 @@ impl TraceFlowXCommand {
 #[serde(untagged)]
 pub(crate) enum TraceFlowXOutput {
     Ambiguous(AmbiguousCandidates),
-    Trace(TraceFlowOutput),
+    Trace(Box<TraceFlowOutput>),
 }
 
 #[derive(Debug, Serialize)]
@@ -483,6 +484,7 @@ pub(crate) struct TraceFlowOutput {
     contracts_synced_at: Option<String>,
     contracts_stale: bool,
     step_count: usize,
+    completeness: crate::domain::completeness::ResultBounds,
     steps: Vec<xflow::XStep>,
     truncated: Vec<xflow::Truncation>,
 }
@@ -596,7 +598,7 @@ impl ContractService {
                 command.max_hops,
             );
             let (contracts_synced_at, contracts_stale) = group_freshness(&command.group, &catalog);
-            TraceFlowXOutput::Trace(TraceFlowOutput {
+            TraceFlowXOutput::Trace(Box::new(TraceFlowOutput {
                 entry_point: entry_id,
                 repo: start_repo,
                 group: command.group,
@@ -605,9 +607,10 @@ impl ContractService {
                 contracts_synced_at,
                 contracts_stale,
                 step_count: trace.steps.len(),
+                completeness: trace.completeness,
                 steps: trace.steps,
                 truncated: trace.truncated,
-            })
+            }))
         })
         .await
         .map_err(blocking_error)

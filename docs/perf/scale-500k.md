@@ -18,20 +18,21 @@ adapters: `ArtifactCache` snapshot/index loading, the BM25 `SearchIndex`, the wi
 `TextIndex`, and the MCP resource paging scan. `scale-500k-local.json` holds the
 latest raw report; it is machine-specific and regenerated, not a golden file.
 
-Reference machine for the numbers below: macOS / aarch64, 14 logical CPUs,
-release profile, 2026-07-20.
+Reference machine for the latest numbers below: macOS / aarch64, 14 logical
+CPUs, release profile, 2026-07-21.
 
 ## Results
 
 | Scenario | Observed | §21.6 target | Verdict |
 |---|---:|---|---|
-| Artifact cold parse (500k nodes + 1M edges) | 706 ms | — | baseline |
-| Lazy positional index build | 276 ms | — | baseline |
-| Artifact cache hit p95 | 0.029 ms | — | fast path is an `Arc` clone |
-| Event-loop delay p99 during cold load | 0.65 ms | < 50 ms | **pass** |
+| Artifact cold parse (500k nodes + 1M edges) | 752-817 ms | — | baseline |
+| First persisted positional index build | 718 ms | — | writes sidecar |
+| Warm-restart persisted index load | 199 ms | — | **3.6x faster** |
+| Artifact cache hit p95 | 0.027-0.032 ms | — | fast path is an `Arc` clone |
+| Event-loop delay p99 during cold load | 1.27 ms | < 50 ms | **pass** |
 | Same-key cold burst (8 callers) | 1 loader build, shared snapshot | exactly 1 | **pass** |
 | Resource tail page p95 | 0.039 ms | < 2000 ms | **pass** |
-| BM25 search query p95 (500k docs) | 489–511 ms | < 500 ms | **at/over the line** |
+| BM25 search query p95 (500k docs) | 16.2-17.1 ms | < 500 ms | **pass** |
 
 Memory at 500k nodes: artifact snapshot ≈ 762 MiB estimated, BM25 index ≈ 362 MiB,
 peak RSS ≈ 2.0–2.9 GiB across the full harness (which holds artifact, index, and
@@ -55,13 +56,12 @@ went from quadratic (~4 s of pure rescanning for 500 pages) to linear. The
 `resource_tail_page_p95` acceptance threshold was tightened from 2000 ms to 5 ms
 so a regression to full-scan paging fails the benchmark.
 
-## Open findings
+## Closed and open findings
 
-1. **BM25 search at 500k documents sits on the §21.6 500 ms p95 target**
-   (489 ms and 511 ms across two runs; p99 ≈ 512 ms). It is not a regression from
-   the paging work — search is untouched by it — but it is the next real
-   scalability item: either the query path needs optimizing or the target needs
-   an explicit revision for repositories of this size.
+1. **BM25 latency is closed.** Dense score accumulation plus linear top-k
+   selection replaced a 500k-entry hash map and full candidate sort. Ranking
+   equivalence tests pass; two release runs measured 16.216 ms and 17.132 ms
+   p95, roughly 29-31x below the previous 489-511 ms range.
 2. **Default cache budgets are smaller than a single 500k-node repository.** The
    artifact snapshot alone (≈ 762 MiB) exceeds `CIH_ARTIFACT_CACHE_MAX_BYTES`
    (512 MiB) and the BM25 index (≈ 362 MiB) exceeds
@@ -69,3 +69,8 @@ so a regression to full-scan paging fails the benchmark.
    without being retained (the oversize bypass). Correct and bounded, but it
    means no caching benefit for a repository this large until the budgets are
    raised or the representations shrink.
+3. **Persisted adjacency reuse is implemented, but memory size is not closed.**
+   The checksummed sidecar reduced warm adjacency initialization from 718 ms to
+   199 ms. Nodes, edges, and loaded hash indexes remain resident and the
+   estimated snapshot is about 762 MiB; memory mapping/compact ordinals remain
+   a future representation change rather than a claimed result of persistence.

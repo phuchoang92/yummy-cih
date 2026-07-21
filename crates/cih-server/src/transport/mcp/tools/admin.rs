@@ -26,6 +26,7 @@ impl CihServer {
         let output = self
             .repository_admin()
             .status(RepoStatusCommand { name: args.name })
+            .await
             .map_err(app_error_to_mcp)?;
         json_result(&output)
     }

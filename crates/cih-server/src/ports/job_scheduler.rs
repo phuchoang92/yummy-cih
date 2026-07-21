@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 
 use crate::domain::error::AppError;
-use crate::domain::indexing::{IndexJobSnapshot, IndexJobSpec, IndexSchedulerReceipt};
+use crate::domain::indexing::{
+    IndexJobSnapshot, IndexJobSpec, IndexQueueMetrics, IndexSchedulerReceipt,
+};
 
 #[async_trait]
 pub(crate) trait IndexJobScheduler: Send + Sync {
@@ -10,4 +12,8 @@ pub(crate) trait IndexJobScheduler: Send + Sync {
     async fn status(&self, job_id: &str) -> Result<IndexJobSnapshot, AppError>;
 
     async fn cancel(&self, job_id: &str) -> Result<(), AppError>;
+
+    async fn metrics(&self) -> IndexQueueMetrics {
+        IndexQueueMetrics::default()
+    }
 }

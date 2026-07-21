@@ -1,6 +1,6 @@
 # CIH Server Clean Architecture, Scalability, and Maintainability Proposal
 
-> **Status:** MILESTONES 1-4 COMPLETE; MILESTONE 5 OPEN - reviewed 2026-07-20;
+> **Status:** MILESTONES 1-5 COMPLETE - implemented and measured 2026-07-21;
 > Section 29 first slice
 > implemented 2026-07-20 (S9 graph-key targeting at both sites,
 > `detect_changes` completeness + budgeted batching, typed
@@ -130,13 +130,23 @@
 > (default 16 MiB), validated in the startup cache-budget total (default total
 > raised to 1040 MiB), and the benchmark's tail-page acceptance threshold was
 > tightened from 2000 ms to 5 ms as a regression guard.
-> Two measured findings remain open (details in `docs/perf/scale-500k.md`):
-> BM25 search p95 at 500k documents sits on the Section 21.6 500 ms target
-> (489-511 ms across runs), and the default artifact/search cache budgets are
-> individually smaller than one 500k-node repository, so at that scale both are
-> served without retention. Remaining Milestone 5 work: memory-mapped/persisted
-> artifact indexes, evaluating more cross-repo reads via `GraphStore`,
-> page-level wiki materialization, and a scheduled soak test.
+> Milestone 5 gap closure completed 2026-07-21. BM25 now accumulates scores in a
+> dense buffer and performs linear top-k selection instead of a 500k-entry hash
+> map plus full sort; ranking equivalence tests remain green and release p95 is
+> 16.2-17.1 ms. Artifact adjacency indexes use a versioned, checksummed,
+> source-identity-bound binary sidecar with atomic publication and in-memory
+> fallback; the measured warm initialization is 199 ms versus 718 ms on first
+> build. Cross-repo traversal now depends on `CrossRepoGraphProvider`; artifacts
+> remain the selected strategy because the current `GraphStore` contract cannot
+> reproduce terminal-node properties and inverse route edges without semantic
+> loss. Wiki pages have O(1) warm slug lookup, atomic file/manifest writes, and a
+> publication marker that prevents mixed-version reads. Scheduled ten-service
+> and fifty-entry soak matrices are in `.github/workflows/cih-server-soak.yml`.
+> The remaining measured limit is representation size, not unbounded retention:
+> the 500k artifact snapshot (~762 MiB) and search index (~362 MiB) exceed the
+> default cache budgets and therefore use the existing oversize bypass. Compact
+> ordinals or memory mapping remain a future optimization, not a Milestone 5
+> correctness gap.
 > Audit follow-ups completed 2026-07-20 (a DoD audit found the status header had
 > overstated two claims): the `/graph/features` HTTP handler was still parsing
 > the whole `nodes.jsonl` on a Tokio worker and now runs in the heavy blocking
@@ -169,17 +179,18 @@
 > `utils::parse_contract_kind_filter`, a dead duplicate kept alive only by an
 > integration test, was removed and its coverage moved onto the live
 > `contracts::parse_contract_kind`. `resolve_patterns.rs` gained its first tests.
-> Known gaps still open: no structured per-request completion event (Section 19)
-> and no blocking-lane/index-queue counters — the largest remaining DoD miss;
-> `Completeness` is carried by `detect_changes` only, so limit-capped `impact`/
-> `communities`/`complexity_hotspots`/`find_duplicates` results are
-> indistinguishable from exhaustive ones; and `architecture_overview`/`status`
-> still read small group-freshness state (`SyncState`, a `contracts_path` stat)
-> and the entrypoints sidecar synchronously on async paths. Those last reads are
-> stat/small-JSON scale rather than the cold full-artifact parses Milestone 1
-> targeted, so they are recorded rather than wrapped — wrapping microsecond work
-> in `spawn_blocking` costs more than it saves. Revisit if profiling on a slow
-> or networked filesystem shows otherwise.
+> Operational follow-up completed 2026-07-21: MCP tool/resource dispatch and
+> HTTP application routes emit one structured `request_completed` event with a
+> bounded repository identifier, duration, queue wait, response bytes, result
+> count/completeness when available, and error class. Authenticated
+> `/operations/metrics` exposes blocking active/queued/rejected/timeout/panic
+> state and index queued/running/rejected state. `ResultBounds` is additive on
+> bounded graph and cross-repo outputs while legacy array payloads remain in MCP
+> text content. `architecture_overview` and `status` sidecar/stat reads now run
+> through the bounded blocking runtime, eliminating the previous event-loop
+> exception. Engine process execution is behind `EngineProcessRunner`; scheduler
+> tests use a fake and the Tokio adapter owns success, failure, timeout,
+> cancellation, truncation, launch, and environment-isolation tests.
 > **Review:** all S1-S9 claims, the instruction-drift claim, and the module
 > inventory were verified against code at `dev@5d95f95` and confirmed;
 > corrections from that review are folded in below as "Review note" callouts  

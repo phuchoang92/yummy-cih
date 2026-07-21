@@ -25,6 +25,7 @@ use cih_graph_store::{
 
 use crate::domain::error::AppError;
 use crate::domain::repository::{RepoSelector, ResolvedRepo};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::ports::repo_context_provider::RepoContextProvider;
 
 /// Hard response-size backstop. Approximate by design: a small margin is
@@ -136,10 +137,30 @@ impl ArchitectureOverviewService {
         let context = self.repo_contexts.resolve(command.repo).await?;
         let entry = &context.repo.registry_entry;
         let catalog = self.repo_contexts.catalog_snapshot();
-        let registry = catalog.registry();
-        let registry_stale = registry.is_stale(&entry.name);
-        let groups = group_sections(&entry.name, registry, catalog.groups());
-        let wiki = self.wiki.list_pages(&context.repo).await?;
+        let repo_name = entry.name.clone();
+        let sidecar_catalog = catalog.clone();
+        let sidecars = run_blocking(
+            blocking_timeout(),
+            "architecture overview group sidecars",
+            move || {
+                let registry = sidecar_catalog.registry();
+                (
+                    registry.is_stale(&repo_name),
+                    group_sections(&repo_name, registry, sidecar_catalog.groups()),
+                )
+            },
+        );
+        let wiki = self.wiki.list_pages(&context.repo);
+        let ((registry_stale, groups), wiki) = tokio::try_join!(
+            async {
+                sidecars.await.map_err(|error| AppError::Unavailable {
+                    dependency: "architecture overview sidecars",
+                    message: error.to_string(),
+                    retryable: true,
+                })
+            },
+            wiki
+        )?;
         compose(ComposeCtx {
             store: context.store.as_ref(),
             entry,
@@ -887,7 +908,7 @@ async fn build_modules(
     }
 }
 
-fn build_entrypoints(
+async fn build_entrypoints(
     entry: &RegistryEntry,
     pool: Option<&StoreResult<GraphOverview>>,
     hub_cap: usize,
@@ -913,7 +934,23 @@ fn build_entrypoints(
         .unwrap_or_default();
     hubs.sort_by(|a, b| b.degree.cmp(&a.degree).then_with(|| a.id.cmp(&b.id)));
     hubs.truncate(hub_cap);
-    let (scheduled, sidecar_mtime) = load_scheduled(entry, scheduled_cap);
+    let entry_for_sidecar = entry.clone();
+    let (scheduled, sidecar_mtime) = match run_blocking(
+        blocking_timeout(),
+        "architecture overview entrypoints sidecar",
+        move || load_scheduled(&entry_for_sidecar, scheduled_cap),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => (
+            Section::off(
+                format!("entrypoints sidecar unavailable: {error}"),
+                Some(remedy::discover(entry)),
+            ),
+            None,
+        ),
+    };
     (
         Section::ok("graph", EntrypointsBody { hubs, scheduled }),
         sidecar_mtime,
@@ -1114,7 +1151,8 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
             pool.as_ref(),
             cap(ctx.limit, DEFAULT_HUBS),
             cap(ctx.limit, DEFAULT_SCHEDULED),
-        );
+        )
+        .await;
         (Some(section), mtime)
     } else {
         (None, None)

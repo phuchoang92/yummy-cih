@@ -500,6 +500,33 @@ companion-object/`object` `val`s with literal initializers):
 
 ## Performance notes
 
+### Server read-path and publication boundaries
+
+- MCP tools and resources emit one `request_completed` event at the RMCP
+  dispatch boundary. HTTP application routes use the equivalent Axum
+  middleware. Repository labels are deterministic hashes; arbitrary repository
+  names are not metric labels.
+- `/operations/metrics` is authenticated with the other protected routes and
+  reports blocking-lane `active`/`queued`/`rejected`/timeout/panic counters plus
+  index-queue `queued`/`running`/`rejected` counters.
+- Heavy artifact reads, repository status sidecars, overview group state, and
+  the entrypoints sidecar run through the bounded blocking runtime. Async
+  application code must not call `std::fs` for request-path reads; metadata-only
+  probes belong in an infrastructure adapter or the same bounded runtime.
+- Artifact adjacency indexes are stored as the checksummed,
+  source-identity-bound `cih-server-index-v1.bin` sidecar. Invalid, stale,
+  corrupt, or unwritable sidecars fall back to an in-memory build. Publication
+  uses temporary-file rename.
+- Wiki generation writes changed pages and the manifest atomically. A
+  `.publishing` marker makes readers return a retryable unavailable result while
+  publication is in progress or after an interrupted publication; a successful
+  rerun clears it. Warm page lookup uses the manifest's slug index and is O(1).
+- Cross-repository flow uses `CrossRepoGraphProvider`. The production strategy
+  remains artifact-backed: the current `GraphStore` API does not expose the raw
+  terminal-node properties and inverse `HandlesRoute` projection needed for
+  output-equivalent contract hops. A store-backed strategy must first extend
+  that port and pass output-order equivalence tests.
+
 - **Symbol-ID interning: measured, not needed (2026-07).** NodeId-keyed maps in
   the taint pipeline use `FxHashMap` (rustc-hash). A full 4-phase `taint` run on
   Fineract (~46k nodes) completes in ~0.77s wall time, so interning NodeIds to

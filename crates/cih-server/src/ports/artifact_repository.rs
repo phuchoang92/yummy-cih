@@ -18,7 +18,7 @@ pub(crate) struct ArtifactIndexes {
 }
 
 impl ArtifactIndexes {
-    fn build(nodes: &[Node], edges: &[Edge]) -> Self {
+    pub(crate) fn build(nodes: &[Node], edges: &[Edge]) -> Self {
         let node_by_id = nodes
             .iter()
             .enumerate()
@@ -71,6 +71,13 @@ impl ArtifactSnapshot {
     pub(crate) fn ensure_indexes_blocking(&self) -> &Arc<ArtifactIndexes> {
         self.indexes
             .get_or_init(|| Arc::new(ArtifactIndexes::build(&self.nodes, &self.edges)))
+    }
+
+    pub(crate) fn ensure_indexes_with<F>(&self, build: F) -> &Arc<ArtifactIndexes>
+    where
+        F: FnOnce() -> ArtifactIndexes,
+    {
+        self.indexes.get_or_init(|| Arc::new(build()))
     }
 
     pub(crate) fn indexes(&self) -> &Arc<ArtifactIndexes> {

@@ -12,98 +12,12 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-use cih_core::{ContractMatch, ContractMatchKind, Edge, EdgeKind, Node};
+use cih_core::{ContractMatch, ContractMatchKind, EdgeKind};
 use serde::Serialize;
 
-use crate::domain::error::AppError;
-use crate::domain::repository::ResolvedRepo;
-use crate::ports::artifact_repository::{ArtifactIndexes, ArtifactRepository, ArtifactSnapshot};
+use crate::domain::completeness::ResultBounds;
+use crate::ports::cross_repo_graph_provider::CrossRepoGraph as ArtifactGraph;
 use crate::utils::node_prop_str_owned;
-
-// ── Artifact graph ───────────────────────────────────────────────────────────
-
-pub(crate) struct ArtifactGraph {
-    snapshot: Arc<ArtifactSnapshot>,
-    indexes: Arc<ArtifactIndexes>,
-}
-
-impl ArtifactGraph {
-    #[cfg(test)]
-    pub(crate) fn build(
-        nodes: Vec<Node>,
-        edges: Vec<Edge>,
-        _nodes_mtime: Option<std::time::SystemTime>,
-        _edges_mtime: Option<std::time::SystemTime>,
-    ) -> Self {
-        Self::from_snapshot(Arc::new(ArtifactSnapshot::from_memory(nodes, edges)))
-    }
-
-    fn from_snapshot(snapshot: Arc<ArtifactSnapshot>) -> Self {
-        let indexes = snapshot.indexes().clone();
-        Self { snapshot, indexes }
-    }
-
-    pub(crate) fn node(&self, id: &str) -> Option<&Node> {
-        self.indexes
-            .node_by_id
-            .get(id)
-            .map(|index| &self.snapshot.nodes[*index])
-    }
-
-    pub(crate) fn contains_node(&self, id: &str) -> bool {
-        self.indexes.node_by_id.contains_key(id)
-    }
-
-    pub(crate) fn nodes(&self) -> impl Iterator<Item = &Node> {
-        self.snapshot.nodes.iter()
-    }
-
-    pub(crate) fn out<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Edge> {
-        self.indexes
-            .outgoing_edges
-            .get(id)
-            .into_iter()
-            .flatten()
-            .map(|index| &self.snapshot.edges[*index])
-    }
-
-    pub(crate) fn incoming<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Edge> {
-        self.indexes
-            .incoming_edges
-            .get(id)
-            .into_iter()
-            .flatten()
-            .map(|index| &self.snapshot.edges[*index])
-    }
-
-    #[cfg(test)]
-    fn snapshot(&self) -> &Arc<ArtifactSnapshot> {
-        &self.snapshot
-    }
-}
-
-/// Lightweight graph views over the process-wide shared artifact cache.
-#[derive(Clone)]
-pub(crate) struct XflowState {
-    artifacts: Arc<dyn ArtifactRepository>,
-}
-
-impl XflowState {
-    pub(crate) fn new(artifacts: Arc<dyn ArtifactRepository>) -> Self {
-        Self { artifacts }
-    }
-
-    pub(crate) async fn graph_for(
-        &self,
-        repo: &ResolvedRepo,
-    ) -> Result<Arc<ArtifactGraph>, AppError> {
-        self.artifacts
-            .indexed_snapshot(repo)
-            .await
-            .map(ArtifactGraph::from_snapshot)
-            .map(Arc::new)
-    }
-}
 
 // ── Trace core ───────────────────────────────────────────────────────────────
 
@@ -151,6 +65,7 @@ pub(crate) struct Truncation {
 pub(crate) struct XTrace {
     pub steps: Vec<XStep>,
     pub truncated: Vec<Truncation>,
+    pub completeness: ResultBounds,
 }
 
 struct WorkItem {
@@ -210,6 +125,11 @@ pub(crate) fn trace_across(
             &mut trace,
         );
     }
+    trace.completeness = if trace.truncated.is_empty() {
+        ResultBounds::requested_scope(trace.steps.len())
+    } else {
+        ResultBounds::partial_unknown(trace.steps.len(), trace.truncated.len())
+    };
     trace
 }
 
@@ -450,9 +370,10 @@ pub(crate) fn resolve_entry(graph: &ArtifactGraph, entry: &str) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::repository::ResolvedRepo;
     use crate::infrastructure::artifact_repository::ArtifactCache;
     use crate::ports::artifact_repository::ArtifactRepository;
-    use cih_core::{NodeId, NodeKind, Range};
+    use cih_core::{Edge, Node, NodeId, NodeKind, Range};
     use std::collections::HashMap;
 
     fn node(id: &str, kind: NodeKind) -> Node {
@@ -821,7 +742,11 @@ mod tests {
         let artifacts = Arc::new(ArtifactCache::new());
         let base = artifacts.snapshot(&repo).await.unwrap();
         assert!(!base.indexes_initialized());
-        let state = XflowState::new(artifacts);
+        let state =
+            crate::infrastructure::artifact_cross_repo_graph::ArtifactCrossRepoGraphProvider::new(
+                artifacts,
+            );
+        use crate::ports::cross_repo_graph_provider::CrossRepoGraphProvider;
         let graph = state.graph_for(&repo).await.expect("loads");
         assert!(Arc::ptr_eq(&base, graph.snapshot()));
         assert!(base.indexes_initialized());

@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::domain::error::AppError;
 use crate::domain::repository::{RepoSelector, ResolvedRepo};
 use crate::ports::repo_context_provider::RepoContextProvider;
+use crate::ports::wiki_materialization_store::WikiMaterializationStore;
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
@@ -124,21 +125,16 @@ impl WikiPageCommand {
     }
 }
 
-#[async_trait]
-pub(crate) trait WikiPageRepository: Send + Sync {
-    async fn get_page(&self, repo: &ResolvedRepo, slug: &str) -> Result<String, AppError>;
-}
-
 #[derive(Clone)]
 pub(crate) struct WikiPageService {
     repo_contexts: Arc<dyn RepoContextProvider>,
-    repository: Arc<dyn WikiPageRepository>,
+    repository: Arc<dyn WikiMaterializationStore>,
 }
 
 impl WikiPageService {
     pub(crate) fn new(
         repo_contexts: Arc<dyn RepoContextProvider>,
-        repository: Arc<dyn WikiPageRepository>,
+        repository: Arc<dyn WikiMaterializationStore>,
     ) -> Self {
         Self {
             repo_contexts,
@@ -148,7 +144,10 @@ impl WikiPageService {
 
     pub(crate) async fn get(&self, command: WikiPageCommand) -> Result<String, AppError> {
         let repo = self.repo_contexts.resolve_repo(command.repo)?;
-        self.repository.get_page(&repo, &command.slug).await
+        self.repository
+            .get_page(&repo, &command.slug)
+            .await
+            .map(|page| page.content)
     }
 }
 

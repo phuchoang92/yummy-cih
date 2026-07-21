@@ -1,5 +1,5 @@
 {
-  "generated_at_unix_secs": 1784554225,
+  "generated_at_unix_secs": 1784642617,
   "machine": {
     "os": "macos",
     "architecture": "aarch64",
@@ -9,7 +9,7 @@
   "fixture": {
     "directory": "target/cih-scale-fixtures/500k-1m",
     "reused": true,
-    "generation_ms": 0.400708,
+    "generation_ms": 0.823333,
     "nodes": 500000,
     "edges": 1000000,
     "communities": 50000,
@@ -18,86 +18,86 @@
     "communities_bytes": 6038890
   },
   "memory": {
-    "baseline_rss_bytes": 6979584,
-    "after_artifact_load_rss_bytes": 971587584,
-    "after_artifact_indexes_rss_bytes": 1262485504,
-    "after_search_index_rss_bytes": 1528086528,
-    "observed_peak_rss_bytes": 3020210176,
+    "baseline_rss_bytes": null,
+    "after_artifact_load_rss_bytes": null,
+    "after_artifact_indexes_rss_bytes": null,
+    "after_search_index_rss_bytes": null,
+    "observed_peak_rss_bytes": null,
     "artifact_estimated_bytes": 798796759,
     "search_estimated_bytes": 380061908,
     "wiki_search_estimated_bytes": 14753574
   },
   "artifact_load": {
-    "cold_parse_ms": 705.563291,
-    "lazy_index_build_ms": 289.746459,
+    "cold_parse_ms": 816.9554999999999,
+    "lazy_index_build_ms": 199.049667,
     "cache_hits": {
       "samples": 20,
-      "p50_ms": 0.012416,
-      "p95_ms": 0.029332999999999998,
-      "p99_ms": 0.041208,
-      "max_ms": 0.041208
+      "p50_ms": 0.019667,
+      "p95_ms": 0.03175,
+      "p99_ms": 0.048625,
+      "max_ms": 0.048625
     },
     "event_loop_delay_during_cold_load": {
-      "samples": 141,
-      "p50_ms": 0.10137499999999999,
-      "p95_ms": 0.646792,
-      "p99_ms": 0.648667,
-      "max_ms": 0.6511250000000001
+      "samples": 163,
+      "p50_ms": 0.006584,
+      "p95_ms": 1.260084,
+      "p99_ms": 1.268208,
+      "max_ms": 1.274791
     }
   },
   "search": {
     "indexed_documents": 500000,
-    "build_ms": 1197.61975,
+    "build_ms": 1352.372417,
     "query": "process order service",
     "returned_hits": 25,
     "warm_queries": {
       "samples": 20,
-      "p50_ms": 476.67695799999996,
-      "p95_ms": 510.718792,
-      "p99_ms": 512.32425,
-      "max_ms": 512.32425
+      "p50_ms": 15.527458,
+      "p95_ms": 17.132209,
+      "p99_ms": 26.772041,
+      "max_ms": 26.772041
     }
   },
   "wiki_search": {
     "indexed_documents": 50000,
-    "build_ms": 111.635375,
+    "build_ms": 118.296333,
     "query": "order processing workflow",
     "returned_hits": 25,
     "warm_queries": {
       "samples": 20,
-      "p50_ms": 2.418167,
-      "p95_ms": 2.577209,
-      "p99_ms": 2.595917,
-      "max_ms": 2.595917
+      "p50_ms": 0.33054100000000003,
+      "p95_ms": 0.393834,
+      "p99_ms": 0.403208,
+      "max_ms": 0.403208
     }
   },
   "resource_scan": {
     "page_size": 100,
     "first_page": {
       "samples": 20,
-      "p50_ms": 0.0415,
-      "p95_ms": 0.052833,
-      "p99_ms": 10.897083,
-      "max_ms": 10.897083
+      "p50_ms": 0.044583000000000005,
+      "p95_ms": 0.05275,
+      "p99_ms": 11.203583,
+      "max_ms": 11.203583
     },
     "middle_page": {
       "samples": 20,
-      "p50_ms": 0.039375,
-      "p95_ms": 0.040291,
-      "p99_ms": 0.043583,
-      "max_ms": 0.043583
+      "p50_ms": 0.043209,
+      "p95_ms": 0.044625,
+      "p99_ms": 0.046042,
+      "max_ms": 0.046042
     },
     "tail_page": {
       "samples": 20,
-      "p50_ms": 0.038375,
-      "p95_ms": 0.038792,
-      "p99_ms": 0.038833,
-      "max_ms": 0.038833
+      "p50_ms": 0.042583,
+      "p95_ms": 0.043166,
+      "p99_ms": 0.043667,
+      "max_ms": 0.043667
     }
   },
   "same_key_cold_burst": {
     "callers": 8,
-    "elapsed_ms": 520.762792,
+    "elapsed_ms": 595.019542,
     "loader_builds": 1,
     "all_callers_shared_snapshot": true
   },
@@ -105,25 +105,25 @@
     {
       "name": "artifact_cache_hit_p95",
       "target": "<= 5.000 ms",
-      "observed": "0.029 ms",
+      "observed": "0.032 ms",
       "passed": true
     },
     {
       "name": "search_query_p95",
       "target": "<= 500.000 ms",
-      "observed": "510.719 ms",
-      "passed": false
+      "observed": "17.132 ms",
+      "passed": true
     },
     {
       "name": "event_loop_delay_p99",
       "target": "<= 50.000 ms",
-      "observed": "0.649 ms",
+      "observed": "1.268 ms",
       "passed": true
     },
     {
       "name": "resource_tail_page_p95",
-      "target": "<= 2000.000 ms",
-      "observed": "0.039 ms",
+      "target": "<= 5.000 ms",
+      "observed": "0.043 ms",
       "passed": true
     },
     {

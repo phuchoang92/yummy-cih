@@ -10,10 +10,87 @@
 //! still the win: a prompt typed error vs a two-minute hang.
 
 use std::fmt;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::Semaphore;
+
+tokio::task_local! {
+    static REQUEST_QUEUE_WAIT_MS: std::cell::Cell<u64>;
+}
+
+pub(crate) async fn track_queue_wait<F>(future: F) -> (F::Output, u64)
+where
+    F: Future,
+{
+    REQUEST_QUEUE_WAIT_MS
+        .scope(std::cell::Cell::new(0), async move {
+            let output = future.await;
+            let waited = REQUEST_QUEUE_WAIT_MS.get().get();
+            (output, waited)
+        })
+        .await
+}
+
+fn record_request_queue_wait(waited_ms: u64) {
+    let _ = REQUEST_QUEUE_WAIT_MS.try_with(|total| {
+        total.set(total.get().saturating_add(waited_ms));
+    });
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct BlockingMetricsSnapshot {
+    pub(crate) active: usize,
+    pub(crate) queued: usize,
+    pub(crate) rejected: u64,
+    pub(crate) timed_out: u64,
+    pub(crate) panicked: u64,
+    pub(crate) queue_wait_ms: u64,
+}
+
+#[derive(Default)]
+struct BlockingMetrics {
+    active: AtomicUsize,
+    queued: AtomicUsize,
+    rejected: AtomicU64,
+    timed_out: AtomicU64,
+    panicked: AtomicU64,
+    queue_wait_ms: AtomicU64,
+}
+
+fn metrics() -> &'static BlockingMetrics {
+    static METRICS: OnceLock<BlockingMetrics> = OnceLock::new();
+    METRICS.get_or_init(BlockingMetrics::default)
+}
+
+pub(crate) fn blocking_metrics() -> BlockingMetricsSnapshot {
+    let metrics = metrics();
+    BlockingMetricsSnapshot {
+        active: metrics.active.load(Ordering::Relaxed),
+        queued: metrics.queued.load(Ordering::Relaxed),
+        rejected: metrics.rejected.load(Ordering::Relaxed),
+        timed_out: metrics.timed_out.load(Ordering::Relaxed),
+        panicked: metrics.panicked.load(Ordering::Relaxed),
+        queue_wait_ms: metrics.queue_wait_ms.load(Ordering::Relaxed),
+    }
+}
+
+struct GaugeGuard(&'static AtomicUsize);
+
+impl GaugeGuard {
+    fn enter(gauge: &'static AtomicUsize) -> Self {
+        gauge.fetch_add(1, Ordering::Relaxed);
+        Self(gauge)
+    }
+}
+
+impl Drop for GaugeGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Failure of a deadline-guarded blocking task.
 #[derive(Debug)]
@@ -66,14 +143,20 @@ where
 {
     match tokio::time::timeout(timeout, tokio::task::spawn_blocking(f)).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(join)) => Err(BlockingError::Panicked {
-            label,
-            detail: join.to_string(),
-        }),
-        Err(_elapsed) => Err(BlockingError::TimedOut {
-            label,
-            secs: timeout.as_secs(),
-        }),
+        Ok(Err(join)) => {
+            metrics().panicked.fetch_add(1, Ordering::Relaxed);
+            Err(BlockingError::Panicked {
+                label,
+                detail: join.to_string(),
+            })
+        }
+        Err(_elapsed) => {
+            metrics().timed_out.fetch_add(1, Ordering::Relaxed);
+            Err(BlockingError::TimedOut {
+                label,
+                secs: timeout.as_secs(),
+            })
+        }
     }
 }
 
@@ -161,6 +244,8 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    let wait_started = std::time::Instant::now();
+    let queued = GaugeGuard::enter(&metrics().queued);
     let permit = match tokio::time::timeout(queue_timeout, lane.acquire_owned()).await {
         Ok(Ok(permit)) => permit,
         // The lane is never closed; treat it like a panic if it ever is.
@@ -171,18 +256,31 @@ where
             })
         }
         Err(_elapsed) => {
+            let waited_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            record_request_queue_wait(waited_ms);
+            metrics()
+                .queue_wait_ms
+                .fetch_add(waited_ms, Ordering::Relaxed);
+            metrics().rejected.fetch_add(1, Ordering::Relaxed);
             return Err(BlockingError::Saturated {
                 label,
                 waited_secs: queue_timeout.as_secs(),
-            })
+            });
         }
     };
+    drop(queued);
+    let waited_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    metrics()
+        .queue_wait_ms
+        .fetch_add(waited_ms, Ordering::Relaxed);
+    record_request_queue_wait(waited_ms);
     // The permit rides inside the closure: a timed-out load keeps its slot
     // until the (uncancellable) closure actually finishes, so saturation
     // reflects work running on the pool, not work being awaited (§9.3 of the
     // design record — never start another heavy load while a timed-out one is
     // still running).
     run_blocking(deadline, label, move || {
+        let _active = GaugeGuard::enter(&metrics().active);
         let _slot = permit;
         f()
     })

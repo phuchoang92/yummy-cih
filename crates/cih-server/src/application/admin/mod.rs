@@ -3,10 +3,39 @@
 pub(crate) mod resolve_patterns;
 
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::application::app_services::RepoContextService;
 use crate::domain::error::AppError;
+use crate::domain::indexing::IndexQueueMetrics;
 use crate::domain::repository::RepoSelector;
+use crate::ports::blocking_runtime::{blocking_metrics, BlockingMetricsSnapshot};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
+use crate::ports::job_scheduler::IndexJobScheduler;
+
+#[derive(Clone)]
+pub(crate) struct OperationalMetricsService {
+    scheduler: Arc<dyn IndexJobScheduler>,
+}
+
+impl OperationalMetricsService {
+    pub(crate) fn new(scheduler: Arc<dyn IndexJobScheduler>) -> Self {
+        Self { scheduler }
+    }
+
+    pub(crate) async fn snapshot(&self) -> OperationalMetricsOutput {
+        OperationalMetricsOutput {
+            blocking: blocking_metrics(),
+            index_queue: self.scheduler.metrics().await,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct OperationalMetricsOutput {
+    pub(crate) blocking: BlockingMetricsSnapshot,
+    pub(crate) index_queue: IndexQueueMetrics,
+}
 
 #[derive(Clone)]
 pub(crate) struct RepositoryAdminService {
@@ -45,37 +74,54 @@ impl RepositoryAdminService {
         ListReposOutput::Entries(registry.entries.clone())
     }
 
-    pub(crate) fn status(&self, command: RepoStatusCommand) -> Result<RepoStatusOutput, AppError> {
+    pub(crate) async fn status(
+        &self,
+        command: RepoStatusCommand,
+    ) -> Result<RepoStatusOutput, AppError> {
         let catalog = self.repos.catalog_snapshot();
-        let repo = catalog.resolve(RepoSelector::NameOrPath(command.name))?;
-        let registry = catalog.registry();
-        let entry = repo.registry_entry;
-        let stale = registry.is_stale(&entry.name);
-        let groups = catalog
-            .groups()
-            .groups_containing(&entry.name)
-            .map(|group| {
-                let state = cih_core::group_dir(&group.name)
-                    .and_then(|directory| cih_core::SyncState::load(&directory));
-                let contracts_exist =
-                    cih_core::contracts_path(&group.name).is_some_and(|path| path.exists());
-                GroupSyncStatus {
-                    name: group.name.clone(),
-                    contracts_synced_at: state.as_ref().map(|value| value.synced_at.clone()),
-                    stale: cih_core::group_contracts_stale(
-                        group,
-                        registry,
-                        state.as_ref(),
-                        contracts_exist,
-                    ),
-                }
-            })
-            .collect();
-        Ok(RepoStatusOutput {
-            entry,
-            stale,
-            groups,
-        })
+        run_blocking(
+            blocking_timeout(),
+            "repository status sidecars",
+            move || {
+                let repo = catalog.resolve(RepoSelector::NameOrPath(command.name))?;
+                let registry = catalog.registry();
+                let entry = repo.registry_entry;
+                let stale = registry.is_stale(&entry.name);
+                let groups = catalog
+                    .groups()
+                    .groups_containing(&entry.name)
+                    .map(|group| {
+                        let state = cih_core::group_dir(&group.name)
+                            .and_then(|directory| cih_core::SyncState::load(&directory));
+                        let contracts_exist =
+                            cih_core::contracts_path(&group.name).is_some_and(|path| path.exists());
+                        GroupSyncStatus {
+                            name: group.name.clone(),
+                            contracts_synced_at: state
+                                .as_ref()
+                                .map(|value| value.synced_at.clone()),
+                            stale: cih_core::group_contracts_stale(
+                                group,
+                                registry,
+                                state.as_ref(),
+                                contracts_exist,
+                            ),
+                        }
+                    })
+                    .collect();
+                Ok(RepoStatusOutput {
+                    entry,
+                    stale,
+                    groups,
+                })
+            },
+        )
+        .await
+        .map_err(|error| AppError::Unavailable {
+            dependency: "repository status",
+            message: error.to_string(),
+            retryable: true,
+        })?
     }
 }
 

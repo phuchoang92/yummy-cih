@@ -62,7 +62,12 @@ impl PageSink {
                 Err(_) => true,
             };
             if needs_write {
-                std::fs::write(&path, &content)?;
+                let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+                std::fs::write(&temporary, &content)?;
+                if let Err(error) = std::fs::rename(&temporary, &path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(error.into());
+                }
                 written += 1;
             } else {
                 unchanged += 1;

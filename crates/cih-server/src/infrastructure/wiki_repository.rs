@@ -20,13 +20,14 @@ use crate::application::architecture_overview::{
     OverviewWikiListing, OverviewWikiPage, OverviewWikiRepository,
 };
 use crate::application::wiki_search::{
-    WikiPageRepository, WikiSearchDocument, WikiSearchFacets as AppWikiSearchFacets, WikiSearchHit,
+    WikiSearchDocument, WikiSearchFacets as AppWikiSearchFacets, WikiSearchHit,
     WikiSearchRepository,
 };
 use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
 use crate::infrastructure::cache::weighted::{AsyncCacheMetrics, AsyncWeightedCache};
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
+use crate::ports::wiki_materialization_store::{MaterializedWikiPage, WikiMaterializationStore};
 
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_LIMIT: usize = 50;
@@ -159,6 +160,7 @@ pub struct WikiIndex {
     pub graph_version: String,
     pub generated_at: String,
     pages: Vec<PageMeta>,
+    page_by_slug: HashMap<String, usize>,
     index: TextIndex,
 }
 
@@ -213,6 +215,12 @@ pub fn load_wiki_index(wiki_dir: &Path) -> anyhow::Result<WikiIndex> {
         .collect();
     let index = TextIndex::build(corpus.iter().map(String::as_str));
 
+    let page_by_slug = manifest
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(ordinal, page)| (page.slug.clone(), ordinal))
+        .collect();
     Ok(WikiIndex {
         wiki_dir: wiki_dir.to_path_buf(),
         manifest_mtime,
@@ -220,6 +228,7 @@ pub fn load_wiki_index(wiki_dir: &Path) -> anyhow::Result<WikiIndex> {
         graph_version: manifest.graph_version,
         generated_at: manifest.generated_at,
         pages: manifest.pages,
+        page_by_slug,
         index,
     })
 }
@@ -236,17 +245,34 @@ impl WikiIndex {
             .saturating_add(self.graph_version.capacity())
             .saturating_add(self.generated_at.capacity())
             .saturating_add(page_meta_weight(&self.pages, self.pages.capacity()))
+            .saturating_add(
+                self.page_by_slug.iter().fold(
+                    self.page_by_slug
+                        .capacity()
+                        .saturating_mul(size_of::<(String, usize)>()),
+                    |total, (slug, _)| total.saturating_add(slug.capacity()),
+                ),
+            )
             .saturating_add(self.index.estimated_size_bytes())
     }
 
     pub fn page_by_slug(&self, slug: &str) -> Option<&PageMeta> {
-        self.pages.iter().find(|page| page.slug == slug)
+        self.page_by_slug
+            .get(slug)
+            .map(|ordinal| &self.pages[*ordinal])
     }
 
     /// A page's raw markdown, front matter included — the front matter carries
     /// provenance (enrichment tier, graph_version) callers should see.
     pub fn page_raw(&self, page: &PageMeta) -> Option<String> {
         read_page_raw(&self.wiki_dir, &page.path)
+    }
+
+    fn is_current(&self) -> bool {
+        !self.wiki_dir.join(".publishing").exists()
+            && std::fs::metadata(self.wiki_dir.join("manifest.json"))
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified == self.manifest_mtime)
     }
 
     /// Report a facet value that matches no page (see [`unknown_facet`]).
@@ -784,6 +810,10 @@ impl WikiSearchState {
     /// Return the cached index for `wiki_dir`, (re)loading when the manifest's
     /// mtime differs from the cached snapshot.
     async fn get_or_load(&self, wiki_dir: &Path) -> anyhow::Result<Arc<WikiIndex>> {
+        anyhow::ensure!(
+            !wiki_dir.join(".publishing").exists(),
+            "wiki publication is in progress; retry shortly"
+        );
         let manifest_mtime = std::fs::metadata(wiki_dir.join("manifest.json"))?.modified()?;
         if let Some(hit) = self.peek_index(wiki_dir, manifest_mtime).await {
             return Ok(hit);
@@ -802,6 +832,10 @@ impl WikiSearchState {
                 load_wiki_index(&dir)
             })
             .await??,
+        );
+        anyhow::ensure!(
+            loaded.is_current(),
+            "wiki changed while its index was loading; retry shortly"
         );
         let weight = loaded.estimated_size_bytes();
         self.retain(
@@ -917,6 +951,13 @@ impl WikiSearchRepository for WikiBundleSearchRepository {
             .into_iter()
             .map(app_search_hit)
             .collect();
+        if !index.is_current() {
+            return Err(AppError::Unavailable {
+                dependency: "wiki publication",
+                message: "wiki changed while search results were being read".into(),
+                retryable: true,
+            });
+        }
         Ok(WikiSearchDocument {
             repo: Some(index.repo_name.clone()),
             graph_version: Some(index.graph_version.clone()),
@@ -1017,8 +1058,12 @@ impl WikiBundlePageRepository {
 }
 
 #[async_trait]
-impl WikiPageRepository for WikiBundlePageRepository {
-    async fn get_page(&self, repo: &ResolvedRepo, slug: &str) -> Result<String, AppError> {
+impl WikiMaterializationStore for WikiBundlePageRepository {
+    async fn get_page(
+        &self,
+        repo: &ResolvedRepo,
+        slug: &str,
+    ) -> Result<MaterializedWikiPage, AppError> {
         if let Some(owned) = self
             .state
             .resident_for(repo)
@@ -1026,13 +1071,18 @@ impl WikiPageRepository for WikiBundlePageRepository {
             .map_err(wiki_app_error)?
         {
             let slug = slug.to_string();
+            let render_slug = slug.clone();
             let rendered = run_blocking(blocking_timeout(), "wiki render", move || {
-                owned.render_slug(&slug)
+                owned.render_slug(&render_slug)
             })
             .await
             .map_err(blocking_app_error)?;
             if let Some(page) = rendered {
-                return Ok(page.content);
+                return Ok(MaterializedWikiPage {
+                    slug: slug.to_string(),
+                    version: "resident".to_string(),
+                    content: page.content,
+                });
             }
         }
 
@@ -1041,12 +1091,24 @@ impl WikiPageRepository for WikiBundlePageRepository {
             entity: "wiki page",
             key: slug.to_string(),
         })?;
-        index.page_raw(page).ok_or_else(|| AppError::Unavailable {
+        let content = index.page_raw(page).ok_or_else(|| AppError::Unavailable {
             dependency: "wiki page",
             message: format!(
                 "wiki page '{slug}' exists in the manifest but its file is unreadable"
             ),
             retryable: false,
+        })?;
+        if !index.is_current() {
+            return Err(AppError::Unavailable {
+                dependency: "wiki publication",
+                message: "wiki changed while the page was being read".into(),
+                retryable: true,
+            });
+        }
+        Ok(MaterializedWikiPage {
+            slug: slug.to_string(),
+            version: index.graph_version.clone(),
+            content,
         })
     }
 }
@@ -1123,6 +1185,7 @@ mod single_flight_tests {
             graph_version: "v1".into(),
             generated_at: String::new(),
             pages: Vec::new(),
+            page_by_slug: HashMap::new(),
             index: TextIndex::default(),
         });
         state

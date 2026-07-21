@@ -17,26 +17,43 @@ use rmcp::{
     model::{
         CallToolResult, Implementation, ListResourceTemplatesResult, ListResourcesResult,
         ListToolsResult, PaginatedRequestParam, ProtocolVersion, ReadResourceRequestParam,
-        ReadResourceResult, ServerCapabilities, ServerInfo,
+        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     ErrorData as McpError, RoleServer, ServerHandler,
 };
 
 use crate::application::app_services::AppServices;
+use crate::domain::observability::{RequestCompletion, RequestErrorKind, RequestTransport};
 use crate::domain::repository::RepoCatalogSnapshot;
+use crate::infrastructure::tracing_observability::TracingObservability;
+use crate::ports::observability::ObservabilityPort;
 
 #[derive(Clone)]
 pub(crate) struct CihServer {
     services: Arc<AppServices>,
     tool_router: ToolRouter<CihServer>,
+    observability: Arc<dyn ObservabilityPort>,
 }
 
 impl CihServer {
+    #[allow(dead_code)] // Used by transport dispatch tests; production injects observability.
     pub(crate) fn new(services: Arc<AppServices>) -> Self {
         Self {
             services,
             tool_router: crate::transport::mcp::router(),
+            observability: Arc::new(TracingObservability),
+        }
+    }
+
+    pub(crate) fn with_observability(
+        services: Arc<AppServices>,
+        observability: Arc<dyn ObservabilityPort>,
+    ) -> Self {
+        Self {
+            services,
+            tool_router: crate::transport::mcp::router(),
+            observability,
         }
     }
 
@@ -137,18 +154,6 @@ const INSTRUCTIONS: &str =
      ## Security\n\
      `taint_paths(category=\"sql\"|\"exec\"|\"file\"|\"html\")` — source→sink flows from HTTP/event entry points; refine=true for flow-sensitive confirmation.";
 
-/// Whether per-tool timing is logged. Read once from `CIH_TOOL_TIMING`
-/// (truthy = `1`/`true`); off by default, so the log is silent unless enabled.
-fn tool_timing_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("CIH_TOOL_TIMING").ok().as_deref(),
-            Some("1") | Some("true")
-        )
-    })
-}
-
 impl ServerHandler for CihServer {
     // NOTE: this `call_tool` is the manual expansion of rmcp 0.7.0's
     // `#[tool_handler]` (build a `ToolCallContext`, dispatch via `tool_router`),
@@ -159,29 +164,42 @@ impl ServerHandler for CihServer {
         request: rmcp::model::CallToolRequestParam,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let timing = tool_timing_enabled();
-        // Only pay the string/lookup work when timing is on.
-        let started = timing.then(|| {
-            let name = request.name.to_string();
-            let repo = request
-                .arguments
-                .as_ref()
-                .and_then(|m| m.get("repo"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            (name, repo, std::time::Instant::now())
-        });
+        let capability = request.name.to_string();
+        let repository_id = request
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("repo"))
+            .and_then(|value| value.as_str())
+            .map(stable_repository_id);
+        let request_id = format!("{:?}", context.id);
+        let started = std::time::Instant::now();
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let result = self.tool_router.call(tcc).await;
-        if let Some((name, repo, t0)) = started {
-            tracing::info!(
-                tool = %name,
-                repo = repo.as_deref().unwrap_or(""),
-                elapsed_ms = t0.elapsed().as_millis() as u64,
-                ok = result.is_ok(),
-                "tool_call"
-            );
-        }
+        let (result, queue_wait_ms) =
+            crate::ports::blocking_runtime::track_queue_wait(self.tool_router.call(tcc)).await;
+        let response_bytes = result
+            .as_ref()
+            .ok()
+            .and_then(|value| serde_json::to_vec(value).ok())
+            .map(|value| value.len());
+        let (result_count, completeness) = result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.structured_content.as_ref())
+            .map(result_metadata)
+            .unwrap_or((None, None));
+        self.observability
+            .record_request_completion(RequestCompletion {
+                request_id,
+                transport: RequestTransport::Mcp,
+                capability,
+                repository_id,
+                duration_ms: started.elapsed().as_millis() as u64,
+                queue_wait_ms: Some(queue_wait_ms),
+                result_count,
+                response_bytes,
+                completeness,
+                error_kind: result.as_ref().err().map(classify_mcp_error),
+            });
         result
     }
 
@@ -216,37 +234,216 @@ impl ServerHandler for CihServer {
     async fn list_resources(
         &self,
         request: Option<PaginatedRequestParam>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        super::resources::list_resources(&self.catalog_snapshot(), request)
+        let started = std::time::Instant::now();
+        let result = super::resources::list_resources(&self.catalog_snapshot(), request);
+        self.record_protocol_completion(
+            "resources/list",
+            format!("{:?}", context.id),
+            started,
+            &result,
+            result.as_ref().ok().map(|value| value.resources.len()),
+            0,
+        );
+        result
     }
 
     async fn list_resource_templates(
         &self,
         request: Option<PaginatedRequestParam>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        super::resources::list_resource_templates(request)
+        let started = std::time::Instant::now();
+        let result = super::resources::list_resource_templates(request);
+        self.record_protocol_completion(
+            "resources/templates/list",
+            format!("{:?}", context.id),
+            started,
+            &result,
+            result
+                .as_ref()
+                .ok()
+                .map(|value| value.resource_templates.len()),
+            0,
+        );
+        result
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParam,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        // Resource reads scan artifact files — heavy lane, not the worker.
-        let catalog = self.catalog_snapshot();
-        crate::ports::blocking_runtime::run_blocking_heavy(
-            crate::ports::blocking_runtime::blocking_timeout(),
-            "resource read",
-            move || super::resources::read_resource(&catalog, request),
-        )
-        .await
-        .map_err(|error| McpError::internal_error(error.to_string(), None))?
+        let started = std::time::Instant::now();
+        let uri = request.uri.clone();
+        let (result, queue_wait_ms) = crate::ports::blocking_runtime::track_queue_wait(async {
+            if let Some((repo, slug)) = wiki_resource_target(&uri) {
+                match crate::application::wiki_search::WikiPageCommand::try_new(repo, slug) {
+                    Ok(command) => self
+                        .wiki_page_service()
+                        .get(command)
+                        .await
+                        .map(|content| ReadResourceResult {
+                            contents: vec![ResourceContents::text(content, uri.clone())],
+                        })
+                        .map_err(super::error::app_error_to_mcp),
+                    Err(error) => Err(super::error::app_error_to_mcp(error)),
+                }
+            } else {
+                // Non-wiki resource reads scan artifact files — heavy lane, not the worker.
+                let catalog = self.catalog_snapshot();
+                match crate::ports::blocking_runtime::run_blocking_heavy(
+                    crate::ports::blocking_runtime::blocking_timeout(),
+                    "resource read",
+                    move || super::resources::read_resource(&catalog, request),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => Err(McpError::internal_error(error.to_string(), None)),
+                }
+            }
+        })
+        .await;
+        self.record_protocol_completion(
+            "resources/read",
+            format!("{:?}", context.id),
+            started,
+            &result,
+            result.as_ref().ok().map(|value| value.contents.len()),
+            queue_wait_ms,
+        );
+        result
     }
+}
+
+fn wiki_resource_target(uri: &str) -> Option<(String, String)> {
+    let rest = uri.strip_prefix("cih://repo/")?;
+    if rest.contains('?') {
+        return None;
+    }
+    super::resources::split_wiki_uri(rest).map(|(repo, slug)| (repo.to_string(), slug.to_string()))
+}
+
+fn classify_mcp_error(error: &McpError) -> RequestErrorKind {
+    let message = error.message.to_ascii_lowercase();
+    if message.contains("saturated") || message.contains("queue full") {
+        RequestErrorKind::Overload
+    } else if message.contains("timed out") || message.contains("timeout") {
+        RequestErrorKind::Timeout
+    } else if error.code == rmcp::model::ErrorCode::INVALID_PARAMS {
+        RequestErrorKind::Protocol
+    } else if message.contains("unavailable") || message.contains("retry") {
+        RequestErrorKind::Dependency
+    } else {
+        RequestErrorKind::Internal
+    }
+}
+
+impl CihServer {
+    fn record_protocol_completion<T: serde::Serialize>(
+        &self,
+        capability: &str,
+        request_id: String,
+        started: std::time::Instant,
+        result: &Result<T, McpError>,
+        result_count: Option<usize>,
+        queue_wait_ms: u64,
+    ) {
+        self.observability
+            .record_request_completion(RequestCompletion {
+                request_id,
+                transport: RequestTransport::Mcp,
+                capability: capability.to_string(),
+                repository_id: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                queue_wait_ms: Some(queue_wait_ms),
+                result_count,
+                response_bytes: result
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| serde_json::to_vec(value).ok())
+                    .map(|bytes| bytes.len()),
+                completeness: None,
+                error_kind: result.as_ref().err().map(classify_mcp_error),
+            });
+    }
+}
+
+fn stable_repository_id(repository: &str) -> String {
+    // FNV-1a gives a deterministic bounded identifier without exposing an
+    // arbitrary repository name as a metrics label.
+    let hash = repository
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("repo-{hash:016x}")
+}
+
+fn result_metadata(value: &serde_json::Value) -> (Option<usize>, Option<String>) {
+    let result_count = value.as_array().map(Vec::len).or_else(|| {
+        value.as_object().and_then(|object| {
+            ["count", "step_count", "total"]
+                .into_iter()
+                .find_map(|key| object.get(key).and_then(serde_json::Value::as_u64))
+                .map(|count| count as usize)
+                .or_else(|| {
+                    ["items", "results", "communities", "routes", "steps"]
+                        .into_iter()
+                        .find_map(|key| object.get(key).and_then(serde_json::Value::as_array))
+                        .map(Vec::len)
+                })
+        })
+    });
+    let completeness = value
+        .get("completeness")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|metadata| metadata.get("complete"))
+        .and_then(serde_json::Value::as_bool)
+        .map(|complete| if complete { "complete" } else { "partial" }.to_string());
+    (result_count, completeness)
 }
 #[cfg(test)]
 mod tests {
+    use super::{classify_mcp_error, result_metadata, stable_repository_id};
+
+    #[test]
+    fn completion_metadata_is_bounded_and_detects_partial_results() {
+        assert_eq!(stable_repository_id("repo-a").len(), 21);
+        assert_eq!(
+            stable_repository_id("repo-a"),
+            stable_repository_id("repo-a")
+        );
+        assert_ne!(
+            stable_repository_id("repo-a"),
+            stable_repository_id("repo-b")
+        );
+        let value = serde_json::json!({
+            "items": [1, 2],
+            "completeness": { "complete": false }
+        });
+        assert_eq!(result_metadata(&value), (Some(2), Some("partial".into())));
+    }
+
+    #[test]
+    fn completion_errors_use_bounded_classes() {
+        assert_eq!(
+            classify_mcp_error(&rmcp::ErrorData::invalid_params("bad", None)),
+            crate::domain::observability::RequestErrorKind::Protocol
+        );
+        assert_eq!(
+            classify_mcp_error(&rmcp::ErrorData::internal_error("queue full", None)),
+            crate::domain::observability::RequestErrorKind::Overload
+        );
+        assert_eq!(
+            classify_mcp_error(&rmcp::ErrorData::internal_error("load timed out", None)),
+            crate::domain::observability::RequestErrorKind::Timeout
+        );
+    }
+
     #[test]
     fn split_routers_register_all_tools_without_dropping_any() {
         // Guards the transport split: the per-theme `#[tool_router]` impls must
