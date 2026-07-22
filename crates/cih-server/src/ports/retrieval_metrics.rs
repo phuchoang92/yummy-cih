@@ -16,10 +16,13 @@ pub(crate) struct CacheMetricsSnapshot {
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
 pub(crate) struct SearchRuntimeMetricsSnapshot {
     pub(crate) scorer_active: usize,
+    pub(crate) scorer_peak_active: usize,
     pub(crate) scorer_queued: usize,
     pub(crate) scorer_rejected: u64,
     pub(crate) scorer_queue_wait_ms: u64,
     pub(crate) scorer_scratch_bytes: usize,
+    pub(crate) scorer_peak_scratch_bytes: usize,
+    pub(crate) scorer_peak_per_query_scratch_bytes: usize,
     pub(crate) score_completed: u64,
     pub(crate) score_elapsed_ms: u64,
     pub(crate) cold_active: usize,

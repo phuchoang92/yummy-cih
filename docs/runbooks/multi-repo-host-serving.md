@@ -147,8 +147,9 @@ wait, response bytes, result count when available, completeness, and a bounded
 error class.
 
 The `retrieval` object adds search cache hits/misses/retained bytes/evictions,
-scorer scratch and queue pressure, cold reserved bytes, sidecar
-load/fallback/repair counters, wiki manifest/live-build counters, and grep
+current and process-high-water scorer concurrency/scratch, queue pressure, cold
+reserved bytes, sidecar load/fallback/repair counters, wiki manifest/live-build
+counters, and grep
 active/queued/rejected/partial/file totals. A growing `fallback_builds` count
 with no `repair_succeeded` indicates stale artifacts or a read-only artifact
 mount. A growing grep `rejected` count means callers should narrow their glob or

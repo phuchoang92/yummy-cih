@@ -50,6 +50,27 @@ The runner performs and records only bounded metadata for:
 
 Tool result bodies and source text are not written to the report.
 
+## Local MCP Preflight
+
+The runner was exercised end to end on 2026-07-22 against an isolated Ladybug
+copy of the Fineract snapshot (87,280 nodes, 253,144 edges). This validates the
+MCP protocol, metrics, cold/warm search, overview, and grep paths, but it does
+not replace the target-host `platform` run.
+
+| Measurement | Observed |
+|---|---:|
+| Persisted sidecar | 32,284,898 bytes |
+| Retained search index | 37,515,232 bytes |
+| Cold 16-caller burst | 85.934 ms, one sidecar load |
+| Warm 16-caller p95 | 3.841 ms, 16 cache hits |
+| Scorer scratch high-water | 1,251,056 bytes aggregate; 312,764 bytes/query |
+| Event-loop health p99 | 0.484 ms cold; 0.343 ms warm |
+| Overview | 294.395 ms without wiki; 276.097 ms default |
+| Grep | 634.874 ms scoped; 199.959 ms full no-match |
+
+The sanitized machine-readable record is
+`docs/perf/search-fineract-local.json`.
+
 ## Required Result
 
 The command must exit zero and every JSON gate must pass. In particular:

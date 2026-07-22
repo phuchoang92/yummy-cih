@@ -203,6 +203,10 @@ class RuntimeMonitor:
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
+            self.errors.append("runtime monitor did not stop within 2 seconds")
+            return
+        self._sample()
 
     def report(self) -> dict[str, Any]:
         return {
@@ -218,34 +222,46 @@ class RuntimeMonitor:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            try:
-                started = time.perf_counter()
-                self.http.get_json("/health")
-                self.health_ms.append((time.perf_counter() - started) * 1000.0)
-                metrics = self.http.get_json("/operations/metrics")
-                runtime = nested(metrics, "retrieval", "search_runtime", default={})
-                active = integer(runtime.get("scorer_active"))
-                scratch = integer(runtime.get("scorer_scratch_bytes"))
-                self.max_scorer_active = max(self.max_scorer_active, active)
-                self.max_scorer_scratch_bytes = max(
-                    self.max_scorer_scratch_bytes, scratch
-                )
-                if active > 0:
-                    self.max_scratch_per_active_bytes = max(
-                        self.max_scratch_per_active_bytes, scratch // active
-                    )
-                self.max_cold_reserved_bytes = max(
-                    self.max_cold_reserved_bytes,
-                    integer(runtime.get("cold_reserved_bytes")),
-                )
-            except (
-                Exception
-            ) as error:  # Continue sampling; the final gate reports failures.
-                if len(self.errors) < 5:
-                    self.errors.append(str(error)[:300])
-            finally:
-                self._ready.set()
+            self._sample()
             self._stop.wait(0.005)
+
+    def _sample(self) -> None:
+        try:
+            started = time.perf_counter()
+            self.http.get_json("/health")
+            self.health_ms.append((time.perf_counter() - started) * 1000.0)
+            metrics = self.http.get_json("/operations/metrics")
+            runtime = nested(metrics, "retrieval", "search_runtime", default={})
+            active = max(
+                integer(runtime.get("scorer_active")),
+                integer(runtime.get("scorer_peak_active")),
+            )
+            scratch = max(
+                integer(runtime.get("scorer_scratch_bytes")),
+                integer(runtime.get("scorer_peak_scratch_bytes")),
+            )
+            per_query_scratch = integer(
+                runtime.get("scorer_peak_per_query_scratch_bytes")
+            )
+            self.max_scorer_active = max(self.max_scorer_active, active)
+            self.max_scorer_scratch_bytes = max(self.max_scorer_scratch_bytes, scratch)
+            if per_query_scratch > 0:
+                self.max_scratch_per_active_bytes = max(
+                    self.max_scratch_per_active_bytes, per_query_scratch
+                )
+            elif active > 0:
+                self.max_scratch_per_active_bytes = max(
+                    self.max_scratch_per_active_bytes, scratch // active
+                )
+            self.max_cold_reserved_bytes = max(
+                self.max_cold_reserved_bytes,
+                integer(runtime.get("cold_reserved_bytes")),
+            )
+        except Exception as error:  # The final gate reports sampling failures.
+            if len(self.errors) < 5:
+                self.errors.append(str(error)[:300])
+        finally:
+            self._ready.set()
 
 
 def parse_http_payload(raw: bytes, content_type: str) -> Any:

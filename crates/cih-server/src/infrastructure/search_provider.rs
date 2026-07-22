@@ -54,10 +54,13 @@ impl Hash for SearchIndexKey {
 #[derive(Default)]
 struct SearchRuntimeMetrics {
     scorer_active: AtomicUsize,
+    scorer_peak_active: AtomicUsize,
     scorer_queued: AtomicUsize,
     scorer_rejected: AtomicU64,
     scorer_queue_wait_ms: AtomicU64,
     scorer_scratch_bytes: AtomicUsize,
+    scorer_peak_scratch_bytes: AtomicUsize,
+    scorer_peak_per_query_scratch_bytes: AtomicUsize,
     score_completed: AtomicU64,
     score_elapsed_ms: AtomicU64,
     cold_active: AtomicUsize,
@@ -82,10 +85,15 @@ impl SearchRuntimeMetrics {
     fn snapshot(&self) -> SearchRuntimeMetricsSnapshot {
         SearchRuntimeMetricsSnapshot {
             scorer_active: self.scorer_active.load(Ordering::Relaxed),
+            scorer_peak_active: self.scorer_peak_active.load(Ordering::Relaxed),
             scorer_queued: self.scorer_queued.load(Ordering::Relaxed),
             scorer_rejected: self.scorer_rejected.load(Ordering::Relaxed),
             scorer_queue_wait_ms: self.scorer_queue_wait_ms.load(Ordering::Relaxed),
             scorer_scratch_bytes: self.scorer_scratch_bytes.load(Ordering::Relaxed),
+            scorer_peak_scratch_bytes: self.scorer_peak_scratch_bytes.load(Ordering::Relaxed),
+            scorer_peak_per_query_scratch_bytes: self
+                .scorer_peak_per_query_scratch_bytes
+                .load(Ordering::Relaxed),
             score_completed: self.score_completed.load(Ordering::Relaxed),
             score_elapsed_ms: self.score_elapsed_ms.load(Ordering::Relaxed),
             cold_active: self.cold_active.load(Ordering::Relaxed),
@@ -301,10 +309,23 @@ enum ActiveKind {
 
 impl ActiveGuard {
     fn scorer(metrics: Arc<SearchRuntimeMetrics>, scratch_bytes: usize) -> Self {
-        metrics.scorer_active.fetch_add(1, Ordering::Relaxed);
-        metrics
+        let active = metrics
+            .scorer_active
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let aggregate_scratch = metrics
             .scorer_scratch_bytes
-            .fetch_add(scratch_bytes, Ordering::Relaxed);
+            .fetch_add(scratch_bytes, Ordering::Relaxed)
+            .saturating_add(scratch_bytes);
+        metrics
+            .scorer_peak_active
+            .fetch_max(active, Ordering::Relaxed);
+        metrics
+            .scorer_peak_scratch_bytes
+            .fetch_max(aggregate_scratch, Ordering::Relaxed);
+        metrics
+            .scorer_peak_per_query_scratch_bytes
+            .fetch_max(scratch_bytes, Ordering::Relaxed);
         Self {
             metrics,
             kind: ActiveKind::Scorer(scratch_bytes),
@@ -1166,5 +1187,28 @@ mod tests {
         assert_eq!(second_cache.runtime_metrics().sidecar_loaded, 1);
         assert_eq!(second_cache.runtime_metrics().fallback_builds, 0);
         std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn scorer_guard_retains_scratch_high_water_marks() {
+        let metrics = Arc::new(SearchRuntimeMetrics::default());
+        let first = ActiveGuard::scorer(metrics.clone(), 128);
+        let second = ActiveGuard::scorer(metrics.clone(), 256);
+
+        let active = metrics.snapshot();
+        assert_eq!(active.scorer_active, 2);
+        assert_eq!(active.scorer_scratch_bytes, 384);
+        assert_eq!(active.scorer_peak_active, 2);
+        assert_eq!(active.scorer_peak_scratch_bytes, 384);
+        assert_eq!(active.scorer_peak_per_query_scratch_bytes, 256);
+
+        drop(second);
+        drop(first);
+        let idle = metrics.snapshot();
+        assert_eq!(idle.scorer_active, 0);
+        assert_eq!(idle.scorer_scratch_bytes, 0);
+        assert_eq!(idle.scorer_peak_active, 2);
+        assert_eq!(idle.scorer_peak_scratch_bytes, 384);
+        assert_eq!(idle.scorer_peak_per_query_scratch_bytes, 256);
     }
 }
