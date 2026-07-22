@@ -163,6 +163,13 @@ CIH_SOAK_DURATION_SECS=60 CIH_SOAK_REPOSITORIES=3 \
   cargo run --release -p cih-server --example soak_bench
 ```
 
+Before rolling a retrieval release onto a production-scale repository, restart
+the server with a generated sidecar and run
+`scripts/validate-retrieval-production.py`. The runner drives cold and warm MCP
+bursts, overview, grep, health, and `/operations/metrics`, then writes a
+source-text-free JSON report. The exact `platform` procedure and acceptance
+limits are maintained in `docs/perf/search-platform-474k.md`.
+
 ### Indexing from the server
 
 `index_repo` spawns `cih-engine analyze` on the host, so it is bounded and
