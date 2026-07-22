@@ -1,0 +1,330 @@
+{
+  "artifact": {
+    "artifact_version": "3067a14a0aa4a110",
+    "nodes_bytes": 57229891,
+    "sidecar_bytes": 32284898,
+    "sidecar_present": true
+  },
+  "cold_search_burst": {
+    "all_results_equal": true,
+    "callers": 16,
+    "fallback_builds": 0,
+    "max_ms": 74.43712500389665,
+    "max_response_bytes": 23476,
+    "p50_ms": 73.68066598428413,
+    "p95_ms": 74.43712500389665,
+    "p99_ms": 74.43712500389665,
+    "repair_succeeded": 0,
+    "result_summary": {
+      "result_count": 25,
+      "result_type": "list"
+    },
+    "runtime_monitor": {
+      "health_max_ms": 0.37537497701123357,
+      "health_p99_ms": 0.37537497701123357,
+      "health_samples": 11,
+      "max_cold_reserved_bytes": 65011712,
+      "max_scorer_active": 4,
+      "max_scorer_scratch_bytes": 1251056,
+      "max_scratch_per_active_bytes": 312764,
+      "monitor_errors": []
+    },
+    "sidecar_loads": 1,
+    "wall_ms": 77.43283297168091
+  },
+  "final_counters": {
+    "grep": {
+      "active": 0,
+      "candidate_files": 12772,
+      "deadline_partial": 0,
+      "elapsed_ms": 385,
+      "files_scanned": 12772,
+      "files_skipped": 0,
+      "matches_returned": 0,
+      "partial": 0,
+      "queue_wait_ms": 0,
+      "queued": 0,
+      "rejected": 0,
+      "requests": 2
+    },
+    "search_cache": {
+      "builds": 1,
+      "evictions": 0,
+      "hits": 16,
+      "misses": 17,
+      "oversize": 0,
+      "requests": 33,
+      "retained_entries": 1,
+      "retained_weight_bytes": 37515232
+    },
+    "search_runtime": {
+      "cold_active": 0,
+      "cold_completed": 1,
+      "cold_elapsed_ms": 71,
+      "cold_queue_wait_ms": 0,
+      "cold_queued": 0,
+      "cold_rejected": 0,
+      "cold_reserved_bytes": 0,
+      "fallback_builds": 0,
+      "flight_active": 0,
+      "flight_joined": 15,
+      "repair_failed": 0,
+      "repair_succeeded": 0,
+      "score_completed": 32,
+      "score_elapsed_ms": 0,
+      "scorer_active": 0,
+      "scorer_peak_active": 4,
+      "scorer_peak_per_query_scratch_bytes": 312764,
+      "scorer_peak_scratch_bytes": 1251056,
+      "scorer_queue_wait_ms": 0,
+      "scorer_queued": 0,
+      "scorer_rejected": 0,
+      "scorer_scratch_bytes": 0,
+      "sidecar_corrupt": 0,
+      "sidecar_loaded": 1,
+      "sidecar_missing": 0,
+      "sidecar_stale": 0
+    },
+    "wiki_runtime": {
+      "live_build_attempted": 0,
+      "live_build_failed": 0,
+      "live_build_rejected_size": 0,
+      "live_build_succeeded": 0,
+      "manifest_overview_attempted": 1,
+      "manifest_overview_failed": 0,
+      "manifest_overview_succeeded": 1
+    }
+  },
+  "gates": [
+    {
+      "name": "search_sidecar_present",
+      "observed": "present=True, bytes=32284898",
+      "passed": true,
+      "target": "non-empty search-index.bin in latest complete artifact"
+    },
+    {
+      "name": "health_endpoint",
+      "observed": "8.696 ms",
+      "passed": true,
+      "target": "HTTP success"
+    },
+    {
+      "name": "ready_endpoint",
+      "observed": "22.307 ms",
+      "passed": true,
+      "target": "HTTP success"
+    },
+    {
+      "name": "mcp_tool_discovery",
+      "observed": "count=31, missing=[]",
+      "passed": true,
+      "target": "non-empty list containing search_code, architecture_overview, grep_files"
+    },
+    {
+      "name": "cold_search_single_flight",
+      "observed": "sidecar_loads=1, fallback_builds=0, equal=True",
+      "passed": true,
+      "target": "sidecar_loads in [1], fallback_builds=0, identical results"
+    },
+    {
+      "name": "cold_search_latency",
+      "observed": "77.433 ms",
+      "passed": true,
+      "target": "16 callers complete in <= 10000 ms"
+    },
+    {
+      "name": "cold_event_loop_responsive",
+      "observed": "p99=0.375 ms, samples=11, errors=0",
+      "passed": true,
+      "target": "health p99 < 50 ms with no monitor errors"
+    },
+    {
+      "name": "platform_index_size",
+      "observed": "bytes=37515232, retained=True",
+      "passed": true,
+      "target": "0 < index_bytes <= 241172480 and retained=true"
+    },
+    {
+      "name": "warm_search_latency",
+      "observed": "p95=3.740 ms, loads=0, builds=0, hits=16",
+      "passed": true,
+      "target": "p95 <= 500 ms, >= 16 cache hits, no load/build, identical results"
+    },
+    {
+      "name": "warm_scorer_scratch",
+      "observed": "active=4, aggregate=1251056, per_active=312764",
+      "passed": true,
+      "target": "observed active scoring; aggregate <= 32 MiB and per active scorer <= 6 MiB"
+    },
+    {
+      "name": "warm_event_loop_responsive",
+      "observed": "p99=0.276 ms, samples=2, errors=0",
+      "passed": true,
+      "target": "health p99 < 50 ms with no monitor errors"
+    },
+    {
+      "name": "overview_without_wiki",
+      "observed": "269.829 ms",
+      "passed": true,
+      "target": "<= 2000 ms"
+    },
+    {
+      "name": "overview_default_fail_soft",
+      "observed": "250.244 ms",
+      "passed": true,
+      "target": "<= 2000 ms including optional wiki handling"
+    },
+    {
+      "name": "scoped_grep_latency",
+      "observed": "210.565 ms",
+      "passed": true,
+      "target": "<= 10000 ms"
+    },
+    {
+      "name": "no_match_grep_bounded",
+      "observed": "elapsed=176.862 ms, complete=True, reason=none",
+      "passed": true,
+      "target": "complete or explicit partial response in <= 85000 ms"
+    }
+  ],
+  "generated_at": "2026-07-22T15:33:18.642031+00:00",
+  "health": {
+    "elapsed_ms": 8.695625001564622,
+    "ok": true
+  },
+  "no_match_grep": {
+    "elapsed_ms": 176.86195799615234,
+    "response_bytes": 680,
+    "result_summary": {
+      "candidate_files": 6386,
+      "complete": true,
+      "elapsed_ms": 176,
+      "files_scanned": 6386,
+      "files_skipped": 0,
+      "matches_returned": 0,
+      "result_type": "object",
+      "top_level_keys": [
+        "candidate_files",
+        "complete",
+        "elapsed_ms",
+        "files_scanned",
+        "files_skipped",
+        "glob",
+        "matches",
+        "matches_returned",
+        "pattern",
+        "truncated",
+        "truncation_reason"
+      ],
+      "truncated": false,
+      "truncation_reason": "none"
+    }
+  },
+  "observed_search_index": {
+    "artifact_version": "3067a14a0aa4a110",
+    "documents": 78191,
+    "index_bytes": 37515232,
+    "retained": true
+  },
+  "overview_default": {
+    "elapsed_ms": 250.24429196491838,
+    "response_bytes": 36300,
+    "result_summary": {
+      "result_type": "object",
+      "top_level_keys": [
+        "entrypoints",
+        "modules",
+        "provenance",
+        "repo",
+        "route_groups",
+        "stats",
+        "warnings",
+        "wiki_pages"
+      ]
+    }
+  },
+  "overview_without_wiki": {
+    "elapsed_ms": 269.82924999902025,
+    "response_bytes": 29482,
+    "result_summary": {
+      "result_type": "object",
+      "top_level_keys": [
+        "entrypoints",
+        "modules",
+        "provenance",
+        "repo",
+        "route_groups",
+        "stats",
+        "warnings"
+      ]
+    }
+  },
+  "passed": true,
+  "ready": {
+    "elapsed_ms": 22.30712497839704,
+    "ok": true
+  },
+  "repo_selector": "fineract-local",
+  "repository_label": "fineract-local",
+  "revision": "a00c2d16cdfeece35962941615224c86053dea80",
+  "scoped_grep": {
+    "elapsed_ms": 210.56545799365267,
+    "response_bytes": 606,
+    "result_summary": {
+      "candidate_files": 6386,
+      "complete": true,
+      "elapsed_ms": 209,
+      "files_scanned": 6386,
+      "files_skipped": 0,
+      "matches_returned": 0,
+      "result_type": "object",
+      "top_level_keys": [
+        "candidate_files",
+        "complete",
+        "elapsed_ms",
+        "files_scanned",
+        "files_skipped",
+        "glob",
+        "matches",
+        "matches_returned",
+        "pattern",
+        "truncated",
+        "truncation_reason"
+      ],
+      "truncated": false,
+      "truncation_reason": "none"
+    }
+  },
+  "server_url": "http://127.0.0.1:8091",
+  "tool_discovery": {
+    "missing": [],
+    "tool_count": 31
+  },
+  "warm_search_burst": {
+    "all_results_equal": true,
+    "cache_hits": 16,
+    "callers": 16,
+    "fallback_builds": 0,
+    "max_ms": 3.7400000146590173,
+    "max_response_bytes": 23476,
+    "p50_ms": 2.857792016584426,
+    "p95_ms": 3.7400000146590173,
+    "p99_ms": 3.7400000146590173,
+    "result_summary": {
+      "result_count": 25,
+      "result_type": "list"
+    },
+    "runtime_monitor": {
+      "health_max_ms": 0.2758330083452165,
+      "health_p99_ms": 0.2758330083452165,
+      "health_samples": 2,
+      "max_cold_reserved_bytes": 0,
+      "max_scorer_active": 4,
+      "max_scorer_scratch_bytes": 1251056,
+      "max_scratch_per_active_bytes": 312764,
+      "monitor_errors": []
+    },
+    "sidecar_loads": 0,
+    "wall_ms": 5.351250001695007
+  }
+}

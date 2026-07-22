@@ -61,12 +61,12 @@ not replace the target-host `platform` run.
 |---|---:|
 | Persisted sidecar | 32,284,898 bytes |
 | Retained search index | 37,515,232 bytes |
-| Cold 16-caller burst | 85.934 ms, one sidecar load |
-| Warm 16-caller p95 | 3.841 ms, 16 cache hits |
+| Cold 16-caller burst | 77.433 ms, one sidecar load |
+| Warm 16-caller p95 | 3.740 ms, 16 cache hits |
 | Scorer scratch high-water | 1,251,056 bytes aggregate; 312,764 bytes/query |
-| Event-loop health p99 | 0.484 ms cold; 0.343 ms warm |
-| Overview | 294.395 ms without wiki; 276.097 ms default |
-| Grep | 634.874 ms scoped; 199.959 ms full no-match |
+| Event-loop health p99 | 0.375 ms cold; 0.276 ms warm |
+| Overview | 269.829 ms without wiki; 250.244 ms default |
+| Grep | 210.565 ms scoped; 176.862 ms full no-match |
 
 The sanitized machine-readable record is
 `docs/perf/search-fineract-local.json`.
