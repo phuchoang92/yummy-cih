@@ -8,6 +8,7 @@ Milestone 5 measurement record for `docs/plans/cih-server-clean-architecture-and
 ```bash
 cargo run --release -p cih-server --example scale_bench -- \
   --nodes 500000 --edges-per-node 2 --iterations 20 \
+  --burst-callers 16 --search-cache-bytes 1 \
   --output docs/perf/scale-500k-local.json [--enforce]
 ```
 
@@ -15,8 +16,15 @@ The harness (`crates/cih-server/src/scale_bench.rs`) generates a deterministic
 fixture — 500,000 `Method` nodes (179 MB `nodes.jsonl`), 1,000,000 `Calls` edges
 (164 MB `edges.jsonl`), 50,000 `Community` records — then drives the **production**
 adapters: `ArtifactCache` snapshot/index loading, the BM25 `SearchIndex`, the wiki
-`TextIndex`, and the MCP resource paging scan. `scale-500k-local.json` holds the
+`TextIndex`, the search sidecar codec, and the MCP resource paging scan. The
+report includes a field-by-field retained-memory breakdown plus sidecar persist
+and warm-restart load durations. `scale-500k-local.json` holds the
 latest raw report; it is machine-specific and regenerated, not a golden file.
+
+The result table below predates the compact search representation introduced by
+`docs/plans/search-index-scale-performance.md`; do not use its 362 MiB BM25
+figure as the current value. Regenerate the raw report before making a capacity
+decision. The harness schema now records the replacement measurements.
 
 Reference machine for the latest numbers below: macOS / aarch64, 14 logical
 CPUs, release profile, 2026-07-21.

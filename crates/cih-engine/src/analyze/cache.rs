@@ -252,8 +252,12 @@ fn config_unchanged(repo_root: &Path, cih_dir: &Path, cache: &AnalyzeCacheOption
 
 fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts> {
     let artifacts = latest_graph_artifacts(repo_root)?;
-    let nodes = artifacts.read_nodes()?;
-    let edges = artifacts.read_edges()?;
+    let node_count = artifacts
+        .stream_nodes()?
+        .try_fold(0usize, |count, node| node.map(|_| count + 1))?;
+    let edge_count = artifacts
+        .stream_edges()?
+        .try_fold(0usize, |count, edge| edge.map(|_| count + 1))?;
     let parsed_dir = cih_dir.join("parsed").join(artifacts.version.as_str());
     let parsed_files_path = parsed_dir.join("parsed-files.jsonl");
     // A missing/corrupt parsed-files.jsonl is deliberately not an error here:
@@ -264,8 +268,8 @@ fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts>
     Ok(ReusedArtifacts {
         artifacts,
         parsed_files_path,
-        node_count: nodes.len(),
-        edge_count: edges.len(),
+        node_count,
+        edge_count,
         parsed_file_count,
     })
 }

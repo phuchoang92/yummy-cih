@@ -272,10 +272,107 @@ fn inverted_index_matches_naive_reference() {
         "loan repayment loan",
     ];
     for q in queries {
-        for &limit in &[1usize, 5, 25, 1000] {
+        for &limit in &[1usize, 5, 10, 25, 50, 1000] {
             let got = index.search(q, limit);
             let want = naive_text_search(&doc_refs, q, limit);
             assert_eq!(got, want, "mismatch for query {q:?} limit {limit}");
+        }
+    }
+}
+
+#[test]
+fn graph_index_matches_field_corpus_for_properties_unicode_and_ties() {
+    use cih_search::TextIndex;
+    use serde_json::json;
+
+    let mut nodes = Vec::new();
+    let mut corpus = Vec::new();
+    for ordinal in 0..120 {
+        let kind = match ordinal % 3 {
+            0 => NodeKind::Route,
+            1 => NodeKind::IntegrationRoute,
+            _ => NodeKind::MessageDestination,
+        };
+        let name = if ordinal % 7 == 0 {
+            "ÜberweisungAPI".to_string()
+        } else {
+            format!("processTransfer{}", ordinal % 11)
+        };
+        let qualified = format!("com.acme.TransferService.{name}");
+        let id = format!("{:03}:{}", ordinal, name);
+        let file = format!("src/service{}/Transfer.java", ordinal % 4);
+        let props = match kind {
+            NodeKind::Route => json!({
+                "httpMethod": "POST",
+                "path": "/api/v1/transfers/{id}/verify",
+                "handler": "verifyTransfer"
+            }),
+            NodeKind::IntegrationRoute => json!({
+                "uri": "direct:transferAudit",
+                "source": "jms:incomingTransfers"
+            }),
+            NodeKind::MessageDestination => json!({"destination_type": "KafkaTopic"}),
+            _ => unreachable!(),
+        };
+        let mut fields = vec![
+            kind.label().to_string(),
+            name.clone(),
+            qualified.clone(),
+            id.clone(),
+            file.clone(),
+        ];
+        match kind {
+            NodeKind::Route => {
+                fields.extend([
+                    "POST".into(),
+                    "/api/v1/transfers/{id}/verify".into(),
+                    "api".into(),
+                    "v1".into(),
+                    "transfers".into(),
+                    "verify".into(),
+                    "verifyTransfer".into(),
+                ]);
+            }
+            NodeKind::IntegrationRoute => fields.extend([
+                "direct:transferAudit".into(),
+                "jms:incomingTransfers".into(),
+            ]),
+            NodeKind::MessageDestination => fields.push("KafkaTopic".into()),
+            _ => unreachable!(),
+        }
+        corpus.push(fields.join(" "));
+        nodes.push(Node {
+            id: NodeId::new(id),
+            kind,
+            name,
+            qualified_name: Some(qualified),
+            file,
+            range: Range::default(),
+            props: Some(props),
+        });
+    }
+
+    let graph = SearchIndex::build(&nodes);
+    let text = TextIndex::build(corpus.iter().map(String::as_str));
+    for query in [
+        "transfer transfer verify",
+        "kafka topic",
+        "incoming transfers audit",
+        "überweisung api",
+        "POST api v1",
+    ] {
+        for limit in [1, 10, 50] {
+            let graph_hits = graph.search(query, limit);
+            let text_hits = text.search(query, limit);
+            let graph_order: Vec<(&str, u32)> = graph_hits
+                .iter()
+                .map(|hit| (hit.node_id.as_str(), hit.bm25_score.unwrap().to_bits()))
+                .collect();
+            let text_order: Vec<(&str, u32)> = text_hits
+                .iter()
+                .map(|(ordinal, score)| (nodes[*ordinal].id.as_str(), score.to_bits()))
+                .collect();
+            assert_eq!(graph_order, text_order, "query={query:?} limit={limit}");
         }
     }
 }

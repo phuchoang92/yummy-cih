@@ -2,7 +2,11 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{GraphArtifacts, JarInfo, NodeKind, VersionId};
+use cih_core::{GraphArtifacts, JarInfo, Node, NodeKind, VersionId};
+use cih_search::{
+    inspect_search_index, persist_search_index, search_index_path, search_schema_fingerprint,
+    SearchIndex, SearchIndexInspection, SearchIndexSource, SEARCH_INDEX_FORMAT_VERSION,
+};
 use serde::Serialize;
 
 use crate::db::{load_with_progress, LoadOutcome};
@@ -407,6 +411,7 @@ pub fn analyze_from_scope_with_options(
         cache_stats,
     } = incremental
     {
+        ensure_reused_search_sidecar(&artifacts);
         ui.finish_with(format!(
             "{} nodes, {} edges  \x1b[2m(no changes — reused)\x1b[0m",
             crate::ui::fmt_count(node_count),
@@ -468,7 +473,7 @@ pub fn analyze_from_scope_with_options(
 
     let java_const_resolver = cih_resolve::build_java_constant_resolver(&parse_output.parsed_files);
 
-    let resolve_output = cih_resolve::resolve_with_registry(
+    let mut resolve_output = cih_resolve::resolve_with_registry(
         &parse_output.parsed_files,
         &resolvers,
         cih_resolve::ResolveOptions {
@@ -578,6 +583,28 @@ pub fn analyze_from_scope_with_options(
     cih_resolve::write_unresolved_reports(&resolve_output.unresolved_refs, &artifacts_dir)
         .with_context(|| "failed to write unresolved-refs reports")?;
 
+    // Capture outcome values before transferring node ownership to the search
+    // index. Dropping the edge vector first keeps the sidecar build from
+    // overlapping with the two largest assembled graph collections.
+    let node_count = all_nodes.len();
+    let edge_count = edges.len();
+    let resolved_edge_count = resolve_output.edges.len();
+    let unresolved_reference_count = resolve_output.skipped;
+    let unresolved_external_fqcns = std::mem::take(&mut resolve_output.unresolved_external_fqcns);
+    let parsed_file_count = parse_output.parsed_files.len();
+    let skipped_count = parse_output.skipped.len();
+    let syntactic_callables = parse_output.syntactic_callables;
+    let callable_node_count = all_nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .count();
+    drop(edges);
+    drop(std::mem::take(&mut resolve_output.edges));
+    drop(std::mem::take(&mut resolve_output.unresolved_refs));
+    drop(parse_output.edges);
+    drop(parse_output.parsed_files);
+    drop(parse_output.skipped);
+
     prune_other_versions(&cih_dir.join("parsed"), &version)?;
     prune_other_versions(&cih_dir.join("artifacts"), &version)?;
     crate::file_cache::FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
@@ -587,11 +614,12 @@ pub fn analyze_from_scope_with_options(
         fingerprint: analyze_config_fingerprint(&repo_root, &cache),
     }
     .save(&cih_dir)?;
+    publish_search_sidecar(&artifacts, all_nodes);
 
     tracing::info!(
-        nodes = all_nodes.len(),
-        edges = edges.len(),
-        resolved_edges = resolve_output.edges.len(),
+        nodes = node_count,
+        edges = edge_count,
+        resolved_edges = resolved_edge_count,
         jar_nodes = jar_node_count,
         unresolved_refs = resolve_output.skipped,
         version = %version,
@@ -600,19 +628,12 @@ pub fn analyze_from_scope_with_options(
     );
     ui.finish_with(format!(
         "{} nodes, {} edges  \x1b[2m(v{})\x1b[0m",
-        crate::ui::fmt_count(all_nodes.len()),
-        crate::ui::fmt_count(edges.len()),
+        crate::ui::fmt_count(node_count),
+        crate::ui::fmt_count(edge_count),
         &version[..8.min(version.len())]
     ));
 
     let cache_stats = cache_stats.with_version(version.clone());
-
-    // Extraction-coverage inputs: what the ASTs contained vs. what we emitted.
-    let syntactic_callables = parse_output.syntactic_callables;
-    let callable_node_count = all_nodes
-        .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
-        .count();
 
     Ok(EmitOutcome {
         scope_file,
@@ -621,13 +642,13 @@ pub fn analyze_from_scope_with_options(
         parsed_files_path: parse_artifacts.parsed_files_path,
         artifacts_dir: artifacts_dir.clone(),
         version,
-        node_count: all_nodes.len(),
-        edge_count: edges.len(),
-        resolved_edge_count: resolve_output.edges.len(),
-        unresolved_reference_count: resolve_output.skipped,
-        unresolved_external_fqcns: resolve_output.unresolved_external_fqcns,
-        parsed_file_count: parse_output.parsed_files.len(),
-        skipped_count: parse_output.skipped.len(),
+        node_count,
+        edge_count,
+        resolved_edge_count,
+        unresolved_reference_count,
+        unresolved_external_fqcns,
+        parsed_file_count,
+        skipped_count,
         jar_node_count,
         jar_failed,
         reused_artifacts: false,
@@ -635,6 +656,118 @@ pub fn analyze_from_scope_with_options(
         syntactic_callables,
         callable_node_count,
     })
+}
+
+fn search_sidecar_enabled() -> bool {
+    std::env::var("CIH_SEARCH_SIDECAR_ENABLED")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn publish_search_sidecar(artifacts: &GraphArtifacts, nodes: Vec<Node>) {
+    if !search_sidecar_enabled() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let source = match SearchIndexSource::from_nodes_file(
+        &artifacts.nodes_path,
+        artifacts.version.to_string(),
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar source metadata unavailable");
+            return;
+        }
+    };
+    let Some(artifacts_dir) = artifacts.nodes_path.parent() else {
+        tracing::warn!("search sidecar artifact directory unavailable");
+        return;
+    };
+    let index = SearchIndex::build_owned(nodes);
+    let documents = index.len();
+    let retained_bytes = index.estimated_size_bytes();
+    match persist_search_index(&search_index_path(artifacts_dir), &source, &index) {
+        Ok(metadata) => tracing::info!(
+            documents,
+            retained_bytes,
+            sidecar_bytes = metadata.payload_len,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar published"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar publication failed; runtime fallback remains available"
+        ),
+    }
+}
+
+fn ensure_reused_search_sidecar(artifacts: &GraphArtifacts) {
+    if !search_sidecar_enabled() {
+        return;
+    }
+    let source = match SearchIndexSource::from_nodes_file(
+        &artifacts.nodes_path,
+        artifacts.version.to_string(),
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar source metadata unavailable");
+            return;
+        }
+    };
+    let Some(artifacts_dir) = artifacts.nodes_path.parent() else {
+        tracing::warn!("search sidecar artifact directory unavailable");
+        return;
+    };
+    let path = search_index_path(artifacts_dir);
+    let current = matches!(
+        inspect_search_index(&path),
+        Ok(SearchIndexInspection::Present(metadata))
+            if metadata.format_version == SEARCH_INDEX_FORMAT_VERSION
+                && metadata.schema_fingerprint == search_schema_fingerprint()
+                && metadata.source == source
+    );
+    if current {
+        return;
+    }
+
+    let started = std::time::Instant::now();
+    let nodes = match artifacts.stream_nodes() {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar backfill could not stream nodes");
+            return;
+        }
+    };
+    let index = match SearchIndex::try_build(nodes) {
+        Ok(index) => index,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar backfill could not decode nodes");
+            return;
+        }
+    };
+    let documents = index.len();
+    let retained_bytes = index.estimated_size_bytes();
+    match persist_search_index(&path, &source, &index) {
+        Ok(metadata) => tracing::info!(
+            documents,
+            retained_bytes,
+            sidecar_bytes = metadata.payload_len,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar backfilled for reused artifacts"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar backfill failed; runtime fallback remains available"
+        ),
+    }
 }
 
 #[derive(Clone, Default)]

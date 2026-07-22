@@ -75,10 +75,13 @@ impl GraphBrowserService {
             .search
             .query_hits(query, limit)
             .await
-            .map_err(|error| AppError::Unavailable {
-                dependency: "search index",
-                message: error.to_string(),
-                retryable: false,
+            .map_err(|error| {
+                let retryable = error.retryable();
+                AppError::Unavailable {
+                    dependency: "search index",
+                    message: error.to_string(),
+                    retryable,
+                }
             })?;
         let subgraph = if expand && !hits.is_empty() {
             let seeds: Vec<NodeId> = hits.iter().take(5).map(|hit| hit.node_id.clone()).collect();

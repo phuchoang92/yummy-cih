@@ -39,13 +39,14 @@ use crate::application::search::SearchService;
 use crate::application::taint::TaintService;
 use crate::application::testing::TestingService;
 use crate::application::wiki_search::{WikiPageService, WikiSearchService};
-use crate::config::{CacheBudgets, Config};
+use crate::config::{CacheBudgets, Config, RetrievalConfig};
 use crate::infrastructure::artifact_cross_repo_graph::ArtifactCrossRepoGraphProvider;
 use crate::infrastructure::artifact_repository::ArtifactCache;
 use crate::infrastructure::git_changed_files::GitChangedFilesSource;
 use crate::infrastructure::graph_store_provider::build_store;
 use crate::infrastructure::local_job_scheduler::{IndexScheduler, RegistryIndexTargetResolver};
 use crate::infrastructure::repo_context_provider::DefaultRepoContextProvider;
+use crate::infrastructure::retrieval_metrics::RuntimeRetrievalMetrics;
 use crate::infrastructure::search_provider::{SearchCache, SearchState};
 use crate::infrastructure::wiki_repository::{
     WikiBundlePageRepository, WikiBundleSearchRepository, WikiOverviewRepository, WikiSearchState,
@@ -85,7 +86,7 @@ pub(crate) fn assemble_services(
             falkor_url.clone(),
             store_limits,
             embed_store,
-            search_cache,
+            search_cache.clone(),
         ));
     let jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let artifacts: Arc<dyn ArtifactRepository> = Arc::new(ArtifactCache::new());
@@ -99,8 +100,13 @@ pub(crate) fn assemble_services(
         Arc::new(RegistryIndexTargetResolver),
         index_scheduler.clone(),
     );
-    let operational_metrics =
-        crate::application::admin::OperationalMetricsService::new(index_scheduler);
+    let operational_metrics = crate::application::admin::OperationalMetricsService::new(
+        index_scheduler,
+        Arc::new(RuntimeRetrievalMetrics::new(
+            search_cache,
+            wiki_state.clone(),
+        )),
+    );
     let contract_service = ContractService::new(
         repo_contexts.clone(),
         Arc::new(ArtifactCrossRepoGraphProvider::new(artifacts.clone())),
@@ -108,7 +114,7 @@ pub(crate) fn assemble_services(
     );
     let architecture_overview = ArchitectureOverviewService::new(
         repo_contexts.clone(),
-        Arc::new(WikiOverviewRepository::new(wiki_state.clone())),
+        Arc::new(WikiOverviewRepository::new()),
     );
     let wiki_search = WikiSearchService::new(
         repo_contexts.clone(),
@@ -168,6 +174,9 @@ pub async fn run() -> Result<()> {
 
     let cfg = Config::from_env();
     let cache_budgets = CacheBudgets::from_env()?;
+    let retrieval = RetrievalConfig::from_env()?;
+    crate::application::files::validate_grep_runtime()?;
+    crate::infrastructure::wiki_repository::validate_live_wiki_config()?;
     tracing::info!(?cfg, "starting CIH MCP server");
     tracing::info!(
         artifact_cache_bytes = cache_budgets.artifact_bytes,
@@ -177,6 +186,7 @@ pub async fn run() -> Result<()> {
         total_cache_bytes = cache_budgets.total_bytes,
         "validated process cache budgets"
     );
+    tracing::info!(?retrieval, "validated retrieval limits");
 
     cfg.check_auth_posture()?;
     if cfg.api_token.is_none() {

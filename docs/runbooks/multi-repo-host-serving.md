@@ -79,6 +79,7 @@ worth setting these deliberately on a multi-repo host.
 | `CIH_ARTIFACT_CACHE_MAX_BYTES` | 512 MiB | parsed `nodes.jsonl`/`edges.jsonl` snapshots |
 | `CIH_WIKI_CACHE_MAX_BYTES` | 256 MiB | wiki indexes, resident renderers, live search |
 | `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | per-repo BM25 indexes |
+| `CIH_SEARCH_CACHE_MAX_ENTRIES` | 32 | repository/version index safety cap |
 | `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES` | 16 MiB | JSONL resource paging indexes |
 | `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | 32 | retained repo versions (LRU beyond this) |
 | `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` | 1800 | idle eviction (0 disables) |
@@ -96,6 +97,31 @@ Other tuning knobs: `CIH_BLOCKING_MAX_CONCURRENT` (2) and
 `CIH_DETECT_CHANGES_MAX_SYMBOLS` (200) caps blast-radius traversals per
 `detect_changes` call.
 
+### Search and grep admission
+
+Search indexes are generated as `search-index.bin` during analyze. On a cold
+request the server validates source identity, schema fingerprint, checksum, and
+format before admitting a decode under both a count limit and a transient-byte
+budget. Missing, stale, or corrupt sidecars fall back to one streaming build and
+an atomic repair; concurrent callers for the same version share that result.
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `CIH_SEARCH_SIDECAR_ENABLED` | `true` | rollback switch for sidecar loading/publication |
+| `CIH_SEARCH_SCORE_MAX_CONCURRENT` | min(4, CPUs) | warm scorer lane |
+| `CIH_SEARCH_SCORE_QUEUE_TIMEOUT_MS` | 2000 | scorer admission timeout |
+| `CIH_SEARCH_COLD_MAX_CONCURRENT` | 1 | simultaneous decode/build count |
+| `CIH_SEARCH_COLD_MAX_BYTES` | 512 MiB | aggregate cold transient reservation |
+| `CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS` | 5 | cold count/byte admission timeout |
+| `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 1 | repository scans admitted at once |
+| `CIH_GREP_THREADS` | min(4, CPUs) | process-wide dedicated grep workers |
+| `CIH_GREP_QUEUE_TIMEOUT_SECS` | 2 | wait before `grep capacity saturated` |
+| `CIH_GREP_DEADLINE_SECS` | 80 | cooperative partial-result deadline |
+| `CIH_WIKI_LIVE_MAX_NODES` | 100000 | require generated wiki above this graph size |
+
+Startup rejects zero/invalid values and rejects a grep queue plus scan deadline
+that does not leave five seconds before `CIH_BLOCKING_TIMEOUT_SECS`.
+
 Operational state is available at authenticated `GET /operations/metrics`.
 Use it to distinguish slow execution from admission pressure: blocking
 `queued`/`active` and cumulative queue wait describe cold read pressure, while
@@ -103,6 +129,14 @@ index `queued`/`running`/`rejected` describes analysis-job pressure. Request
 completion logs use the `request_completed` event and include duration, queue
 wait, response bytes, result count when available, completeness, and a bounded
 error class.
+
+The `retrieval` object adds search cache hits/misses/retained bytes/evictions,
+scorer scratch and queue pressure, cold reserved bytes, sidecar
+load/fallback/repair counters, wiki manifest/live-build counters, and grep
+active/queued/rejected/partial/file totals. A growing `fallback_builds` count
+with no `repair_succeeded` indicates stale artifacts or a read-only artifact
+mount. A growing grep `rejected` count means callers should narrow their glob or
+retry after the current scan drains.
 
 The scheduled `.github/workflows/cih-server-soak.yml` workflow runs both the
 ten-service and fifty-registry-entry matrices. For a local smoke run:

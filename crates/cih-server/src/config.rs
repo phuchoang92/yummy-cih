@@ -52,6 +52,116 @@ pub const DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_TOTAL_CACHE_MAX_BYTES: usize = 1040 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RetrievalConfig {
+    pub(crate) search_cache_max_entries: usize,
+    pub(crate) search_score_max_concurrent: usize,
+    pub(crate) search_score_queue_timeout_ms: u64,
+    pub(crate) search_cold_max_concurrent: usize,
+    pub(crate) search_cold_max_bytes: usize,
+    pub(crate) search_cold_queue_timeout_secs: u64,
+    pub(crate) search_sidecar_enabled: bool,
+    pub(crate) grep_max_concurrent_requests: usize,
+    pub(crate) grep_threads: usize,
+    pub(crate) grep_queue_timeout_secs: u64,
+    pub(crate) grep_deadline_secs: u64,
+    pub(crate) wiki_live_max_nodes: usize,
+}
+
+impl RetrievalConfig {
+    pub(crate) fn from_env() -> Result<Self> {
+        let cpus = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let config = Self {
+            search_cache_max_entries: positive_env("CIH_SEARCH_CACHE_MAX_ENTRIES", 32usize)?,
+            search_score_max_concurrent: positive_env(
+                "CIH_SEARCH_SCORE_MAX_CONCURRENT",
+                cpus.min(4).max(1),
+            )?,
+            search_score_queue_timeout_ms: positive_env(
+                "CIH_SEARCH_SCORE_QUEUE_TIMEOUT_MS",
+                2_000u64,
+            )?,
+            search_cold_max_concurrent: positive_env("CIH_SEARCH_COLD_MAX_CONCURRENT", 1usize)?,
+            search_cold_max_bytes: positive_env(
+                "CIH_SEARCH_COLD_MAX_BYTES",
+                512usize * 1024 * 1024,
+            )?,
+            search_cold_queue_timeout_secs: positive_env(
+                "CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS",
+                5u64,
+            )?,
+            search_sidecar_enabled: bool_env("CIH_SEARCH_SIDECAR_ENABLED", true)?,
+            grep_max_concurrent_requests: positive_env("CIH_GREP_MAX_CONCURRENT_REQUESTS", 1usize)?,
+            grep_threads: positive_env("CIH_GREP_THREADS", cpus.min(4).max(1))?,
+            grep_queue_timeout_secs: positive_env("CIH_GREP_QUEUE_TIMEOUT_SECS", 2u64)?,
+            grep_deadline_secs: positive_env("CIH_GREP_DEADLINE_SECS", 80u64)?,
+            wiki_live_max_nodes: positive_env("CIH_WIKI_LIVE_MAX_NODES", 100_000usize)?,
+        };
+        let blocking_timeout_secs = match std::env::var("CIH_BLOCKING_TIMEOUT_SECS") {
+            Ok(raw) => raw.parse::<u64>().map_err(|_| {
+                anyhow!("CIH_BLOCKING_TIMEOUT_SECS must be a non-negative integer (got '{raw}')")
+            })?,
+            Err(std::env::VarError::NotPresent) => 90,
+            Err(error) => return Err(anyhow!("cannot read CIH_BLOCKING_TIMEOUT_SECS: {error}")),
+        };
+        validate_grep_deadlines(
+            config.grep_queue_timeout_secs,
+            config.grep_deadline_secs,
+            blocking_timeout_secs,
+        )?;
+        Ok(config)
+    }
+}
+
+fn positive_env<T>(name: &'static str, default: T) -> Result<T>
+where
+    T: std::str::FromStr + PartialEq + Default + Copy,
+{
+    let value = match std::env::var(name) {
+        Ok(raw) => raw
+            .parse::<T>()
+            .map_err(|_| anyhow!("{name} must be a positive integer (got '{raw}')"))?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => return Err(anyhow!("cannot read {name}: {error}")),
+    };
+    if value == T::default() {
+        return Err(anyhow!("{name} must be greater than zero"));
+    }
+    Ok(value)
+}
+
+fn bool_env(name: &'static str, default: bool) -> Result<bool> {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(anyhow!(
+                "{name} must be one of true/false, 1/0, yes/no, or on/off (got '{raw}')"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(anyhow!("cannot read {name}: {error}")),
+    }
+}
+
+fn validate_grep_deadlines(queue: u64, deadline: u64, blocking: u64) -> Result<()> {
+    if blocking == 0 {
+        return Ok(());
+    }
+    let required = queue
+        .checked_add(deadline)
+        .and_then(|value| value.checked_add(5))
+        .ok_or_else(|| anyhow!("grep queue/deadline configuration overflows u64"))?;
+    if required > blocking {
+        return Err(anyhow!(
+            "CIH_GREP_QUEUE_TIMEOUT_SECS + CIH_GREP_DEADLINE_SECS must leave at least 5 seconds before CIH_BLOCKING_TIMEOUT_SECS ({queue} + {deadline} + 5 > {blocking})"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CacheBudgets {
     pub(crate) artifact_bytes: usize,
     pub(crate) wiki_bytes: usize,
@@ -250,10 +360,17 @@ pub fn store_options(cfg: &Config) -> cih_store_factory::StoreOptions {
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_is_loopback, CacheBudgets, DEFAULT_ARTIFACT_CACHE_MAX_BYTES,
+        bind_is_loopback, validate_grep_deadlines, CacheBudgets, DEFAULT_ARTIFACT_CACHE_MAX_BYTES,
         DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES, DEFAULT_SEARCH_CACHE_MAX_BYTES,
         DEFAULT_WIKI_CACHE_MAX_BYTES,
     };
+
+    #[test]
+    fn grep_deadline_must_fit_inside_blocking_timeout() {
+        assert!(validate_grep_deadlines(2, 80, 90).is_ok());
+        assert!(validate_grep_deadlines(5, 85, 90).is_err());
+        assert!(validate_grep_deadlines(5, 85, 0).is_ok());
+    }
 
     #[test]
     fn loopback_binds_are_recognized() {

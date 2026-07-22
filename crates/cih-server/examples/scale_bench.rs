@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
         edges_per_node: args.edges_per_node,
         iterations: args.iterations,
         burst_callers: args.burst_callers,
+        search_cache_bytes: args.search_cache_bytes,
         regenerate: args.regenerate,
     })
     .await?;
@@ -58,6 +59,7 @@ struct Args {
     edges_per_node: usize,
     iterations: usize,
     burst_callers: usize,
+    search_cache_bytes: usize,
     regenerate: bool,
     enforce: bool,
 }
@@ -70,7 +72,8 @@ impl Args {
             nodes: 500_000,
             edges_per_node: 2,
             iterations: 20,
-            burst_callers: 8,
+            burst_callers: 16,
+            search_cache_bytes: 1,
             regenerate: false,
             enforce: false,
         };
@@ -97,6 +100,10 @@ impl Args {
                 }
                 "--burst-callers" => {
                     args.burst_callers =
+                        parse_usize(required_value(&mut arguments, &argument)?, &argument)?;
+                }
+                "--search-cache-bytes" => {
+                    args.search_cache_bytes =
                         parse_usize(required_value(&mut arguments, &argument)?, &argument)?;
                 }
                 "--regenerate" => args.regenerate = true,
@@ -134,7 +141,8 @@ fn print_help() {
            --nodes N              Node count (default 500000)\n\
            --edges-per-node N     Edges per node (default 2 = 1m edges)\n\
            --iterations N         Warm measurement samples (default 20)\n\
-           --burst-callers N      Concurrent same-key cold callers (default 8)\n\
+           --burst-callers N      Concurrent same-key cold callers (default 16)\n\
+           --search-cache-bytes N Search burst cache budget (default 1 = oversize mode)\n\
            --regenerate           Replace an otherwise reusable fixture\n\
            --enforce              Exit non-zero when an acceptance check fails\n\
            -h, --help             Show this help"
@@ -159,6 +167,8 @@ mod tests {
                 "2",
                 "--fixture-dir",
                 "/tmp/scale",
+                "--search-cache-bytes",
+                "4096",
                 "--regenerate",
                 "--enforce",
             ]
@@ -170,6 +180,7 @@ mod tests {
         assert_eq!(args.edges_per_node, 3);
         assert_eq!(args.iterations, 4);
         assert_eq!(args.burst_callers, 2);
+        assert_eq!(args.search_cache_bytes, 4096);
         assert!(args.regenerate);
         assert!(args.enforce);
     }

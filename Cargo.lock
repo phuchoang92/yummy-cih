@@ -616,6 +616,7 @@ dependencies = [
  "cih-parse",
  "cih-patterns",
  "cih-resolve",
+ "cih-search",
  "cih-store-factory",
  "cih-taint",
  "cih-wiki",
@@ -777,6 +778,7 @@ dependencies = [
 name = "cih-search"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cih-core",
  "rustc-hash",
  "serde",
@@ -790,6 +792,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "blake3",
  "cih-core",
  "cih-embed",
  "cih-graph-store",
@@ -803,6 +806,7 @@ dependencies = [
  "constant_time_eq",
  "globset",
  "ignore",
+ "rayon",
  "regex",
  "rmcp",
  "schemars",

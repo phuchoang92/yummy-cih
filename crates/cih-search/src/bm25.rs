@@ -1,97 +1,84 @@
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
+use std::convert::Infallible;
 use std::mem::size_of;
 
 use cih_core::{Node, NodeId, NodeKind, Range};
-use serde::{Deserialize, Serialize};
 
 use crate::is_searchable_kind;
 use crate::rrf::SearchHit;
-use crate::tokenize::tokenize;
+use crate::tokenize::{tokenize, Tokenizer};
 
-const K1: f32 = 1.2;
-const B: f32 = 0.75;
+pub(crate) const K1: f32 = 1.2;
+pub(crate) const B: f32 = 0.75;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct IndexedDoc {
     pub node_id: NodeId,
     pub kind: NodeKind,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qualified_name: Option<String>,
-    pub file: String,
+    pub file_id: u32,
     pub range: Range,
-    pub text: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SearchIndex {
-    docs: Vec<IndexedDoc>,
-    avg_doc_len: f32,
-    doc_freq: HashMap<String, usize>,
-    /// Inverted index: term -> [(doc_idx, term_freq)]. Only docs that contain the
-    /// term appear, so `search` visits matching docs instead of scanning every doc
-    /// and rebuilding a per-doc frequency map on each query.
-    #[serde(default)]
-    postings: HashMap<String, Vec<(u32, u32)>>,
-    /// Token count per doc, parallel to `docs` (BM25 length normalization).
-    #[serde(default)]
-    doc_len: Vec<u32>,
+    pub(crate) docs: Vec<IndexedDoc>,
+    pub(crate) files: Vec<String>,
+    pub(crate) avg_doc_len: f32,
+    pub(crate) postings: HashMap<String, Box<[(u32, u32)]>>,
+    pub(crate) doc_len: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SearchIndexSizeBreakdown {
+    pub docs_struct_bytes: usize,
+    pub node_id_bytes: usize,
+    pub name_bytes: usize,
+    pub qualified_name_bytes: usize,
+    pub file_bytes: usize,
+    pub distinct_files: usize,
+    /// Kept explicit in reports to prove synthesized document text is not retained.
+    pub text_bytes: usize,
+    /// Kept explicit in reports to prove document frequency is derived from postings.
+    pub doc_freq_bytes: usize,
+    pub postings_table_bytes: usize,
+    pub postings_key_bytes: usize,
+    pub postings_payload_bytes: usize,
+    pub postings_bytes: usize,
+    pub doc_len_bytes: usize,
+    pub total_bytes: usize,
 }
 
 impl SearchIndex {
+    /// Compatibility entry point for callers that retain a node slice.
     pub fn build(nodes: &[Node]) -> Self {
-        let mut docs = Vec::new();
-        let mut doc_freq: HashMap<String, usize> = HashMap::new();
-        let mut postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
-        let mut doc_len: Vec<u32> = Vec::new();
-        let mut total_len = 0usize;
+        Self::build_owned(nodes.iter().cloned())
+    }
 
-        for node in nodes.iter().filter(|node| is_searchable_kind(node.kind)) {
-            let text = node_text(node);
-            let tokens = tokenize(&text);
-            if tokens.is_empty() {
-                continue;
-            }
-            total_len += tokens.len();
-            let doc_idx = docs.len() as u32;
-
-            let mut term_freq: HashMap<&str, u32> = HashMap::new();
-            for token in &tokens {
-                *term_freq.entry(token.as_str()).or_insert(0) += 1;
-            }
-            for (term, &freq) in &term_freq {
-                *doc_freq.entry((*term).to_string()).or_insert(0) += 1;
-                postings
-                    .entry((*term).to_string())
-                    .or_default()
-                    .push((doc_idx, freq));
-            }
-
-            doc_len.push(tokens.len() as u32);
-            docs.push(IndexedDoc {
-                node_id: node.id.clone(),
-                kind: node.kind,
-                name: node.name.clone(),
-                qualified_name: node.qualified_name.clone(),
-                file: node.file.clone(),
-                range: node.range,
-                text,
-            });
+    /// Build while consuming nodes one at a time. Retained strings can move into
+    /// the index instead of requiring a second full node collection.
+    pub fn build_owned<I>(nodes: I) -> Self
+    where
+        I: IntoIterator<Item = Node>,
+    {
+        match Self::try_build(nodes.into_iter().map(Ok::<Node, Infallible>)) {
+            Ok(index) => index,
+            Err(error) => match error {},
         }
+    }
 
-        let avg_doc_len = if docs.is_empty() {
-            0.0
-        } else {
-            total_len as f32 / docs.len() as f32
-        };
-
-        Self {
-            docs,
-            avg_doc_len,
-            doc_freq,
-            postings,
-            doc_len,
+    /// Build from a fallible streaming source such as `nodes.jsonl`.
+    pub fn try_build<I, E>(nodes: I) -> Result<Self, E>
+    where
+        I: IntoIterator<Item = Result<Node, E>>,
+    {
+        let mut builder = SearchIndexBuilder::default();
+        for node in nodes {
+            builder.push(node?);
         }
+        Ok(builder.finish())
     }
 
     pub fn len(&self) -> usize {
@@ -102,24 +89,57 @@ impl SearchIndex {
         self.docs.is_empty()
     }
 
+    pub fn size_breakdown(&self) -> SearchIndexSizeBreakdown {
+        let postings_table_bytes = self
+            .postings
+            .capacity()
+            .saturating_mul(size_of::<(String, Box<[(u32, u32)]>)>());
+        let postings_key_bytes = self
+            .postings
+            .keys()
+            .fold(0usize, |total, key| total.saturating_add(key.capacity()));
+        let postings_payload_bytes = self.postings.values().fold(0usize, |total, postings| {
+            total.saturating_add(postings.len().saturating_mul(size_of::<(u32, u32)>()))
+        });
+        let mut breakdown = SearchIndexSizeBreakdown {
+            docs_struct_bytes: self.docs.capacity().saturating_mul(size_of::<IndexedDoc>()),
+            file_bytes: self.files.capacity().saturating_mul(size_of::<String>()),
+            distinct_files: self.files.len(),
+            postings_table_bytes,
+            postings_key_bytes,
+            postings_payload_bytes,
+            postings_bytes: postings_table_bytes
+                .saturating_add(postings_key_bytes)
+                .saturating_add(postings_payload_bytes),
+            doc_len_bytes: self.doc_len.capacity().saturating_mul(size_of::<u32>()),
+            ..SearchIndexSizeBreakdown::default()
+        };
+        for doc in &self.docs {
+            breakdown.node_id_bytes = breakdown
+                .node_id_bytes
+                .saturating_add(doc.node_id.as_str().len());
+            breakdown.name_bytes = breakdown.name_bytes.saturating_add(doc.name.capacity());
+            breakdown.qualified_name_bytes = breakdown
+                .qualified_name_bytes
+                .saturating_add(doc.qualified_name.as_ref().map_or(0, String::capacity));
+        }
+        breakdown.file_bytes = self.files.iter().fold(breakdown.file_bytes, |total, file| {
+            total.saturating_add(file.capacity())
+        });
+        breakdown.total_bytes = size_of::<Self>()
+            .saturating_add(breakdown.docs_struct_bytes)
+            .saturating_add(breakdown.node_id_bytes)
+            .saturating_add(breakdown.name_bytes)
+            .saturating_add(breakdown.qualified_name_bytes)
+            .saturating_add(breakdown.file_bytes)
+            .saturating_add(breakdown.postings_bytes)
+            .saturating_add(breakdown.doc_len_bytes);
+        breakdown
+    }
+
     /// Conservative retained-memory estimate for process cache accounting.
     pub fn estimated_size_bytes(&self) -> usize {
-        let docs = self.docs.iter().fold(
-            self.docs.capacity().saturating_mul(size_of::<IndexedDoc>()),
-            |total, doc| {
-                total
-                    .saturating_add(doc.node_id.as_str().len())
-                    .saturating_add(doc.name.capacity())
-                    .saturating_add(doc.qualified_name.as_ref().map_or(0, String::capacity))
-                    .saturating_add(doc.file.capacity())
-                    .saturating_add(doc.text.capacity())
-            },
-        );
-        size_of::<Self>()
-            .saturating_add(docs)
-            .saturating_add(string_usize_map_weight(&self.doc_freq))
-            .saturating_add(postings_weight(&self.postings))
-            .saturating_add(self.doc_len.capacity().saturating_mul(size_of::<u32>()))
+        self.size_breakdown().total_bytes
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
@@ -133,68 +153,65 @@ impl SearchIndex {
 
         let n = self.docs.len() as f32;
         let avg = self.avg_doc_len.max(1.0);
-        // Accumulate scores only over docs that contain a query term. Query tokens
-        // are iterated in order, so a doc's contributions land in the same order as
-        // the previous per-doc loop — identical f32 accumulation, identical output.
-        // A dense score buffer is substantially cheaper than a HashMap for
-        // common terms that match hundreds of thousands of documents. Keep a
-        // compact touched list so result construction still visits candidates
-        // only, not every indexed document.
         let mut scores = vec![0.0_f32; self.docs.len()];
-        let mut touched = Vec::new();
         for token in &query_tokens {
             let Some(postings) = self.postings.get(token.as_str()) else {
                 continue;
             };
-            let df = *self.doc_freq.get(token.as_str()).unwrap_or(&0) as f32;
-            let token_idf = idf(n, df);
-            for &(doc_idx, tf) in postings {
+            let token_idf = idf(n, postings.len() as f32);
+            for &(doc_idx, tf) in postings.iter() {
                 let doc_idx = doc_idx as usize;
                 let tf = tf as f32;
                 let dl = self.doc_len[doc_idx] as f32;
-                let contrib =
+                let contribution =
                     token_idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg)));
-                if scores[doc_idx] == 0.0 {
-                    touched.push(doc_idx);
-                }
-                scores[doc_idx] += contrib;
+                scores[doc_idx] += contribution;
             }
         }
 
-        let mut candidates: Vec<(usize, f32)> = touched
-            .into_iter()
-            .map(|doc_idx| (doc_idx, scores[doc_idx]))
-            .filter(|&(_, score)| score > 0.0)
-            .collect();
-        let rank_order = |a: &(usize, f32), b: &(usize, f32)| {
-            b.1.total_cmp(&a.1).then_with(|| {
-                self.docs[a.0]
-                    .node_id
-                    .as_str()
-                    .cmp(self.docs[b.0].node_id.as_str())
-            })
-        };
-        // Partition in linear time and sort only the requested top-k. This
-        // preserves the existing deterministic score/node-id ordering.
-        if candidates.len() > limit {
-            candidates.select_nth_unstable_by(limit, rank_order);
-            candidates.truncate(limit);
+        let mut top = BinaryHeap::with_capacity(limit.saturating_add(1));
+        for (doc_idx, &score) in scores.iter().enumerate() {
+            if score <= 0.0 {
+                continue;
+            }
+            let candidate = SearchCandidate {
+                doc_idx,
+                score,
+                node_id: self.docs[doc_idx].node_id.as_str(),
+            };
+            if top.len() < limit {
+                top.push(candidate);
+            } else if top.peek().is_some_and(|worst| candidate < *worst) {
+                top.pop();
+                top.push(candidate);
+            }
         }
-        candidates.sort_by(rank_order);
 
+        let mut candidates = top.into_vec();
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.node_id.cmp(right.node_id))
+        });
         candidates
             .into_iter()
             .enumerate()
-            .map(|(rank, (doc_idx, score))| {
-                let doc = &self.docs[doc_idx];
+            .map(|(rank, candidate)| {
+                let doc = &self.docs[candidate.doc_idx];
+                let file = self
+                    .files
+                    .get(doc.file_id as usize)
+                    .cloned()
+                    .unwrap_or_default();
                 let mut hit = SearchHit::from_parts(
                     doc.node_id.clone(),
                     doc.kind,
                     doc.name.clone(),
                     doc.qualified_name.clone(),
-                    doc.file.clone(),
+                    file,
                     doc.range,
-                    score,
+                    candidate.score,
                     "bm25",
                 );
                 hit.rank = rank + 1;
@@ -204,25 +221,138 @@ impl SearchIndex {
     }
 }
 
+#[derive(Default)]
+struct SearchIndexBuilder {
+    docs: Vec<IndexedDoc>,
+    files: Vec<String>,
+    file_ids: HashMap<String, u32>,
+    postings: HashMap<String, Vec<(u32, u32)>>,
+    doc_len: Vec<u32>,
+    total_len: u64,
+    tokenizer: Tokenizer,
+    tokens: Vec<String>,
+    term_freq: HashMap<String, u32>,
+}
+
+impl SearchIndexBuilder {
+    fn push(&mut self, node: Node) {
+        if !is_searchable_kind(node.kind) {
+            return;
+        }
+
+        self.tokens.clear();
+        collect_node_tokens(&node, &mut self.tokenizer, &mut self.tokens);
+        if self.tokens.is_empty() {
+            return;
+        }
+
+        let doc_idx = checked_doc_ordinal(self.docs.len());
+        let token_count = u32::try_from(self.tokens.len())
+            .expect("search document supports at most u32::MAX tokens");
+        self.total_len = self.total_len.saturating_add(u64::from(token_count));
+
+        self.term_freq.clear();
+        for token in self.tokens.drain(..) {
+            *self.term_freq.entry(token).or_insert(0) += 1;
+        }
+        for (term, frequency) in self.term_freq.drain() {
+            self.postings
+                .entry(term)
+                .or_default()
+                .push((doc_idx, frequency));
+        }
+
+        let file_id = if let Some(&file_id) = self.file_ids.get(node.file.as_str()) {
+            file_id
+        } else {
+            let file_id = u32::try_from(self.files.len())
+                .expect("search index supports at most u32::MAX distinct files");
+            self.file_ids.insert(node.file.clone(), file_id);
+            self.files.push(node.file.clone());
+            file_id
+        };
+        self.doc_len.push(token_count);
+        self.docs.push(IndexedDoc {
+            node_id: node.id,
+            kind: node.kind,
+            name: node.name,
+            qualified_name: node.qualified_name,
+            file_id,
+            range: node.range,
+        });
+    }
+
+    fn finish(mut self) -> SearchIndex {
+        self.docs.shrink_to_fit();
+        self.files.shrink_to_fit();
+        self.doc_len.shrink_to_fit();
+        let avg_doc_len = if self.docs.is_empty() {
+            0.0
+        } else {
+            self.total_len as f32 / self.docs.len() as f32
+        };
+        let postings = self
+            .postings
+            .drain()
+            .map(|(term, mut values)| {
+                values.shrink_to_fit();
+                (term, values.into_boxed_slice())
+            })
+            .collect();
+        SearchIndex {
+            docs: self.docs,
+            files: self.files,
+            avg_doc_len,
+            postings,
+            doc_len: self.doc_len,
+        }
+    }
+}
+
+fn checked_doc_ordinal(documents: usize) -> u32 {
+    u32::try_from(documents).expect("search index supports at most u32::MAX documents")
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SearchCandidate<'a> {
+    doc_idx: usize,
+    score: f32,
+    node_id: &'a str,
+}
+
+impl PartialEq for SearchCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.doc_idx == other.doc_idx
+            && self.score.to_bits() == other.score.to_bits()
+            && self.node_id == other.node_id
+    }
+}
+
+impl Eq for SearchCandidate<'_> {}
+
+impl PartialOrd for SearchCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SearchCandidate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.node_id.cmp(other.node_id))
+            .then_with(|| self.doc_idx.cmp(&other.doc_idx))
+    }
+}
+
 /// BM25 index over arbitrary text documents, addressed by build-order ordinal.
-///
-/// Unlike [`SearchIndex`], which indexes graph nodes, this scores plain
-/// strings (e.g. rendered wiki pages) and returns `(ordinal, score)` pairs.
-/// Empty documents keep their ordinal so callers can map hits back to their
-/// own collection, but they never match.
 #[derive(Clone, Debug, Default)]
 pub struct TextIndex {
-    /// Total document count, including empty docs (which keep their ordinal so
-    /// callers can map hits back to their own collection).
     num_docs: usize,
-    /// Non-empty document count — the `N` used in IDF (matches the original,
-    /// which counted non-empty docs at query time).
     indexed: usize,
     avg_doc_len: f32,
-    doc_freq: HashMap<String, usize>,
-    /// Inverted index: term -> [(ordinal, term_freq)].
-    postings: HashMap<String, Vec<(u32, u32)>>,
-    /// Token count per ordinal (0 for empty docs).
+    postings: HashMap<String, Box<[(u32, u32)]>>,
     doc_len: Vec<u32>,
 }
 
@@ -231,48 +361,56 @@ impl TextIndex {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let mut doc_freq: HashMap<String, usize> = HashMap::new();
         let mut postings: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
-        let mut doc_len: Vec<u32> = Vec::new();
-        let mut total_len = 0usize;
+        let mut doc_len = Vec::new();
+        let mut total_len = 0u64;
         let mut indexed = 0usize;
         let mut num_docs = 0usize;
+        let mut tokenizer = Tokenizer::default();
+        let mut tokens = Vec::new();
+        let mut term_freq = HashMap::new();
 
         for text in docs {
-            let ordinal = num_docs as u32;
+            let ordinal =
+                u32::try_from(num_docs).expect("text index supports at most u32::MAX documents");
             num_docs += 1;
-            let tokens = tokenize(text);
-            total_len += tokens.len();
-            doc_len.push(tokens.len() as u32);
+            tokens.clear();
+            tokenizer.tokenize_into(text, &mut tokens);
+            let token_count = u32::try_from(tokens.len())
+                .expect("text document supports at most u32::MAX tokens");
+            total_len = total_len.saturating_add(u64::from(token_count));
+            doc_len.push(token_count);
             if tokens.is_empty() {
                 continue;
             }
             indexed += 1;
 
-            let mut term_freq: HashMap<&str, u32> = HashMap::new();
-            for token in &tokens {
-                *term_freq.entry(token.as_str()).or_insert(0) += 1;
+            term_freq.clear();
+            for token in tokens.drain(..) {
+                *term_freq.entry(token).or_insert(0) += 1;
             }
-            for (term, &freq) in &term_freq {
-                *doc_freq.entry((*term).to_string()).or_insert(0) += 1;
-                postings
-                    .entry((*term).to_string())
-                    .or_default()
-                    .push((ordinal, freq));
+            for (term, frequency) in term_freq.drain() {
+                postings.entry(term).or_default().push((ordinal, frequency));
             }
         }
 
+        doc_len.shrink_to_fit();
         let avg_doc_len = if indexed == 0 {
             0.0
         } else {
             total_len as f32 / indexed as f32
         };
-
+        let postings = postings
+            .into_iter()
+            .map(|(term, mut values)| {
+                values.shrink_to_fit();
+                (term, values.into_boxed_slice())
+            })
+            .collect();
         Self {
             num_docs,
             indexed,
             avg_doc_len,
-            doc_freq,
             postings,
             doc_len,
         }
@@ -286,15 +424,12 @@ impl TextIndex {
         self.num_docs == 0
     }
 
-    /// Conservative retained-memory estimate for process cache accounting.
     pub fn estimated_size_bytes(&self) -> usize {
         size_of::<Self>()
-            .saturating_add(string_usize_map_weight(&self.doc_freq))
             .saturating_add(postings_weight(&self.postings))
             .saturating_add(self.doc_len.capacity().saturating_mul(size_of::<u32>()))
     }
 
-    /// Rank documents against `query`, best first. Ties break on ordinal.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(usize, f32)> {
         if self.num_docs == 0 || limit == 0 {
             return Vec::new();
@@ -307,61 +442,84 @@ impl TextIndex {
         let n = self.indexed as f32;
         let avg = self.avg_doc_len.max(1.0);
         let mut scores = vec![0.0_f32; self.num_docs];
-        let mut touched = Vec::new();
         for token in &query_tokens {
             let Some(postings) = self.postings.get(token.as_str()) else {
                 continue;
             };
-            let df = *self.doc_freq.get(token.as_str()).unwrap_or(&0) as f32;
-            let token_idf = idf(n, df);
-            for &(ordinal, tf) in postings {
+            let token_idf = idf(n, postings.len() as f32);
+            for &(ordinal, tf) in postings.iter() {
                 let ordinal = ordinal as usize;
                 let tf = tf as f32;
                 let dl = self.doc_len[ordinal] as f32;
-                let contrib =
+                scores[ordinal] +=
                     token_idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg)));
-                if scores[ordinal] == 0.0 {
-                    touched.push(ordinal);
-                }
-                scores[ordinal] += contrib;
             }
         }
 
-        let mut hits: Vec<(usize, f32)> = touched
-            .into_iter()
-            .map(|ordinal| (ordinal, scores[ordinal]))
-            .filter(|&(_, score)| score > 0.0)
-            .collect();
-
-        let rank_order =
-            |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0));
-        if hits.len() > limit {
-            hits.select_nth_unstable_by(limit, rank_order);
-            hits.truncate(limit);
+        let mut top = BinaryHeap::with_capacity(limit.saturating_add(1));
+        for (ordinal, &score) in scores.iter().enumerate() {
+            if score <= 0.0 {
+                continue;
+            }
+            let candidate = TextCandidate { ordinal, score };
+            if top.len() < limit {
+                top.push(candidate);
+            } else if top.peek().is_some_and(|worst| candidate < *worst) {
+                top.pop();
+                top.push(candidate);
+            }
         }
-        hits.sort_by(rank_order);
-        hits
+        let mut hits = top.into_vec();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.ordinal.cmp(&right.ordinal))
+        });
+        hits.into_iter()
+            .map(|candidate| (candidate.ordinal, candidate.score))
+            .collect()
     }
 }
 
-fn string_usize_map_weight(values: &HashMap<String, usize>) -> usize {
-    values.iter().fold(
-        values
-            .capacity()
-            .saturating_mul(size_of::<(String, usize)>()),
-        |total, (key, _)| total.saturating_add(key.capacity()),
-    )
+#[derive(Clone, Copy, Debug)]
+struct TextCandidate {
+    ordinal: usize,
+    score: f32,
 }
 
-fn postings_weight(values: &HashMap<String, Vec<(u32, u32)>>) -> usize {
+impl PartialEq for TextCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.ordinal == other.ordinal && self.score.to_bits() == other.score.to_bits()
+    }
+}
+
+impl Eq for TextCandidate {}
+
+impl PartialOrd for TextCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TextCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.ordinal.cmp(&other.ordinal))
+    }
+}
+
+fn postings_weight(values: &HashMap<String, Box<[(u32, u32)]>>) -> usize {
     values.iter().fold(
         values
             .capacity()
-            .saturating_mul(size_of::<(String, Vec<(u32, u32)>)>()),
+            .saturating_mul(size_of::<(String, Box<[(u32, u32)]>)>()),
         |total, (key, postings)| {
             total
                 .saturating_add(key.capacity())
-                .saturating_add(postings.capacity().saturating_mul(size_of::<(u32, u32)>()))
+                .saturating_add(postings.len().saturating_mul(size_of::<(u32, u32)>()))
         },
     )
 }
@@ -370,51 +528,61 @@ fn idf(total_docs: f32, matching_docs: f32) -> f32 {
     ((total_docs - matching_docs + 0.5) / (matching_docs + 0.5) + 1.0).ln()
 }
 
-fn node_text(node: &Node) -> String {
-    let mut parts = Vec::new();
-    parts.push(node.kind.label().to_string());
-    parts.push(node.name.clone());
+fn collect_node_tokens(node: &Node, tokenizer: &mut Tokenizer, output: &mut Vec<String>) {
+    tokenizer.tokenize_into(node.kind.label(), output);
+    tokenizer.tokenize_into(&node.name, output);
     if let Some(qualified_name) = &node.qualified_name {
-        parts.push(qualified_name.clone());
+        tokenizer.tokenize_into(qualified_name, output);
     }
-    parts.push(node.id.as_str().to_string());
-    parts.push(node.file.clone());
-    // Enrich with props for higher-signal node kinds.
-    if let Some(props) = &node.props {
-        // Route: include HTTP method and path segments so "GET /orders" matches.
-        if matches!(node.kind, NodeKind::Route) {
-            if let Some(m) = props.get("httpMethod").and_then(|v| v.as_str()) {
-                parts.push(m.to_string());
-            }
-            if let Some(p) = props.get("path").and_then(|v| v.as_str()) {
-                // add both the raw path and its slash-split segments
-                parts.push(p.to_string());
-                for seg in p
-                    .split('/')
-                    .filter(|s| !s.is_empty() && !s.starts_with('{'))
-                {
-                    parts.push(seg.to_string());
-                }
-            }
-            if let Some(handler) = props.get("handler").and_then(|v| v.as_str()) {
-                parts.push(handler.to_string());
+    tokenizer.tokenize_into(node.id.as_str(), output);
+    tokenizer.tokenize_into(&node.file, output);
+
+    let Some(props) = &node.props else {
+        return;
+    };
+    if matches!(node.kind, NodeKind::Route) {
+        if let Some(method) = props.get("httpMethod").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(method, output);
+        }
+        if let Some(path) = props.get("path").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(path, output);
+            for segment in path
+                .split('/')
+                .filter(|segment| !segment.is_empty() && !segment.starts_with('{'))
+            {
+                tokenizer.tokenize_into(segment, output);
             }
         }
-        // IntegrationRoute: include uri and source for searchability.
-        if matches!(node.kind, NodeKind::IntegrationRoute) {
-            if let Some(uri) = props.get("uri").and_then(|v| v.as_str()) {
-                parts.push(uri.to_string());
-            }
-            if let Some(source) = props.get("source").and_then(|v| v.as_str()) {
-                parts.push(source.to_string());
-            }
-        }
-        // MessageDestination: include destination_type and component.
-        if matches!(node.kind, NodeKind::MessageDestination) {
-            if let Some(dt) = props.get("destination_type").and_then(|v| v.as_str()) {
-                parts.push(dt.to_string());
-            }
+        if let Some(handler) = props.get("handler").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(handler, output);
         }
     }
-    parts.join(" ")
+    if matches!(node.kind, NodeKind::IntegrationRoute) {
+        if let Some(uri) = props.get("uri").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(uri, output);
+        }
+        if let Some(source) = props.get("source").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(source, output);
+        }
+    }
+    if matches!(node.kind, NodeKind::MessageDestination) {
+        if let Some(destination_type) = props
+            .get("destination_type")
+            .and_then(|value| value.as_str())
+        {
+            tokenizer.tokenize_into(destination_type, output);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    use super::checked_doc_ordinal;
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    #[should_panic(expected = "search index supports at most u32::MAX documents")]
+    fn document_ordinal_overflow_is_rejected() {
+        checked_doc_ordinal(u32::MAX as usize + 1);
+    }
 }

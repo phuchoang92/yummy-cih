@@ -202,6 +202,45 @@ fn read_file_opt(path: &Path) -> io::Result<Vec<u8>> {
     }
 }
 
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    #[test]
+    fn bundle_round_trip_preserves_optional_search_sidecar() {
+        let source = tempfile::tempdir().unwrap();
+        let artifact_dir = source.path().join(".cih/artifacts/v1");
+        let artifacts =
+            GraphArtifacts::write(&artifact_dir, VersionId::new("v1"), &[], &[]).unwrap();
+        let sidecar = b"derived-search-sidecar";
+        fs::write(artifact_dir.join("search-index.bin"), sidecar).unwrap();
+        let bundle = source.path().join("repo.cihpack");
+        artifacts
+            .export_bundle(
+                None,
+                &source.path().join("missing-hashes.json"),
+                &source.path().join("missing-scope.json"),
+                &source.path().join("missing-map.json"),
+                &bundle,
+            )
+            .unwrap();
+
+        let destination = tempfile::tempdir().unwrap();
+        let (imported, _, _) = GraphArtifacts::import_bundle(&bundle, destination.path()).unwrap();
+        assert_eq!(
+            fs::read(
+                imported
+                    .nodes_path
+                    .parent()
+                    .unwrap()
+                    .join("search-index.bin")
+            )
+            .unwrap(),
+            sidecar
+        );
+    }
+}
+
 impl GraphArtifacts {
     /// Export a bundle archive to `dest`.
     ///
@@ -214,6 +253,7 @@ impl GraphArtifacts {
     /// 6. `file-hashes.json`
     /// 7. `scope.json`
     /// 8. `repo-map.json`
+    /// 9. `search-index.bin` (optional derived sidecar)
     pub fn export_bundle(
         &self,
         community: Option<&GraphArtifacts>,
@@ -298,6 +338,14 @@ impl GraphArtifacts {
         write_bundle_entry(&mut w, &read_file_opt(file_hashes)?)?;
         write_bundle_entry(&mut w, &read_file_opt(scope_json)?)?;
         write_bundle_entry(&mut w, &read_file_opt(repo_map_json)?)?;
+        let search_index = self
+            .nodes_path
+            .parent()
+            .map(|dir| dir.join("search-index.bin"))
+            .map(|path| read_file_opt(&path))
+            .transpose()?
+            .unwrap_or_default();
+        write_bundle_entry(&mut w, &search_index)?;
 
         w.flush()?;
         Ok(manifest)
@@ -331,6 +379,11 @@ impl GraphArtifacts {
         let file_hashes_bytes = read_bundle_entry(&mut r)?;
         let scope_bytes = read_bundle_entry(&mut r)?;
         let repo_map_bytes = read_bundle_entry(&mut r)?;
+        let search_index_bytes = match read_bundle_entry(&mut r) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Vec::new(),
+            Err(error) => return Err(error),
+        };
 
         // Restore into cih_dir.
         let art_dir = cih_dir.join("artifacts").join(&manifest.artifact_version);
@@ -340,6 +393,9 @@ impl GraphArtifacts {
         let edges_path = art_dir.join("edges.jsonl");
         fs::write(&nodes_path, &nodes_bytes)?;
         fs::write(&edges_path, &edges_bytes)?;
+        if !search_index_bytes.is_empty() {
+            fs::write(art_dir.join("search-index.bin"), &search_index_bytes)?;
+        }
 
         let main_artifacts = GraphArtifacts {
             nodes_path,

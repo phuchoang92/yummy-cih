@@ -7,9 +7,11 @@
 //! `cih-engine wiki` regeneration is picked up without a server restart.
 
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::mem::size_of;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -27,6 +29,7 @@ use crate::domain::error::AppError;
 use crate::domain::repository::ResolvedRepo;
 use crate::infrastructure::cache::weighted::{AsyncCacheMetrics, AsyncWeightedCache};
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
+use crate::ports::retrieval_metrics::WikiRuntimeMetricsSnapshot;
 use crate::ports::wiki_materialization_store::{MaterializedWikiPage, WikiMaterializationStore};
 
 pub const DEFAULT_LIMIT: usize = 20;
@@ -401,6 +404,35 @@ pub(crate) enum WikiError {
     Internal(String),
 }
 
+#[derive(Default)]
+struct WikiRuntimeMetrics {
+    manifest_overview_attempted: AtomicU64,
+    manifest_overview_succeeded: AtomicU64,
+    manifest_overview_failed: AtomicU64,
+    live_build_attempted: AtomicU64,
+    live_build_succeeded: AtomicU64,
+    live_build_rejected_size: AtomicU64,
+    live_build_failed: AtomicU64,
+}
+
+fn wiki_runtime_counters() -> &'static WikiRuntimeMetrics {
+    static METRICS: OnceLock<WikiRuntimeMetrics> = OnceLock::new();
+    METRICS.get_or_init(WikiRuntimeMetrics::default)
+}
+
+pub(crate) fn wiki_runtime_metrics() -> WikiRuntimeMetricsSnapshot {
+    let metrics = wiki_runtime_counters();
+    WikiRuntimeMetricsSnapshot {
+        manifest_overview_attempted: metrics.manifest_overview_attempted.load(Ordering::Relaxed),
+        manifest_overview_succeeded: metrics.manifest_overview_succeeded.load(Ordering::Relaxed),
+        manifest_overview_failed: metrics.manifest_overview_failed.load(Ordering::Relaxed),
+        live_build_attempted: metrics.live_build_attempted.load(Ordering::Relaxed),
+        live_build_succeeded: metrics.live_build_succeeded.load(Ordering::Relaxed),
+        live_build_rejected_size: metrics.live_build_rejected_size.load(Ordering::Relaxed),
+        live_build_failed: metrics.live_build_failed.load(Ordering::Relaxed),
+    }
+}
+
 /// Freshness token for the resident caches: the mtimes of everything a resident
 /// `OwnedWiki` reads. Includes the enrichment caches (which change independently
 /// of the graph artifacts), so adding/refreshing enrichment invalidates the
@@ -573,10 +605,19 @@ enum WikiCacheValue {
         freshness: Freshness,
         owned: Arc<cih_wiki::OwnedWiki>,
     },
+    ResidentRejected {
+        freshness: Freshness,
+    },
     Live {
         freshness: Freshness,
         index: Arc<LiveWikiIndex>,
     },
+}
+
+enum ResidentCacheLookup {
+    Miss,
+    Available(Arc<cih_wiki::OwnedWiki>),
+    Rejected,
 }
 
 #[derive(Clone)]
@@ -639,8 +680,8 @@ impl WikiSearchState {
         &self,
         repo_path: &Path,
         freshness: &Freshness,
-    ) -> Option<Arc<cih_wiki::OwnedWiki>> {
-        let value = self
+    ) -> ResidentCacheLookup {
+        let Some(value) = self
             .cache
             .get_if(&WikiCacheKey::Resident(repo_path.to_path_buf()), |value| {
                 matches!(
@@ -648,13 +689,19 @@ impl WikiSearchState {
                     WikiCacheValue::Resident {
                         freshness: cached,
                         ..
+                    } | WikiCacheValue::ResidentRejected {
+                        freshness: cached,
                     } if cached == freshness && freshness.has_complete_graph()
                 )
             })
-            .await?;
+            .await
+        else {
+            return ResidentCacheLookup::Miss;
+        };
         match value.as_ref() {
-            WikiCacheValue::Resident { owned, .. } => Some(owned.clone()),
-            _ => None,
+            WikiCacheValue::Resident { owned, .. } => ResidentCacheLookup::Available(owned.clone()),
+            WikiCacheValue::ResidentRejected { .. } => ResidentCacheLookup::Rejected,
+            _ => ResidentCacheLookup::Miss,
         }
     }
 
@@ -755,16 +802,59 @@ impl WikiSearchState {
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        if let Some(owned) = self.cached_resident(&repo_path, &freshness).await {
-            return Ok(Some(owned));
+        match self.cached_resident(&repo_path, &freshness).await {
+            ResidentCacheLookup::Available(owned) => return Ok(Some(owned)),
+            ResidentCacheLookup::Rejected => return Ok(None),
+            ResidentCacheLookup::Miss => {}
         }
         let gate = gate_for(&self.resident_gates, &repo_path);
         let _held = gate.lock().await;
         let Some(freshness) = Freshness::probe(&repo_path) else {
             return Ok(None);
         };
-        if let Some(owned) = self.cached_resident(&repo_path, &freshness).await {
-            return Ok(Some(owned));
+        match self.cached_resident(&repo_path, &freshness).await {
+            ResidentCacheLookup::Available(owned) => return Ok(Some(owned)),
+            ResidentCacheLookup::Rejected => return Ok(None),
+            ResidentCacheLookup::Miss => {}
+        }
+        wiki_runtime_counters()
+            .live_build_attempted
+            .fetch_add(1, Ordering::Relaxed);
+        let node_cap = live_wiki_node_cap().map_err(WikiError::Internal)?;
+        let cap_repo = repo_path.clone();
+        let exceeds_cap = run_blocking(blocking_timeout(), "wiki live node cap", move || {
+            graph_exceeds_node_cap(&cap_repo, node_cap)
+        })
+        .await
+        .map_err(|error| WikiError::Internal(error.to_string()))?;
+        match exceeds_cap {
+            Ok(false) => {}
+            Ok(true) => {
+                wiki_runtime_counters()
+                    .live_build_rejected_size
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    node_cap,
+                    "live wiki materialization skipped; use a generated wiki bundle"
+                );
+                self.retain(
+                    WikiCacheKey::Resident(repo_path),
+                    WikiCacheValue::ResidentRejected { freshness },
+                    size_of::<Freshness>(),
+                )
+                .await;
+                return Ok(None);
+            }
+            Err(error) => {
+                wiki_runtime_counters()
+                    .live_build_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    error = %error,
+                    "live wiki node count unavailable; falling back to generated wiki bundle"
+                );
+                return Ok(None);
+            }
         }
         let load_repo = repo_path.clone();
         let name = repo_path
@@ -772,12 +862,27 @@ impl WikiSearchState {
             .and_then(|n| n.to_str())
             .unwrap_or("repo")
             .to_string();
-        let owned = run_blocking(blocking_timeout(), "wiki resident load", move || {
+        let owned = match run_blocking(blocking_timeout(), "wiki resident load", move || {
             cih_wiki::OwnedWiki::load_package_mode(&load_repo, name)
         })
         .await
-        .map_err(|e| WikiError::Internal(e.to_string()))?
-        .map_err(|e| WikiError::Internal(format!("failed to load resident wiki: {e}")))?;
+        {
+            Ok(Ok(owned)) => owned,
+            Ok(Err(error)) => {
+                wiki_runtime_counters()
+                    .live_build_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(WikiError::Internal(format!(
+                    "failed to load resident wiki: {error}"
+                )));
+            }
+            Err(error) => {
+                wiki_runtime_counters()
+                    .live_build_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(WikiError::Internal(error.to_string()));
+            }
+        };
         let owned = Arc::new(owned);
         let weight = owned.estimated_size_bytes();
         self.retain(
@@ -789,6 +894,9 @@ impl WikiSearchState {
             weight,
         )
         .await;
+        wiki_runtime_counters()
+            .live_build_succeeded
+            .fetch_add(1, Ordering::Relaxed);
         Ok(Some(owned))
     }
 
@@ -875,6 +983,40 @@ fn cache_env(name: &str, default: usize) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn live_wiki_node_cap() -> Result<usize, String> {
+    static CAP: OnceLock<Result<usize, String>> = OnceLock::new();
+    CAP.get_or_init(|| match std::env::var("CIH_WIKI_LIVE_MAX_NODES") {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "CIH_WIKI_LIVE_MAX_NODES must be a positive integer".to_string()),
+        Err(std::env::VarError::NotPresent) => Ok(100_000),
+        Err(error) => Err(format!("cannot read CIH_WIKI_LIVE_MAX_NODES: {error}")),
+    })
+    .clone()
+}
+
+pub(crate) fn validate_live_wiki_config() -> anyhow::Result<()> {
+    live_wiki_node_cap().map(|_| ()).map_err(anyhow::Error::msg)
+}
+
+fn graph_exceeds_node_cap(repo_path: &Path, cap: usize) -> std::io::Result<bool> {
+    let artifacts =
+        cih_core::GraphArtifacts::latest_in_dir(&repo_path.join(".cih").join("artifacts"))
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let file = std::fs::File::open(artifacts.nodes_path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    for _ in 0..=cap {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Clone)]
@@ -983,14 +1125,12 @@ fn app_search_hit(hit: WikiHit) -> WikiSearchHit {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct WikiOverviewRepository {
-    state: WikiSearchState,
-}
+#[derive(Clone, Default)]
+pub(crate) struct WikiOverviewRepository;
 
 impl WikiOverviewRepository {
-    pub(crate) fn new(state: WikiSearchState) -> Self {
-        Self { state }
+    pub(crate) fn new() -> Self {
+        Self
     }
 }
 
@@ -1019,30 +1159,57 @@ impl OverviewWikiRepository for WikiOverviewRepository {
         &self,
         repo: &ResolvedRepo,
     ) -> Result<Option<OverviewWikiListing>, AppError> {
-        match self.state.live_index_for(repo).await {
-            Ok(Some(live)) => {
-                return Ok(Some(OverviewWikiListing {
-                    pages: live.pages.iter().map(overview_page).collect(),
-                    page_count: live.page_count(),
-                    source: "wiki-live",
-                    graph_version: None,
-                    generated_at: None,
-                }));
+        wiki_runtime_counters()
+            .manifest_overview_attempted
+            .fetch_add(1, Ordering::Relaxed);
+        let wiki_dir = repo.canonical_path.join(".cih").join("wiki");
+        let loaded = run_blocking(blocking_timeout(), "wiki overview manifest", move || {
+            if wiki_dir.join(".publishing").exists() {
+                return Err("wiki publication is in progress; retry shortly".to_string());
             }
-            Ok(None) => {}
-            Err(error) => return Err(overview_wiki_error(error)),
-        }
-        match self.state.index_for(repo).await {
-            Ok(index) => Ok(Some(OverviewWikiListing {
-                pages: index.pages.iter().map(overview_page).collect(),
-                page_count: index.page_count(),
-                source: "wiki-bundle",
-                graph_version: Some(index.graph_version.clone()),
-                generated_at: Some(index.generated_at.clone()),
-            })),
-            Err(WikiError::NotFound(_)) => Ok(None),
-            Err(error) => Err(overview_wiki_error(error)),
-        }
+            let bytes = match std::fs::read(wiki_dir.join("manifest.json")) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(format!("failed to read wiki manifest: {error}")),
+            };
+            let manifest: Manifest = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("failed to parse wiki manifest: {error}"))?;
+            if wiki_dir.join(".publishing").exists() {
+                return Err("wiki publication changed during manifest read; retry shortly".into());
+            }
+            Ok(Some(manifest))
+        })
+        .await;
+        let manifest = match loaded {
+            Ok(Ok(manifest)) => manifest,
+            Ok(Err(message)) => {
+                wiki_runtime_counters()
+                    .manifest_overview_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(overview_wiki_error(WikiError::Internal(message)));
+            }
+            Err(error) => {
+                wiki_runtime_counters()
+                    .manifest_overview_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(AppError::Unavailable {
+                    dependency: "wiki repository",
+                    message: error.to_string(),
+                    retryable: true,
+                });
+            }
+        };
+        wiki_runtime_counters()
+            .manifest_overview_succeeded
+            .fetch_add(1, Ordering::Relaxed);
+
+        Ok(manifest.map(|manifest| OverviewWikiListing {
+            page_count: manifest.pages.len(),
+            pages: manifest.pages.iter().map(overview_page).collect(),
+            source: "wiki-bundle",
+            graph_version: Some(manifest.graph_version),
+            generated_at: Some(manifest.generated_at),
+        }))
     }
 }
 
@@ -1138,6 +1305,7 @@ fn blocking_app_error(error: crate::ports::blocking_runtime::BlockingError) -> A
 #[cfg(test)]
 mod single_flight_tests {
     use super::*;
+    use cih_core::{RegistryEntry, RegistryStats};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1230,6 +1398,61 @@ mod single_flight_tests {
         assert_eq!(metrics.retained_entries, 1);
         assert_eq!(metrics.retained_weight_bytes, 60);
         assert_eq!(metrics.evictions, 1);
+    }
+
+    #[tokio::test]
+    async fn overview_listing_reads_manifest_without_page_bodies() {
+        let temp = tempfile::tempdir().unwrap();
+        let wiki_dir = temp.path().join(".cih/wiki");
+        std::fs::create_dir_all(&wiki_dir).unwrap();
+        std::fs::write(
+            wiki_dir.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "repo_name": "demo",
+                "graph_version": "v1",
+                "generated_at": "2026-07-22T00:00:00Z",
+                "pages": [{
+                    "slug": "overview",
+                    "title": "Overview",
+                    "kind": "index",
+                    "path": "missing-page.md"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let repo = ResolvedRepo::from_entry(RegistryEntry {
+            name: "demo".into(),
+            path: temp.path().display().to_string(),
+            graph_key: "demo".into(),
+            artifacts_dir: String::new(),
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: RegistryStats::default(),
+        });
+
+        let listing = WikiOverviewRepository::new()
+            .list_pages(&repo)
+            .await
+            .expect("manifest metadata should load")
+            .expect("manifest should produce a listing");
+
+        assert_eq!(listing.page_count, 1);
+        assert_eq!(listing.pages[0].slug, "overview");
+        assert_eq!(listing.graph_version.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn live_wiki_node_cap_stops_counting_after_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join(".cih/artifacts/v1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("nodes.jsonl"), b"one\ntwo\n").unwrap();
+        std::fs::write(artifacts.join("edges.jsonl"), b"").unwrap();
+
+        assert!(graph_exceeds_node_cap(temp.path(), 1).unwrap());
+        assert!(!graph_exceeds_node_cap(temp.path(), 2).unwrap());
     }
 }
 

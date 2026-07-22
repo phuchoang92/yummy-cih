@@ -388,12 +388,24 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | `CIH_ARTIFACT_CACHE_MAX_BYTES` | 512 MiB | Parsed artifact snapshots |
 | `CIH_WIKI_CACHE_MAX_BYTES` | 256 MiB | Wiki indexes and resident renderers |
 | `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | Per-repo BM25 indexes |
+| `CIH_SEARCH_CACHE_MAX_ENTRIES` | 32 | Retained repository/version indexes |
+| `CIH_SEARCH_SIDECAR_ENABLED` | `true` | Load/publish `search-index.bin`; set false only as a rollback |
+| `CIH_SEARCH_SCORE_MAX_CONCURRENT` | min(4, CPUs) | Concurrent warm BM25 scorers |
+| `CIH_SEARCH_SCORE_QUEUE_TIMEOUT_MS` | 2000 | Wait for a scorer slot before shedding |
+| `CIH_SEARCH_COLD_MAX_CONCURRENT` | 1 | Concurrent sidecar decode or fallback builds |
+| `CIH_SEARCH_COLD_MAX_BYTES` | 512 MiB | Aggregate transient-memory admission for cold search loads |
+| `CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS` | 5 | Wait for cold-load count/memory admission |
 | `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES` | 16 MiB | JSONL resource paging indexes |
 | `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | 32 | Retained repo versions (LRU beyond this) |
 | `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` | 1800 | Idle cache eviction (0 disables) |
 | `CIH_BLOCKING_MAX_CONCURRENT` | 2 | Concurrent heavy artifact loads |
 | `CIH_BLOCKING_QUEUE_TIMEOUT_SECS` | 5 | Wait for a heavy-load slot before shedding |
 | `CIH_BLOCKING_TIMEOUT_SECS` | 90 | Deadline for one blocking load |
+| `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 1 | Concurrent whole-repository grep requests |
+| `CIH_GREP_THREADS` | min(4, CPUs) | Dedicated workers within one admitted grep |
+| `CIH_GREP_QUEUE_TIMEOUT_SECS` | 2 | Wait for grep admission before retryable rejection |
+| `CIH_GREP_DEADLINE_SECS` | 80 | Cooperative scan deadline; returns a partial result |
+| `CIH_WIKI_LIVE_MAX_NODES` | 100000 | Above this, live wiki materialization requires a generated bundle |
 | `CIH_RESOURCE_MAX_BYTES` | 256 KiB | Byte cap for one MCP resource page |
 | `CIH_DETECT_CHANGES_MAX_SYMBOLS` | 200 | Blast-radius traversals per `detect_changes` |
 | `CIH_INDEX_MAX_CONCURRENT` | 1 | Concurrently running index jobs |
@@ -402,6 +414,12 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | `CIH_INDEX_OUTPUT_CAP_BYTES` | 1 MiB | Retained `cih-engine` output per stream |
 | `CIH_MAX_CONCURRENT_QUERIES` | 64 | Concurrent Cypher queries |
 | `CIH_QUERY_QUEUE_TIMEOUT_MS` | 5000 | Wait for a query slot before shedding |
+
+`cih-engine analyze` writes a versioned `search-index.bin` beside
+`nodes.jsonl`. Existing artifacts are backfilled on a no-op analyze, and the
+server repairs missing, stale, or corrupt sidecars from the canonical JSONL.
+Sidecar repair failure is non-fatal, but a read-only deployment should generate
+the sidecar before mounting artifacts into `cih-server`.
 
 ---
 

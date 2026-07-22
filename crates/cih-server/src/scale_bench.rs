@@ -11,12 +11,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range, RegistryEntry, RegistryStats};
-use cih_search::{SearchIndex, TextIndex};
+use cih_search::{
+    load_search_index, persist_search_index, search_index_path, SearchIndex, SearchIndexLoad,
+    SearchIndexSizeBreakdown, SearchIndexSource, TextIndex,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::domain::repository::ResolvedRepo;
 use crate::infrastructure::artifact_repository::ArtifactCache;
+use crate::infrastructure::search_provider::{SearchCache, SearchState};
 use crate::ports::artifact_repository::ArtifactRepository;
 
 const FIXTURE_SCHEMA: u32 = 1;
@@ -29,6 +33,7 @@ pub struct ScaleConfig {
     pub edges_per_node: usize,
     pub iterations: usize,
     pub burst_callers: usize,
+    pub search_cache_bytes: usize,
     pub regenerate: bool,
 }
 
@@ -43,6 +48,10 @@ impl ScaleConfig {
         anyhow::ensure!(
             self.burst_callers > 0,
             "burst_callers must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.search_cache_bytes > 0,
+            "search_cache_bytes must be greater than zero"
         );
         Ok(())
     }
@@ -68,6 +77,8 @@ pub struct ScaleReport {
     pub wiki_search: WikiSearchReport,
     pub resource_scan: ResourceScanReport,
     pub same_key_cold_burst: ColdBurstReport,
+    pub search_cold_burst: SearchColdBurstReport,
+    pub corrupt_sidecar_recovery: SidecarRecoveryReport,
     pub acceptance: Vec<AcceptanceResult>,
 }
 
@@ -98,6 +109,7 @@ pub struct MemoryReport {
     pub after_artifact_load_rss_bytes: Option<u64>,
     pub after_artifact_indexes_rss_bytes: Option<u64>,
     pub after_search_index_rss_bytes: Option<u64>,
+    pub after_search_sidecar_load_rss_bytes: Option<u64>,
     pub observed_peak_rss_bytes: Option<u64>,
     pub artifact_estimated_bytes: usize,
     pub search_estimated_bytes: usize,
@@ -116,6 +128,10 @@ pub struct ArtifactLoadReport {
 pub struct SearchReport {
     pub indexed_documents: usize,
     pub build_ms: f64,
+    pub size_breakdown: SearchIndexSizeBreakdown,
+    pub sidecar_persist_ms: f64,
+    pub sidecar_load_ms: f64,
+    pub sidecar_payload_bytes: u64,
     pub query: String,
     pub returned_hits: usize,
     pub warm_queries: Distribution,
@@ -144,6 +160,25 @@ pub struct ColdBurstReport {
     pub elapsed_ms: f64,
     pub loader_builds: u64,
     pub all_callers_shared_snapshot: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchColdBurstReport {
+    pub callers: usize,
+    pub cache_budget_bytes: usize,
+    pub elapsed_ms: f64,
+    pub sidecar_loads: u64,
+    pub fallback_builds: u64,
+    pub retained_bytes: usize,
+    pub all_callers_equal: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SidecarRecoveryReport {
+    pub elapsed_ms: f64,
+    pub fallback_builds: u64,
+    pub repair_succeeded: u64,
+    pub restart_sidecar_loads: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -190,6 +225,8 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
     let (metadata, reused) = ensure_fixture(&config)?;
     let generation_ms = generation_started.elapsed().as_secs_f64() * 1000.0;
     let paths = FixturePaths::new(&config.fixture_dir);
+    let search_artifacts_root = prepare_search_artifacts(&config.fixture_dir, &paths)?;
+    let search_artifacts_dir = search_artifacts_root.join("v1");
     let baseline_rss = current_rss_bytes();
 
     let repo = fixture_repo(&config.fixture_dir);
@@ -220,6 +257,26 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
     let search_query = "process order service";
     let (search_queries, search_hits) =
         measure_sync(config.iterations, || search_index.search(search_query, 25));
+    let search_size_breakdown = search_index.size_breakdown();
+    let search_source =
+        SearchIndexSource::from_nodes_file(&search_artifacts_dir.join("nodes.jsonl"), "v1")?;
+    let search_sidecar = search_index_path(&search_artifacts_dir);
+    let persist_started = Instant::now();
+    let sidecar_metadata = persist_search_index(&search_sidecar, &search_source, &search_index)?;
+    let sidecar_persist_ms = persist_started.elapsed().as_secs_f64() * 1000.0;
+    let search_estimated_bytes = search_index.estimated_size_bytes();
+    drop(search_index);
+    let load_started = Instant::now();
+    let search_index = match load_search_index(&search_sidecar, &search_source)? {
+        SearchIndexLoad::Loaded { index, .. } => index,
+        other => anyhow::bail!("fresh scale sidecar did not load: {other:?}"),
+    };
+    let sidecar_load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+    let after_search_sidecar_load_rss = current_rss_bytes();
+    anyhow::ensure!(
+        search_index.search(search_query, 25).len() == search_hits.len(),
+        "sidecar round-trip changed the result count"
+    );
 
     let wiki_documents = synthetic_wiki_documents(metadata.communities);
     let wiki_started = Instant::now();
@@ -247,13 +304,13 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
     )?;
 
     let artifact_estimated_bytes = indexed_snapshot.estimated_weight_bytes();
-    let search_estimated_bytes = search_index.estimated_size_bytes();
     let wiki_search_estimated_bytes = wiki_index.estimated_size_bytes();
     let observed_peak_rss = [
         baseline_rss,
         after_artifact_load_rss,
         after_artifact_indexes_rss,
         after_search_index_rss,
+        after_search_sidecar_load_rss,
         current_rss_bytes(),
     ]
     .into_iter()
@@ -267,6 +324,16 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
     drop(snapshot);
     drop(artifacts);
 
+    let search_burst = measure_search_cold_burst(
+        &search_artifacts_root,
+        config.burst_callers,
+        config.search_cache_bytes,
+        search_query,
+    )
+    .await?;
+    let corrupt_recovery =
+        measure_corrupt_sidecar_recovery(&search_artifacts_root, &search_sidecar, search_query)
+            .await?;
     let burst = measure_same_key_cold_burst(&repo, config.burst_callers).await?;
     let artifact_cache_hits = Distribution::from_durations(cache_hits);
     let event_loop_delay = Distribution::from_durations(event_loop_delay);
@@ -282,6 +349,7 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
             "ms",
         ),
         acceptance_below("search_query_p95", 500.0, search_queries.p95_ms, "ms"),
+        acceptance_below("search_sidecar_load", 10_000.0, sidecar_load_ms, "ms"),
         acceptance_below("event_loop_delay_p99", 50.0, event_loop_delay.p99_ms, "ms"),
         // Tight on purpose: paging is index-backed, so tail-page cost no longer
         // grows with offset (~0.04 ms at 500k/50k records). A regression to the
@@ -297,6 +365,29 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
             target: "exactly 1 loader build".into(),
             observed: format!("{} loader builds", burst.loader_builds),
             passed: burst.loader_builds == 1 && burst.all_callers_shared_snapshot,
+        },
+        AcceptanceResult {
+            name: "search_cold_load_single_flight",
+            target: "exactly 1 sidecar load or fallback build".into(),
+            observed: format!(
+                "{} sidecar loads + {} fallback builds",
+                search_burst.sidecar_loads, search_burst.fallback_builds
+            ),
+            passed: search_burst.sidecar_loads + search_burst.fallback_builds == 1
+                && search_burst.all_callers_equal,
+        },
+        AcceptanceResult {
+            name: "corrupt_sidecar_self_heal",
+            target: "1 fallback, 1 repair, restart loads sidecar".into(),
+            observed: format!(
+                "fallback={}, repair={}, restart_load={}",
+                corrupt_recovery.fallback_builds,
+                corrupt_recovery.repair_succeeded,
+                corrupt_recovery.restart_sidecar_loads
+            ),
+            passed: corrupt_recovery.fallback_builds == 1
+                && corrupt_recovery.repair_succeeded == 1
+                && corrupt_recovery.restart_sidecar_loads == 1,
         },
     ];
 
@@ -330,6 +421,7 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
             after_artifact_load_rss_bytes: after_artifact_load_rss,
             after_artifact_indexes_rss_bytes: after_artifact_indexes_rss,
             after_search_index_rss_bytes: after_search_index_rss,
+            after_search_sidecar_load_rss_bytes: after_search_sidecar_load_rss,
             observed_peak_rss_bytes: observed_peak_rss,
             artifact_estimated_bytes,
             search_estimated_bytes,
@@ -344,6 +436,10 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
         search: SearchReport {
             indexed_documents: search_index_len(metadata.nodes),
             build_ms: search_build_ms,
+            size_breakdown: search_size_breakdown,
+            sidecar_persist_ms,
+            sidecar_load_ms,
+            sidecar_payload_bytes: sidecar_metadata.payload_len,
             query: search_query.into(),
             returned_hits: search_hits.len(),
             warm_queries: search_queries,
@@ -362,8 +458,33 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
             tail_page: tail_page_distribution,
         },
         same_key_cold_burst: burst,
+        search_cold_burst: search_burst,
+        corrupt_sidecar_recovery: corrupt_recovery,
         acceptance,
     })
+}
+
+fn prepare_search_artifacts(root: &Path, paths: &FixturePaths) -> Result<PathBuf> {
+    let artifacts_root = root.join("search-artifacts");
+    let version = artifacts_root.join("v1");
+    fs::create_dir_all(&version)?;
+    link_or_copy(&paths.nodes, &version.join("nodes.jsonl"))?;
+    link_or_copy(&paths.edges, &version.join("edges.jsonl"))?;
+    Ok(artifacts_root)
+}
+
+fn link_or_copy(source: &Path, destination: &Path) -> Result<()> {
+    if destination.is_file() {
+        let source_len = fs::metadata(source)?.len();
+        if fs::metadata(destination)?.len() == source_len {
+            return Ok(());
+        }
+        fs::remove_file(destination)?;
+    }
+    if fs::hard_link(source, destination).is_err() {
+        fs::copy(source, destination)?;
+    }
+    Ok(())
 }
 
 fn ensure_fixture(config: &ScaleConfig) -> Result<(FixtureMetadata, bool)> {
@@ -477,6 +598,89 @@ fn write_communities(path: &Path, count: usize) -> Result<()> {
     }
     writer.flush()?;
     Ok(())
+}
+
+async fn measure_search_cold_burst(
+    artifacts_root: &Path,
+    callers: usize,
+    cache_budget_bytes: usize,
+    query: &str,
+) -> Result<SearchColdBurstReport> {
+    let cache = SearchCache::new(1, cache_budget_bytes);
+    let state = Arc::new(SearchState::with_cache(
+        Some(artifacts_root.to_path_buf()),
+        None,
+        cache.clone(),
+    ));
+    let started = Instant::now();
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..callers {
+        let state = state.clone();
+        let query = query.to_string();
+        tasks.spawn(async move { state.query_hits(&query, 25).await });
+    }
+    let mut results = Vec::with_capacity(callers);
+    while let Some(result) = tasks.join_next().await {
+        let hits = result.context("search cold-burst task panicked")??;
+        results.push(
+            hits.into_iter()
+                .map(|hit| (hit.node_id, hit.score.to_bits()))
+                .collect::<Vec<_>>(),
+        );
+    }
+    let all_callers_equal = results
+        .first()
+        .is_none_or(|first| results.iter().all(|result| result == first));
+    let runtime = cache.runtime_metrics();
+    let retained = cache.metrics().await;
+    Ok(SearchColdBurstReport {
+        callers,
+        cache_budget_bytes,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        sidecar_loads: runtime.sidecar_loaded,
+        fallback_builds: runtime.fallback_builds,
+        retained_bytes: retained.retained_weight_bytes,
+        all_callers_equal,
+    })
+}
+
+async fn measure_corrupt_sidecar_recovery(
+    artifacts_root: &Path,
+    sidecar: &Path,
+    query: &str,
+) -> Result<SidecarRecoveryReport> {
+    let mut bytes = fs::read(sidecar)?;
+    anyhow::ensure!(!bytes.is_empty(), "search sidecar is empty");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x5a;
+    fs::write(sidecar, bytes)?;
+
+    let started = Instant::now();
+    let repair_cache = SearchCache::new(1, usize::MAX / 4);
+    let repair_state = SearchState::with_cache(
+        Some(artifacts_root.to_path_buf()),
+        None,
+        repair_cache.clone(),
+    );
+    repair_state.query_hits(query, 25).await?;
+    let repaired = repair_cache.runtime_metrics();
+    drop(repair_state);
+    drop(repair_cache);
+
+    let restart_cache = SearchCache::new(1, usize::MAX / 4);
+    let restart_state = SearchState::with_cache(
+        Some(artifacts_root.to_path_buf()),
+        None,
+        restart_cache.clone(),
+    );
+    restart_state.query_hits(query, 25).await?;
+    let restarted = restart_cache.runtime_metrics();
+    Ok(SidecarRecoveryReport {
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        fallback_builds: repaired.fallback_builds,
+        repair_succeeded: repaired.repair_succeeded,
+        restart_sidecar_loads: restarted.sidecar_loaded,
+    })
 }
 
 async fn measure_same_key_cold_burst(
@@ -715,6 +919,7 @@ mod tests {
             edges_per_node: 2,
             iterations: 1,
             burst_callers: 2,
+            search_cache_bytes: 1,
             regenerate: false,
         };
         let (first, reused) = ensure_fixture(&config).unwrap();
@@ -739,6 +944,7 @@ mod tests {
             edges_per_node: 2,
             iterations: 2,
             burst_callers: 4,
+            search_cache_bytes: 1,
             regenerate: false,
         })
         .await

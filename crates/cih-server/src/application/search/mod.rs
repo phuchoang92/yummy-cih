@@ -185,11 +185,12 @@ pub(crate) struct FeatureMapOutput {
     pub(crate) clusters: Vec<FeatureMapCluster>,
 }
 
-fn search_error(error: anyhow::Error) -> AppError {
+fn search_error(error: crate::ports::search_provider::SearchProviderError) -> AppError {
+    let retryable = error.retryable();
     AppError::Unavailable {
         dependency: "search index",
         message: error.to_string(),
-        retryable: false,
+        retryable,
     }
 }
 

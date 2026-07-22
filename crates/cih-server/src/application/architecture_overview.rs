@@ -134,6 +134,11 @@ impl ArchitectureOverviewService {
         &self,
         command: ArchitectureOverviewCommand,
     ) -> Result<OverviewResponse, AppError> {
+        // Keep validation at the application boundary even though the public
+        // constructor also validates. This prevents repository or graph work
+        // if a future caller constructs commands inside this crate.
+        let sections = validate_sections(&command.sections)?;
+        let wants_wiki = sections.iter().any(|section| section == SECTION_WIKI_PAGES);
         let context = self.repo_contexts.resolve(command.repo).await?;
         let entry = &context.repo.registry_entry;
         let catalog = self.repo_contexts.catalog_snapshot();
@@ -150,8 +155,14 @@ impl ArchitectureOverviewService {
                 )
             },
         );
-        let wiki = self.wiki.list_pages(&context.repo);
-        let ((registry_stale, groups), wiki) = tokio::try_join!(
+        let wiki = async {
+            if wants_wiki {
+                self.wiki.list_pages(&context.repo).await
+            } else {
+                Ok(None)
+            }
+        };
+        let (sidecars, wiki) = tokio::join!(
             async {
                 sidecars.await.map_err(|error| AppError::Unavailable {
                     dependency: "architecture overview sidecars",
@@ -160,14 +171,25 @@ impl ArchitectureOverviewService {
                 })
             },
             wiki
-        )?;
+        );
+        let (registry_stale, groups) = sidecars?;
+        let (wiki, wiki_warning) = match wiki {
+            Ok(wiki) => (wiki, None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "wiki page metadata unavailable ({error}); graph-backed overview sections remain current"
+                )),
+            ),
+        };
         compose(ComposeCtx {
             store: context.store.as_ref(),
             entry,
             registry_stale,
             groups,
             wiki,
-            sections: command.sections,
+            wiki_warning,
+            sections,
             limit: command.limit,
         })
         .await
@@ -492,6 +514,7 @@ struct ComposeCtx<'a> {
     registry_stale: bool,
     groups: Vec<GroupOut>,
     wiki: Option<OverviewWikiListing>,
+    wiki_warning: Option<String>,
     sections: Vec<String>,
     limit: usize,
 }
@@ -815,6 +838,9 @@ fn build_warnings(
                 }
             }
         }
+    }
+    if let Some(warning) = &ctx.wiki_warning {
+        warnings.push(warning.clone());
     }
     warnings
 }
@@ -1161,6 +1187,13 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     let wiki_pages = if want_wiki_pages {
         Some(match &ctx.wiki {
             Some(listing) => build_wiki_pages(listing, cap(ctx.limit, DEFAULT_WIKI_PAGES)),
+            None if ctx.wiki_warning.is_some() => Section::off(
+                "wiki page metadata is temporarily unavailable",
+                Some(
+                    "retry the overview; graph-backed sections in this response remain valid"
+                        .into(),
+                ),
+            ),
             None => Section::off("no generated wiki for this repo", Some(remedy::wiki(entry))),
         })
     } else {
@@ -1247,6 +1280,7 @@ mod tests {
         HotspotNode, Impact, Path as GraphPath, Result as StoreResult, SimilarMethod, Subgraph,
         SymbolContext,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Canned-data store: only the methods `compose` touches return data; the
     /// rest are unreachable from the overview and answer `Unimplemented`.
@@ -1295,6 +1329,25 @@ mod tests {
             _repo: &ResolvedRepo,
         ) -> Result<Option<OverviewWikiListing>, AppError> {
             Ok(self.listing.clone())
+        }
+    }
+
+    struct UnavailableWiki {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl OverviewWikiRepository for UnavailableWiki {
+        async fn list_pages(
+            &self,
+            _repo: &ResolvedRepo,
+        ) -> Result<Option<OverviewWikiListing>, AppError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::Unavailable {
+                dependency: "test wiki",
+                message: "offline".into(),
+                retryable: true,
+            })
         }
     }
 
@@ -1569,6 +1622,7 @@ mod tests {
             registry_stale: false,
             groups: vec![],
             wiki: None,
+            wiki_warning: None,
             sections,
             limit,
         }
@@ -1626,6 +1680,65 @@ mod tests {
         assert_eq!(json["stats"]["available"], true);
         assert_eq!(json["wiki_pages"]["source"], "test-wiki");
         assert_eq!(json["wiki_pages"]["items"][0]["slug"], "index");
+    }
+
+    #[tokio::test]
+    async fn service_skips_unrequested_wiki_and_degrades_requested_failure() {
+        let registry_entry = entry("/nonexistent/demo", Some("/x"), 100);
+        let context = Arc::new(RepoContext {
+            repo: ResolvedRepo::from_entry(registry_entry.clone()),
+            store: Arc::new(populated_store()),
+            search: Arc::new(crate::infrastructure::search_provider::SearchState::new(
+                None, None,
+            )),
+        });
+        let catalog = RepoCatalogSnapshot::for_test(
+            "demo".into(),
+            cih_core::Registry {
+                entries: vec![registry_entry],
+            },
+            cih_core::GroupRegistry::default(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = ArchitectureOverviewService::new(
+            Arc::new(FixedRepoContexts { context, catalog }),
+            Arc::new(UnavailableWiki {
+                calls: calls.clone(),
+            }),
+        );
+
+        let stats = service
+            .execute(
+                ArchitectureOverviewCommand::try_new(String::new(), vec![SECTION_STATS.into()], 5)
+                    .unwrap(),
+            )
+            .await
+            .expect("unrequested wiki must not affect overview");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(stats.wiki_pages.is_none());
+
+        let with_wiki = service
+            .execute(
+                ArchitectureOverviewCommand::try_new(
+                    String::new(),
+                    vec![SECTION_STATS.into(), SECTION_WIKI_PAGES.into()],
+                    5,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("wiki failure must degrade to a partial overview");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(with_wiki
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("wiki page metadata unavailable")));
+        let wiki = serde_json::to_value(with_wiki.wiki_pages).unwrap();
+        assert_eq!(wiki["available"], false);
+        assert!(wiki["reason"]
+            .as_str()
+            .unwrap()
+            .contains("temporarily unavailable"));
     }
 
     #[test]
@@ -2113,6 +2226,7 @@ mod tests {
             registry_stale: false,
             groups: vec![],
             wiki: None,
+            wiki_warning: None,
             sections: vec![],
             limit: 0,
         })
@@ -2178,6 +2292,7 @@ mod tests {
             registry_stale: false,
             groups: vec![],
             wiki: None,
+            wiki_warning: None,
             sections: vec![],
             limit: 0,
         })

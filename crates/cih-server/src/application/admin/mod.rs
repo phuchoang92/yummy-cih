@@ -12,29 +12,41 @@ use crate::domain::repository::RepoSelector;
 use crate::ports::blocking_runtime::{blocking_metrics, BlockingMetricsSnapshot};
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::ports::job_scheduler::IndexJobScheduler;
+use crate::ports::retrieval_metrics::{RetrievalMetricsProvider, RetrievalMetricsSnapshot};
 
 #[derive(Clone)]
 pub(crate) struct OperationalMetricsService {
     scheduler: Arc<dyn IndexJobScheduler>,
+    retrieval: Arc<dyn RetrievalMetricsProvider>,
 }
 
 impl OperationalMetricsService {
-    pub(crate) fn new(scheduler: Arc<dyn IndexJobScheduler>) -> Self {
-        Self { scheduler }
+    pub(crate) fn new(
+        scheduler: Arc<dyn IndexJobScheduler>,
+        retrieval: Arc<dyn RetrievalMetricsProvider>,
+    ) -> Self {
+        Self {
+            scheduler,
+            retrieval,
+        }
     }
 
     pub(crate) async fn snapshot(&self) -> OperationalMetricsOutput {
+        let (index_queue, retrieval) =
+            tokio::join!(self.scheduler.metrics(), self.retrieval.snapshot());
         OperationalMetricsOutput {
             blocking: blocking_metrics(),
-            index_queue: self.scheduler.metrics().await,
+            index_queue,
+            retrieval,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct OperationalMetricsOutput {
     pub(crate) blocking: BlockingMetricsSnapshot,
     pub(crate) index_queue: IndexQueueMetrics,
+    pub(crate) retrieval: RetrievalMetricsSnapshot,
 }
 
 #[derive(Clone)]

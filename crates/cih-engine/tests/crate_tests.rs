@@ -140,6 +140,17 @@ fn incremental_noop_when_files_unchanged() {
     let first = analyze_emit(&scan, all_scope()).unwrap();
     assert!(!first.reused_artifacts);
     assert!(first.cache_stats.enabled);
+    let search_sidecar = first
+        .artifacts
+        .nodes_path
+        .parent()
+        .unwrap()
+        .join(cih_search::SEARCH_INDEX_FILE_NAME);
+    assert!(
+        search_sidecar.is_file(),
+        "fresh analysis must publish a search sidecar"
+    );
+    fs::remove_file(&search_sidecar).unwrap();
 
     let scan = scan::scan_repo(&root).unwrap();
     let second = analyze_emit(&scan, all_scope()).unwrap();
@@ -148,6 +159,10 @@ fn incremental_noop_when_files_unchanged() {
     assert!(second.cache_stats.noop);
     assert_eq!(second.version, first.version);
     assert_eq!(second.cache_stats.reparsed_files, 0);
+    assert!(
+        search_sidecar.is_file(),
+        "a no-op analysis must backfill a missing search sidecar"
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }
