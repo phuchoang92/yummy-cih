@@ -1,5 +1,5 @@
 {
-  "generated_at_unix_secs": 1784642617,
+  "generated_at_unix_secs": 1784689906,
   "machine": {
     "os": "macos",
     "architecture": "aarch64",
@@ -9,7 +9,7 @@
   "fixture": {
     "directory": "target/cih-scale-fixtures/500k-1m",
     "reused": true,
-    "generation_ms": 0.823333,
+    "generation_ms": 0.646416,
     "nodes": 500000,
     "edges": 1000000,
     "communities": 50000,
@@ -22,114 +22,192 @@
     "after_artifact_load_rss_bytes": null,
     "after_artifact_indexes_rss_bytes": null,
     "after_search_index_rss_bytes": null,
+    "after_search_sidecar_load_rss_bytes": null,
     "observed_peak_rss_bytes": null,
     "artifact_estimated_bytes": 798796759,
-    "search_estimated_bytes": 380061908,
-    "wiki_search_estimated_bytes": 14753574
+    "search_estimated_bytes": 199580278,
+    "wiki_search_estimated_bytes": 9124763
   },
   "artifact_load": {
-    "cold_parse_ms": 816.9554999999999,
-    "lazy_index_build_ms": 199.049667,
+    "cold_parse_ms": 540.582125,
+    "lazy_index_build_ms": 181.259583,
     "cache_hits": {
       "samples": 20,
-      "p50_ms": 0.019667,
-      "p95_ms": 0.03175,
-      "p99_ms": 0.048625,
-      "max_ms": 0.048625
+      "p50_ms": 0.020625,
+      "p95_ms": 0.036625000000000005,
+      "p99_ms": 0.06962499999999999,
+      "max_ms": 0.06962499999999999
     },
     "event_loop_delay_during_cold_load": {
-      "samples": 163,
-      "p50_ms": 0.006584,
-      "p95_ms": 1.260084,
-      "p99_ms": 1.268208,
-      "max_ms": 1.274791
+      "samples": 108,
+      "p50_ms": 0.011125,
+      "p95_ms": 0.023833,
+      "p99_ms": 1.263458,
+      "max_ms": 1.265208
     }
   },
   "search": {
     "indexed_documents": 500000,
-    "build_ms": 1352.372417,
+    "build_ms": 862.538917,
+    "size_breakdown": {
+      "docs_struct_bytes": 48000000,
+      "node_id_bytes": 21778890,
+      "name_bytes": 8888890,
+      "qualified_name_bytes": 25778890,
+      "file_bytes": 3045000,
+      "distinct_files": 50000,
+      "text_bytes": 0,
+      "doc_freq_bytes": 0,
+      "postings_table_bytes": 36700160,
+      "postings_key_bytes": 5396320,
+      "postings_payload_bytes": 47992000,
+      "postings_bytes": 90088480,
+      "doc_len_bytes": 2000000,
+      "total_bytes": 199580278
+    },
+    "sidecar_persist_ms": 475.987583,
+    "sidecar_load_ms": 425.509417,
+    "sidecar_payload_bytes": 134888074,
     "query": "process order service",
     "returned_hits": 25,
     "warm_queries": {
       "samples": 20,
-      "p50_ms": 15.527458,
-      "p95_ms": 17.132209,
-      "p99_ms": 26.772041,
-      "max_ms": 26.772041
+      "p50_ms": 3.6359589999999997,
+      "p95_ms": 3.733833,
+      "p99_ms": 7.820917000000001,
+      "max_ms": 7.820917000000001
     }
   },
   "wiki_search": {
     "indexed_documents": 50000,
-    "build_ms": 118.296333,
+    "build_ms": 50.572291,
     "query": "order processing workflow",
     "returned_hits": 25,
     "warm_queries": {
       "samples": 20,
-      "p50_ms": 0.33054100000000003,
-      "p95_ms": 0.393834,
-      "p99_ms": 0.403208,
-      "max_ms": 0.403208
+      "p50_ms": 0.23525,
+      "p95_ms": 0.279334,
+      "p99_ms": 0.284625,
+      "max_ms": 0.284625
     }
   },
   "resource_scan": {
     "page_size": 100,
     "first_page": {
       "samples": 20,
-      "p50_ms": 0.044583000000000005,
-      "p95_ms": 0.05275,
-      "p99_ms": 11.203583,
-      "max_ms": 11.203583
+      "p50_ms": 0.043167000000000004,
+      "p95_ms": 0.052208,
+      "p99_ms": 7.409833,
+      "max_ms": 7.409833
     },
     "middle_page": {
       "samples": 20,
-      "p50_ms": 0.043209,
-      "p95_ms": 0.044625,
-      "p99_ms": 0.046042,
-      "max_ms": 0.046042
+      "p50_ms": 0.043459,
+      "p95_ms": 0.048959,
+      "p99_ms": 0.0505,
+      "max_ms": 0.0505
     },
     "tail_page": {
       "samples": 20,
-      "p50_ms": 0.042583,
-      "p95_ms": 0.043166,
-      "p99_ms": 0.043667,
-      "max_ms": 0.043667
+      "p50_ms": 0.042292,
+      "p95_ms": 0.048041,
+      "p99_ms": 0.048291999999999995,
+      "max_ms": 0.048291999999999995
     }
   },
   "same_key_cold_burst": {
-    "callers": 8,
-    "elapsed_ms": 595.019542,
+    "callers": 16,
+    "elapsed_ms": 530.823042,
     "loader_builds": 1,
     "all_callers_shared_snapshot": true
+  },
+  "search_cold_burst": {
+    "callers": 16,
+    "cache_budget_bytes": 1,
+    "elapsed_ms": 484.177417,
+    "sidecar_loads": 1,
+    "fallback_builds": 0,
+    "retained_bytes": 0,
+    "all_callers_equal": true
+  },
+  "corrupt_sidecar_recovery": {
+    "elapsed_ms": 2441.2752499999997,
+    "fallback_builds": 1,
+    "repair_succeeded": 1,
+    "restart_sidecar_loads": 1
+  },
+  "alternating_search_hot_set": {
+    "repositories": 8,
+    "cache_budget_bytes": 1756306446,
+    "expected_working_set_bytes": 1596642224,
+    "first_pass_sidecar_loads": 8,
+    "second_pass_additional_sidecar_loads": 0,
+    "fallback_builds": 0,
+    "evictions": 0,
+    "retained_entries": 8,
+    "retained_bytes": 1596642224,
+    "all_results_equal": true,
+    "second_pass_queries": {
+      "samples": 8,
+      "p50_ms": 3.8192500000000003,
+      "p95_ms": 4.017208,
+      "p99_ms": 4.017208,
+      "max_ms": 4.017208
+    }
   },
   "acceptance": [
     {
       "name": "artifact_cache_hit_p95",
       "target": "<= 5.000 ms",
-      "observed": "0.032 ms",
+      "observed": "0.037 ms",
       "passed": true
     },
     {
       "name": "search_query_p95",
       "target": "<= 500.000 ms",
-      "observed": "17.132 ms",
+      "observed": "3.734 ms",
+      "passed": true
+    },
+    {
+      "name": "search_sidecar_load",
+      "target": "<= 10000.000 ms",
+      "observed": "425.509 ms",
       "passed": true
     },
     {
       "name": "event_loop_delay_p99",
       "target": "<= 50.000 ms",
-      "observed": "1.268 ms",
+      "observed": "1.263 ms",
       "passed": true
     },
     {
       "name": "resource_tail_page_p95",
       "target": "<= 5.000 ms",
-      "observed": "0.043 ms",
+      "observed": "0.048 ms",
       "passed": true
     },
     {
       "name": "same_key_cold_load_single_flight",
       "target": "exactly 1 loader build",
       "observed": "1 loader builds",
+      "passed": true
+    },
+    {
+      "name": "search_cold_load_single_flight",
+      "target": "exactly 1 sidecar load or fallback build",
+      "observed": "1 sidecar loads + 0 fallback builds",
+      "passed": true
+    },
+    {
+      "name": "corrupt_sidecar_self_heal",
+      "target": "1 fallback, 1 repair, restart loads sidecar",
+      "observed": "fallback=1, repair=1, restart_load=1",
+      "passed": true
+    },
+    {
+      "name": "alternating_search_hot_set",
+      "target": "8 retained repositories, no second-pass loads or evictions",
+      "observed": "retained=8, second_pass_loads=0, evictions=0, bytes=1596642224/1756306446",
       "passed": true
     }
   ]

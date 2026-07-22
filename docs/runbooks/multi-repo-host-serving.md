@@ -78,7 +78,7 @@ worth setting these deliberately on a multi-repo host.
 | `CIH_CACHE_MAX_BYTES` | 1040 MiB | total; must be ≥ the sum of the four below |
 | `CIH_ARTIFACT_CACHE_MAX_BYTES` | 512 MiB | parsed `nodes.jsonl`/`edges.jsonl` snapshots |
 | `CIH_WIKI_CACHE_MAX_BYTES` | 256 MiB | wiki indexes, resident renderers, live search |
-| `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | per-repo BM25 indexes |
+| `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | aggregate retained BM25 indexes across all repositories |
 | `CIH_SEARCH_CACHE_MAX_ENTRIES` | 32 | repository/version index safety cap |
 | `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES` | 16 MiB | JSONL resource paging indexes |
 | `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | 32 | retained repo versions (LRU beyond this) |
@@ -89,6 +89,22 @@ oversize repository degrades to "no caching" rather than evicting healthy
 entries or exceeding the budget. At ~500k nodes one repository's snapshot alone
 exceeds the 512 MiB default (see `docs/perf/scale-500k.md`) — raise the artifact
 and total budgets if you serve repositories that large and want them cached.
+
+Size the search hot set from measured index weights, not repository count:
+
+```text
+CIH_SEARCH_CACHE_MAX_BYTES >= sum(hot repository index bytes) * 1.10
+CIH_CACHE_MAX_BYTES >= artifact + wiki + search + resource cache-family budgets
+```
+
+The synthetic 500k gate measures one compact index at 199,580,278 bytes. Its
+eight-repository clone test therefore declares a 1,756,306,446-byte search
+budget, retains all 1,596,642,224 working-set bytes, and verifies that a second
+alternating pass causes zero reloads and zero evictions. Replace those sizes
+with `/operations/metrics.retrieval.search_indexes` values from the actual
+repositories. If a safe container cannot hold that aggregate, keep the smaller
+budget and treat repeated sidecar loads/evictions as the trigger for a segmented
+or mmap-backed Tier 2 index; do not describe that state as warm caching.
 
 Other tuning knobs: `CIH_BLOCKING_MAX_CONCURRENT` (2) and
 `CIH_BLOCKING_QUEUE_TIMEOUT_SECS` (5) bound concurrent cold artifact loads;

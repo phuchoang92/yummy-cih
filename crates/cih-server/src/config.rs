@@ -76,7 +76,7 @@ impl RetrievalConfig {
             search_cache_max_entries: positive_env("CIH_SEARCH_CACHE_MAX_ENTRIES", 32usize)?,
             search_score_max_concurrent: positive_env(
                 "CIH_SEARCH_SCORE_MAX_CONCURRENT",
-                cpus.min(4).max(1),
+                cpus.clamp(1, 4),
             )?,
             search_score_queue_timeout_ms: positive_env(
                 "CIH_SEARCH_SCORE_QUEUE_TIMEOUT_MS",
@@ -93,7 +93,7 @@ impl RetrievalConfig {
             )?,
             search_sidecar_enabled: bool_env("CIH_SEARCH_SIDECAR_ENABLED", true)?,
             grep_max_concurrent_requests: positive_env("CIH_GREP_MAX_CONCURRENT_REQUESTS", 1usize)?,
-            grep_threads: positive_env("CIH_GREP_THREADS", cpus.min(4).max(1))?,
+            grep_threads: positive_env("CIH_GREP_THREADS", cpus.clamp(1, 4))?,
             grep_queue_timeout_secs: positive_env("CIH_GREP_QUEUE_TIMEOUT_SECS", 2u64)?,
             grep_deadline_secs: positive_env("CIH_GREP_DEADLINE_SECS", 80u64)?,
             wiki_live_max_nodes: positive_env("CIH_WIKI_LIVE_MAX_NODES", 100_000usize)?,

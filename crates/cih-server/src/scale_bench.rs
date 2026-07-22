@@ -25,6 +25,7 @@ use crate::ports::artifact_repository::ArtifactRepository;
 
 const FIXTURE_SCHEMA: u32 = 1;
 const EVENT_LOOP_SAMPLE_MS: u64 = 5;
+const HOT_SET_REPOSITORIES: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct ScaleConfig {
@@ -79,6 +80,7 @@ pub struct ScaleReport {
     pub same_key_cold_burst: ColdBurstReport,
     pub search_cold_burst: SearchColdBurstReport,
     pub corrupt_sidecar_recovery: SidecarRecoveryReport,
+    pub alternating_search_hot_set: AlternatingHotSetReport,
     pub acceptance: Vec<AcceptanceResult>,
 }
 
@@ -179,6 +181,21 @@ pub struct SidecarRecoveryReport {
     pub fallback_builds: u64,
     pub repair_succeeded: u64,
     pub restart_sidecar_loads: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AlternatingHotSetReport {
+    pub repositories: usize,
+    pub cache_budget_bytes: usize,
+    pub expected_working_set_bytes: usize,
+    pub first_pass_sidecar_loads: u64,
+    pub second_pass_additional_sidecar_loads: u64,
+    pub fallback_builds: u64,
+    pub evictions: u64,
+    pub retained_entries: usize,
+    pub retained_bytes: usize,
+    pub all_results_equal: bool,
+    pub second_pass_queries: Distribution,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -334,6 +351,12 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
     let corrupt_recovery =
         measure_corrupt_sidecar_recovery(&search_artifacts_root, &search_sidecar, search_query)
             .await?;
+    let alternating_hot_set = measure_alternating_search_hot_set(
+        &search_artifacts_root,
+        search_query,
+        search_estimated_bytes,
+    )
+    .await?;
     let burst = measure_same_key_cold_burst(&repo, config.burst_callers).await?;
     let artifact_cache_hits = Distribution::from_durations(cache_hits);
     let event_loop_delay = Distribution::from_durations(event_loop_delay);
@@ -388,6 +411,26 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
             passed: corrupt_recovery.fallback_builds == 1
                 && corrupt_recovery.repair_succeeded == 1
                 && corrupt_recovery.restart_sidecar_loads == 1,
+        },
+        AcceptanceResult {
+            name: "alternating_search_hot_set",
+            target: "8 retained repositories, no second-pass loads or evictions".into(),
+            observed: format!(
+                "retained={}, second_pass_loads={}, evictions={}, bytes={}/{}",
+                alternating_hot_set.retained_entries,
+                alternating_hot_set.second_pass_additional_sidecar_loads,
+                alternating_hot_set.evictions,
+                alternating_hot_set.retained_bytes,
+                alternating_hot_set.cache_budget_bytes
+            ),
+            passed: alternating_hot_set.repositories == HOT_SET_REPOSITORIES
+                && alternating_hot_set.first_pass_sidecar_loads == HOT_SET_REPOSITORIES as u64
+                && alternating_hot_set.second_pass_additional_sidecar_loads == 0
+                && alternating_hot_set.fallback_builds == 0
+                && alternating_hot_set.evictions == 0
+                && alternating_hot_set.retained_entries == HOT_SET_REPOSITORIES
+                && alternating_hot_set.retained_bytes <= alternating_hot_set.cache_budget_bytes
+                && alternating_hot_set.all_results_equal,
         },
     ];
 
@@ -460,6 +503,7 @@ pub async fn run(config: ScaleConfig) -> Result<ScaleReport> {
         same_key_cold_burst: burst,
         search_cold_burst: search_burst,
         corrupt_sidecar_recovery: corrupt_recovery,
+        alternating_search_hot_set: alternating_hot_set,
         acceptance,
     })
 }
@@ -681,6 +725,110 @@ async fn measure_corrupt_sidecar_recovery(
         repair_succeeded: repaired.repair_succeeded,
         restart_sidecar_loads: restarted.sidecar_loaded,
     })
+}
+
+async fn measure_alternating_search_hot_set(
+    artifacts_root: &Path,
+    query: &str,
+    index_bytes: usize,
+) -> Result<AlternatingHotSetReport> {
+    let expected_working_set_bytes = index_bytes
+        .checked_mul(HOT_SET_REPOSITORIES)
+        .context("search hot-set byte count overflowed")?;
+    let cache_budget_bytes = expected_working_set_bytes
+        .checked_add(expected_working_set_bytes / 10)
+        .context("search hot-set budget overflowed")?;
+    let roots = prepare_search_hot_set(artifacts_root)?;
+    let cache = SearchCache::new(HOT_SET_REPOSITORIES, cache_budget_bytes);
+    let states: Vec<SearchState> = roots
+        .into_iter()
+        .map(|root| SearchState::with_cache(Some(root), None, cache.clone()))
+        .collect();
+
+    let mut reference = None;
+    let mut all_results_equal = true;
+    for state in &states {
+        let hits = state.query_hits(query, 25).await?;
+        let result: Vec<_> = hits
+            .into_iter()
+            .map(|hit| (hit.node_id, hit.score.to_bits()))
+            .collect();
+        if let Some(reference) = &reference {
+            all_results_equal &= reference == &result;
+        } else {
+            reference = Some(result);
+        }
+    }
+    let first_pass = cache.runtime_metrics();
+
+    let mut second_pass_queries = Vec::with_capacity(states.len());
+    for state in &states {
+        let started = Instant::now();
+        let hits = state.query_hits(query, 25).await?;
+        second_pass_queries.push(started.elapsed());
+        let result: Vec<_> = hits
+            .into_iter()
+            .map(|hit| (hit.node_id, hit.score.to_bits()))
+            .collect();
+        all_results_equal &= reference
+            .as_ref()
+            .is_none_or(|expected| expected == &result);
+    }
+    let second_pass = cache.runtime_metrics();
+    let retained = cache.metrics().await;
+
+    Ok(AlternatingHotSetReport {
+        repositories: states.len(),
+        cache_budget_bytes,
+        expected_working_set_bytes,
+        first_pass_sidecar_loads: first_pass.sidecar_loaded,
+        second_pass_additional_sidecar_loads: second_pass
+            .sidecar_loaded
+            .saturating_sub(first_pass.sidecar_loaded),
+        fallback_builds: second_pass.fallback_builds,
+        evictions: retained.evictions,
+        retained_entries: retained.retained_entries,
+        retained_bytes: retained.retained_weight_bytes,
+        all_results_equal,
+        second_pass_queries: Distribution::from_durations(second_pass_queries),
+    })
+}
+
+fn prepare_search_hot_set(artifacts_root: &Path) -> Result<Vec<PathBuf>> {
+    let source = artifacts_root.join("v1");
+    let fixture_root = artifacts_root
+        .parent()
+        .context("search artifacts root has no fixture parent")?;
+    let hot_set_root = fixture_root.join("search-hot-set");
+    let mut roots = Vec::with_capacity(HOT_SET_REPOSITORIES);
+    for repository in 0..HOT_SET_REPOSITORIES {
+        let root = hot_set_root.join(format!("repo-{repository}"));
+        let version = root.join("v1");
+        fs::create_dir_all(&version)?;
+        for name in ["nodes.jsonl", "edges.jsonl", "search-index.bin"] {
+            replace_hard_link(&source.join(name), &version.join(name))?;
+        }
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
+fn replace_hard_link(source: &Path, destination: &Path) -> Result<()> {
+    match fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("remove {}", destination.display()))
+        }
+    }
+    fs::hard_link(source, destination).with_context(|| {
+        format!(
+            "create hot-set fixture link {} -> {}",
+            destination.display(),
+            source.display()
+        )
+    })?;
+    Ok(())
 }
 
 async fn measure_same_key_cold_burst(

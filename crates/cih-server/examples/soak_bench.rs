@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
                 edges_per_node: 2,
                 iterations,
                 burst_callers: 8,
+                search_cache_bytes: 1,
                 regenerate: false,
             })
             .await

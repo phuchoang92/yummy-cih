@@ -67,7 +67,7 @@ pub enum SearchIndexInspection {
 #[derive(Debug)]
 pub enum SearchIndexLoad {
     Loaded {
-        index: SearchIndex,
+        index: Box<SearchIndex>,
         metadata: SearchIndexMetadata,
     },
     Missing,
@@ -174,7 +174,7 @@ pub fn load_search_index(path: &Path, expected: &SearchIndexSource) -> io::Resul
         ));
     }
     Ok(SearchIndexLoad::Loaded {
-        index,
+        index: Box::new(index),
         metadata: header.metadata,
     })
 }

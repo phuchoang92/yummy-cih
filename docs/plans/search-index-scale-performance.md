@@ -1,7 +1,9 @@
 # Plan - Predictable MCP retrieval at 500k-node scale
 
-> **Status:** PROPOSED - revised 2026-07-21 after the `platform` production incident.
-> No implementation has started. Land this as independently measurable slices from `dev`.
+> **Status:** IMPLEMENTED - synthetic 500k acceptance passed on 2026-07-22.
+> Production acceptance remains open for the sanitized `platform` artifacts, the scheduled
+> 30-minute mixed soak, and the eight-repository alternating hot-set gate. Current measured
+> evidence is in `docs/perf/scale-500k.md` and `docs/perf/scale-500k-local.json`.
 
 ## 1. Objective
 
@@ -998,24 +1000,24 @@ eliminate the recurring cold-build cost.
 
 ## 21. Definition of Done
 
-- [ ] The three incident failures are reproducible in baseline evidence.
-- [ ] Concurrent cold searches share one result even when retention rejects it.
-- [ ] Strict cache-family validation remains intact and cold transient bytes are admitted
+- [x] The three incident failures are reproducible in baseline evidence.
+- [x] Concurrent cold searches share one result even when retention rejects it.
+- [x] Strict cache-family validation remains intact and cold transient bytes are admitted
       separately.
-- [ ] Warm scoring runs off async workers with bounded concurrency and <= 6 MiB scratch per
+- [x] Warm scoring runs off async workers with bounded concurrency and <= 6 MiB scratch per
       active scorer at 500k documents.
 - [ ] `platform` BM25 is <= 230 MiB with bit-identical ranking.
-- [ ] Valid sidecar cold load is <= 10 seconds and performs no build.
-- [ ] Missing/stale/corrupt sidecars rebuild once and repair themselves on writable artifacts;
+- [x] Valid sidecar cold load is <= 10 seconds and performs no build.
+- [x] Missing/stale/corrupt sidecars rebuild once and repair themselves on writable artifacts;
       read-only artifacts still serve the fallback result with explicit repair guidance.
-- [ ] Unchanged analyze runs backfill missing/new-schema sidecars.
-- [ ] Default overview never live-builds wiki and degrades optional wiki failures.
-- [ ] Grep prunes by glob, bounds concurrency, and returns partial output by 80 seconds.
-- [ ] User-facing errors identify the operation rather than blaming the blocking runtime.
-- [ ] Search, wiki, and grep metrics are visible without DEBUG logging.
+- [x] Unchanged analyze runs backfill missing/new-schema sidecars.
+- [x] Default overview never live-builds wiki and degrades optional wiki failures.
+- [x] Grep prunes by glob, bounds concurrency, and returns partial output by 80 seconds.
+- [x] User-facing errors identify the operation rather than blaming the blocking runtime.
+- [x] Search, wiki, and grep metrics are visible without DEBUG logging.
 - [ ] Mixed retrieval soak has no duplicate same-key builds or monotonic RSS growth.
 - [ ] Multi-repository hot-set sizing is documented and the alternating-repository gate
       passes without unplanned decode/eviction thrash.
-- [ ] Full workspace format, lint, test, layering, and release scale gates pass.
-- [ ] Performance/runbook documentation contains measured before/after results.
-- [ ] OData extraction remains explicitly tracked until the motivating endpoint is traceable.
+- [x] Full workspace format, lint, test, layering, and release scale gates pass.
+- [x] Performance/runbook documentation contains measured before/after results.
+- [x] OData extraction remains explicitly tracked until the motivating endpoint is traceable.

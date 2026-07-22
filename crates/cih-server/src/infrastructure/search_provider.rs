@@ -124,10 +124,7 @@ impl SearchRuntime {
         let logical_cpus = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
-        let scorer_count = env_usize(
-            "CIH_SEARCH_SCORE_MAX_CONCURRENT",
-            logical_cpus.min(4).max(1),
-        );
+        let scorer_count = env_usize("CIH_SEARCH_SCORE_MAX_CONCURRENT", logical_cpus.clamp(1, 4));
         let cold_count = env_usize("CIH_SEARCH_COLD_MAX_CONCURRENT", 1);
         let cold_max_bytes = env_usize("CIH_SEARCH_COLD_MAX_BYTES", 512 * MIB);
         let cold_max_units = u32::try_from(cold_max_bytes.div_ceil(MIB))
@@ -899,7 +896,7 @@ impl SearchCache {
                                 source = "sidecar",
                                 "search index loaded"
                             );
-                            return Ok(Arc::new(index));
+                            return Ok(Arc::from(index));
                         }
                         Ok(SearchIndexLoad::Missing) => {
                             metrics.sidecar_missing.fetch_add(1, Ordering::Relaxed);

@@ -31,6 +31,8 @@ LAYERS = {
     # Storage
     "cih-graph-store": 3,
     "cih-falkor": 3,
+    "cih-ladybug": 3,
+    "cih-store-factory": 3,
     # Product
     "cih-engine": 4,
     "cih-wiki": 4,

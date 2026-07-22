@@ -440,13 +440,15 @@ async fn grep_files(
         grep_dir(
             &repo_root,
             &regex,
-            overrides,
-            limit,
-            started,
-            deadline,
-            &cancelled,
-            &runtime.pool,
-            runtime.config.threads,
+            GrepScanOptions {
+                overrides,
+                limit,
+                started,
+                deadline,
+                cancelled: &cancelled,
+                pool: &runtime.pool,
+                threads: runtime.config.threads,
+            },
         )
     })
     .await;
@@ -621,6 +623,16 @@ struct FileScan {
     stopped: Option<GrepTruncationReason>,
 }
 
+struct GrepScanOptions<'a> {
+    overrides: Option<ignore::overrides::Override>,
+    limit: usize,
+    started: Instant,
+    deadline: Instant,
+    cancelled: &'a AtomicBool,
+    pool: &'a rayon::ThreadPool,
+    threads: usize,
+}
+
 fn cooperative_stop(cancelled: &AtomicBool, deadline: Instant) -> Option<GrepTruncationReason> {
     if cancelled.load(Ordering::Acquire) {
         Some(GrepTruncationReason::Cancelled)
@@ -634,17 +646,16 @@ fn cooperative_stop(cancelled: &AtomicBool, deadline: Instant) -> Option<GrepTru
 /// Gitignore-aware, glob-pruned regex scan under `root`. Candidate paths are
 /// sorted before small parallel batches are processed, keeping result order
 /// deterministic while bounding disk concurrency and transient line buffers.
-fn grep_dir(
-    root: &Path,
-    regex: &regex::Regex,
-    overrides: Option<ignore::overrides::Override>,
-    limit: usize,
-    started: Instant,
-    deadline: Instant,
-    cancelled: &AtomicBool,
-    pool: &rayon::ThreadPool,
-    threads: usize,
-) -> GrepScan {
+fn grep_dir(root: &Path, regex: &regex::Regex, options: GrepScanOptions<'_>) -> GrepScan {
+    let GrepScanOptions {
+        overrides,
+        limit,
+        started,
+        deadline,
+        cancelled,
+        pool,
+        threads,
+    } = options;
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -948,16 +959,19 @@ mod tests {
             .build()
             .unwrap();
         let started = Instant::now();
+        let cancelled = AtomicBool::new(false);
         grep_dir(
             root,
             &regex,
-            overrides,
-            limit,
-            started,
-            started + Duration::from_secs(5),
-            &AtomicBool::new(false),
-            &pool,
-            2,
+            GrepScanOptions {
+                overrides,
+                limit,
+                started,
+                deadline: started + Duration::from_secs(5),
+                cancelled: &cancelled,
+                pool: &pool,
+                threads: 2,
+            },
         )
     }
 
@@ -1072,16 +1086,19 @@ mod tests {
             .build()
             .unwrap();
         let started = Instant::now();
+        let cancelled = AtomicBool::new(false);
         let scan = grep_dir(
             &root,
             &regex,
-            None,
-            100,
-            started,
-            started,
-            &AtomicBool::new(false),
-            &pool,
-            1,
+            GrepScanOptions {
+                overrides: None,
+                limit: 100,
+                started,
+                deadline: started,
+                cancelled: &cancelled,
+                pool: &pool,
+                threads: 1,
+            },
         );
         assert!(!scan.complete);
         assert_eq!(scan.truncation_reason, GrepTruncationReason::Deadline);

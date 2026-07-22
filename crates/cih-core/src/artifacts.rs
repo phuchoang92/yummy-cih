@@ -202,45 +202,6 @@ fn read_file_opt(path: &Path) -> io::Result<Vec<u8>> {
     }
 }
 
-#[cfg(test)]
-mod bundle_tests {
-    use super::*;
-
-    #[test]
-    fn bundle_round_trip_preserves_optional_search_sidecar() {
-        let source = tempfile::tempdir().unwrap();
-        let artifact_dir = source.path().join(".cih/artifacts/v1");
-        let artifacts =
-            GraphArtifacts::write(&artifact_dir, VersionId::new("v1"), &[], &[]).unwrap();
-        let sidecar = b"derived-search-sidecar";
-        fs::write(artifact_dir.join("search-index.bin"), sidecar).unwrap();
-        let bundle = source.path().join("repo.cihpack");
-        artifacts
-            .export_bundle(
-                None,
-                &source.path().join("missing-hashes.json"),
-                &source.path().join("missing-scope.json"),
-                &source.path().join("missing-map.json"),
-                &bundle,
-            )
-            .unwrap();
-
-        let destination = tempfile::tempdir().unwrap();
-        let (imported, _, _) = GraphArtifacts::import_bundle(&bundle, destination.path()).unwrap();
-        assert_eq!(
-            fs::read(
-                imported
-                    .nodes_path
-                    .parent()
-                    .unwrap()
-                    .join("search-index.bin")
-            )
-            .unwrap(),
-            sidecar
-        );
-    }
-}
-
 impl GraphArtifacts {
     /// Export a bundle archive to `dest`.
     ///
@@ -432,5 +393,44 @@ impl GraphArtifacts {
         }
 
         Ok((main_artifacts, community_artifacts, manifest))
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    #[test]
+    fn bundle_round_trip_preserves_optional_search_sidecar() {
+        let source = tempfile::tempdir().unwrap();
+        let artifact_dir = source.path().join(".cih/artifacts/v1");
+        let artifacts =
+            GraphArtifacts::write(&artifact_dir, VersionId::new("v1"), &[], &[]).unwrap();
+        let sidecar = b"derived-search-sidecar";
+        fs::write(artifact_dir.join("search-index.bin"), sidecar).unwrap();
+        let bundle = source.path().join("repo.cihpack");
+        artifacts
+            .export_bundle(
+                None,
+                &source.path().join("missing-hashes.json"),
+                &source.path().join("missing-scope.json"),
+                &source.path().join("missing-map.json"),
+                &bundle,
+            )
+            .unwrap();
+
+        let destination = tempfile::tempdir().unwrap();
+        let (imported, _, _) = GraphArtifacts::import_bundle(&bundle, destination.path()).unwrap();
+        assert_eq!(
+            fs::read(
+                imported
+                    .nodes_path
+                    .parent()
+                    .unwrap()
+                    .join("search-index.bin")
+            )
+            .unwrap(),
+            sidecar
+        );
     }
 }
