@@ -1,7 +1,7 @@
 //! `architecture_overview` MCP tool — one-call orientation for an indexed repo.
 //! The typed application service owns orchestration; this router only maps the
 //! wire request and translates the application result back to MCP.
-//! Design record: `docs/plans/architecture-overview-tool.md`.
+//! User workflow: `docs/agent-workflows/exploring.md`.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};

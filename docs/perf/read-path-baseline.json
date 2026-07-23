@@ -1,5 +1,5 @@
 {
-  "_about": "Read-path (MCP tool) latency baseline. Regenerate with: FALKOR_URL=redis://127.0.0.1:6380 CIH_BENCH_GRAPH=fineract CIH_BENCH_NAME=disburseLoan cargo run -p cih-falkor --example query_bench. See docs/plans/read-path-latency.md.",
+  "_about": "Read-path (MCP tool) latency baseline. Regenerate with: FALKOR_URL=redis://127.0.0.1:6380 CIH_BENCH_GRAPH=fineract CIH_BENCH_NAME=disburseLoan cargo run -p cih-falkor --example query_bench.",
   "fixture": "fineract",
   "graph_nodes": 87739,
   "machine": "native macOS (dev)",

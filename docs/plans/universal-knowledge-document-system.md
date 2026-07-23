@@ -3,20 +3,19 @@
 Status: Proposed
 
 Date: 2026-07-19
-Last revised: 2026-07-20
+Last revised: 2026-07-23
 
 Target: Replace the current hardcoded wiki generation and Docusaurus viewer with a
 versioned, scalable knowledge system for source code and technical assets.
 
-Related plans:
+Related work:
 
-- `docs/plans/wiki-render-factoring.md` (P2.5a render-core factoring) and
-  `docs/plans/read-path-latency.md` (P3.8 resident serving) describe the current
-  pipeline that this plan replaces.
-- `docs/plans/cih-server-clean-architecture-and-scalability.md` defines the
-  server-side application ports, request budgets, bounded scheduler, completeness
-  metadata, and transport boundaries reused by this system. This plan extends those
-  contracts rather than creating a second server architecture.
+- The current `cih-wiki` render core and resident `cih-server` wiki serving
+  pipeline are the implemented baseline that this plan replaces.
+- `docs/ARCHITECTURE.md` defines the server-side application ports, request
+  budgets, bounded scheduler, completeness metadata, and transport boundaries
+  reused by this system. This plan extends those contracts rather than creating
+  a second server architecture.
 
 ## 1. Executive Summary
 
@@ -177,6 +176,9 @@ The design target is:
 - Real-time multi-user coauthoring.
 - Enterprise RBAC beyond the existing authenticated server boundary.
 - Full bidirectional Confluence body synchronization.
+- Simultaneous writable membership of one repository in multiple documentation
+  workspaces. Existing CIH groups may overlap, but V1 assigns each repository to
+  exactly one writable documentation workspace (§11.1).
 - Rendering the complete code graph in the browser.
 - Creating a persisted document page for every source symbol.
 - Treating AI output as authoritative without evidence and validation.
@@ -206,6 +208,7 @@ The design target is:
 | Term | Meaning |
 | --- | --- |
 | Evidence | A source-backed fact from code, tests, APIs, schemas, config, or another adapter. |
+| Claim | One independently attributable statement about a knowledge object, with truth, authority, evidence, and optional deterministic attestation. |
 | Knowledge object | A stable entity such as a capability, process, service, API, or scenario. |
 | Knowledge block | A typed section fragment belonging to a knowledge object. |
 | Document view | A role-filtered, ordered projection of an object and its blocks. |
@@ -213,9 +216,11 @@ The design target is:
 | Workspace pack | A compact cross-service taxonomy, catalog, relation, and search projection. |
 | Placement | Assignment of evidence or an object to a primary parent or related capability. |
 | Change envelope | Bounded evidence describing a requested or detected code change. |
-| Change set | Validated object, relation, block, placement, and review operations. |
+| Change set | Validated object, relation, claim, block, placement, and review operations. |
 | Overlay | Repository-owned human content attached to an object or section. |
-| Generation | An immutable, successfully published pack version. |
+| Generation | An immutable pack version identified before artifact serialization from canonical compiler inputs. |
+| Artifact manifest hash | A hash of one completed manifest, including the generation ID and immutable artifact checksums. |
+| Authored state | Durable current human, reviewed, and accepted-AI intent replayed by every full or incremental compilation. |
 | Workspace snapshot | One workspace generation plus the exact service generations pinned by its manifest. |
 
 ## 7. Target Architecture
@@ -234,9 +239,10 @@ flowchart LR
     H --> J["MCP tools"]
     H --> K["Exporters"]
     H --> L["Confluence publisher"]
-    M["AI documentation agent"] --> D
+    M["AI documentation agent"] -->|"validated auto-apply"| P["Durable authored state"]
     M --> N["Review inbox"]
-    N --> D
+    N -->|"reviewed decision"| P
+    P --> D
     O["Optional GraphStore"] --> H
 ```
 
@@ -251,8 +257,11 @@ Foundation-level, backend-independent types and ports:
 - `RelationKind`
 - `KnowledgeObject`
 - `KnowledgeRelation`
+- `RelationDefinition`
+- `KnowledgeClaim`
 - `KnowledgeBlock`
 - `EvidenceRef`
+- `CoverageRecord`
 - `DocumentView`
 - `ChangeEnvelope`
 - `DocumentationChangeSet`
@@ -379,8 +388,10 @@ Semantic dependencies are optional across the complete path:
   public signature.
 - `cih-server` propagates semantic features to those crates. Its current direct,
   unconditional `cih-embed` dependency and imports
-  (`crates/cih-server/Cargo.toml`, `app.rs`, `search.rs`, and `startup.rs`) must be
-  moved behind the feature boundary before the new crates are accepted.
+  (`crates/cih-server/Cargo.toml`, `src/bootstrap.rs`,
+  `src/infrastructure/search_provider.rs`, and
+  `src/infrastructure/repo_context_provider.rs`) must be moved behind the feature
+  boundary before the new crates are accepted.
 - `cih-embed` pulls `fastembed` with ONNX/ORT, so merely disabling model
   initialization at runtime is insufficient.
 
@@ -526,6 +537,30 @@ Coverage must distinguish:
 The UI and AI must not convert unsupported or failed extraction into claims such as
 "this service has no tests" or "this repository has no APIs."
 
+Coverage is persisted as scoped data, not only as a manifest summary:
+
+```rust
+pub struct CoverageRecord {
+    pub id: CoverageId,
+    pub adapter: AdapterId,
+    pub scope_kind: CoverageScopeKind,
+    pub scope_id: String,
+    pub construct_kind: String,
+    pub status: CoverageStatus,
+    pub examined: u64,
+    pub matched: u64,
+    pub failed: u64,
+    pub diagnostic: Option<DiagnosticId>,
+    pub content_hash: ContentHash,
+}
+```
+
+`CoverageStatus` has exactly the six states above. Records may be scoped to a
+repository, adapter input, source file, module, service, or construct kind. UI,
+search, AI-answer validation, and absence claims query these records. The adapter
+coverage value in a manifest is a derived aggregate for fast status checks and is
+never the only retained coverage data.
+
 ## 9. Knowledge Ontology
 
 ### 9.1 Extensible identifiers
@@ -566,14 +601,17 @@ cih://<workspace-id>/<scope-id>/<kind>/<stable-id>
 Examples:
 
 ```text
-cih://banking/business/core:capability/payment-refunds
-cih://banking/payment-service/core:api/post-payments-id-refund
-cih://banking/payment-service/core:service/payment-service
+cih://workspace_01j_banking/business/core:capability/payment-refunds
+cih://workspace_01j_banking/repo_01j_payment_service/core:api/post-payments-id-refund
+cih://workspace_01j_banking/repo_01j_payment_service/core:service/payment-service
 ```
 
 Rules:
 
 - Keys never include display titles.
+- `<workspace-id>` is the persisted documentation-workspace ID, or the immutable
+  repository ID for standalone operation. Repository-backed `<scope-id>` values are
+  immutable registry IDs. None is a group name, repository display name, or path.
 - Human-configured objects use configured IDs.
 - Generated objects use deterministic hashes of durable evidence anchors.
 - Renames create aliases and update titles without changing keys.
@@ -636,6 +674,26 @@ core:deployed-as
 core:affects
 ```
 
+Every relation kind has a machine-readable `RelationDefinition` containing its
+canonical source and target kinds, canonical direction, inverse display label,
+symmetry/transitivity flags, and any cardinality constraints. Packs persist only
+the canonical direction. APIs accept `outbound`, `inbound`, or `both`; renderers
+may use the inverse label for inbound results but never write an inverse relation
+as if it were a second kind. Namespaced adapters must register their definitions
+before emitting relations, and schema validation rejects a source/target pair that
+violates the definition.
+
+Representative canonical definitions:
+
+| Kind | Canonical source | Canonical target | Inverse label |
+| --- | --- | --- | --- |
+| `core:contains` | Container object | Contained object | contained by |
+| `core:implements` | Service, Component, or CodeEntity | Capability, UseCase, or BusinessRule | implemented by |
+| `core:participates-in` | Capability, Service, Component, API, or Event | Process | has participant |
+| `core:exposes` | System, Service, or Component | Interface or API | exposed by |
+| `core:tests` | TestCase | CodeEntity, Component, API, or Service | tested by |
+| `core:covers` | TestCase or Scenario | Requirement, UseCase, Process, or Capability | covered by |
+
 Every relation has:
 
 - Stable relation ID.
@@ -658,18 +716,20 @@ pub struct KnowledgeObject {
     pub key: KnowledgeKey,
     pub kind: KnowledgeKind,
     pub title: String,
-    pub summary: Option<String>,
     pub primary_parent: Option<KnowledgeKey>,
     pub facets: BTreeMap<String, Vec<String>>,
     pub lifecycle: Lifecycle,
     pub authority: Authority,
-    pub truth: TruthStatus,
-    pub confidence: f32,
     pub content_hash: ContentHash,
     pub first_seen: GenerationId,
     pub last_seen: GenerationId,
 }
 ```
+
+Objects carry identity, taxonomy, and lifecycle. Factual content is represented by
+claims. In particular, an object's summary is the active `core:summary` claim
+selected by authority and lifecycle rules; it is not an untraceable text column on
+the object.
 
 `Lifecycle` values:
 
@@ -679,7 +739,46 @@ pub struct KnowledgeObject {
 - Deleted
 - Merged
 
-### 9.6 Knowledge blocks
+### 9.6 Knowledge claims
+
+A claim is the smallest unit of truth, evidence, and attestation. A block can
+present several claims with different truth states without collapsing them into
+one block-level status.
+
+```rust
+pub struct KnowledgeClaim {
+    pub id: ClaimId,
+    pub object: KnowledgeKey,
+    pub kind: ClaimKind,
+    pub statement: String,
+    pub value: Option<StructuredValue>,
+    pub lifecycle: ClaimLifecycle,
+    pub authority: Authority,
+    pub truth: TruthStatus,
+    pub confidence: f32,
+    pub evidence: Vec<EvidenceRef>,
+    pub attestation: Option<ClaimAttestation>,
+    pub content_hash: ContentHash,
+    pub first_seen: GenerationId,
+    pub last_seen: GenerationId,
+}
+```
+
+Observed claims require a reproducible deterministic attestation. Inferred and
+Intended claims may cite evidence but cannot use evidence existence alone to claim
+observation. Claims can outlive a presentation block during revision/history
+retention, and each claim has an independent lifecycle in pack storage.
+`ClaimLifecycle` is `Active` or `Deleted`; staleness and conflict remain truth
+states rather than lifecycle values.
+
+Claim IDs are stable across wording and source-location changes. Deterministic
+projectors derive them from object key, claim kind, template ID, and a durable
+semantic slot/evidence anchor. Human and AI proposals supply a validated stable
+purpose that is persisted in authored state. Statement text and confidence are
+content, never identity; changing either updates the same claim under a base-hash
+precondition.
+
+### 9.7 Knowledge blocks
 
 A document is assembled from blocks. A block is the smallest independently
 fingerprinted, generated, reviewed, searched, cached, and rendered unit.
@@ -693,13 +792,18 @@ pub struct KnowledgeBlock {
     pub audiences: BTreeSet<Audience>,
     pub payload: BlockPayload,
     pub authority: Authority,
-    pub truth: TruthStatus,
-    pub confidence: f32,
-    pub evidence: Vec<EvidenceRef>,
+    pub claims: Vec<ClaimId>,
     pub content_hash: ContentHash,
     pub generator: Option<GeneratorInfo>,
 }
 ```
+
+Block authority controls edit/replacement ownership. Truth, confidence, evidence,
+and deterministic attestations belong to claims. Generated prose that makes a
+factual statement must reference claims; presentation-only text may omit them but
+is excluded from fact retrieval and evidence-backed AI answers. Block truth badges
+are derived summaries such as `mixed`, `conflicting`, or `stale`, never stored as a
+single authoritative truth value.
 
 Supported `BlockPayload` values:
 
@@ -719,7 +823,7 @@ Supported `BlockPayload` values:
 Large relation lists and evidence lists store query descriptors rather than all rows
 inside the block payload.
 
-### 9.7 Truth and authority
+### 9.8 Truth and authority
 
 Truth states:
 
@@ -786,18 +890,22 @@ Every object has at most one primary parent. This guarantees:
 - Predictable exports.
 - Deterministic move behavior.
 
-Objects may have any number of secondary relations. For example:
+Objects may have any number of secondary relations. The canonical stored facts for
+one capability may be:
 
 ```text
-Payment Refunds capability
-  implemented-by -> payment-service
-  implemented-by -> ledger-service
-  participates-in -> Merchant Refund process
-  exposes -> POST /payments/{id}/refund
-  publishes -> RefundRequested
-  writes -> REFUND table
-  covered-by -> RefundIntegrationTest
+payment-service       -- core:implements -----> Payment Refunds capability
+ledger-service        -- core:implements -----> Payment Refunds capability
+Payment Refunds       -- core:participates-in -> Merchant Refund process
+payment-service       -- core:exposes --------> POST /payments/{id}/refund
+refund-handler        -- core:publishes ------> RefundRequested
+refund-repository     -- core:writes ---------> REFUND table
+RefundIntegrationTest -- core:covers ---------> Payment Refunds capability
 ```
+
+The arrows show storage direction. A capability UI may render inbound relations as
+"implemented by" or "covered by" using the registered inverse labels, while the
+stored kinds remain `core:implements` and `core:covers`.
 
 ### 10.3 Role modes
 
@@ -902,6 +1010,46 @@ configuration path in group metadata (a new field on `GroupEntry` in
 itself new: the current settings ladder is flag > env > `<repo>/cih.toml` >
 `~/.cih/config.toml` > default, with no group layer.
 
+Phase 1 first migrates registry identity before any stable key or evidence ID is
+written:
+
+- Every `RegistryEntry` gains an immutable, globally unique `repo_id`, generated
+  once and persisted atomically. Rename, path move, and re-registration preserve
+  it. Registry export/import preserves it and rejects duplicate IDs.
+- `GroupEntry` stores repository IDs as canonical membership. Existing
+  name-based memberships migrate only when each name resolves uniquely; missing
+  or ambiguous names block migration with a repair command instead of inventing
+  identity.
+- A documentation-enabled `GroupEntry` gains an immutable `docs_workspace_id`,
+  generated once by `cih docs init`; group rename preserves it. The `[workspace].id`
+  value must equal this persisted ID, while a separate mutable slug/title supplies
+  human-readable URLs and labels. A standalone coordinator uses its `repo_id` as
+  the workspace segment until explicitly attached.
+- CLI and TOML may accept a repository display name for usability, but config
+  loading immediately resolves it to `repo_id`. Packs, keys, evidence hashes,
+  manifests, workflow rows, and group membership persist only IDs.
+- Registry migration is versioned, takes the registry lock, writes a temporary
+  validated registry, fsyncs it, and atomically replaces the old file. A backup
+  and dry-run report are retained until the first successful pack build.
+
+CIH groups may continue to overlap for analysis and search use cases. Documentation
+has one additional ownership rule: `RegistryEntry.docs_workspace_id` is either
+empty for standalone operation or identifies exactly one writable documentation
+workspace. `cih docs init --group` claims that ownership transactionally and fails
+when another documentation workspace owns the repository. This keeps the one
+service `current.json`, authored-state database, and generation history
+unambiguous.
+
+Attaching an existing standalone repository is an explicit migration under the
+workspace and service locks. It imports the current authored state, revisions,
+comments, and terminal workflow records into the workspace coordinator, validates
+ID/hash equality, rekeys the standalone workspace prefix to the target immutable
+workspace ID while retaining old keys as aliases, builds a workspace snapshot,
+then records ownership. It refuses to run with nonterminal proposals, reviews,
+jobs, or activation journals unless the operator first resolves or explicitly
+migrates them. Moving or detaching a repository from a writable documentation
+workspace is an audited admin migration, not an ordinary V1 indexing operation.
+
 Per-repository configuration:
 
 ```text
@@ -922,7 +1070,8 @@ Example:
 schema = 1
 
 [workspace]
-id = "banking"
+id = "workspace_01j_banking"
+slug = "banking"
 title = "Banking Platform"
 canonical_language = "en"
 default_role = "dev"
@@ -952,7 +1101,7 @@ aliases = ["refund", "reverse payment"]
 
 [[mappings]]
 target = "payment-refunds"
-repo = "payment-service"
+repo_id = "repo_01j_payment_service"
 route = "/payments/{*}/refund"
 
 [[mappings]]
@@ -997,9 +1146,9 @@ Rules may assign:
 
 Placement precedence:
 
-1. Pinned human placement.
+1. Pinned source-controlled or authored-state placement.
 2. Exact configuration mapping.
-3. Reviewed prior placement.
+3. Reviewed current authored-state placement.
 4. Existing stable placement with unchanged evidence.
 5. Deterministic classifier.
 6. AI high-confidence classifier.
@@ -1008,11 +1157,17 @@ Placement precedence:
 
 Content precedence:
 
-1. Pinned overlay block.
-2. Human overlay block.
-3. External requirement block.
-4. AI block.
-5. Deterministic generated block.
+1. Pinned source-controlled overlay block.
+2. Pinned authored-state block.
+3. Human source-controlled overlay block.
+4. Human authored-state block.
+5. External requirement block.
+6. Accepted AI authored-state block.
+7. Deterministic generated block.
+
+Within one level, replacement requires the stable entity ID and expected base
+content hash. A reviewed conversion changes authority through an authored-state
+revision; it does not copy prose into history and hope the next compiler finds it.
 
 ### 11.5 Overlay format
 
@@ -1021,11 +1176,13 @@ Example:
 ```markdown
 ---
 schema: 1
-object: cih://banking/business/core:capability/payment-refunds
+object: cih://workspace_01j_banking/business/core:capability/payment-refunds
 section: business-rules
 mode: append
 authority: human
 block_id: human-refund-settlement-rule
+claim_id: human-refund-settlement-rule-claim
+truth: intended
 audiences: [po, ba, tester, dev]
 ---
 
@@ -1041,6 +1198,14 @@ Allowed modes:
 
 `replace-generated` replaces only the matching generated block ID. It cannot delete
 another human or external block.
+
+When `claim_id` and `truth` are present, the bounded Markdown body is one stable
+human claim referenced by the overlay block. Human overlays may declare `intended`
+or `inferred`, never `observed`; deterministic attestation is still required for
+Observed. An overlay without claim metadata is presentation-only: it remains
+rendered and lexical-searchable but cannot be cited as an evidence-backed factual
+answer. Multiple independent statements use separate overlay blocks/claim IDs so
+they can be reviewed and superseded independently.
 
 Raw HTML, MDX imports, executable expressions, and scripts are rejected.
 
@@ -1082,6 +1247,19 @@ Workspace pack:
 
 `vectors.usearch` is omitted when semantic search is disabled.
 
+`current.json` is a small canonical pointer, not a copy of the manifest:
+
+```json
+{
+  "schema": 1,
+  "generation": "blake3-value",
+  "manifest_hash": "blake3-value"
+}
+```
+
+Readers verify both fields before opening a pack. The pointer contains no mutable
+timestamp, so expected-base comparison is byte-stable.
+
 For a standalone repository, `current.json` selects one service generation. For a
 group, `current.json` selects one workspace generation, and that workspace
 generation's manifest pins the exact generation and manifest hash of every service
@@ -1090,9 +1268,13 @@ pack in the snapshot. Group readers never follow the independently moving servic
 the one workspace manifest they already selected. The workspace pointer is
 therefore the single atomic visibility boundary for a multi-service snapshot.
 
-Service pointers remain useful for standalone serving and direct `cih docs index`
-workflows. A grouped publication updates them idempotently after the workspace
-pointer commits, but their intermediate values cannot affect grouped readers.
+Service pointers remain useful for unowned standalone repositories and direct
+service inspection. A grouped publication updates them idempotently after the
+workspace pointer commits, but their intermediate values cannot affect grouped
+readers and they are not an independent write boundary for an owned repository.
+Only the repository's owning documentation workspace may build a workspace-scoped
+service generation or advance its pointer. Ordinary CIH membership in another
+overlapping group grants no documentation write authority.
 
 ### 12.2 Manifest
 
@@ -1101,8 +1283,10 @@ pointer commits, but their intermediate values cannot affect grouped readers.
   "format": "cih-knowledge-pack",
   "schema": 1,
   "scope": "service",
-  "workspace": "banking",
+  "workspace_id": "workspace_01j_banking",
+  "repository_id": "repo_01j_payment_service",
   "service": "payment-service",
+  "parent_generation": "prior-blake3-value",
   "generation": "blake3-value",
   "profile": "fts",
   "inputs": {
@@ -1116,6 +1300,8 @@ pointer commits, but their intermediate values cannot affect grouped readers.
     "configuration_hash": "blake3-value",
     "taxonomy_hash": "blake3-value",
     "overlay_hash": "blake3-value",
+    "authored_state_version": 42,
+    "authored_state_hash": "blake3-value",
     "projection_policy_hash": "blake3-value",
     "technical_edge_index": {
       "format": "sqlite-compact-v1",
@@ -1135,13 +1321,16 @@ pointer commits, but their intermediate values cannot affect grouped readers.
     "service_generations": {}
   },
   "generator_version": "cih-version",
+  "builder_fingerprint": "sqlite-vector-format-and-version-hash",
   "created_at": "RFC3339 timestamp",
   "counts": {
     "objects": 0,
     "relations": 0,
     "technical_edges": 0,
     "blocks": 0,
-    "evidence": 0
+    "claims": 0,
+    "evidence": 0,
+    "coverage_records": 0
   },
   "checksums": {
     "service.sqlite": "blake3-value",
@@ -1152,18 +1341,57 @@ pointer commits, but their intermediate values cannot affect grouped readers.
 
 For a workspace pack, `inputs.service_generations` is a key-sorted map from stable
 service ID to `{ generation, manifest_hash }`; for a service pack it is empty.
+`workspace_id` is the persisted group documentation ID or the repository ID in
+standalone mode; `repository_id` is omitted for a workspace pack. `service` is a
+display label and never identity. `parent_generation` is omitted for the first
+generation.
 Optional artifact fields and checksums, including the embedding model and
 `vectors.usearch`, are omitted rather than populated with sentinel values.
 Adapter entries are sorted by namespace and include every input needed to decide
 whether extraction can be reused. The manifest also records any selected compact
 technical-edge-index format and version (§13.1).
 
-The generation ID hashes canonicalized deterministic manifest fields and artifact
-checksums; it excludes `created_at` and the generation field itself. Comparing the
-active manifest's versioned `inputs` to freshly discovered input fingerprints is
-the contract behind the two-second no-change path. An implementation may use cheap
-version/metadata checks before computing content hashes, but it cannot report
-`unchanged` unless every configured input is accounted for.
+Generation and artifact identity are deliberately separate:
+
+1. Before any pack row is serialized, the compiler canonicalizes a
+   `GenerationDescriptor`: pack schema, scope and immutable IDs, parent generation,
+   profile, complete versioned `inputs` (including `authored_state_hash`), generator
+   version, builder fingerprint (SQLite/vector library versions and deterministic
+   format settings), and projection policy. `GenerationId` is the BLAKE3 hash of
+   that descriptor. It excludes timestamps, output counts, artifact bytes,
+   checksums, and the generation field itself.
+2. Every generation-qualified SQLite row is written with that precomputed
+   `GenerationId`.
+3. After SQLite, diagnostics, and optional vectors are complete and validated, the
+   compiler writes counts and artifact checksums into the manifest.
+   `ArtifactManifestHash` is the BLAKE3 hash of the canonical finalized manifest
+   payload, including `generation` and checksums but excluding `created_at` and any
+   manifest-hash field.
+4. Workspace manifests pin each service as
+   `{ generation, manifest_hash }`. Readers validate both values.
+
+This ordering removes any hash cycle between a SQLite checksum and generation IDs
+stored inside SQLite. A repeated deterministic build has the same generation ID;
+artifact nondeterminism is exposed by a different manifest hash and fails the
+reproducibility check rather than being hidden behind a new generation identity.
+If a directory already exists for the same generation, an equal manifest hash is
+reused idempotently; a different hash is quarantined as a blocking nondeterminism
+error and never overwrites the existing generation.
+Artifacts covered by the manifest must therefore be byte-reproducible.
+`diagnostics.jsonl` contains canonical code/scope/details only; wall-clock times,
+durations, host paths, and peak-memory measurements go to operational metrics, not
+the checksummed file. SQLite insertion/order settings and vector construction use
+stable ordering and fixed seeds. A vector backend that cannot produce deterministic
+bytes for identical logical input fails the Phase 0 backend gate or is published as
+a separately versioned semantic profile with a deterministic builder.
+The two-second no-change path runs before creating a child descriptor. It compares
+the active manifest's pack schema, scope IDs, profile, generator version, builder
+fingerprint, projection policy, and complete versioned `inputs` to freshly resolved
+values. An implementation may use cheap version/metadata checks before computing
+content hashes, but it cannot report `unchanged` unless every descriptor-affecting
+field and configured input is accounted for. A forced reproducibility build reuses
+the original fixed parent descriptor; an ordinary changed build uses the active
+generation as its parent.
 
 ### 12.3 SQLite schema
 
@@ -1186,13 +1414,10 @@ CREATE TABLE objects (
     DEFERRABLE INITIALLY DEFERRED,
   kind TEXT NOT NULL,
   title TEXT NOT NULL,
-  summary TEXT,
   primary_parent TEXT REFERENCES object_refs(key)
     DEFERRABLE INITIALLY DEFERRED,
   lifecycle TEXT NOT NULL,
   authority TEXT NOT NULL,
-  truth_status TEXT NOT NULL,
-  confidence REAL NOT NULL,
   content_hash BLOB NOT NULL,
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL,
@@ -1206,13 +1431,24 @@ CREATE TABLE object_facets (
   PRIMARY KEY (object_key, facet, value)
 );
 
+CREATE TABLE relation_definitions (
+  kind TEXT PRIMARY KEY,
+  source_kinds_json TEXT NOT NULL,
+  target_kinds_json TEXT NOT NULL,
+  inverse_label TEXT NOT NULL,
+  symmetric INTEGER NOT NULL CHECK (symmetric IN (0, 1)),
+  transitive INTEGER NOT NULL CHECK (transitive IN (0, 1)),
+  cardinality_json TEXT,
+  definition_hash BLOB NOT NULL
+);
+
 CREATE TABLE relations (
   id TEXT PRIMARY KEY,
   source_key TEXT NOT NULL REFERENCES object_refs(key)
     DEFERRABLE INITIALLY DEFERRED,
   target_key TEXT NOT NULL REFERENCES object_refs(key)
     DEFERRABLE INITIALLY DEFERRED,
-  kind TEXT NOT NULL,
+  kind TEXT NOT NULL REFERENCES relation_definitions(kind),
   authority TEXT NOT NULL,
   truth_status TEXT NOT NULL,
   confidence REAL NOT NULL,
@@ -1255,8 +1491,6 @@ CREATE TABLE blocks (
   block_type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   authority TEXT NOT NULL,
-  truth_status TEXT NOT NULL,
-  confidence REAL NOT NULL,
   content_hash BLOB NOT NULL,
   generator_json TEXT,
   first_seen TEXT NOT NULL,
@@ -1264,9 +1498,34 @@ CREATE TABLE blocks (
   deleted_generation TEXT
 );
 
+CREATE TABLE claims (
+  id TEXT PRIMARY KEY,
+  object_key TEXT NOT NULL REFERENCES objects(key) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  statement TEXT NOT NULL,
+  value_json TEXT,
+  lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active', 'deleted')),
+  authority TEXT NOT NULL,
+  truth_status TEXT NOT NULL
+    CHECK (truth_status IN ('observed', 'inferred', 'intended', 'conflicting', 'stale')),
+  confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+  content_hash BLOB NOT NULL,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  deleted_generation TEXT
+);
+
+CREATE TABLE block_claims (
+  block_id TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+  claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  PRIMARY KEY (block_id, claim_id),
+  UNIQUE (block_id, ordinal)
+);
+
 CREATE TABLE evidence (
   id TEXT PRIMARY KEY,
-  repo TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
   source_version TEXT NOT NULL,
   local_key TEXT NOT NULL,
   graph_node_id TEXT,
@@ -1284,22 +1543,55 @@ CREATE TABLE evidence (
   last_seen TEXT NOT NULL,
   deleted_generation TEXT,
   metadata_json TEXT NOT NULL,
-  UNIQUE (adapter, repo, local_key)
+  UNIQUE (adapter, repo_id, local_key)
 );
 
-CREATE TABLE block_evidence (
-  block_id TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+CREATE TABLE claim_evidence (
+  claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
   evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
-  -- NOT NULL: SQLite permits NULLs in rowid-table primary keys, and NULL != NULL
-  -- would allow duplicate rows.
-  claim_id TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY (block_id, evidence_id, claim_id)
+  role TEXT NOT NULL CHECK (role IN ('supports', 'contradicts', 'context')),
+  PRIMARY KEY (claim_id, evidence_id, role)
+);
+
+CREATE TABLE claim_attestations (
+  claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE,
+  projector TEXT NOT NULL,
+  projector_version TEXT NOT NULL,
+  template_id TEXT NOT NULL,
+  inputs_hash BLOB NOT NULL,
+  claim_hash BLOB NOT NULL,
+  payload_json TEXT NOT NULL
 );
 
 CREATE TABLE relation_evidence (
   relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
   evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
   PRIMARY KEY (relation_id, evidence_id)
+);
+
+CREATE TABLE coverage_records (
+  id TEXT PRIMARY KEY,
+  adapter TEXT NOT NULL,
+  scope_kind TEXT NOT NULL
+    CHECK (scope_kind IN ('repository', 'adapter-input', 'file', 'module', 'service', 'construct')),
+  scope_id TEXT NOT NULL,
+  construct_kind TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'supported-found',
+    'supported-not-found',
+    'partially-supported',
+    'unsupported',
+    'adapter-failed',
+    'omitted-by-configuration'
+  )),
+  examined_count INTEGER NOT NULL,
+  matched_count INTEGER NOT NULL,
+  failed_count INTEGER NOT NULL,
+  diagnostic_id TEXT,
+  content_hash BLOB NOT NULL,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  deleted_generation TEXT
 );
 
 CREATE TABLE aliases (
@@ -1427,6 +1719,44 @@ CREATE TABLE state_meta (
   value TEXT NOT NULL
 );
 
+CREATE TABLE authored_state_versions (
+  version INTEGER PRIMARY KEY,
+  parent_version INTEGER REFERENCES authored_state_versions(version),
+  state_hash BLOB NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('prepared', 'active', 'superseded', 'aborted')),
+  source_change_set_id TEXT REFERENCES change_sets(id),
+  source_review_id TEXT REFERENCES reviews(id),
+  created_at TEXT NOT NULL,
+  activated_at TEXT
+);
+
+CREATE TABLE authored_entity_revisions (
+  state_version INTEGER NOT NULL REFERENCES authored_state_versions(version),
+  entity_kind TEXT NOT NULL CHECK (entity_kind IN (
+    'object', 'relation', 'claim', 'block', 'placement', 'alias', 'taxonomy'
+  )),
+  entity_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  authority TEXT NOT NULL,
+  lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active', 'deleted')),
+  content_hash BLOB NOT NULL,
+  source_change_set_id TEXT REFERENCES change_sets(id),
+  source_review_id TEXT REFERENCES reviews(id),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (state_version, entity_kind, entity_id)
+);
+
+CREATE TABLE authored_current_entities (
+  entity_kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  revision_version INTEGER NOT NULL REFERENCES authored_state_versions(version),
+  payload_json TEXT NOT NULL,
+  authority TEXT NOT NULL,
+  lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active', 'deleted')),
+  content_hash BLOB NOT NULL,
+  PRIMARY KEY (entity_kind, entity_id)
+);
+
 CREATE TABLE generation_history (
   generation TEXT PRIMARY KEY,
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
@@ -1455,29 +1785,37 @@ CREATE TABLE proposal_envelopes (
   purged_at TEXT
 );
 
-CREATE TABLE apply_journal (
+CREATE TABLE activation_journal (
   id TEXT PRIMARY KEY,
-  change_set_id TEXT NOT NULL REFERENCES change_sets(id),
+  operation_kind TEXT NOT NULL CHECK (operation_kind IN (
+    'index', 'sync', 'apply', 'review', 'semantic', 'compaction', 'rollback', 'migration'
+  )),
+  change_set_id TEXT REFERENCES change_sets(id),
+  job_id TEXT REFERENCES jobs(id),
   idempotency_key TEXT NOT NULL UNIQUE,
   coordination_scope TEXT NOT NULL
     CHECK (coordination_scope IN ('standalone-service', 'workspace')),
   coordinator_id TEXT NOT NULL,
-  base_snapshot_id TEXT NOT NULL,
+  base_snapshot_id TEXT,
   target_snapshot_id TEXT NOT NULL,
-  phase TEXT NOT NULL,
+  base_authored_state_version INTEGER REFERENCES authored_state_versions(version),
+  target_authored_state_version INTEGER REFERENCES authored_state_versions(version),
+  phase TEXT NOT NULL CHECK (phase IN (
+    'prepared', 'built', 'pointer-committed', 'committed', 'aborted', 'quarantined'
+  )),
   mutation_hash BLOB NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE apply_journal_packs (
-  journal_id TEXT NOT NULL REFERENCES apply_journal(id) ON DELETE CASCADE,
+CREATE TABLE activation_journal_packs (
+  journal_id TEXT NOT NULL REFERENCES activation_journal(id) ON DELETE CASCADE,
   scope_kind TEXT NOT NULL CHECK (scope_kind IN ('service', 'workspace')),
   scope_id TEXT NOT NULL,
-  base_generation TEXT NOT NULL,
-  base_manifest_hash BLOB NOT NULL,
+  base_generation TEXT,
+  base_manifest_hash BLOB,
   target_generation TEXT NOT NULL,
-  target_manifest_hash BLOB NOT NULL,
+  target_manifest_hash BLOB,
   pointer_state TEXT NOT NULL,
   PRIMARY KEY (journal_id, scope_kind, scope_id)
 );
@@ -1548,22 +1886,49 @@ CREATE TABLE audit_events (
 
 The `comments`, `change_sets`, `change_set_generations`, `change_operations`, `reviews`,
 `publication_targets`, `publication_items`, `state_meta`, `generation_history`,
-`proposal_envelopes`, `apply_journal`, `apply_journal_packs`,
-`document_revisions`, `revision_archives`, `retention_refs`, and `jobs` tables
-live in the mutable `state.sqlite` beside `current.json`, not in the immutable
-generation database (§12.10). Foreign keys among those state tables are enforced.
-Pack-object references and service-generation references that cross pack roots are
-validated against exact manifest hashes by the application. `audit_events` also
-lives in `state.sqlite`; it is append-only under normal operation and follows the
-explicit retention/export policy in §12.11.
+`proposal_envelopes`, `authored_state_versions`, `authored_entity_revisions`,
+`authored_current_entities`, `activation_journal`, `activation_journal_packs`,
+`document_revisions`, `revision_archives`, `retention_refs`, and `jobs` tables live
+in the mutable `state.sqlite` beside `current.json`, not in the immutable generation
+database (§12.10). Foreign keys among those state tables are enforced. Pack-object
+references and service-generation references that cross pack roots are validated
+against exact manifest hashes by the application. `audit_events` also lives in
+`state.sqlite`; it is append-only under normal operation and follows the explicit
+retention/export policy in §12.11.
+
+`authored_current_entities` is the materialized current compiler input for accepted
+AI content, human/review edits, pinned placements, aliases, and reviewed taxonomy
+decisions. `authored_entity_revisions` is the append-only delta used to prepare and
+recover a new state version. Each typed `payload_json` is validated against the
+`cih-knowledge` schema for its `entity_kind`; arbitrary JSON is rejected. The
+canonical `state_hash` covers the authored-state schema and the key-sorted logical
+set of current entity IDs, content hashes, authorities, and lifecycles, including
+deletion tombstones that suppress deterministic regeneration. The active version
+and hash are duplicated in `state_meta` and checked on every write.
+Authored payloads contain stable knowledge/evidence IDs and intent only; generation
+IDs, activation timestamps, workflow status, and source change-set/review IDs are
+metadata outside the payload/content hash. Consequently `authored_state_hash` can
+participate in a generation descriptor without introducing another identity cycle.
+To reconstruct a noncurrent version, V1 follows explicit `parent_version` links to
+genesis, applies that branch's typed entity revisions in forward order, and verifies
+the resulting canonical hash before replacing `authored_current_entities`. A later
+validated checkpoint from §12.11 may bound replay. Version numbers are identifiers,
+not an assumption that all lower numbers belong to the same branch.
+
+Source-controlled overlays are a separate, repository-versioned compiler input and
+retain their higher precedence. `document_revisions` is historical output, not a
+source of current intent, and is never replayed to reconstruct a build. A full
+rebuild reads the exact active authored-state version plus evidence, configuration,
+taxonomy, and overlays; therefore losing all inactive pack directories cannot drop
+accepted or reviewed content.
 
 Evidence IDs are globally stable hashes of `(adapter namespace, repo identity,
 adapter-local key)`. `local_key` preserves the adapter identity used to derive the
 hash. `source_version` records the source version last observed and is deliberately
 excluded from the identity hash: a version-qualified identity would rotate every
 evidence ID on any repository change, invalidating every stored `EvidenceRef` and
-`block_evidence` row and making the Changed and Renamed evidence sets of §13.3 —
-and the 1-percent incremental budget of §3.2 — unattainable. `repo` is the
+`claim_evidence` row and making the Changed and Renamed evidence sets of §13.3 —
+and the 1-percent incremental budget of §3.2 — unattainable. `repo_id` is the
 immutable, globally unique repository registry ID, not a display name or mutable
 path. Identity is stable across versions; re-extraction upserts the row, refreshing
 `source_version`, locations, and hashes, and `content_hash` decides whether the
@@ -1571,7 +1936,8 @@ evidence counts as Changed.
 
 When an adapter-local key disappears, the compiler marks its row `tombstone`,
 records `deleted_generation`, and preserves its last locator and join rows.
-Dependent blocks can therefore transition to Stale and a
+Dependent claims can therefore transition to Stale, their blocks derive a stale or
+mixed summary, and a
 `ChangeEnvelope.deleted` entry remains resolvable during review. Reappearance of
 the same adapter-local key clears the tombstone and records a Changed transition.
 Physical deletion occurs only through the protected tombstone-retention rules in
@@ -1588,6 +1954,7 @@ CREATE VIRTUAL TABLE search_fts USING fts5(
   result_key UNINDEXED,
   object_key UNINDEXED,
   block_id UNINDEXED,
+  claim_ids UNINDEXED,
   kind UNINDEXED,
   title,
   aliases,
@@ -1600,7 +1967,10 @@ CREATE VIRTUAL TABLE search_fts USING fts5(
 
 The search document for a technical entity contains names, qualified names, route
 paths, event names, tables, signatures, and bounded doc comments. It does not store
-full source bodies by default.
+full source bodies by default. `summary` is derived from the selected active
+`core:summary` claim, and `body`/`evidence_terms` are derived from the block's
+active claims and their evidence joins. No object-summary or block-truth column is
+treated as a second factual source.
 
 ### 12.5 Indexes and constraints
 
@@ -1611,16 +1981,23 @@ Required indexes:
 - `relations(source_key, kind, deleted_generation)`
 - `relations(target_key, kind, deleted_generation)`
 - `blocks(object_key, section, ordinal)`
-- `evidence(repo, source_version, graph_node_id)`
+- `claims(object_key, kind, deleted_generation)`
+- `claims(truth_status, lifecycle, deleted_generation)`
+- `block_claims(claim_id, block_id)`
+- `evidence(repo_id, source_version, graph_node_id)`
 - `evidence(lifecycle, deleted_generation)`
-- `block_evidence(evidence_id)`
+- `claim_evidence(evidence_id, claim_id)`
+- `coverage_records(adapter, scope_kind, scope_id, construct_kind)`
+- `coverage_records(status, deleted_generation)`
 - `change_set_generations(scope_kind, scope_id, target_generation)`
 - `reviews(status, created_at)`
 - `publication_items(status)`
 - `generation_history(scope_kind, scope_id, created_at)`
 - `proposal_envelopes(status, created_at)`
-- `apply_journal(phase, updated_at)`
-- `apply_journal_packs(scope_kind, scope_id, target_generation)`
+- `authored_state_versions(status, created_at)`
+- `authored_entity_revisions(entity_kind, entity_id, state_version)`
+- `activation_journal(phase, updated_at)`
+- `activation_journal_packs(scope_kind, scope_id, target_generation)`
 - `document_revisions(entity_kind, entity_id, created_at)`
 - `revision_archives(min_created_at, max_created_at)`
 - `retention_refs(target_kind, target_id)`
@@ -1639,15 +2016,17 @@ publication.
 
 ### 12.6 Revision history
 
-V1 history covers document-visible knowledge objects, blocks, reviewed placements,
-comments, and applied change sets. It does not retain a revision for every
-technical symbol or evidence row.
+V1 history covers document-visible knowledge objects, claims, blocks, reviewed
+placements, comments, and applied change sets. It does not retain a revision for
+every technical symbol or evidence row.
 
 Before activation, changed document-visible rows are appended to
 `document_revisions` with the target generation and complete typed payload. The
 first accepted generation seeds one baseline revision for each document-visible
 entity. The history API reads these revisions instead of depending on old pack
 directories.
+Revisions describe what a user saw; they do not define what the next compiler must
+build. The active authored-state version in §12.3 is the durable current input.
 Generation retention remains useful for rollback but is not the history contract.
 Pruning an old generation therefore cannot remove document history. Configured
 history retention moves older revisions into queryable immutable archive segments
@@ -1696,24 +2075,30 @@ vectors are never queried against changed blocks.
 
 Build sequence:
 
-1. Resolve immutable input versions.
-2. Create a new staging generation directory.
-3. Build SQLite with WAL disabled for the final read-only artifact.
-4. Build optional vector sidecar.
-5. Run integrity, schema, referential, count, and checksum validation.
-6. Write `manifest.json`.
-7. Fsync files and generation directory where supported.
-8. Atomically replace the standalone pack's `current.json` using temporary-file
-   rename. A grouped multi-pack publication instead commits only the workspace
-   coordinator pointer through §12.10. On Windows either path requires
-   `ReplaceFile`/`MOVEFILE_REPLACE_EXISTING` semantics; a plain rename does not
-   replace an existing file there.
-9. Leave the previous generation available for rollback.
-10. Prune old generations only after retention policy permits it.
+1. Under the coordinator lock, snapshot immutable source inputs and the exact
+   authored-state version, then compute the target `GenerationDescriptor` and
+   `GenerationId` before writing output (§12.2).
+2. Prepare an activation journal and any authored-state delta through §12.10.
+3. Create the target staging generation directory named by `GenerationId`.
+4. Build SQLite with the precomputed generation ID and WAL disabled for the final
+   read-only artifact.
+5. Build the optional vector sidecar.
+6. Run integrity, schema, referential, count, determinism, and checksum validation.
+7. Write `manifest.json`, compute `ArtifactManifestHash`, and record the completed
+   target in the activation journal.
+8. Fsync files and generation directories where supported.
+9. Activate only through the generic coordinator protocol in §12.10. On Windows
+   pointer replacement requires `ReplaceFile`/`MOVEFILE_REPLACE_EXISTING`
+   semantics; a plain rename does not replace an existing file there.
+10. Leave the previous generation available for rollback and prune only after the
+    retention policy permits it.
 
 Standalone readers open the service generation named by one snapshot of
 `current.json`. Group readers open one workspace generation and its pinned service
 map (§12.2). Neither follows a moving pointer during a request.
+Index, sync, review, AI apply, semantic enrichment, compaction, migration, and
+rollback all use this sequence or its existing-generation rollback variant. No
+producer is allowed to replace `current.json` directly.
 
 ### 12.9 Runtime pack manager
 
@@ -1750,17 +2135,20 @@ State ownership:
 - A standalone repository uses its service-root `state.sqlite` and service
   `current.json` as the coordinator.
 - A grouped workspace uses the workspace-root `state.sqlite` as the authoritative
-  home for proposals, cross-service change sets, reviews, comments, jobs,
-  publication state, retention references, and the apply journal. Service-root
-  state files do not duplicate those workflow rows. Its `generation_history`
+  home for authored state, proposals, cross-service change sets, reviews, comments,
+  jobs, publication state, retention references, and the activation journal.
+  Service-root state files do not duplicate those rows. Its `generation_history`
   catalogs the workspace generations and every service generation referenced by a
   workspace manifest.
+- The immutable `repo_id` and single `docs_workspace_id` ownership rule in §11.1
+  determine which coordinator may write a repository. Overlapping non-documentation
+  groups cannot create a second authored state or workspace-specific service pack.
 - The grouped coordinator snapshot is the workspace generation selected by the
   workspace `current.json`. Its manifest contains the exact service-generation map
   (§12.2). A change set cannot span two workspaces; such a request is split into
   independently reviewed change sets.
 - `change_set_generations` stores the typed base and target generation for every
-  affected service and the workspace. `apply_journal_packs` stores the same
+  affected service and the workspace. `activation_journal_packs` stores the same
   resolved target set plus manifest hashes for crash recovery. Generation maps are
   never hidden only in `metadata_json`.
 
@@ -1768,69 +2156,103 @@ Rules:
 
 - The coordinator `state.sqlite` is the only database opened for workflow writes
   during serving.
-- State rows reference immutable snapshot and generation IDs and survive pointer
-  replacement.
-- Applying a change set never mutates the active generation: it produces a new
-  standalone service generation or a new workspace snapshot through the
-  incremental build path (§13.3) and activates it through the protocol below.
-- Generation producers (`cih docs index`, `cih docs sync`, change-set apply,
-  review resolution, and GC) serialize on operating-system advisory file locks,
+- State rows reference immutable snapshot, generation, manifest, and authored-state
+  IDs and survive pointer replacement.
+- No operation mutates an active generation. Index, sync, change-set apply, review
+  resolution, semantic enrichment, compaction, migration, and rollback all activate
+  through the same protocol below. GC uses the same locks and its dedicated archive
+  transaction (§12.11), but does not create a generation unless it runs compaction.
+- Generation producers and GC serialize on operating-system advisory file locks,
   not file-existence checks. A workspace operation acquires the workspace
   `write.lock` first and affected service locks in stable service-ID order; a
   standalone operation acquires only its service lock. This global order prevents
   deadlock. Process exit releases locks automatically. Lock metadata contains PID,
   host, start time, and operation ID for diagnostics. A second producer fails fast
   with a clear diagnostic rather than queueing silently.
+- For a repository owned by a documentation workspace, `cih docs index --group`
+  builds the changed service and a refreshed workspace generation in one activation.
+  A standalone index invocation fails with the owning workspace ID; it never moves
+  the service pointer independently. This eliminates competing workspace-specific
+  interpretations of the same service pack.
 - Readers never open `state.sqlite` transactionally with a pack; cross-database
   consistency is by the one selected coordinator snapshot, not joint transactions.
 
-Change-set activation protocol:
+Activation idempotency keys are operation-specific but all include coordinator ID,
+operation kind, expected base snapshot/manifest map, and mutation hash. Index/sync
+also include target generation descriptors; review/apply include the review or
+change-set ID; semantic enrichment and compaction include model/policy versions;
+rollback includes the exact target generation/manifest map. The unique journal key
+returns the prior result or resumes reconciliation and can never alias a request
+against a newer base.
 
-1. Acquire the coordinator and affected-pack locks in the order above. Read the
-   coordinator pointer once. Validate `base_snapshot_id` and every
-   `change_set_generations` base generation and manifest hash against that
-   snapshot's manifest. For each affected service, its standalone pointer must
-   still equal the pinned base generation (or already equal the idempotent target);
-   a newer independent service index causes a stale-snapshot failure and requires
-   workspace sync/rebase. The apply path never moves a service pointer backward.
-2. Build and validate every affected service target without changing a pointer.
-   Build the target workspace generation last; its manifest pins the new service
-   targets and the unchanged service generations inherited from the base snapshot.
-   A standalone apply builds one service target.
-3. In one coordinator `state.sqlite` transaction, register all target generations,
-   insert the `apply_journal` row and its `apply_journal_packs` children as
-   `Prepared`, append revision rows, add required `retention_refs`, and store all
-   snapshot-qualified workflow effects. Prepared rows are visible only through
-   reconciliation logic.
-4. Atomically replace only the coordinator `current.json`: the workspace pointer
-   for a group or the service pointer for standalone operation. This single rename
-   is the logical commit point.
-5. In one idempotent coordinator-state transaction, mark the journal `Committed`,
-   finalize change-set/review status, and mark the target snapshot Active.
-6. For a grouped apply, idempotently advance affected service `current.json`
-   pointers with an expected-base compare and record each `pointer_state`. These
-   pointers support standalone readers but are not consulted by grouped readers,
-   so a crash here cannot expose a mixed workspace snapshot.
-7. Release locks. Cleanup occurs only through §12.11.
+Generation activation protocol:
 
-Startup and pre-write reconciliation runs before accepting another producer:
+1. Reconcile any nonterminal journal, then acquire the coordinator and affected-pack
+   locks in the global order. Read the coordinator pointer and active
+   authored-state version once. Validate the caller's expected base snapshot,
+   generation/manifest map, and authored-state hash. Initial creation has no base;
+   every other operation must name one. A stale base fails before output is built.
+2. Validate and canonicalize the operation's typed authored-state mutation. Compute
+   the target logical authored state and hash without exposing it. Operations that
+   change no human/reviewed intent reuse the base version and hash. A rollback names
+   the authored-state version/hash recorded by the target manifest; retained state
+   revisions can reconstruct that version.
+3. Resolve complete compiler inputs and precompute every target `GenerationId`.
+   In one coordinator-state transaction, insert an `activation_journal` in
+   `prepared`, its pack map, and any prepared `authored_state_versions` and
+   `authored_entity_revisions`. The mutation hash covers operation kind, expected
+   base, target descriptors, and authored delta. No prepared authored row is copied
+   to `authored_current_entities` yet.
+4. Build and validate every affected service target without changing a pointer.
+   Build the workspace target last, pinning new and inherited service
+   `{ generation, manifest_hash }` pairs. Rollback validates the already existing
+   target instead. In one transaction, register completed generations, fill target
+   manifest hashes, append snapshot-qualified document revisions and retention
+   references, and move the journal to `built`.
+5. Atomically replace only the coordinator `current.json`: the workspace pointer
+   for a group or service pointer for standalone operation. This one rename is the
+   logical visibility commit. A best-effort state transaction records
+   `pointer-committed`; recovery never depends on that write succeeding.
+6. In one idempotent coordinator-state transaction, apply prepared authored deltas
+   to `authored_current_entities` (or reconstruct the selected version for
+   rollback), update the active authored version/hash in `state_meta`, finalize
+   change-set, review, and job effects, mark generations and authored state active,
+   and mark the journal `committed`.
+7. For a grouped operation, idempotently repair affected service `current.json`
+   pointers with expected-base-or-target comparison and record each `pointer_state`.
+   Group readers do not consult those pointers, so a crash during repair cannot
+   expose a mixed workspace snapshot. Release locks; cleanup occurs only through
+   §12.11.
 
-- `Prepared` and coordinator `current == base_snapshot_id`: revalidate every
-  `apply_journal_packs` target and manifest hash, then resume pointer activation; if
-  validation fails before the commit point, mark the journal Aborted and leave
-  unreferenced targets for GC.
-- `Prepared` and coordinator `current == target_snapshot_id`: idempotently run the
-  finalization transaction and repair grouped service pointers.
-- `Committed` and coordinator `current == target_snapshot_id`: repair any remaining
-  grouped service pointers; no logical state transition is needed.
-- Any other pointer/journal combination is quarantined as a blocking consistency
-  error; it is never guessed or silently overwritten.
+Startup reconciliation runs before write readiness, and pre-write reconciliation
+runs before accepting another producer:
+
+In the cases below, “at the base” or “at the target” means that both the generation
+and manifest hash in `current.json` equal the corresponding coordinator pack row.
+
+- `prepared` with the coordinator still at the base: resume an explicitly
+  restartable durable job, or abort the prepared authored version and leave partial
+  targets for GC. If all target manifests validate, reconciliation may promote the
+  journal to `built` and continue.
+- `built` with the coordinator at the base: validate every target generation and
+  manifest hash, then resume pointer activation. Validation failure before the
+  commit point aborts the journal and prepared authored version.
+- `prepared`, `built`, or `pointer-committed` with the coordinator at the target:
+  infer that the logical commit occurred and run finalization exactly once from the
+  stored typed delta, then repair grouped service pointers.
+- `committed` with the coordinator at the target: repair any remaining service
+  pointers; no logical state transition is needed.
+- A pointer at neither the recorded base nor target, a mismatched authored-state
+  parent/hash, or an invalid target manifest quarantines the journal as a blocking
+  consistency error. Recovery never guesses, rolls a pointer backward, or silently
+  overwrites newer state.
 
 State readers use the selected coordinator snapshot plus journal phase when
-resolving snapshot-qualified rows. Group readers always derive service generations
-from the selected workspace manifest, so a crash cannot expose a mixture of old
-and new service packs. Fault-injection tests kill the process before and after
-every step and after each service-pointer repair.
+resolving snapshot-qualified rows; prepared authored revisions are invisible.
+Group readers always derive service generations from the selected workspace
+manifest, so a crash cannot expose a mixture of old and new service packs.
+Fault-injection tests kill the process before and after every step for every
+operation kind and after each service-pointer repair.
 
 ### 12.11 Retention, archive, and garbage collection
 
@@ -1860,9 +2282,11 @@ transactions create and remove these typed references with their owner rows:
 - Submitted change set to proposal envelope and all base/target snapshots.
 - Unresolved review or comment to its change set, revision, and required snapshot.
 - Publication conflict to the published revision and generation.
-- Nonterminal apply journal to every pack generation in `apply_journal_packs`.
+- Nonterminal activation journal to every pack generation in
+  `activation_journal_packs` and to any prepared authored-state version.
 - Active job to its proposal, change set, export, or publication result.
 - Retained workspace snapshot to every service generation in its manifest.
+- Retained generation to the authored-state version/hash recorded by its manifest.
 
 GC never parses `metadata_json`, `payload_json`, `result_id`, or audit text to infer
 reachability. Audit records do not pin all historical storage indefinitely: when an
@@ -1933,9 +2357,21 @@ be deleted under their caps. Audit rows are exported and checksum-verified befor
 their configured removal. Dry-run and real GC use the same candidate-selection
 function.
 
+Authored-state revisions are not document-history retention. V1 retains the full
+parent chain required to reconstruct the active state and every state referenced by
+a retained generation, nonterminal workflow, or audit retention root. A later
+compactor may checkpoint a complete canonical authored state and remove unreachable
+prefix deltas only after proving the checkpoint hash equals the original logical
+state; ordinary revision archiving never deletes compiler intent.
+
 ## 13. Knowledge Compilation
 
 ### 13.1 Full service build
+
+Before pass 1, the compiler captures the active authored-state version/hash from
+the owning coordinator and validates it against the canonical materialization. The
+same snapshot is used through publication; accepted intent cannot change midway
+through a build.
 
 Pass 1: metadata and nodes
 
@@ -1983,13 +2419,15 @@ Pass 3: technical assets
 
 - Run configured evidence adapters.
 - Reuse unchanged adapter outputs by input fingerprint.
-- Record coverage and diagnostics.
+- Persist scoped `coverage_records`, then derive manifest coverage aggregates and
+  diagnostics from them.
 
 Pass 4: deterministic projection
 
 - Build Service, Component, Interface, API, Event, Job, DataAsset, DeploymentUnit,
   TestCase, and Process objects.
-- Materialize summary facts and role-neutral blocks.
+- Materialize independently attributable claims, including `core:summary` claims,
+  and role-neutral blocks that reference those claim IDs.
 - Create evidence-backed relations.
 
 Pass 5: classification
@@ -2002,8 +2440,10 @@ Pass 5: classification
 Pass 6: content
 
 - Build deterministic blocks.
-- Merge overlays according to authority and mode.
-- Mark stale or conflicting blocks.
+- Apply the captured current authored-state entities, then merge source-controlled
+  overlays according to authority and mode.
+- Mark individual claims stale or conflicting and derive block-level status
+  summaries.
 
 Pass 7: search
 
@@ -2016,6 +2456,9 @@ Pass 8: validation and publish
 - Validate and atomically activate the generation.
 
 No pass constructs a complete `WikiGraph` or renders every possible document.
+A clean build with no prior generation uses evidence, configuration, taxonomy,
+overlays, and current authored state to reproduce all accepted content. Revision
+history and old packs are never required as hidden compiler inputs.
 
 ### 13.2 Workspace build
 
@@ -2041,12 +2484,13 @@ Inputs are fingerprinted by adapter and projector.
 
 Incremental logic:
 
-1. Compare active manifest inputs to current inputs.
+1. Compare active manifest inputs, including authored-state version/hash and scoped
+   coverage inputs, to current inputs.
 2. Exit successfully with `unchanged` when all fingerprints match.
 3. Stream new artifacts and compare technical object hashes.
 4. Create Added, Changed, Deleted, and Renamed evidence sets.
 5. Find projectors dependent on those evidence keys.
-6. Rebuild only affected objects, relations, and blocks.
+6. Rebuild only affected objects, relations, claims, blocks, and coverage records.
 7. Rebuild FTS rows and embeddings only for changed blocks.
 8. Recalculate workspace objects only for changed service summaries.
 9. Publish a complete immutable generation.
@@ -2092,7 +2536,8 @@ Rename detection uses:
 Deletion behavior:
 
 - Missing generated evidence becomes a tombstone.
-- Dependent blocks become Stale in the first generation.
+- Dependent claims become Stale in the first generation; containing blocks derive
+  their stale/mixed summary.
 - Physical evidence removal occurs only through §12.11 after stale-block and
   workflow protections expire.
 - Human overlays remain and show a missing-evidence warning.
@@ -2226,11 +2671,19 @@ pub struct BoundedCollection<T> {
     pub continuation: Option<LocalQueryRef>,
 }
 
+pub struct PackVersionRef {
+    pub generation: GenerationId,
+    pub manifest_hash: ArtifactManifestHash,
+}
+
 pub struct DocumentationSnapshotRef {
     pub coordination_scope: CoordinationScope,
     pub coordinator_id: String,
     pub snapshot_id: GenerationId,
-    pub service_generations: BTreeMap<ServiceId, GenerationId>,
+    pub snapshot_manifest_hash: ArtifactManifestHash,
+    pub service_generations: BTreeMap<ServiceId, PackVersionRef>,
+    pub authored_state_version: u64,
+    pub authored_state_hash: ContentHash,
 }
 
 pub struct ChangeEnvelope {
@@ -2276,7 +2729,7 @@ change produces a diagnostic or review item instead of silently dropping scope.
 4. Retrieve at most 20 placement candidates.
 5. Select at most 8 candidates for LLM adjudication.
 6. Ask the LLM for schema-constrained placement and missing-information output.
-7. Generate role-neutral Inferred facts before role-specific prose. Observed facts
+7. Generate role-neutral Inferred claims before role-specific prose. Observed claims
    come only from deterministic projectors and attestations.
 8. Generate or update stable blocks only.
 9. Validate every object, relation, claim, and evidence reference.
@@ -2296,7 +2749,7 @@ proposal:
 ```json
 {
   "placement": {
-    "selected_parent": "cih://banking/business/core:capability/payment-refunds",
+    "selected_parent": "cih://workspace_01j_banking/business/core:capability/payment-refunds",
     "alternatives": [],
     "confidence": 0.94,
     "signals": [
@@ -2305,7 +2758,7 @@ proposal:
     ],
     "rationale": "The new endpoint extends the existing refund process."
   },
-  "facts": [
+  "claims": [
     {
       "claim_id": "refund-api-created",
       "truth_status": "inferred",
@@ -2341,6 +2794,7 @@ pub struct DocumentationChangeSet {
     pub instruction: Option<String>,
     pub object_operations: Vec<ObjectOperation>,
     pub relation_operations: Vec<RelationOperation>,
+    pub claim_operations: Vec<ClaimOperation>,
     pub block_operations: Vec<BlockOperation>,
     pub placement_operations: Vec<PlacementOperation>,
     pub review_items: Vec<ReviewItem>,
@@ -2351,6 +2805,9 @@ pub struct DocumentationChangeSet {
 
 Operations are Add, Update, Deprecate, DeleteGenerated, Alias, or ProposeTaxonomy.
 There is no unrestricted SQL or Markdown-edit operation.
+Claim operations carry their own authority, truth status, evidence joins,
+attestation, and base content hash. A block operation may reference only claims
+created by the same change set or present in its exact base snapshot.
 
 ### 15.6 Validation
 
@@ -2358,15 +2815,18 @@ Before apply:
 
 - The coordinator snapshot and every service generation still exactly match
   `base_snapshot`.
+- The active authored-state version/hash matches the proposal and change-set base.
 - Object keys and kinds are valid.
 - Referenced objects and evidence exist. Deleted-evidence operations may reference
   retained tombstones; other operations require Active evidence.
 - New relations do not create forbidden primary-parent cycles.
+- Relation source/target kinds and direction match the registered
+  `RelationDefinition`; inverse display labels are not accepted as stored kinds.
 - Block payloads match their type schema.
 - Every Observed claim has a deterministic attestation containing projector
   version, claim-template ID, source evidence fields, and a reproducible claim
   hash.
-- AI-originated facts are Inferred or Intended, never Observed.
+- AI-originated claims are Inferred or Intended, never Observed.
 - Inferred claims are labeled.
 - Human and pinned authority rules are respected.
 - Replacement base hashes match current blocks.
@@ -2379,7 +2839,7 @@ Before apply:
 Any validation or pre-activation failure leaves the active coordinator snapshot
 unchanged.
 Once pointer activation succeeds, a finalization failure is recovered
-idempotently through `apply_journal` (§12.10); it does not roll the pointer back
+idempotently through `activation_journal` (§12.10); it does not roll the pointer back
 without an explicit rollback operation.
 
 Placement confidence and factual truth are independent. A `0.94` placement score
@@ -2397,7 +2857,7 @@ Idempotency is defined separately for proposal, change-set submission, and apply
 - Proposal key: normalized instruction, canonical resolved scope,
   `base_snapshot.snapshot_id`, the key-sorted service-generation map, graph and
   technical-asset fingerprints, taxonomy and overlay versions, and agent policy
-  version.
+  version, plus the base authored-state version/hash.
 - Change-set key: proposal ID, envelope hash, canonical typed-operation hash, model
   and prompt versions when applicable, and generator policy version.
 - Apply key: change-set ID, expected base snapshot ID, and mutation hash.
@@ -2434,6 +2894,10 @@ Review actions:
 - Defer.
 
 Review resolution creates an auditable change set. It does not mutate rows directly.
+Accept, edit, pin, convert-to-human, alias, and taxonomy decisions produce typed
+authored-state revisions and a new generation through the generic activation
+protocol. Reject and defer update workflow state only and do not create compiler
+intent.
 
 ### 15.9 AI failure behavior
 
@@ -2545,14 +3009,15 @@ Default limits:
 {
   "results": [
     {
-      "object_key": "cih://banking/business/core:capability/payment-refunds",
+      "object_key": "cih://workspace_01j_banking/business/core:capability/payment-refunds",
       "block_id": "capability-overview",
       "kind": "core:capability",
       "title": "Payment Refunds",
       "breadcrumb": ["Banking Platform", "Payments", "Payment Refunds"],
       "excerpt": "A refund can be requested...",
-      "truth_status": "observed",
+      "truth_summary": ["observed"],
       "authority": "generated",
+      "matched_claim_ids": ["refund-api-created"],
       "evidence_count": 8,
       "scores": {
         "lexical": 0.81,
@@ -2602,6 +3067,8 @@ workspace `canonical_language`.
 ```rust
 pub struct DocumentView {
     pub object: KnowledgeObject,
+    pub summary: Option<KnowledgeClaim>,
+    pub claim_summary: ClaimSummary,
     pub role: Audience,
     pub breadcrumbs: Vec<NavigationItem>,
     pub sections: Vec<DocumentSection>,
@@ -2665,7 +3132,8 @@ GET /navigation?workspace=<id>&role=<role>&parent=<key>&cursor=<cursor>
 GET /object?key=<knowledge-key>&role=<role>
 GET /section?key=<knowledge-key>&section=<id>&role=<role>
 GET /relations?key=<knowledge-key>&kind=<kind>&direction=<direction>&cursor=<cursor>
-GET /evidence?key=<knowledge-key>&block=<block-id>&cursor=<cursor>
+GET /evidence?key=<knowledge-key>&block=<block-id>&claim=<claim-id>&cursor=<cursor>
+GET /coverage?workspace=<id>&service=<id>&adapter=<id>&scope_kind=<kind>&scope_id=<id>&construct=<kind>&status=<status>&cursor=<cursor>
 GET /history?key=<knowledge-key>&entity=<optional-id>&cursor=<cursor>
 GET /search?q=<query>&workspace=<id>&role=<role>&filters...
 GET /changes?workspace=<id>&since_snapshot=<snapshot>&cursor=<cursor>
@@ -2766,11 +3234,12 @@ On restart:
 - Queued jobs within their deadline are re-admitted.
 - Running jobs become Interrupted and are retried only when the operation is
   declared idempotent and its deadline remains valid.
-- Apply jobs reconcile `apply_journal` before changing job state.
+- Generation-producing jobs reconcile `activation_journal` before changing job
+  state.
 - Non-idempotent publication jobs resume from `publication_items` or fail with a
   stable manual-intervention code.
 - Terminal job rows follow bounded TTL/cap policies, except while referenced by an
-  unresolved review, change set, publication conflict, or apply journal.
+  unresolved review, change set, publication conflict, or activation journal.
 
 ## 19. MCP Interface
 
@@ -2798,7 +3267,7 @@ On restart:
 
 `get_knowledge_evidence`
 
-- Inputs: key, block ID, cursor, limit.
+- Inputs: key, optional block ID, optional claim ID, cursor, limit.
 - Returns: bounded evidence references and snippets.
 
 `get_documentation_status`
@@ -2806,6 +3275,13 @@ On restart:
 - Inputs: workspace or repository.
 - Returns: coordinator snapshot, pinned pack generations, staleness, coverage,
   diagnostics, and review counts.
+
+`get_documentation_coverage`
+
+- Inputs: workspace, optional service, adapter, scope kind/ID, construct kind,
+  status, cursor, and limit.
+- Returns: paginated scoped coverage records and derived counts. It never converts
+  unsupported or failed scope into a supported-not-found result.
 
 ### 19.2 Write tools
 
@@ -2880,9 +3356,11 @@ cih docs gc
 
 ### 20.1 `cih docs init`
 
-Creates or registers workspace configuration, validates group membership, and emits
-a starter taxonomy with an Unclassified domain. It never invents approved business
-domains without review.
+Creates or registers workspace configuration, runs or validates the immutable
+repository-ID migration, resolves group names to repository IDs, claims the single
+documentation-workspace ownership allowed by §11.1, and emits a starter taxonomy
+with an Unclassified domain. It never invents approved business domains without
+review.
 
 ### 20.2 `cih docs index`
 
@@ -2892,6 +3370,9 @@ cih docs index <repo> [--group <group>] [--force] [--no-ai]
 ```
 
 Builds or incrementally refreshes one service pack.
+For a workspace-owned repository, `--group` must name the owner and the command
+also refreshes and activates the workspace pack; invoking it as standalone is a
+validation error. A standalone repository omits `--group`.
 
 ### 20.3 `cih docs sync`
 
@@ -2909,7 +3390,7 @@ Reports:
 - Active coordinator snapshot and pinned pack generations.
 - Input and taxonomy versions.
 - Staleness.
-- Object, block, relation, and evidence counts.
+- Object, relation, claim, block, evidence, and coverage-record counts.
 - Extraction coverage.
 - Search availability.
 - Review backlog.
@@ -3186,7 +3667,7 @@ Index metrics:
 
 - Nodes and edges streamed.
 - Adapter duration and coverage.
-- Objects, relations, blocks, and evidence emitted.
+- Objects, relations, claims, blocks, evidence, and coverage records emitted.
 - Reused versus rebuilt projections.
 - FTS and vector build duration.
 - Peak batch size and RSS.
@@ -3246,8 +3727,10 @@ Readiness checks:
 - Preserve addressability, major content, evidence, and MCP behavior.
 - Run old and new outputs from the same graph versions during comparison.
 - Keep rollback available for one compatibility release.
-- Do not switch the default product link or remove Docusaurus until the Phase 6
-  scale, boundedness, recovery, and fault-injection gates pass.
+- Do not switch the default embedded product link until the Phase 6 scale,
+  boundedness, recovery, and fault-injection gates pass.
+- Do not remove Docusaurus until Phase 7 static-export parity and the compatibility
+  release complete. Confluence is never a cutover prerequisite.
 
 ### 26.2 Legacy mapping
 
@@ -3289,22 +3772,31 @@ Cutover order:
 3. Compatibility wiki MCP adapters.
 4. New embedded UI under `/docs`.
 5. Phase 6 performance, boundedness, recovery, and fault-injection gates pass.
-6. Static export replaces Docusaurus deployment needs.
-7. Default product link switches from Docusaurus to `/docs`.
-8. Keep `cih wiki` compatibility wrapper for one release.
-9. Remove Docusaurus and `docs-viewer`.
+6. Default embedded product link switches to `/docs`; Docusaurus remains available
+   for compatibility/static deployment workflows.
+7. Phase 7 static HTML export replaces Docusaurus deployment needs and passes its
+   separate removal gate.
+8. Keep `cih wiki` compatibility wrapper and Docusaurus rollback for one release.
+9. Remove Docusaurus and `docs-viewer` only after that release.
 10. Remove resident `OwnedWiki`, `LiveWikiIndex`, and hardcoded page generation after
    no supported caller remains.
 
 ## 27. Delivery Plan
 
-The MVP is Phases 0–3: the minimum end-to-end slice that replaces the wiki for
+The MVP is Phases 0–3: the minimum end-to-end slice that can replace the wiki for
 daily use (artifact and repository-docs adapters, deterministic projection, role
 views, packs, server reads, UI). Phase 3 makes the new read path available for
 opt-in use; it does not switch the default product link. Phases 4–7 are sequenced
-enhancements. The remaining evidence adapters and Confluence publication are
-explicitly deferred and must not block default read-path cutover after Phase 6
-gates pass.
+hardening and capability slices. The Phase 6 gate permits the embedded `/docs`
+read path to become the default. Static export and the compatibility release remain
+required for Docusaurus removal in Phase 7. Confluence publication is conditional
+when enabled and blocks neither gate.
+Phase 5 adapters are delivered independently behind their coverage contracts; the
+entire adapter catalog is not a default-read-path prerequisite. Unsupported assets
+must remain explicit rather than delaying useful documentation for supported input.
+Likewise, Phases 4C and 4D are optional feature profiles; their disabled/degraded
+paths are part of the default gate, while their quality targets apply only when
+enabled (§29.3).
 
 ### Phase 0: Baseline and architecture contracts
 
@@ -3313,7 +3805,9 @@ Deliverables:
 - Benchmark corpus and hardware definition.
 - Current wiki content inventory.
 - Role-based evaluation queries.
-- Architecture decision records for keys, ontology, packs, workspace-snapshot
+- Architecture decision records for immutable repository/workspace identity,
+  relation direction, claim/attestation ownership, generation versus artifact
+  identity, authored state, generic activation, packs, workspace-snapshot
   coordination, technical-edge indexing, retention/archive, AI authority, and
   vector backend.
 - New crate skeletons and layering enforcement.
@@ -3327,6 +3821,10 @@ Deliverables:
   paths, checksum/fsync cost, and staged vector updates.
 - Compact `technical_edges` prototype on the 5M-edge benchmark, including forward
   and reverse lookup size and latency.
+- Reproducibility prototype for the mandatory FTS and selected semantic profiles,
+  proving that generation IDs are known before SQLite is serialized, identical
+  inputs produce identical artifact manifest hashes, and an intentional output-byte
+  change is detected without a hash cycle.
 
 Acceptance:
 
@@ -3336,6 +3834,8 @@ Acceptance:
   `fastembed`, `ort`, or USearch dependency; semantic profiles compile separately.
 - The selected physical pack strategy demonstrates a credible path to both full and
   incremental budgets; otherwise the storage ADR is revised before Phase 1.
+- Registry fixtures prove that names/paths are not identity and that ambiguous
+  name-based group migration fails closed.
 
 ### Phase 1: Knowledge model and service packs
 
@@ -3343,16 +3843,21 @@ Deliverables:
 
 - `cih-knowledge`.
 - `cih-doc-store`.
-- Stable key and kind validation.
+- Atomic registry migration to immutable `repo_id`, persisted documentation
+  workspace IDs, ID-based group membership, and stable key/kind validation.
+- Machine-readable relation definitions and canonical-direction validation.
 - SQLite migrations.
-- Canonical manifest input/fingerprint schema.
+- Claim, claim-evidence, deterministic-attestation, and scoped-coverage storage.
+- Canonical generation descriptor, authored-state baseline, manifest
+  input/fingerprint schema, and separate artifact manifest hash.
 - Artifact streaming adapter.
 - Streaming repository-docs adapter with include/ignore, path-count, file-size,
   total-byte, cancellation, and coverage rules.
-- Technical object, knowledge relation, compact technical-edge, block, and evidence
-  projection.
+- Technical object, knowledge relation, claim, compact technical-edge, block,
+  evidence, and coverage projection.
 - Evidence tombstone transitions and protected tombstone GC.
-- Atomic generation publication.
+- Generic activation journal for initial and incremental service indexing; no
+  direct pointer-writing path.
 - Status and integrity commands.
 
 Acceptance:
@@ -3362,8 +3867,13 @@ Acceptance:
 - Does not retain all discovered repository paths or document bodies in memory.
 - Can resolve object, evidence, knowledge-relation, and one-hop call/reference
   queries without `GraphStore` or a scan of `edges.jsonl`.
-- Manifest comparison returns no-change only when every configured input
-  fingerprint matches.
+- Manifest/descriptor comparison returns no-change only when every
+  descriptor-affecting field and configured input fingerprint matches.
+- Coverage state is queryable by adapter, scope, and construct; manifest coverage
+  is demonstrably derived from those rows.
+- Observed claims without valid deterministic attestations cannot be published.
+- Generation IDs and SQLite checksums have no circular dependency, and a
+  reproducibility mismatch fails publication.
 - Deleted evidence remains resolvable as a tombstone until its protection and
   retention window expire.
 - Survives interrupted builds without changing the active generation.
@@ -3373,6 +3883,8 @@ Acceptance:
 Deliverables:
 
 - Workspace and repository config parsing.
+- Single writable documentation-workspace ownership enforcement and audited
+  standalone-to-workspace attach migration.
 - Domain and capability taxonomy.
 - Deterministic placement.
 - Overlay system.
@@ -3389,6 +3901,9 @@ Acceptance:
 - One capability can span multiple services.
 - Uncertain placement appears in Unclassified.
 - One workspace pointer selects a reproducible workspace/service generation map.
+- Overlapping ordinary groups cannot write a second documentation interpretation,
+  and indexing an owned service activates a refreshed workspace snapshot rather
+  than independently moving its service pointer.
 
 ### Phase 3: Server, MCP reads, and UI
 
@@ -3409,51 +3924,97 @@ Acceptance:
 - Browser receives no unbounded collection.
 - Legacy `search_wiki` and `get_wiki_page` work through adapters.
 - Grouped reads use only service generations pinned by the selected workspace
-  manifest, even while service pointers move independently.
+  manifest, including while post-commit service-pointer repair is incomplete.
 
-### Phase 4: Semantic search and AI documentation
+### Phase 4A: Durable authorship and generic write activation
+
+Deliverables:
+
+- Authored-state versions, typed revisions, current materialization, canonical hash,
+  and source-controlled-overlay precedence.
+- Typed object, relation, claim, block, placement, alias, and taxonomy operations.
+- Snapshot-bound change-set validation and idempotent apply.
+- Generic multi-pack activation journal used by index, sync, apply, review,
+  semantic enrichment, compaction, migration, and rollback.
+- Normalized generation maps, deterministic lock ordering, and startup/pre-write
+  reconciliation.
+- Minimal principal model and authenticated MCP/HTTP write foundation.
+
+Acceptance:
+
+- A clean full rebuild with old pack directories removed reproduces accepted AI,
+  reviewed human content, pins, aliases, placements, and taxonomy from current
+  authored state.
+- Prepared authored changes are invisible before pointer commit and finalize
+  exactly once after it.
+- Process termination at every activation step for every operation kind converges
+  to one consistent snapshot, authored-state version, and workflow state.
+- A repository cannot be written through two documentation coordinators.
+
+### Phase 4B: Workflow, review, history, and retention
+
+Deliverables:
+
+- Durable proposal and typed change-set storage/application services.
+- Document revision history, normalized retention references, queryable archive
+  segments, and the full `cih docs gc` workflow.
+- Review inbox and UI.
+- Durable jobs and authenticated MCP/HTTP review, apply, export, and publication
+  write tools.
+
+Acceptance:
+
+- Ambiguous and taxonomy-changing scenarios require review.
+- Accept, edit, pin, alias, and convert-to-human decisions become durable authored
+  state rather than history-only rows.
+- Archived revision history remains paginated and queryable after live revision
+  and pack-generation pruning.
+- GC cannot remove authored state, evidence, generations, proposals, or jobs held by
+  normalized retention roots.
+- Queued/running durable jobs recover according to their operation policy.
+
+### Phase 4C: Optional semantic retrieval
+
+Deliverables:
+
+- Local USearch semantic index and optional pgvector adapter.
+- Hybrid search, score explanation, staged vector update, and FTS-only degradation.
+
+Acceptance:
+
+- The default build remains free of embedding/ONNX/USearch dependencies.
+- Semantic ranking improves the Phase 0 evaluation set and meets its separate
+  performance budget when enabled.
+- Vector failure cannot make FTS, navigation, or document reads unavailable.
+
+### Phase 4D: Optional AI documentation agent
 
 Deliverables:
 
 - `cih-llm` extraction.
-- Local USearch semantic index and optional pgvector adapter.
-- Hybrid search and score explanation.
-- Change envelopes.
-- Placement engine.
-- Structured AI proposals.
-- Durable proposal retrieval and typed change-set submission handoff.
-- Snapshot-bound change-set validation and idempotent apply.
-- Multi-pack coordinator journal with normalized generation maps and deterministic
-  lock ordering.
-- Document revision history, normalized retention references, queryable archive
-  segments, and the full `cih docs gc` workflow.
-- Review inbox and UI.
-- Minimal principal model and authenticated MCP/HTTP write tools.
+- Change envelopes and deterministic placement candidates.
+- Structured claim/block proposals with durable server/CLI handoff.
+- AI idempotency, evidence/attestation validation, and review integration.
 
 Acceptance:
 
 - "Document the new API" scenarios update the correct existing capability when
   evidence is strong.
-- Ambiguous and taxonomy-changing scenarios require review.
-- Hallucinated or stale references cannot be applied.
+- Hallucinated, non-entailed, stale, or wrong-direction references cannot be
+  applied.
 - AI prose cannot be marked Observed without deterministic attestation.
-- Repeating an instruction against the same snapshot is idempotent; advancing only
-  the document snapshot produces a new proposal instead of a stale prior result.
-- Process termination at every activation step converges to one consistent
-  workspace snapshot and workflow state after restart, including cross-service
-  changes and service-pointer repair.
-- Archived revision history remains paginated and queryable after live revision
-  and pack-generation pruning.
+- Repeating an instruction against the same snapshot and authored-state hash is
+  idempotent; advancing either produces a fresh proposal.
+- AI-disabled and provider-failure paths retain complete deterministic documents.
 
-### Phase 5: Universal technical assets
+### Phase 5: Universal technical assets (incremental)
 
 Deliverables:
 
 - OpenAPI, AsyncAPI, GraphQL, database, configuration, container, Kubernetes,
   and Terraform adapters.
 - External evidence-bundle import.
-- Coverage reporting.
-- Cross-service workspace compilation.
+- Adapter-specific scoped coverage expansion and cross-asset contract projectors.
 
 Acceptance:
 
@@ -3478,7 +4039,8 @@ Acceptance:
 - All mandatory FTS-profile performance budgets pass.
 - The Phase 0 local-semantic budget passes when that feature is enabled.
 - No unbounded endpoint, discovery path, envelope, job queue, log, or cache remains.
-- Restart recovery converges every apply-journal and durable-job fault scenario.
+- Restart recovery converges every activation-journal operation and durable-job
+  fault scenario.
 - GC preserves every normalized retention root and recovers every archive
   temp-file/catalog crash point without history loss.
 - Corrupt and unavailable optional components degrade safely.
@@ -3489,10 +4051,10 @@ Acceptance:
 Deliverables:
 
 - Static HTML export.
-- Confluence publisher and publication state.
+- Optional Confluence publisher and publication state.
 - Wiki migration command.
 - Dual-run reports.
-- Default UI cutover after the Phase 6 gate.
+- Recorded default embedded-UI cutover after the Phase 6 gate.
 - Docusaurus removal after the compatibility release.
 
 Acceptance:
@@ -3503,7 +4065,8 @@ Acceptance:
 - All current supported wiki slugs resolve.
 - Rollback works during the compatibility window.
 - Docusaurus is removed only after no supported workflow depends on it and all
-  default-use acceptance criteria (§29) pass.
+  removal criteria (§29.2) pass. Conditional Confluence criteria (§29.3) apply only
+  when that publisher is enabled.
 
 ## 28. Test Strategy
 
@@ -3512,24 +4075,36 @@ Acceptance:
 - Knowledge kind and key validation.
 - Stable ID generation.
 - Globally namespaced evidence-ID generation and collision fixtures.
-- Immutable repository-ID validation.
+- Immutable repository/workspace-ID migration, rename/path preservation, import
+  collision, ambiguous name-membership failure, and ID-based group round-trip.
+- Single documentation-workspace ownership, overlapping ordinary groups, and
+  standalone-to-workspace attach validation.
 - Evidence Active/Tombstone/reappearance transitions and protected deletion.
 - Alias and merge behavior.
 - Primary-parent cycle prevention.
+- Relation-definition registration, canonical direction, source/target kind, and
+  inverse-label rendering.
 - Pack-local foreign keys and external-reference validation.
 - Authority precedence.
 - Truth-state transitions.
+- Claim lifecycle, claim-evidence roles, summary-claim selection, mixed block truth
+  summaries, and deterministic attestation validation.
 - Block schema validation.
-- Overlay merge modes.
+- Scoped six-state coverage persistence and manifest aggregation.
+- Overlay merge modes, explicit claim mapping, presentation-only behavior, and
+  rejection of unattested Observed overlay claims.
 - Config validation.
 - Placement thresholds and sticky placement.
 - Snapshot-bound proposal, change-set, and apply idempotency keys.
 - Change-set validation.
-- Canonical manifest serialization, complete input accounting, and generation hashes.
+- Authored-state typed-payload validation, canonical hashing, current
+  materialization, branch/rollback reconstruction, and overlay precedence.
+- Canonical manifest serialization, complete input accounting, precomputed
+  generation IDs, artifact manifest hashes, and reproducibility mismatch detection.
 - Stable compact-ID insertion/collision behavior plus technical-edge
   forward/reverse lookup and cursors.
-- Multi-pack generation-map validation, lock ordering, apply-journal transitions,
-  and reconciliation tables.
+- Multi-pack generation-map validation, lock ordering, activation-journal
+  transitions for every operation kind, and reconciliation tables.
 - Retention-reference reachability and cycle handling.
 - Revision-archive catalog, checksum, epoch invalidation, and cross-segment cursor
   behavior.
@@ -3556,7 +4131,8 @@ Each adapter requires:
 - Incremental unchanged input.
 - Changed and deleted input.
 - Deleted then reappearing adapter-local key.
-- Coverage report assertions.
+- Scoped coverage-row assertions for all six states plus derived manifest
+  aggregation and false-absence prevention.
 - Path traversal and secret-handling assertions where relevant.
 
 ### 28.3 Cross-language fixtures
@@ -3630,16 +4206,25 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 
 ### 28.7 Failure tests
 
-- Process killed during each build phase, every apply-journal transition, and each
-  grouped service-pointer repair.
-- Crash before coordinator-pointer activation reconciles to the base snapshot.
+- Process killed during each build phase, every activation-journal transition for
+  each operation kind, and each grouped service-pointer repair.
+- Crash before coordinator-pointer activation reconciles to the base snapshot and
+  never exposes prepared authored entities.
 - Crash after pointer activation but before journal finalization reconciles to the
-  target snapshot without applying state twice.
+  target snapshot and authored-state version without applying either state twice.
 - Cross-service targets are complete while the workspace pointer remains at base.
 - Group readers never observe mixed service generations while service pointers are
   being repaired.
-- An affected service pointer advanced by independent indexing causes rebase
-  instead of being moved backward by apply.
+- Standalone indexing of a workspace-owned repository and indexing through a
+  non-owning overlapping group both fail before build.
+- Registry migration interrupted before rename leaves the old registry readable;
+  duplicate or ambiguous IDs fail closed.
+- Clean full rebuild after deleting inactive packs preserves all accepted authored
+  claims, blocks, placements, aliases, and taxonomy.
+- Rollback reconstructs the authored-state version/hash recorded by the selected
+  target manifest.
+- Identical generation descriptors with different output bytes trigger a
+  reproducibility failure rather than a second generation identity.
 - Pointer/journal disagreement is quarantined instead of guessed.
 - Invalid active pointer.
 - Missing or corrupt SQLite file.
@@ -3656,8 +4241,8 @@ Each fixture asserts stable knowledge rather than language-specific page bytes.
 - Crash before and after archive-segment fsync, rename, catalog insertion, and live
   revision deletion.
 - Missing, corrupt, duplicate, and unregistered revision archive segments.
-- GC with protected generations, tombstones, revisions, proposals, jobs, and
-  transitive workspace-to-service references.
+- GC with protected generations, authored-state chains, tombstones, revisions,
+  proposals, jobs, and transitive workspace-to-service references.
 - Server restart with Queued, Running, AwaitingReview, and terminal jobs.
 - Expired job deadline, queue saturation, cancellation, and retained-history caps.
 - Stale diagnostic lock metadata with and without an active OS file lock.
@@ -3675,15 +4260,16 @@ Service benchmark:
 - Full and incremental builds.
 - Copy-on-write and portable-copy incremental publication paths.
 - Checksum, fsync, FTS update, staged-vector update, and compaction costs.
-- Object, knowledge-relation, forward/reverse technical-edge, evidence, FTS, and
-  semantic queries.
+- Object, claim, coverage, knowledge-relation, forward/reverse technical-edge,
+  evidence, FTS, and semantic queries.
+- Authored-state hash/materialization and clean full-rebuild replay costs.
 - Tombstone and generation GC, revision archive creation, and archive-history reads.
 
 Workspace benchmark:
 
 - 20 service packs.
 - Cross-service contracts and processes.
-- Atomic workspace-snapshot swaps while service pointers change independently.
+- Atomic workspace-snapshot swaps plus post-commit service-pointer repair.
 - Cold and warm navigation.
 - PO, BA, Tester, and Dev search workloads.
 - LRU churn.
@@ -3704,43 +4290,78 @@ Record:
 
 ## 29. Acceptance Criteria
 
-The replacement is ready for default use only when:
+### 29.1 Default embedded read-path gate
 
-1. Documentation builds from `GraphArtifacts` without a graph database.
-2. Primary navigation remains business/service oriented on the largest fixture.
-3. PO, BA, Tester, and Dev views share one canonical object.
-4. Every Observed generated claim has evidence and a reproducible deterministic
-   attestation; AI-originated prose cannot declare itself Observed.
-5. Human and pinned blocks survive regeneration unchanged.
-6. Full and incremental performance budgets pass.
-7. Search works without embeddings and improves when semantic search is enabled.
-8. No endpoint, adapter discovery path, change envelope, job queue, live revision
-   set, archive query, retained job history, log buffer, or cache is unbounded.
-9. AI high-confidence placement meets the precision target fixed in Phase 0.
-10. Ambiguous and taxonomy-changing operations enter review.
-11. AI change application is crash-consistent, recoverable, snapshot-safe, and
-    idempotent across coordinator `state.sqlite`, workspace `current.json`, and
-    every affected service generation.
-12. Unsupported extraction is visible.
-13. Static Markdown and HTML exports resolve internal links.
-14. Confluence publication is optional, idempotent, and conflict-safe.
-15. Existing MCP wiki tools and legacy slugs remain functional during migration.
-16. The system can roll back to the previous standalone generation or workspace
-    snapshot and its exact service-generation map.
-17. Docusaurus removal does not remove a supported user workflow.
-18. Document history remains queryable across live and archive storage after
-    pack-generation retention pruning.
-19. Durable jobs recover according to policy after server restart.
-20. `cih-server` has no direct or transitive `cih-llm` dependency and performs no
-    LLM egress; its default feature tree also excludes `cih-embed`, `fastembed`,
-    ONNX/ORT, and USearch.
-21. The default FTS profile resolves bounded one-hop call/reference relations from
-    the pack without `GraphStore` or runtime JSONL scans.
-22. Deleted evidence remains a resolvable tombstone until all stale-block, review,
-    history, and retention protections expire.
-23. No-change publication is based on a complete canonical manifest input set.
-24. Grouped readers select one workspace snapshot and can never observe a mixed
-    service-generation set.
+The embedded `/docs` experience may become the default only when:
+
+1. Documentation builds from `GraphArtifacts` without a graph database and without
+   loading all nodes, edges, or discovered files into memory.
+2. Immutable repository-ID migration, ID-based group membership, and single
+   writable documentation-workspace ownership pass rename, overlap, import, and
+   interruption tests.
+3. Primary navigation remains business/service oriented on the largest fixture,
+   and PO, BA, Tester, and Dev views share one canonical object.
+4. Facts are queryable as independent claims. Every Observed generated claim has
+   evidence and a reproducible deterministic attestation; block truth is derived
+   from claims rather than stored as one coarse value.
+5. Accepted AI/human content, reviewed placements, pins, aliases, and taxonomy are
+   durable authored state. A clean full rebuild without old packs reproduces them,
+   while source-controlled overlays retain their declared precedence.
+6. Full and incremental FTS-profile performance budgets pass, and no endpoint,
+   adapter discovery path, change envelope, job queue, live revision set, archive
+   query, retained job history, log buffer, or cache is unbounded.
+7. Search and bounded one-hop call/reference retrieval work from packs without
+   embeddings, `GraphStore`, or runtime JSONL scans.
+8. All six coverage states are queryable at adapter/scope/construct level;
+   unsupported, failed, partial, and omitted extraction cannot become false absence
+   claims.
+9. Every generation-producing operation uses the generic activation journal.
+   Fault injection converges coordinator pointer, pack map, authored state, and
+   workflow state without duplicate application or mixed service generations.
+10. Generation IDs are precomputed from complete canonical inputs, artifact
+    manifest hashes validate output bytes independently, and no-change checks
+    account for every configured input including authored state.
+11. Canonical relation direction and source/target definitions are validated, while
+    inverse wording remains a presentation concern.
+12. Human and pinned content survives regeneration unchanged, and deleted evidence
+    remains a resolvable tombstone until all claim, review, history, and retention
+    protections expire.
+13. Existing MCP wiki tools and legacy slugs remain functional during migration.
+14. Rollback selects an exact standalone generation or workspace/service map and
+    reconstructs the authored-state version/hash recorded by that target.
+15. Document history remains queryable across live/archive storage after pack
+    pruning, and durable jobs recover according to policy after restart.
+16. `cih-server` has no direct or transitive `cih-llm` dependency or LLM egress;
+    its default feature tree also excludes `cih-embed`, `fastembed`, ONNX/ORT, and
+    USearch.
+
+### 29.2 Docusaurus removal gate
+
+Docusaurus and `docs-viewer` may be removed only when:
+
+1. The default embedded read-path gate above has passed in production-like dual
+   runs.
+2. Curated Markdown and static HTML exports are complete, bounded, navigable, and
+   resolve internal and legacy links without a Node/Docusaurus runtime.
+3. The compatibility release has completed with `cih wiki`, legacy MCP tools,
+   legacy slugs, and rollback available.
+4. The supported-workflow inventory confirms that no caller or deployment still
+   depends on Docusaurus-specific output.
+
+### 29.3 Conditional feature gates
+
+These criteria apply only when the corresponding optional feature is enabled:
+
+1. AI high-confidence placement meets the Phase 0 precision target; ambiguous and
+   taxonomy-changing operations enter review.
+2. AI proposals reject hallucinated, non-entailed, stale, or wrong-direction
+   references, and AI prose cannot declare itself Observed.
+3. AI proposal/apply is snapshot- and authored-state-bound, idempotent, and uses
+   the same crash-consistent activation protocol as deterministic producers.
+4. Semantic search improves the evaluation set and meets its separate budget;
+   vector failure degrades to complete FTS behavior.
+5. Confluence publication is idempotent, ownership-safe, and conflict-safe.
+   Confluence availability is not required for either gate above.
 
 ## 30. Risks and Mitigations
 
@@ -3753,8 +4374,13 @@ The replacement is ready for default use only when:
 | SQLite packs become too large | Lightweight technical entities, compact integer technical edges, no rendered symbol pages, measurement gates, and sharding by service |
 | Compact edge indexes reproduce the raw graph cost | Separate rich relations from integer adjacency; benchmark row/index ratios and revise the storage ADR before Phase 1 |
 | Portable incremental copy exceeds the budget | Phase 0 physical prototype is a gate; revise the ADR to shard before Phase 1 |
+| Generation identity depends on its own serialized checksum | Precompute generation IDs from canonical inputs; hash finalized artifacts separately and test reproducibility |
+| Accepted or reviewed content disappears on a full rebuild | Durable current authored state is a mandatory compiler input; history is never used as a substitute |
+| One repository receives conflicting workspace interpretations | Immutable repository IDs plus exactly one writable documentation-workspace owner in V1 |
+| A block-level truth flag hides mixed or conflicting statements | Persist independently evidenced claims and derive block truth summaries |
+| Aggregate coverage creates false absence claims | Persist scoped six-state coverage rows and derive manifest summaries from them |
 | Service pointers expose a mixed workspace after a crash | One workspace coordinator pointer, manifest-pinned service generations, journaled pointer repair, and quarantine |
-| Restart retries duplicate a side effect | Durable job intent, operation-specific idempotency, apply-journal reconciliation, and publication state |
+| Restart retries duplicate a side effect | Durable job intent, operation-specific idempotency, generic activation-journal reconciliation, and publication state |
 | Deleted evidence breaks stale documentation or review | Stable tombstones, preserved joins and locators, and protected delayed deletion |
 | Revision archive or GC loses required history | Immutable checksummed segments, normalized retention roots, crash recovery, and one shared candidate selector |
 | Search fan-out opens every service | Workspace-first retrieval, bounded service expansion, LRU and concurrency limits |
@@ -3778,8 +4404,12 @@ The following defaults are fixed for the first implementation:
 - Automatic grouping plus human overrides.
 - Code and technical assets as initial evidence.
 - Observed implementation separated from Intended requirements.
+- Independent evidence-backed claims; block truth is a derived summary.
 - Controlled core ontology with namespaced extensions.
+- Canonical stored relation directions with registered inverse display labels.
+- Immutable repository IDs and one writable documentation workspace per repository.
 - SQLite service and workspace packs.
+- Generation IDs derived before serialization and separate artifact manifest hashes.
 - A workspace generation manifest as the atomic grouped snapshot and service-generation map.
 - FTS5 as the mandatory search baseline.
 - Compact pack-local technical-edge indexes for bounded one-hop queries.
@@ -3790,10 +4420,13 @@ The following defaults are fixed for the first implementation:
   only deterministic projectors create Observed claims.
 - Review required for taxonomy changes.
 - Stable evidence tombstones with protected delayed deletion.
-- Durable bounded jobs and crash-recoverable coordinator-snapshot activation.
+- Scoped six-state coverage records with derived manifest aggregates.
+- Durable current authored state replayed by full and incremental compilers.
+- Durable bounded jobs and generic crash-recoverable coordinator-snapshot activation.
 - Queryable revision archives and normalized GC retention references.
 - Minimal capability-bearing principals without an enterprise RBAC platform.
-- Scale and recovery gates before default UI cutover or Docusaurus removal.
+- Phase 6 scale/recovery gates before default embedded-UI cutover; Phase 7
+  static-export and compatibility gates before Docusaurus removal.
 - Repository-owned Markdown overlays.
 - Optional Confluence Cloud publication.
 - No full rich editor, RBAC platform, or bidirectional Confluence body sync in V1.
@@ -3808,6 +4441,7 @@ cih analyze
 
 cih docs index
   -> immutable service knowledge pack
+  -> evidence-backed claims and scoped coverage
 
 cih docs sync
   -> immutable workspace snapshot
@@ -3823,7 +4457,8 @@ cih docs document "Document the new refund APIs"
   -> bounded change envelope
   -> deterministic and AI placement
   -> validated change set
-  -> automatic safe updates
+  -> durable authored-state revision
+  -> crash-recoverable generation activation
   -> review inbox for ambiguity
 
 cih docs export / publish

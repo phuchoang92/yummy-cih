@@ -2,8 +2,8 @@
 
 Companion to [`analyze-by-copying-source-into-container.md`](./analyze-by-copying-source-into-container.md)
 (the base copy-into-volume workflow — container names, volumes, and env vars below come from there).
-Run this once after upgrading to **`dev ≥ 5c7b1f3`** (plan:
-[`../plans/ocb-osgi-cxf-stitching.md`](../plans/ocb-osgi-cxf-stitching.md)).
+Run this once after upgrading to **`dev ≥ 5c7b1f3`**, which contains the completed
+OSGi/CXF stitching fixes.
 
 ## Why a full re-index is required
 

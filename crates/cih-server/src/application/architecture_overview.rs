@@ -1,7 +1,6 @@
 //! Typed `architecture_overview` application service composed live over existing
 //! `GraphStore` port methods plus labeled artifact reads (entrypoints sidecar,
-//! wiki index, registry). Design record: `docs/plans/architecture-overview-tool.md`
-//! (D1–D6). No new port methods, no precomputed artifact: the motivating bug was
+//! wiki index, registry). No new port methods, no precomputed artifact: the motivating bug was
 //! a stale precomputed snapshot, so every graph-sourced section is computed at
 //! call time and every non-graph section carries a one-word `source` label.
 //!

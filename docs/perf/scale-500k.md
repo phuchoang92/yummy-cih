@@ -1,7 +1,6 @@
 # 500k-node scale reference run
 
-Scale measurement record for `docs/plans/cih-server-clean-architecture-and-scalability.md`
-and `docs/plans/search-index-scale-performance.md`.
+Scale measurement record for `docs/plans/search-index-scale-performance.md`.
 
 ## Method
 

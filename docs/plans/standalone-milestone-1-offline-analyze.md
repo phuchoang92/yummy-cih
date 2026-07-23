@@ -246,8 +246,6 @@ and `group_sync`.
   `--features falkor` alone and `--features embedding` alone, a later change can
   silently break additivity. The feature-matrix `cargo check` in Verification
   should go into CI alongside the default build.
-- **Sequencing with the graph-store decoupling**
-  (`docs/plans/graph-store-decoupling.md`): prefer landing the decoupling first —
-  M1's `falkor` feature then simply forwards to `cih-store-factory/falkor` and
-  the cfg gates concentrate in the factory crate instead of engine internals.
-  If M1 lands first, those gates migrate during the decoupling rebase.
+- **Graph-store decoupling is already complete.** M1's `falkor` feature should
+  forward to `cih-store-factory/falkor`, concentrating the cfg gates in the
+  factory crate instead of engine internals.
