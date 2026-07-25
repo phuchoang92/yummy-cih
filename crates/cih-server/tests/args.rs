@@ -163,5 +163,23 @@ fn reaches_args_defaults() {
     assert_eq!(args.to, "AUDIT_LOG");
     assert_eq!(args.max_depth, 0, "0 = server default (8)");
     assert_eq!(args.max_paths, 0, "0 = server default (3)");
+    assert_eq!(
+        args.access,
+        cih_server::args::ReachesAccessArg::Any,
+        "any is the compatibility default"
+    );
     assert!(args.repo.is_empty());
+}
+
+#[test]
+fn reaches_args_accepts_table_access_filter() {
+    let args: ReachesArgs = serde_json::from_str(
+        r#"{"from":"Route:POST /x","to":"AUDIT_LOG","access":"write"}"#,
+    )
+    .unwrap();
+    assert_eq!(args.access, cih_server::args::ReachesAccessArg::Write);
+    assert!(serde_json::from_str::<ReachesArgs>(
+        r#"{"from":"x","to":"T","access":"mutation"}"#
+    )
+    .is_err());
 }

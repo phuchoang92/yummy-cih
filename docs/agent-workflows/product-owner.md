@@ -25,10 +25,12 @@ code.
 list_repos()
 ```
 
-Returns: `[{ name, path, indexed_at, stats: { nodes, edges, files, routes, communities, processes } }]`
+Returns: `[{ name, path, indexed_at, stats: { nodes, edges, files, routes, routes_current, communities, processes } }]`
 
 Confirm the service name and when it was last indexed. A stale index (indexed weeks ago) means
-recent features may not appear. Check `stats.routes` to confirm this is an HTTP service.
+recent features may not appear. Check `stats.routes` only when
+`stats.routes_current == true`; otherwise re-run analyze before classifying the
+repository as an HTTP service or library.
 
 ### Step 2 — Browse the API surface
 

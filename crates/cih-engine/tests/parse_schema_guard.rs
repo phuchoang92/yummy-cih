@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (26, "9e723fb179868fb0");
+const GOLDEN: (u32, &str) = (27, "0de9127a9aaea189");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -62,22 +62,37 @@ public class UserFacade implements UserAdmin {
     ),
     (
         // SQL-valued constant (non-UPPER_SNAKE name) + heuristic execution site
-        // (constant flowing into a custom queue API) → SqlConstant + SqlExecutionSite.
+        // (constant flowing into custom queue APIs) → SqlConstant + SqlExecutionSite.
+        // Constructor qualifier assignment also pins inferred field qualifiers;
+        // the constant-returning isReady method pins strict accessor detection.
         "src/main/java/com/acme/AuditAdapter.java",
         r#"package com.acme;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 public class AuditAdapter {
     private static final String insertAudit =
         "INSERT INTO AUDIT_LOG (ID, ACTION) VALUES (?, ?)";
     private AuditQueue auditQueue;
 
+    public AuditAdapter(@Qualifier("auditQueueBean") AuditQueue queue) {
+        this.auditQueue = queue;
+    }
+
     public void record(String action) {
         auditQueue.enqueue(insertAudit, action);
+    }
+
+    public void inheritedRecord(String action) {
+        enqueue(insertAudit, action);
     }
 
     // Trivial accessor → isAccessor prop on the Method node.
     public AuditQueue getAuditQueue() {
         return auditQueue;
+    }
+
+    public boolean isReady() {
+        return true;
     }
 }
 "#,

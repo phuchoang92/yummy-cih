@@ -717,6 +717,7 @@ dependencies = [
  "once_cell",
  "serde_json",
  "streaming-iterator",
+ "tracing",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c-sharp",

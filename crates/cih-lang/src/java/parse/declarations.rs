@@ -134,7 +134,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let param_types = param_type_names(node, src);
     let is_test_method = owner.is_test && is_test_method(node, src);
     let is_bean = is_bean_method(node, src);
-    let is_accessor = is_trivial_accessor(node, &name);
+    let is_accessor = is_trivial_accessor(node, &name, src);
 
     let complexity = node
         .child_by_field_name("body")

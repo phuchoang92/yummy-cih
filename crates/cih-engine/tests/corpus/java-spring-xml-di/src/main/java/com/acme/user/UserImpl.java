@@ -14,6 +14,11 @@ public class UserImpl implements UserAdmin {
         auditQueue.enqueue(INSERT_AUDIT_LOG, "PASSWORD_CHANGE");
     }
 
+    /** Models an inherited/custom wrapper whose invocation has no explicit receiver. */
+    private void enqueueAudit() {
+        enqueue(INSERT_AUDIT_LOG, "PASSWORD_CHANGE");
+    }
+
     private void persist(PasswordRequest request) {
         // write path stub
     }

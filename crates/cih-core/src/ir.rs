@@ -101,10 +101,12 @@ pub fn looks_like_sql(text: &str) -> bool {
     ];
     let head = text.trim_start();
     SQL_STARTERS.iter().any(|kw| {
-        head.len() >= kw.len()
-            && head[..kw.len()].eq_ignore_ascii_case(kw)
+        head.get(..kw.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(kw))
             // Keyword boundary: "SELECTION_MODE" is not SQL.
-            && !head[kw.len()..]
+            && !head
+                .get(kw.len()..)
+                .unwrap_or_default()
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')

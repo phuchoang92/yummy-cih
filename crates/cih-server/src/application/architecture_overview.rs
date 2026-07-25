@@ -328,7 +328,10 @@ struct ModuleEntry {
 
 #[derive(Serialize)]
 struct RouteGroupsBody {
+    /// Exact when the route probe returned at most `MAX_ROUTE_FETCH` rows;
+    /// otherwise this is the number of routes represented by this bounded view.
     total_routes: usize,
+    total_routes_exact: bool,
     total_groups: usize,
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -432,6 +435,7 @@ struct GroupMemberOut {
     pub(crate) nodes: usize,
     pub(crate) edges: usize,
     pub(crate) routes: usize,
+    pub(crate) routes_current: bool,
     pub(crate) communities: usize,
     pub(crate) indexed_at: String,
 }
@@ -567,6 +571,7 @@ fn route_prefix(path: &str) -> String {
 fn build_route_groups(
     mut routes: Vec<RouteInfo>,
     total_routes: usize,
+    total_routes_exact: bool,
     cap: usize,
 ) -> RouteGroupsBody {
     routes.sort_by(|a, b| {
@@ -597,11 +602,12 @@ fn build_route_groups(
         .collect();
     items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.prefix.cmp(&b.prefix)));
     items.truncate(cap);
-    let truncated = total_groups > items.len();
+    let truncated = !total_routes_exact || total_groups > items.len();
     let next = (truncated && items.first().is_some_and(|g| hint_safe(&g.prefix)))
         .then(|| format!("route_map(prefix=\"{}\")", items[0].prefix));
     RouteGroupsBody {
         total_routes,
+        total_routes_exact,
         total_groups,
         truncated,
         next,
@@ -754,6 +760,7 @@ fn group_sections(
                         nodes: e.stats.nodes,
                         edges: e.stats.edges,
                         routes: e.stats.routes,
+                        routes_current: e.stats.routes_current,
                         communities: e.stats.communities,
                         indexed_at: e.indexed_at.clone(),
                     },
@@ -762,6 +769,7 @@ fn group_sections(
                         nodes: 0,
                         edges: 0,
                         routes: 0,
+                        routes_current: false,
                         communities: 0,
                         indexed_at: String::new(),
                     },
@@ -800,7 +808,7 @@ fn validate_sections(sections: &[String]) -> Result<Vec<String>, AppError> {
 
 fn build_warnings(
     ctx: &ComposeCtx<'_>,
-    summary: &GraphSummary,
+    summary: Option<&GraphSummary>,
     artifacts_version: Option<&str>,
 ) -> Vec<String> {
     let entry = ctx.entry;
@@ -812,21 +820,23 @@ fn build_warnings(
             remedy::analyze(entry)
         ));
     }
-    if entry.stats.nodes == 0 {
-        warnings.push(
-            "registry stats for this repo are zero (discover has not run or stats were never recorded) — counts in this response come from the live graph"
-                .into(),
-        );
-    } else {
-        let live_nodes = summary.total_nodes as f64;
-        let registry_nodes = entry.stats.nodes as f64;
-        if (live_nodes - registry_nodes).abs() / live_nodes.max(registry_nodes).max(1.0) > 0.10 {
-            warnings.push(format!(
-                "graph store size ({} nodes) diverges from registry stats ({} nodes) — the loaded graph may not match the latest artifacts; reload: {}",
-                summary.total_nodes,
-                entry.stats.nodes,
-                remedy::load(entry)
-            ));
+    if let Some(summary) = summary {
+        if entry.stats.nodes == 0 {
+            warnings.push(
+                "registry stats for this repo are zero (discover has not run or stats were never recorded) — counts in this response come from the live graph"
+                    .into(),
+            );
+        } else {
+            let live_nodes = summary.total_nodes as f64;
+            let registry_nodes = entry.stats.nodes as f64;
+            if (live_nodes - registry_nodes).abs() / live_nodes.max(registry_nodes).max(1.0) > 0.10 {
+                warnings.push(format!(
+                    "graph store size ({} nodes) diverges from registry stats ({} nodes) — the loaded graph may not match the latest artifacts; reload: {}",
+                    summary.total_nodes,
+                    entry.stats.nodes,
+                    remedy::load(entry)
+                ));
+            }
         }
     }
 
@@ -1027,27 +1037,20 @@ fn build_hotspots(
 }
 
 fn build_route_section(
-    fetched: Option<StoreResult<Vec<RouteInfo>>>,
-    route_total: usize,
+    fetched: StoreResult<Vec<RouteInfo>>,
     item_cap: usize,
 ) -> Section<RouteGroupsBody> {
-    let Some(fetched) = fetched else {
-        debug_assert_eq!(route_total, 0, "routes must be fetched when any exist");
-        return Section::ok(
-            "graph",
-            RouteGroupsBody {
-                total_routes: 0,
-                total_groups: 0,
-                truncated: false,
-                next: None,
-                items: vec![],
-            },
-        );
-    };
-
     match fetched {
         Err(e) => Section::store_err(&e),
-        Ok(routes) => Section::ok("graph", build_route_groups(routes, route_total, item_cap)),
+        Ok(mut routes) => {
+            let total_routes_exact = routes.len() <= MAX_ROUTE_FETCH;
+            routes.truncate(MAX_ROUTE_FETCH);
+            let total_routes = routes.len();
+            Section::ok(
+                "graph",
+                build_route_groups(routes, total_routes, total_routes_exact, item_cap),
+            )
+        }
     }
 }
 
@@ -1056,31 +1059,9 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     let want = |name: &str| selected.iter().any(|s| s == name);
     let entry = ctx.entry;
 
-    // First store call: a backend error here means the store is down — hard
-    // error (D5 taxonomy). Every later store error degrades per-section.
-    let mut summary = ctx
-        .store
-        .graph_summary()
-        .await
-        .map_err(|error| AppError::Unavailable {
-            dependency: "graph store",
-            message: format!("architecture overview summary: {error}"),
-            retryable: true,
-        })?;
-    summary
-        .kinds
-        .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
-    let route_total = summary
-        .kinds
-        .iter()
-        .find(|k| k.kind == "Route")
-        .map(|k| k.count as usize)
-        .unwrap_or(0);
-
     let artifacts_version = Path::new(&entry.artifacts_dir)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned());
-    let mut warnings = build_warnings(&ctx, &summary, artifacts_version.as_deref());
 
     let want_stats = want(SECTION_STATS);
     let want_modules = want(SECTION_MODULES);
@@ -1097,7 +1078,15 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     // These reads are independent. The backend's query semaphore remains the
     // concurrency bound; symbol-community attribution runs later because it
     // depends on the overview pool.
-    let (pool, fetched_communities, fetched_routes, fetched_hotspots) = tokio::join!(
+    let (fetched_summary, pool, fetched_communities, fetched_routes, fetched_hotspots) =
+        tokio::join!(
+        async {
+            if want_stats {
+                Some(ctx.store.graph_summary().await)
+            } else {
+                None
+            }
+        },
         async {
             if need_pool {
                 Some(
@@ -1117,11 +1106,11 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
             }
         },
         async {
-            if want_route_groups && route_total > 0 {
-                // The 1..1000 clamp is tool-level (`route_map` tool); the port
-                // takes a bare usize, so this enumerates the live Route count.
-                let fetch = route_total.clamp(1, MAX_ROUTE_FETCH);
-                Some(ctx.store.route_map(None, fetch).await)
+            if want_route_groups {
+                // Fetch one row past the bounded view. Unlike graph_summary,
+                // this query is both the route section's data and its exactness
+                // probe, so a summary outage cannot suppress route facts.
+                Some(ctx.store.route_map(None, MAX_ROUTE_FETCH + 1).await)
             } else {
                 None
             }
@@ -1140,16 +1129,31 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
         }
     );
 
-    let stats = want_stats.then(|| {
-        Section::ok(
-            "graph",
-            StatsBody {
-                total_nodes: summary.total_nodes,
-                total_edges: summary.total_edges,
-                kinds: summary.kinds.clone(),
-            },
-        )
-    });
+    let mut summary_for_warning = None;
+    let stats = if want_stats {
+        Some(match fetched_summary.expect("summary is fetched whenever stats is selected") {
+            Err(error) => Section::store_err(&error),
+            Ok(mut summary) => {
+                summary
+                    .kinds
+                    .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
+                let body = StatsBody {
+                    total_nodes: summary.total_nodes,
+                    total_edges: summary.total_edges,
+                    kinds: summary.kinds.clone(),
+                };
+                summary_for_warning = Some(summary);
+                Section::ok("graph", body)
+            }
+        })
+    } else {
+        None
+    };
+    let mut warnings = build_warnings(
+        &ctx,
+        summary_for_warning.as_ref(),
+        artifacts_version.as_deref(),
+    );
 
     let modules = if want_modules {
         let fetched = fetched_communities
@@ -1171,8 +1175,8 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
 
     let route_groups = if want_route_groups {
         Some(build_route_section(
-            fetched_routes,
-            route_total,
+            fetched_routes
+                .expect("routes are fetched whenever the route_groups section is selected"),
             cap(ctx.limit, DEFAULT_ROUTE_GROUPS),
         ))
     } else {
@@ -1877,6 +1881,7 @@ mod tests {
             "sample must carry the handler NodeId: {sample}"
         );
         assert_eq!(v["route_groups"]["total_routes"], 3);
+        assert_eq!(v["route_groups"]["total_routes_exact"], true);
     }
 
     #[tokio::test]
@@ -2032,16 +2037,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_error_on_first_query_is_a_hard_error() {
+    async fn summary_failure_degrades_stats_without_sinking_sibling_sections() {
+        let mut store = populated_store();
+        store.fail_summary = true;
+        let entry = entry("/nonexistent/demo", Some("/x"), 100);
+        let v = compose_json(ctx_with(&store, &entry, vec![], 0)).await;
+
+        assert_eq!(v["stats"]["available"], false);
+        assert!(v["stats"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("summary down"));
+        assert_eq!(v["modules"]["available"], true);
+        assert_eq!(v["route_groups"]["available"], true);
+        assert_eq!(v["route_groups"]["total_routes"], 3);
+    }
+
+    #[test]
+    fn route_probe_marks_a_bounded_total_as_inexact() {
+        let routes = (0..=MAX_ROUTE_FETCH)
+            .map(|index| {
+                route(
+                    "GET",
+                    &format!("/api/items/{index}"),
+                    "Method:acme.Items#get",
+                )
+            })
+            .collect();
+        let section = build_route_section(Ok(routes), DEFAULT_ROUTE_GROUPS);
+        let value = serde_json::to_value(section).unwrap();
+
+        assert_eq!(value["total_routes"], MAX_ROUTE_FETCH);
+        assert_eq!(value["total_routes_exact"], false);
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn unrequested_summary_is_not_a_hidden_dependency() {
         let store = FakeStore {
             fail_summary: true,
+            communities: vec![community("c1", "loan", 1)],
             ..Default::default()
         };
         let entry = entry("/nonexistent/demo", Some("/x"), 100);
-        assert!(
-            compose(ctx_with(&store, &entry, vec![], 0)).await.is_err(),
-            "graph_summary failure means the store is down — hard error"
-        );
+        let v = compose_json(ctx_with(&store, &entry, vec!["modules".into()], 0)).await;
+        assert_eq!(v["modules"]["available"], true);
+        assert!(v.get("stats").is_none());
     }
 
     #[tokio::test]
@@ -2135,6 +2176,7 @@ mod tests {
                 nodes: 100,
                 edges: 200,
                 routes: 3,
+                routes_current: true,
                 communities: 2,
                 indexed_at: "2026-07-19T00:00:00Z".into(),
             }],

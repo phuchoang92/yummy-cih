@@ -10,6 +10,16 @@
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use serde::{Deserialize, Serialize};
+mod traversal;
+
+/// Maximum number of source nodes sent to an adapter's one-hop query.
+pub const EXECUTION_BATCH_SIZE: usize = 256;
+/// Hard bound for a shared execution walk.
+pub const TRAVERSAL_NODE_BUDGET: usize = 10_000;
+/// Hard bound for relationships examined by a shared execution walk.
+pub const TRAVERSAL_EDGE_BUDGET: usize = 50_000;
+/// Largest offset + page-size window accepted by `trace_flow`.
+pub const FLOW_VISIBLE_WINDOW: usize = 5_000;
 
 #[cfg(feature = "test-support")]
 pub mod contract;
@@ -22,11 +32,17 @@ pub enum GraphStoreError {
     NotFound(String),
     #[error("not implemented for this backend: {0}")]
     Unimplemented(&'static str),
+    #[error("invalid graph query: {0}")]
+    InvalidInput(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
 pub type Result<T> = std::result::Result<T, GraphStoreError>;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// Traversal direction for impact / neighbor queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +94,10 @@ pub struct PathEdge {
     pub confidence: f32,
     /// Resolution reason (`di-qualifier`, `receiver-bound`, `sql-scan`, …).
     pub reason: String,
+    /// True when logical execution walks opposite the stored relationship
+    /// direction (Route→handler and topic→listener).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub traversed_reverse: bool,
 }
 
 /// A start→target path across call and side-effect edges, answering
@@ -89,6 +109,41 @@ pub struct PathInfo {
     pub edges: Vec<PathEdge>,
     /// The weakest edge's confidence — the path is only as trustworthy as that.
     pub min_confidence: f32,
+}
+
+/// Optional database-access constraint for a path's final edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PathAccess {
+    #[default]
+    Any,
+    Read,
+    Write,
+}
+
+/// Bounds and semantics for [`GraphStore::paths_between`].
+#[derive(Clone, Debug)]
+pub struct PathFilter {
+    pub max_depth: u32,
+    pub max_paths: usize,
+    pub access: PathAccess,
+}
+
+/// Shared traversal accounting. `truncated` means the answer is incomplete,
+/// not that the target is unreachable.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TraversalStats {
+    pub visited_nodes: usize,
+    pub expanded_edges: usize,
+    pub truncated: bool,
+}
+
+/// Shortest path results plus honest budget/path-cap metadata.
+#[derive(Clone, Debug)]
+pub struct PathPage {
+    pub paths: Vec<PathInfo>,
+    pub has_more: bool,
+    pub traversal: TraversalStats,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -259,15 +314,19 @@ impl FlowFilter {
         }
     }
 
-    /// Rows an adapter must materialize before slicing: everything up to the
-    /// end of the requested page, plus one row to answer `has_more` honestly.
+    /// Rows required to cover the requested page plus one continuation probe.
+    /// The shared walker rejects overflow and windows beyond
+    /// [`FLOW_VISIBLE_WINDOW`]; this helper remains saturating for callers that
+    /// only use it for capacity hints.
     pub fn budget(&self) -> usize {
-        self.offset + self.effective_limit() + 1
+        self.offset
+            .saturating_add(self.effective_limit())
+            .saturating_add(1)
     }
 
     /// Slice an assembled, ordered hop list into the requested page.
     pub fn paginate(&self, mut hops: Vec<FlowHop>) -> FlowPage {
-        let end = self.offset + self.effective_limit();
+        let end = self.offset.saturating_add(self.effective_limit());
         let has_more = hops.len() > end;
         hops.truncate(end.min(hops.len()));
         let hops = if self.offset >= hops.len() {
@@ -275,7 +334,11 @@ impl FlowFilter {
         } else {
             hops.split_off(self.offset)
         };
-        FlowPage { hops, has_more }
+        FlowPage {
+            hops,
+            has_more,
+            traversal: TraversalStats::default(),
+        }
     }
 }
 
@@ -286,6 +349,7 @@ pub struct FlowPage {
     /// True when hops beyond this page exist (fetch the next page via
     /// `offset + hops.len()`).
     pub has_more: bool,
+    pub traversal: TraversalStats,
 }
 
 /// One step in a trace_flow result: the symbol reached, and the edge used to reach it.
@@ -311,6 +375,28 @@ pub struct FlowEdge {
 pub struct CallSiteArgs {
     /// Resolved (constant-propagated) argument expressions.
     pub args: Vec<String>,
+}
+
+/// One logical execution transition returned by a backend's batched one-hop
+/// primitive. The target carries enough metadata for the shared BFS to avoid a
+/// per-node lookup.
+#[derive(Clone, Debug)]
+pub struct ExecutionTransition {
+    pub source: NodeId,
+    pub target: Node,
+    pub kind: String,
+    pub confidence: f32,
+    pub reason: String,
+    pub call_sites: Vec<CallSiteArgs>,
+    pub traversed_reverse: bool,
+    pub target_is_accessor: bool,
+}
+
+/// AOP advice attached to one traced method by a batched adapter lookup.
+#[derive(Clone, Debug)]
+pub struct Interception {
+    pub target: NodeId,
+    pub advice: InterceptingAdvice,
 }
 
 /// A method node returned by complexity_hotspots.
@@ -429,29 +515,46 @@ pub trait GraphStore: Send + Sync {
     /// STEP_IN_PROCESS edges.  Used by `detect_changes` to list affected processes.
     async fn processes_for_symbols(&self, symbol_ids: &[NodeId]) -> Result<Vec<String>>;
 
-    /// Trace the downstream execution chain from an entry point.
-    /// Traverses CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT, LISTENS_TO edges.
-    /// Returns one page of reachable hops ordered by minimum depth, filtered and
-    /// sliced per `filter` (kind/accessor exclusion, offset/limit continuation).
-    /// Each hop carries the edge used to reach it (with call-site args if available).
-    async fn flow_downstream(&self, entry: &NodeId, filter: &FlowFilter) -> Result<FlowPage>;
+    /// Return logical one-hop execution transitions for at most
+    /// [`EXECUTION_BATCH_SIZE`] source ids. Adapters preserve stored edge
+    /// orientation in the graph but return Route→handler and topic→listener as
+    /// reverse logical transitions.
+    async fn execution_transitions(
+        &self,
+        _ids: &[NodeId],
+        _include_data: bool,
+        _limit: usize,
+    ) -> Result<Vec<ExecutionTransition>> {
+        Err(GraphStoreError::Unimplemented("execution_transitions"))
+    }
+
+    /// Return Spring AOP advice for a batch of traced methods. Backends without
+    /// promoted ADVISES support may return an empty list.
+    async fn interceptions_for_methods(&self, _ids: &[NodeId]) -> Result<Vec<Interception>> {
+        Ok(Vec::new())
+    }
+
+    /// Trace the downstream execution chain using the backend-neutral bounded
+    /// BFS. Node filters hide results but never sever traversal paths.
+    async fn flow_downstream(&self, entry: &NodeId, filter: &FlowFilter) -> Result<FlowPage> {
+        traversal::flow_downstream(self, entry, filter).await
+    }
 
     /// Database effects of the given methods: every `(method)-[:EXECUTES_QUERY]->
     /// (DbQuery)-[:READS_TABLE|WRITES_TABLE]->(DbTable)` chain, one entry per
     /// (method, query, table). Used to surface table reads/writes on traces.
     async fn db_effects_for_methods(&self, ids: &[NodeId]) -> Result<Vec<DbEffect>>;
 
-    /// Shortest directed paths from `from` to `to` over execution and
-    /// side-effect edges (CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT,
-    /// LISTENS_TO, EXECUTES_QUERY, READS_TABLE, WRITES_TABLE), each with
-    /// per-edge provenance. Powers "does X reach a write to table Y?".
+    /// Shortest logical execution paths from `from` to `to`, with per-edge
+    /// provenance and honest traversal/path caps.
     async fn paths_between(
         &self,
         from: &NodeId,
         to: &NodeId,
-        max_depth: u32,
-        max_paths: usize,
-    ) -> Result<Vec<PathInfo>>;
+        filter: &PathFilter,
+    ) -> Result<PathPage> {
+        traversal::paths_between(self, from, to, filter).await
+    }
 
     /// Return methods with complexity above the given thresholds (Gap 1).
     /// `min_transitive_loop` defaults to 1 if None.

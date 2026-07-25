@@ -10,14 +10,14 @@ use cih_core::{NodeId, NodeKind, Range};
 use crate::bm25::{IndexedDoc, SearchIndex};
 
 const MAGIC: &[u8; 8] = b"CIHSRCH1";
-pub const SEARCH_INDEX_FORMAT_VERSION: u32 = 1;
+pub const SEARCH_INDEX_FORMAT_VERSION: u32 = 2;
 pub const SEARCH_INDEX_FILE_NAME: &str = "search-index.bin";
 const MAX_ARTIFACT_VERSION_BYTES: usize = 4096;
 const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS: usize = 100_000_000;
 const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const SCHEMA_DESCRIPTOR: &str = concat!(
-    "cih-search-schema-v1;",
+    "cih-search-schema-v2;",
     "tokenizer=ascii-alnum-camel-v1;",
     "fields=kind,name,qualified_name,node_id,file,route,integration,message,dbquery;",
     "k1=1.2;b=0.75;",
@@ -858,6 +858,35 @@ mod tests {
         assert!(matches!(
             load_search_index(&path, &source).unwrap(),
             SearchIndexLoad::Corrupt(_)
+        ));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn previous_format_is_stale_and_must_be_rebuilt() {
+        let directory = std::env::temp_dir().join(format!(
+            "cih-search-old-format-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let nodes = directory.join("nodes.jsonl");
+        fs::write(&nodes, "node\n").unwrap();
+        let source = source(&nodes, "v1");
+        let path = search_index_path(&directory);
+        persist_search_index(&path, &source, &sample_index()).unwrap();
+
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&1u32.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        let loaded = load_search_index(&path, &source).unwrap();
+        assert!(matches!(
+            loaded,
+            SearchIndexLoad::Stale(message) if message.contains("format version 1")
         ));
         fs::remove_dir_all(directory).ok();
     }

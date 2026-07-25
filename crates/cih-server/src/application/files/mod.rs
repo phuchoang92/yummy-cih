@@ -1,7 +1,7 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -18,11 +18,20 @@ use crate::ports::retrieval_metrics::GrepRuntimeMetricsSnapshot;
 pub(crate) struct FileService {
     repos: RepoContextService,
     limits: ReadFileLimits,
+    grep: Arc<GrepRuntime>,
 }
 
 impl FileService {
-    pub(crate) fn new(repos: RepoContextService, limits: ReadFileLimits) -> Self {
-        Self { repos, limits }
+    pub(crate) fn new(
+        repos: RepoContextService,
+        limits: ReadFileLimits,
+        grep: Arc<GrepRuntime>,
+    ) -> Self {
+        Self {
+            repos,
+            limits,
+            grep,
+        }
     }
 
     pub(crate) async fn read_file(
@@ -42,7 +51,7 @@ impl FileService {
         let repo = self
             .repos
             .resolve_repo(RepoSelector::from_wire(&command.repo))?;
-        grep_files(repo.canonical_path, command).await
+        grep_files(repo.canonical_path, command, self.grep.clone()).await
     }
 }
 
@@ -202,15 +211,15 @@ pub struct GrepMatch {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct GrepConfig {
-    max_concurrent_requests: usize,
-    threads: usize,
-    queue_timeout: Duration,
-    deadline: Duration,
+pub(crate) struct GrepRuntimeConfig {
+    pub(crate) max_concurrent_requests: usize,
+    pub(crate) threads: usize,
+    pub(crate) queue_timeout: Duration,
+    pub(crate) deadline: Duration,
 }
 
-struct GrepRuntime {
-    config: GrepConfig,
+pub(crate) struct GrepRuntime {
+    config: GrepRuntimeConfig,
     lane: Arc<Semaphore>,
     pool: rayon::ThreadPool,
     metrics: GrepRuntimeMetrics,
@@ -251,54 +260,8 @@ impl GrepRuntimeMetrics {
     }
 }
 
-static GREP_RUNTIME: OnceLock<Result<GrepRuntime, String>> = OnceLock::new();
-
-fn env_positive_usize(name: &str, default: usize) -> Result<usize, String> {
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse::<usize>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| format!("{name} must be a positive integer")),
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(error) => Err(format!("cannot read {name}: {error}")),
-    }
-}
-
-fn env_positive_u64(name: &str, default: u64) -> Result<u64, String> {
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| format!("{name} must be a positive integer")),
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(error) => Err(format!("cannot read {name}: {error}")),
-    }
-}
-
 impl GrepRuntime {
-    fn from_env() -> Result<Self, String> {
-        let logical_cpus = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1);
-        let config = GrepConfig {
-            max_concurrent_requests: env_positive_usize("CIH_GREP_MAX_CONCURRENT_REQUESTS", 2)?,
-            threads: env_positive_usize("CIH_GREP_THREADS", logical_cpus.min(4))?,
-            queue_timeout: Duration::from_secs(env_positive_u64("CIH_GREP_QUEUE_TIMEOUT_SECS", 2)?),
-            deadline: Duration::from_secs(env_positive_u64("CIH_GREP_DEADLINE_SECS", 80)?),
-        };
-        let required = config
-            .deadline
-            .checked_add(Duration::from_secs(5))
-            .ok_or_else(|| "CIH_GREP_DEADLINE_SECS is too large".to_string())?;
-        if required > blocking_timeout() {
-            return Err(format!(
-                "CIH_GREP_DEADLINE_SECS ({}) must leave at least 5 seconds before CIH_BLOCKING_TIMEOUT_SECS ({})",
-                config.deadline.as_secs(),
-                blocking_timeout().as_secs()
-            ));
-        }
+    pub(crate) fn new(config: GrepRuntimeConfig) -> Result<Self, String> {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.threads)
             .thread_name(|index| format!("cih-grep-{index}"))
@@ -311,29 +274,21 @@ impl GrepRuntime {
             metrics: GrepRuntimeMetrics::default(),
         })
     }
-}
 
-fn grep_runtime() -> Result<&'static GrepRuntime, AppError> {
-    match GREP_RUNTIME.get_or_init(GrepRuntime::from_env) {
-        Ok(runtime) => Ok(runtime),
-        Err(message) => Err(AppError::Unavailable {
-            dependency: "grep configuration",
-            message: message.clone(),
-            retryable: false,
-        }),
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self::new(GrepRuntimeConfig {
+            max_concurrent_requests: 2,
+            threads: 2,
+            queue_timeout: Duration::from_secs(2),
+            deadline: Duration::from_secs(5),
+        })
+        .expect("test grep runtime")
     }
-}
 
-pub(crate) fn validate_grep_runtime() -> Result<(), AppError> {
-    grep_runtime().map(|_| ())
-}
-
-pub(crate) fn grep_runtime_metrics() -> GrepRuntimeMetricsSnapshot {
-    GREP_RUNTIME
-        .get()
-        .and_then(|runtime| runtime.as_ref().ok())
-        .map(|runtime| runtime.metrics.snapshot())
-        .unwrap_or_default()
+    pub(crate) fn metrics(&self) -> GrepRuntimeMetricsSnapshot {
+        self.metrics.snapshot()
+    }
 }
 
 struct GaugeGuard<'a>(&'a AtomicUsize);
@@ -380,6 +335,7 @@ impl Drop for CancellationGuard {
 async fn grep_files(
     repo_root: PathBuf,
     command: GrepFilesCommand,
+    runtime: Arc<GrepRuntime>,
 ) -> Result<GrepFilesOutput, AppError> {
     let regex = compile_pattern(&command.pattern)?;
     let overrides = compile_glob_override(&repo_root, &command.glob)?;
@@ -391,7 +347,6 @@ async fn grep_files(
     }
     .min(GREP_MAX_LIMIT);
 
-    let runtime = grep_runtime()?;
     let queued_at = Instant::now();
     let queued = GaugeGuard::enter(&runtime.metrics.queued);
     let permit = match tokio::time::timeout(
@@ -413,7 +368,8 @@ async fn grep_files(
             return Err(AppError::Unavailable {
                 dependency: "grep",
                 message: format!(
-                    "grep capacity saturated after {}s; retry shortly",
+                    "grep capacity saturated after {}s; retry shortly or tune \
+                     CIH_GREP_MAX_CONCURRENT_REQUESTS / CIH_GREP_QUEUE_TIMEOUT_SECS",
                     runtime.config.queue_timeout.as_secs()
                 ),
                 retryable: true,
@@ -432,12 +388,13 @@ async fn grep_files(
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut cancellation = CancellationGuard::new(cancelled.clone());
     let glob = command.glob.clone();
+    let scan_runtime = runtime.clone();
     let scan = run_blocking(blocking_timeout(), "grep", move || {
         // The permit deliberately lives in the closure. If the async caller
         // disconnects or the outer timeout fires, no second repository scan
         // can start until this cooperative scan has actually exited.
         let _permit = permit;
-        let _active = GaugeGuard::enter(&runtime.metrics.active);
+        let _active = GaugeGuard::enter(&scan_runtime.metrics.active);
         grep_dir(
             &repo_root,
             &regex,
@@ -448,8 +405,8 @@ async fn grep_files(
                 started,
                 deadline,
                 cancelled: &cancelled,
-                pool: &runtime.pool,
-                threads: runtime.config.threads,
+                pool: &scan_runtime.pool,
+                threads: scan_runtime.config.threads,
             },
         )
     })
@@ -457,7 +414,7 @@ async fn grep_files(
     let scan = match scan {
         Ok(scan) => {
             cancellation.disarm();
-            scan
+            scan?
         }
         Err(error) => return Err(grep_blocking_error(error)),
     };
@@ -583,8 +540,8 @@ fn grep_blocking_error(error: BlockingError) -> AppError {
         BlockingError::Panicked { detail, .. } => format!("grep task panicked: {detail}"),
         BlockingError::Saturated { waited_secs, .. } => {
             format!(
-                "grep concurrency limit reached (CIH_GREP_MAX_CONCURRENT_REQUESTS) \
-                 after waiting {waited_secs}s"
+                "grep blocking lane saturated after waiting {waited_secs}s \
+                 (CIH_BLOCKING_MAX_CONCURRENT / CIH_BLOCKING_QUEUE_TIMEOUT_SECS)"
             )
         }
     };
@@ -648,8 +605,9 @@ enum WalkPlan {
     Full,
     /// The glob's literal prefix is a directory — walk only that subtree.
     Subtree(PathBuf),
-    /// The whole glob is a literal path to one file — scan just it (repo-relative).
-    SingleFile(PathBuf),
+    /// The whole glob is a literal path to one file — scan just its contained,
+    /// resolved target while reporting the original repo-relative path.
+    SingleFile { path: PathBuf, relative: PathBuf },
     /// The literal prefix does not exist — nothing can match.
     Empty,
 }
@@ -681,19 +639,74 @@ fn literal_walk_prefix(glob: &str) -> Option<(PathBuf, bool)> {
 /// Decide the walk scope from the glob's literal prefix. On a 500k-file volume
 /// this is the difference between one `stat` and a full-tree traversal for a
 /// single-file grep.
-fn plan_walk(root: &Path, glob: &str) -> WalkPlan {
+fn plan_walk(root: &Path, glob: &str) -> Result<WalkPlan, AppError> {
     if glob.is_empty() {
-        return WalkPlan::Full;
+        return Ok(WalkPlan::Full);
     }
     let Some((prefix, whole_glob)) = literal_walk_prefix(glob) else {
-        return WalkPlan::Full;
+        return Ok(WalkPlan::Full);
     };
-    match root.join(&prefix).metadata() {
-        Ok(md) if md.is_dir() => WalkPlan::Subtree(root.join(&prefix)),
-        Ok(md) if md.is_file() && whole_glob => WalkPlan::SingleFile(prefix),
-        // A file mid-glob, or something unreadable: the glob cannot match.
-        Ok(_) | Err(_) => WalkPlan::Empty,
+
+    // Inspect each component without following links. A symlink used as a
+    // directory prefix is never traversed, even when it points back inside the
+    // repository. The only allowed literal-link fast path is an exact file,
+    // whose canonical target must remain under the canonical repository root.
+    let components = prefix.components().collect::<Vec<_>>();
+    let mut candidate = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        candidate.push(component.as_os_str());
+        let metadata = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(WalkPlan::Empty),
+        };
+        let last = index + 1 == components.len();
+        if metadata.file_type().is_symlink() {
+            if !last || !whole_glob {
+                return Ok(WalkPlan::Empty);
+            }
+            let canonical_root = root
+                .canonicalize()
+                .map_err(|error| invalid("glob", format!("cannot resolve repo root: {error}")))?;
+            let target = candidate.canonicalize().map_err(|error| {
+                invalid(
+                    "glob",
+                    format!("cannot resolve literal path '{}': {error}", prefix.display()),
+                )
+            })?;
+            if !target.starts_with(&canonical_root) {
+                return Err(invalid(
+                    "glob",
+                    format!(
+                        "literal path '{}' resolves outside the repository root",
+                        prefix.display()
+                    ),
+                ));
+            }
+            return match target.metadata() {
+                Ok(target_metadata) if target_metadata.is_file() => Ok(WalkPlan::SingleFile {
+                    path: target,
+                    relative: prefix,
+                }),
+                _ => Ok(WalkPlan::Empty),
+            };
+        }
+        if !last && !metadata.is_dir() {
+            return Ok(WalkPlan::Empty);
+        }
+        if last {
+            return if metadata.is_dir() {
+                Ok(WalkPlan::Subtree(candidate))
+            } else if metadata.is_file() && whole_glob {
+                Ok(WalkPlan::SingleFile {
+                    path: candidate,
+                    relative: prefix,
+                })
+            } else {
+                Ok(WalkPlan::Empty)
+            };
+        }
     }
+    Ok(WalkPlan::Empty)
 }
 
 fn cooperative_stop(cancelled: &AtomicBool, deadline: Instant) -> Option<GrepTruncationReason> {
@@ -709,7 +722,11 @@ fn cooperative_stop(cancelled: &AtomicBool, deadline: Instant) -> Option<GrepTru
 /// Gitignore-aware, glob-pruned regex scan under `root`. Candidate paths are
 /// sorted before small parallel batches are processed, keeping result order
 /// deterministic while bounding disk concurrency and transient line buffers.
-fn grep_dir(root: &Path, regex: &regex::Regex, options: GrepScanOptions<'_>) -> GrepScan {
+fn grep_dir(
+    root: &Path,
+    regex: &regex::Regex,
+    options: GrepScanOptions<'_>,
+) -> Result<GrepScan, AppError> {
     let GrepScanOptions {
         overrides,
         glob,
@@ -725,14 +742,13 @@ fn grep_dir(root: &Path, regex: &regex::Regex, options: GrepScanOptions<'_>) -> 
     let mut candidate_files = 0usize;
     let mut files_skipped = 0usize;
     let mut traversal_stop = None;
-    match plan_walk(root, glob) {
+    match plan_walk(root, glob)? {
         WalkPlan::Empty => {}
-        WalkPlan::SingleFile(relative) => {
+        WalkPlan::SingleFile { path, relative } => {
             // The glob names exactly one real file — no traversal at all.
-            let path = root.join(&relative);
             candidate_files = 1;
             match path.metadata() {
-                Ok(md) if md.len() <= GREP_MAX_FILE_BYTES && !md.is_symlink() => {
+                Ok(md) if md.len() <= GREP_MAX_FILE_BYTES => {
                     candidates.push(CandidateFile { path, relative });
                 }
                 _ => files_skipped = 1,
@@ -856,7 +872,7 @@ fn grep_dir(root: &Path, regex: &regex::Regex, options: GrepScanOptions<'_>) -> 
         }
     }
     let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    GrepScan {
+    Ok(GrepScan {
         matches,
         complete: reason == GrepTruncationReason::None,
         truncation_reason: reason,
@@ -864,7 +880,7 @@ fn grep_dir(root: &Path, regex: &regex::Regex, options: GrepScanOptions<'_>) -> 
         files_scanned,
         files_skipped,
         elapsed_ms,
-    }
+    })
 }
 
 fn scan_candidate(
@@ -1060,6 +1076,7 @@ mod tests {
                 threads: 2,
             },
         )
+        .unwrap()
     }
 
     #[test]
@@ -1125,8 +1142,11 @@ mod tests {
         write_under(&root, "src/main/App.java", b"// TODO one\n");
         write_under(&root, "src/other/Noise.java", b"// TODO noise\n");
         assert_eq!(
-            plan_walk(&root, "src/main/App.java"),
-            WalkPlan::SingleFile(std::path::PathBuf::from("src/main/App.java"))
+            plan_walk(&root, "src/main/App.java").unwrap(),
+            WalkPlan::SingleFile {
+                path: root.join("src/main/App.java"),
+                relative: std::path::PathBuf::from("src/main/App.java"),
+            }
         );
         let scan = test_grep(&root, "TODO", "src/main/App.java", 100);
         assert!(scan.complete);
@@ -1138,6 +1158,62 @@ mod tests {
         assert_eq!(scan.matches[0].file, "src/main/App.java");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn grep_single_file_symlink_is_allowed_only_for_an_in_repo_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = grep_root("fastpath-contained-symlink");
+        write_under(&root, "src/Target.java", b"// TODO contained\n");
+        symlink("Target.java", root.join("src/Alias.java")).unwrap();
+
+        let scan = test_grep(&root, "TODO", "src/Alias.java", 100);
+        assert_eq!(scan.candidate_files, 1);
+        assert_eq!(scan.files_scanned, 1);
+        assert_eq!(scan.matches.len(), 1);
+        assert_eq!(scan.matches[0].file, "src/Alias.java");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grep_single_file_symlink_rejects_an_outside_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = grep_root("fastpath-escaping-symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "cih-grepfiles-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&outside, b"// TODO secret\n").unwrap();
+        symlink(&outside, root.join("escape.java")).unwrap();
+
+        let error = plan_walk(&root, "escape.java").unwrap_err();
+        assert!(error.to_string().contains("outside the repository root"));
+        std::fs::remove_file(outside).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grep_does_not_traverse_a_directory_symlink_prefix() {
+        use std::os::unix::fs::symlink;
+
+        let root = grep_root("fastpath-directory-symlink");
+        write_under(&root, "real/App.java", b"// TODO real\n");
+        symlink("real", root.join("alias")).unwrap();
+
+        assert_eq!(
+            plan_walk(&root, "alias/**/*.java").unwrap(),
+            WalkPlan::Empty
+        );
+        let scan = test_grep(&root, "TODO", "alias/**/*.java", 100);
+        assert_eq!(scan.candidate_files, 0);
+        assert!(scan.matches.is_empty());
+    }
+
     /// A literal directory prefix roots the walk at that subtree; match paths
     /// stay repo-relative.
     #[test]
@@ -1146,7 +1222,7 @@ mod tests {
         write_under(&root, "src/main/App.java", b"// TODO in scope\n");
         write_under(&root, "vendor/big/Other.java", b"// TODO out of scope\n");
         assert!(matches!(
-            plan_walk(&root, "src/main/**/*.java"),
+            plan_walk(&root, "src/main/**/*.java").unwrap(),
             WalkPlan::Subtree(_)
         ));
         let scan = test_grep(&root, "TODO", "src/main/**/*.java", 100);
@@ -1161,7 +1237,10 @@ mod tests {
     fn grep_missing_literal_prefix_returns_empty() {
         let root = grep_root("fastpath-missing");
         write_under(&root, "src/App.java", b"// TODO\n");
-        assert_eq!(plan_walk(&root, "nope/**/*.java"), WalkPlan::Empty);
+        assert_eq!(
+            plan_walk(&root, "nope/**/*.java").unwrap(),
+            WalkPlan::Empty
+        );
         let scan = test_grep(&root, "TODO", "nope/**/*.java", 100);
         assert!(scan.complete);
         assert_eq!(scan.candidate_files, 0);
@@ -1263,7 +1342,8 @@ mod tests {
                 pool: &pool,
                 threads: 1,
             },
-        );
+        )
+        .unwrap();
         assert!(!scan.complete);
         assert_eq!(scan.truncation_reason, GrepTruncationReason::Deadline);
     }

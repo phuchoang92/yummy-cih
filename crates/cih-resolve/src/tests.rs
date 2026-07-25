@@ -275,6 +275,15 @@ fn receiver_type_param_field_and_this() {
 #[test]
 fn local_param_shadows_field() {
     let mut files = workspace();
+    let mut qualified_field = binding(
+        "service",
+        "OwnerService",
+        BindingKind::Field,
+        "com.acme.OwnerController",
+        3,
+    );
+    qualified_field.qualifier = Some("fieldBean".into());
+    files[2].type_bindings.push(qualified_field);
     files[2].type_bindings.push(binding(
         "service",
         "Owner",
@@ -292,6 +301,61 @@ fn local_param_shadows_field() {
         .as_deref(),
         Some("com.acme.Owner"),
         "a local must shadow the field of the same name"
+    );
+    assert_eq!(
+        idx.receiver(
+            "com.acme.OwnerController#handle/1",
+            "service",
+            "com/acme/OwnerController.java"
+        )
+        .and_then(|resolved| resolved.qualifier),
+        None,
+        "an unqualified local must also shadow the field qualifier"
+    );
+}
+
+#[test]
+fn receiver_qualifier_comes_from_the_selected_parameter_or_field_binding() {
+    let mut files = workspace();
+    let mut field = binding(
+        "service",
+        "OwnerService",
+        BindingKind::Field,
+        "com.acme.OwnerController",
+        3,
+    );
+    field.qualifier = Some("fieldBean".into());
+    let mut param = binding(
+        "svc",
+        "OwnerService",
+        BindingKind::Param,
+        "com.acme.OwnerController#handle/1",
+        5,
+    );
+    param.qualifier = Some("paramBean".into());
+    files[2]
+        .type_bindings
+        .retain(|binding| binding.name != "svc");
+    files[2].type_bindings.extend([field, param]);
+
+    let idx = ResolveIndex::build(&files, &default_registry());
+    assert_eq!(
+        idx.receiver(
+            "com.acme.OwnerController#handle/1",
+            "svc",
+            "com/acme/OwnerController.java"
+        )
+        .and_then(|resolved| resolved.qualifier),
+        Some("paramBean".into())
+    );
+    assert_eq!(
+        idx.receiver(
+            "com.acme.OwnerController#handle/1",
+            "service",
+            "com/acme/OwnerController.java"
+        )
+        .and_then(|resolved| resolved.qualifier),
+        Some("fieldBean".into())
     );
 }
 

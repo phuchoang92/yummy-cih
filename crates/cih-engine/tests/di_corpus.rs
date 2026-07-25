@@ -1,6 +1,7 @@
 //! End-to-end gate for qualifier-aware Spring XML DI resolution: the full
 //! `analyze` pipeline over `tests/corpus/java-spring-xml-di` must redirect the
-//! `@Qualifier("retailUserAdminRef")` interface-field call to the XML-wired
+//! constructor `@Qualifier("retailUserAdminRef")` propagated through an exact
+//! `this.field = parameter` assignment, then used for an interface-field call to the XML-wired
 //! `UserImpl` — and must never emit the historical `CustomUserImpl → CustomUserImpl`
 //! false self-recursion (bean id map collected before resolve, qualifier parsed
 //! from the field, redirect skipping the enclosing class).
@@ -56,7 +57,7 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 #[test]
-fn qualifier_field_call_redirects_to_xml_wired_impl() {
+fn constructor_qualifier_field_call_redirects_to_xml_wired_impl() {
     let edges = analyze_corpus("qualifier");
     let calls: Vec<serde_json::Value> = edges
         .lines()
@@ -109,5 +110,23 @@ fn audit_queue_sql_constant_produces_table_write_edges() {
             && e["src"] == query_id
             && e["dst"] == "DbTable:AUDIT_LOG"),
         "the audit INSERT must write AUDIT_LOG"
+    );
+}
+
+#[test]
+fn objectless_sql_constant_call_produces_query_edge() {
+    let edges = analyze_corpus("objectless-sql");
+    let all: Vec<serde_json::Value> = edges
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect();
+
+    assert!(
+        all.iter().any(|edge| {
+            edge["kind"] == "ExecutesQuery"
+                && edge["src"] == "Method:com.acme.user.UserImpl#enqueueAudit/0"
+                && edge["dst"] == "DbQuery:com.acme.user.UserImpl#INSERT_AUDIT_LOG"
+        }),
+        "objectless custom wrapper call must retain SQL-constant execution evidence"
     );
 }

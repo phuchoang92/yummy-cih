@@ -10,9 +10,12 @@ import org.springframework.beans.factory.annotation.Qualifier;
  */
 public class CustomUserImpl implements UserAdmin {
 
-    @Autowired
-    @Qualifier("retailUserAdminRef")
     private UserAdmin retailUserAdminRef;
+
+    @Autowired
+    public CustomUserImpl(@Qualifier("retailUserAdminRef") UserAdmin delegate) {
+        this.retailUserAdminRef = delegate;
+    }
 
     @Override
     public void modifyUserPassword(PasswordRequest request) {

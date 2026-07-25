@@ -558,6 +558,75 @@ fn field_qualifier_lands_on_type_binding() {
 }
 
 #[test]
+fn parameter_qualifier_propagates_only_through_direct_field_assignment() {
+    let src = r#"
+        package com.acme;
+
+        class Facade {
+            private UserAdmin constructorInjected;
+            private UserAdmin methodInjected;
+            private UserAdmin transformed;
+
+            Facade(@Qualifier("constructorBean") UserAdmin selected) {
+                this.constructorInjected = selected;
+                this.transformed = decorate(selected);
+            }
+
+            void install(@Resource(name = "methodBean") UserAdmin selected) {
+                this.methodInjected = selected;
+            }
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/Facade.java", src)
+        .expect("parse");
+    let field = |name: &str| {
+        unit.parsed_file
+            .type_bindings
+            .iter()
+            .find(|binding| binding.kind == cih_core::BindingKind::Field && binding.name == name)
+            .unwrap_or_else(|| panic!("field binding {name}"))
+    };
+
+    assert_eq!(
+        field("constructorInjected").qualifier.as_deref(),
+        Some("constructorBean")
+    );
+    assert_eq!(
+        field("methodInjected").qualifier.as_deref(),
+        Some("methodBean")
+    );
+    assert_eq!(field("transformed").qualifier, None);
+}
+
+#[test]
+fn conflicting_direct_and_inferred_field_qualifiers_are_discarded() {
+    let src = r#"
+        package com.acme;
+
+        class Facade {
+            @Qualifier("directBean")
+            private UserAdmin service;
+
+            Facade(@Qualifier("constructorBean") UserAdmin selected) {
+                this.service = selected;
+            }
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/Facade.java", src)
+        .expect("parse");
+    let field = unit
+        .parsed_file
+        .type_bindings
+        .iter()
+        .find(|binding| binding.kind == cih_core::BindingKind::Field && binding.name == "service")
+        .expect("field binding");
+
+    assert_eq!(field.qualifier, None);
+}
+
+#[test]
 fn sql_value_shaped_constants_are_captured_without_upper_snake_names() {
     let src = r#"
         package com.acme;
@@ -606,6 +675,10 @@ fn configured_sql_api_and_const_flow_heuristic_emit_execution_sites() {
                 CustomRunner.run(INSERT_AUDIT);
             }
 
+            void inheritedWrapper() {
+                enqueue(INSERT_AUDIT);
+            }
+
             void noise() {
                 CustomRunner.run(NOT_SQL);
             }
@@ -635,13 +708,19 @@ fn configured_sql_api_and_const_flow_heuristic_emit_execution_sites() {
     assert_eq!(heuristic.const_ref.as_deref(), Some("INSERT_AUDIT"));
     assert!(heuristic.heuristic);
 
+    let objectless = sites
+        .iter()
+        .find(|s| s.api_name == "enqueue" && s.heuristic)
+        .expect("objectless call should retain the SQL-constant heuristic");
+    assert_eq!(objectless.const_ref.as_deref(), Some("INSERT_AUDIT"));
+
     assert!(
         !sites.iter().any(|s| s.api_name == "info"),
         "logger receivers must not become execution sites"
     );
     assert_eq!(
         sites.len(),
-        2,
+        3,
         "non-SQL constants must not create heuristic sites: {sites:?}"
     );
 }
@@ -653,10 +732,21 @@ fn trivial_accessors_get_the_is_accessor_prop() {
 
         class User {
             private String name;
+            private boolean active;
 
             public String getName() { return name; }
             public void setName(String name) { this.name = name; }
-            public boolean isActive() { return true; }
+            public boolean isActive() { return this.active; }
+            public boolean hasName() { return name; }
+
+            // Accessor-shaped names with non-accessor bodies.
+            public boolean isConstant() { return true; }
+            public String getCalculated() { return name + "!"; }
+            public String getConditional() { if (active) return name; return ""; }
+            public String getWithArg(String fallback) { return name; }
+            public void setCalculated(String name) { this.name = normalize(name); }
+            public void setWrong(String value) { this.name = name; }
+            public void setMissing() { this.name = "x"; }
 
             // Same prefix, but real logic — must NOT be flagged.
             public String getDisplayName() { return format(name); }
@@ -680,6 +770,18 @@ fn trivial_accessors_get_the_is_accessor_prop() {
     assert!(accessor_flag("getName"));
     assert!(accessor_flag("setName"));
     assert!(accessor_flag("isActive"));
+    assert!(accessor_flag("hasName"));
+    for name in [
+        "isConstant",
+        "getCalculated",
+        "getConditional",
+        "getWithArg",
+        "setCalculated",
+        "setWrong",
+        "setMissing",
+    ] {
+        assert!(!accessor_flag(name), "{name} is not an exact accessor");
+    }
     assert!(
         !accessor_flag("getDisplayName"),
         "calls format() — not trivial"

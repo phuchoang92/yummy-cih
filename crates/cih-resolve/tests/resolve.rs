@@ -943,6 +943,83 @@ fn qualifier_redirect_follows_xml_bean_id() {
     );
 }
 
+#[test]
+fn parameter_qualifier_redirect_uses_the_lexically_selected_binding() {
+    let mut files = make_qualifier_scenario(true, Some("wrongFieldBean"));
+    files[1].type_bindings.push(TypeBinding {
+        name: "retailUserAdminRef".into(),
+        raw_type: "UserAdmin".into(),
+        kind: BindingKind::Param,
+        in_fqcn: "com.acme.CustomUserImpl#modifyUserPassword/1".into(),
+        qualifier: Some("parameterBean".into()),
+        range: Range::default(),
+    });
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("parameterBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::Calls
+                && edge.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1)
+        })
+        .expect("parameter qualifier should redirect to its XML bean");
+    assert_eq!(edge.reason, "di-qualifier");
+}
+
+#[test]
+fn unqualified_local_shadows_a_qualified_field() {
+    let mut files = make_qualifier_scenario(true, Some("fieldBean"));
+    files[1].type_bindings.push(TypeBinding {
+        name: "retailUserAdminRef".into(),
+        raw_type: "UserAdmin".into(),
+        kind: BindingKind::Local,
+        in_fqcn: "com.acme.CustomUserImpl#modifyUserPassword/1".into(),
+        qualifier: None,
+        range: Range::default(),
+    });
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("fieldBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let calls: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Calls)
+        .collect();
+    assert!(
+        calls.iter().any(|edge| {
+            edge.dst == method_id("com.acme.UserAdmin", "modifyUserPassword", 1)
+        }),
+        "ambiguous unqualified local should fall back to the interface method"
+    );
+    assert!(!calls.iter().any(|edge| edge.reason == "di-qualifier"));
+}
+
 /// The sole in-scope implementor being the caller's own class must NOT produce a
 /// `caller → caller` self-loop (the OCB false-recursion bug): the redirect skips
 /// the enclosing class and the call degrades to the interface method.

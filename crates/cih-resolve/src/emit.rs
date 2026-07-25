@@ -8,7 +8,7 @@ use cih_core::{
 use cih_lang::constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 
 use crate::contracts::resolve_contract_edges;
-use crate::index::ResolveIndex;
+use crate::index::{ResolveIndex, ResolvedReceiver};
 use crate::inheritance::build_mro_map;
 use crate::lang::{DiSite, InheritanceModel, ResolverRegistry};
 use crate::types::{
@@ -115,10 +115,13 @@ impl<'a> EdgeEmitter<'a> {
             RefKind::Call => {
                 if let Some(recv) = site.receiver.as_deref() {
                     match self.resolve_receiver_expr_type(pf, site, recv) {
-                        Some(rt) if rt.contains('.') && !self.index.is_known_type(&rt) => {
-                            ("receiver_external", None, Some(rt))
+                        Some(resolved)
+                            if resolved.fqcn.contains('.')
+                                && !self.index.is_known_type(&resolved.fqcn) =>
+                        {
+                            ("receiver_external", None, Some(resolved.fqcn))
                         }
-                        Some(rt) => ("member_not_found", Some(rt), None),
+                        Some(resolved) => ("member_not_found", Some(resolved.fqcn), None),
                         None => ("receiver_type_unknown", None, None),
                     }
                 } else {
@@ -141,7 +144,8 @@ impl<'a> EdgeEmitter<'a> {
                 let recv_type = site
                     .receiver
                     .as_deref()
-                    .and_then(|r| self.resolve_receiver_expr_type(pf, site, r));
+                    .and_then(|r| self.resolve_receiver_expr_type(pf, site, r))
+                    .map(|resolved| resolved.fqcn);
                 ("field_not_found", recv_type, None)
             }
             _ => ("unresolved", None, None),
@@ -413,24 +417,16 @@ impl<'a> EdgeEmitter<'a> {
             return None;
         }
 
-        if let Some(owner) = self.resolve_receiver_expr_type(pf, site, receiver) {
+        if let Some(resolved) = self.resolve_receiver_expr_type(pf, site, receiver) {
             let bare_receiver = !receiver.contains('.') && !receiver.contains('(');
+            let owner = resolved.fqcn;
 
             // DI redirect: interface receiver → the impl the container would inject
             // (qualifier/bean-id, unique bean, or sole implementor — see di_redirect).
             if self.index.is_interface_type(&owner) {
                 let enclosing = class_of(&site.in_fqcn).to_string();
-                // A bare identifier receiver is (potentially) an injected field whose
-                // declaration may carry a @Qualifier.
-                let qualifier = if bare_receiver {
-                    self.index
-                        .field_qualifier(&enclosing, receiver)
-                        .map(str::to_string)
-                } else {
-                    None
-                };
                 let di_site = DiSite {
-                    qualifier: qualifier.as_deref(),
+                    qualifier: resolved.qualifier.as_deref(),
                     enclosing_class: &enclosing,
                 };
                 if let Some(redirect) =
@@ -488,7 +484,7 @@ impl<'a> EdgeEmitter<'a> {
 
     fn resolve_field_access(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<NodeId> {
         let owner = match site.receiver.as_deref() {
-            Some(receiver) => self.resolve_receiver_expr_type(pf, site, receiver)?,
+            Some(receiver) => self.resolve_receiver_expr_type(pf, site, receiver)?.fqcn,
             None => class_of(&site.in_fqcn).to_string(),
         };
         self.index.find_field_in_hierarchy(&owner, &site.name)
@@ -555,7 +551,7 @@ impl<'a> EdgeEmitter<'a> {
         pf: &ParsedFile,
         site: &ReferenceSite,
         receiver: &str,
-    ) -> Option<String> {
+    ) -> Option<ResolvedReceiver> {
         let receiver = receiver.trim();
         if receiver.is_empty() {
             return None;
@@ -568,16 +564,19 @@ impl<'a> EdgeEmitter<'a> {
                 .for_language(effective_lang(pf))
                 .is_self_receiver(receiver)
             {
-                return self.index.receiver_type(&site.in_fqcn, receiver, &pf.file);
+                return self.index.receiver(&site.in_fqcn, receiver, &pf.file);
             }
             if starts_uppercase(receiver) {
                 if let Some(fqcn) = self.resolve_type_cached(receiver, &pf.file) {
                     if self.index.is_known_type(&fqcn) {
-                        return Some(fqcn);
+                        return Some(ResolvedReceiver {
+                            fqcn,
+                            qualifier: None,
+                        });
                     }
                 }
             }
-            return self.index.receiver_type(&site.in_fqcn, receiver, &pf.file);
+            return self.index.receiver(&site.in_fqcn, receiver, &pf.file);
         }
 
         if !receiver.contains('.') && receiver.ends_with(')') {
@@ -585,12 +584,19 @@ impl<'a> EdgeEmitter<'a> {
             let owner = class_of(&site.in_fqcn);
             return self
                 .index
-                .member_return_type_in_hierarchy(owner, call, None);
+                .member_return_type_in_hierarchy(owner, call, None)
+                .map(|fqcn| ResolvedReceiver {
+                    fqcn,
+                    qualifier: None,
+                });
         }
 
         if let Some(fqcn) = self.resolve_type_cached(receiver, &pf.file) {
             if self.index.is_known_type(&fqcn) {
-                return Some(fqcn);
+                return Some(ResolvedReceiver {
+                    fqcn,
+                    qualifier: None,
+                });
             }
         }
 
@@ -602,21 +608,41 @@ impl<'a> EdgeEmitter<'a> {
                             let name = call_name(right)?;
                             return self
                                 .index
-                                .member_return_type_in_hierarchy(&fqcn, name, None);
+                                .member_return_type_in_hierarchy(&fqcn, name, None)
+                                .map(|fqcn| ResolvedReceiver {
+                                    fqcn,
+                                    qualifier: None,
+                                });
                         }
-                        return self.index.field_type_in_hierarchy(&fqcn, right);
+                        return self
+                            .index
+                            .field_type_in_hierarchy(&fqcn, right)
+                            .map(|fqcn| ResolvedReceiver {
+                                fqcn,
+                                qualifier: None,
+                            });
                     }
                 }
             }
 
-            let owner = self.resolve_receiver_expr_type(pf, site, left)?;
+            let owner = self.resolve_receiver_expr_type(pf, site, left)?.fqcn;
             if right.ends_with(')') {
                 let name = call_name(right)?;
                 return self
                     .index
-                    .member_return_type_in_hierarchy(&owner, name, None);
+                    .member_return_type_in_hierarchy(&owner, name, None)
+                    .map(|fqcn| ResolvedReceiver {
+                        fqcn,
+                        qualifier: None,
+                    });
             }
-            return self.index.field_type_in_hierarchy(&owner, right);
+            return self
+                .index
+                .field_type_in_hierarchy(&owner, right)
+                .map(|fqcn| ResolvedReceiver {
+                    fqcn,
+                    qualifier: None,
+                });
         }
 
         None

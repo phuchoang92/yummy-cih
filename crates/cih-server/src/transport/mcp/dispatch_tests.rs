@@ -18,7 +18,7 @@ use rmcp::model::{CallToolRequestParam, ClientInfo};
 use rmcp::{ClientHandler, ServiceExt};
 
 use super::CihServer;
-use crate::application::files::ReadFileLimits;
+use crate::application::files::{GrepRuntime, ReadFileLimits};
 use crate::bootstrap::assemble_services;
 use crate::infrastructure::wiki_repository::WikiSearchState;
 
@@ -56,6 +56,7 @@ async fn serve_test_server() -> TestClient {
             max_bytes: 1 << 20,
             max_lines: 2000,
         },
+        Arc::new(GrepRuntime::for_tests()),
         WikiSearchState::new(),
     );
     let server = CihServer::new(services);

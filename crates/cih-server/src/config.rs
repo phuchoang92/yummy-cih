@@ -92,7 +92,7 @@ impl RetrievalConfig {
                 5u64,
             )?,
             search_sidecar_enabled: bool_env("CIH_SEARCH_SIDECAR_ENABLED", true)?,
-            grep_max_concurrent_requests: positive_env("CIH_GREP_MAX_CONCURRENT_REQUESTS", 1usize)?,
+            grep_max_concurrent_requests: positive_env("CIH_GREP_MAX_CONCURRENT_REQUESTS", 2usize)?,
             grep_threads: positive_env("CIH_GREP_THREADS", cpus.clamp(1, 4))?,
             grep_queue_timeout_secs: positive_env("CIH_GREP_QUEUE_TIMEOUT_SECS", 2u64)?,
             grep_deadline_secs: positive_env("CIH_GREP_DEADLINE_SECS", 80u64)?,

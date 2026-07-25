@@ -141,7 +141,7 @@ entry per repo — **always with `--transport http-only`**:
       "command": "npx",
       "args": ["-y", "mcp-remote", "http://localhost:8081/mcp", "--transport", "http-only"],
       "disabled": false,
-      "autoApprove": ["context","impact","trace_flow","search_code","query",
+      "autoApprove": ["context","impact","trace_flow","reaches","search_code","query",
                       "communities","feature_map","route_map","read_file",
                       "test_coverage","regression_scope","list_repos","status"]
     }
@@ -166,6 +166,7 @@ by intent — Kiro picks the tools:
 - *"list_repos, then use feature_map to find where loan disbursement is implemented."*
 - *"Run impact upstream on `LoanWritePlatformService` — what's the blast radius before I change it?"*
 - *"trace_flow from the POST /loans route end-to-end."*
+- *"Does the POST /loans route reach a write to DbTable:M_LOAN? Use reaches with access=write."*
 - *"Show the communities and summarize the loan-related ones."*
 - *"search_code for 'interest recalculation' and read_file the top hit."*
 

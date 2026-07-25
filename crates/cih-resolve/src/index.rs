@@ -47,12 +47,16 @@ pub struct ResolveIndex {
     /// `./services/index`, which the parser cannot do because it is per-file and
     /// never sees its siblings.
     known_modules: HashSet<String>,
-    /// DI XML bean id/name → declared class FQCN (from [`crate::di_xml::DiWiring`],
+    /// DI XML bean id/name → unambiguous declared class FQCN (from [`crate::di_xml::DiWiring`],
     /// when the caller pre-collected it). Consulted by qualifier-aware DI redirect.
     di_beans_by_id: HashMap<String, String>,
-    /// `(class FQCN, field name)` → DI qualifier (`@Qualifier`/`@Resource(name)`)
-    /// declared on that injected field.
-    field_qualifiers: HashMap<(String, String), String>,
+}
+
+/// Receiver type and DI qualifier selected from one lexical binding lookup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedReceiver {
+    pub(crate) fqcn: String,
+    pub(crate) qualifier: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -147,13 +151,6 @@ impl ResolveIndex {
                 cih_lang::strip_source_extension(&pf.file).unwrap_or(pf.file.as_str());
             idx.known_modules.insert(module_scope.to_string());
             for tb in &pf.type_bindings {
-                if tb.kind == BindingKind::Field {
-                    if let Some(qualifier) = &tb.qualifier {
-                        // Field bindings carry the enclosing type FQCN in `in_fqcn`.
-                        idx.field_qualifiers
-                            .insert((tb.in_fqcn.clone(), tb.name.clone()), qualifier.clone());
-                    }
-                }
                 idx.bindings
                     .entry(tb.in_fqcn.clone())
                     .or_default()
@@ -432,28 +429,47 @@ impl ResolveIndex {
     /// a file). For a method this is the same file as the owner class, so results
     /// are unchanged.
     pub fn receiver_type(&self, in_fqcn: &str, receiver: &str, file: &str) -> Option<String> {
-        self.receiver_type_inner(in_fqcn, receiver, file, 0)
+        self.receiver(in_fqcn, receiver, file)
+            .map(|resolved| resolved.fqcn)
     }
 
-    fn receiver_type_inner(
+    pub(crate) fn receiver(
+        &self,
+        in_fqcn: &str,
+        receiver: &str,
+        file: &str,
+    ) -> Option<ResolvedReceiver> {
+        self.receiver_inner(in_fqcn, receiver, file, 0)
+    }
+
+    fn receiver_inner(
         &self,
         in_fqcn: &str,
         receiver: &str,
         file: &str,
         depth: u8,
-    ) -> Option<String> {
+    ) -> Option<ResolvedReceiver> {
         if depth > 8 {
             return None; // alias cycle guard
         }
         let owner_class = class_of(in_fqcn);
         match receiver {
-            "this" => return Some(owner_class.to_string()),
+            "this" => {
+                return Some(ResolvedReceiver {
+                    fqcn: owner_class.to_string(),
+                    qualifier: None,
+                });
+            }
             "super" => {
                 return self
                     .supertypes
                     .get(owner_class)
                     .and_then(|s| s.first())
                     .cloned()
+                    .map(|fqcn| ResolvedReceiver {
+                        fqcn,
+                        qualifier: None,
+                    });
             }
             _ => {}
         }
@@ -461,7 +477,12 @@ impl ResolveIndex {
         // 1. param / local / pattern / alias / call-result in this callable.
         if let Some(bindings) = self.bindings.get(in_fqcn) {
             if let Some(tb) = pick_binding(bindings, receiver) {
-                return self.resolve_binding(tb, in_fqcn, file, depth);
+                return self
+                    .resolve_binding(tb, in_fqcn, file, depth)
+                    .map(|fqcn| ResolvedReceiver {
+                        fqcn,
+                        qualifier: tb.qualifier.clone(),
+                    });
             }
         }
 
@@ -469,12 +490,17 @@ impl ResolveIndex {
         //    after callable-scoped bindings so a function-local shadows it).
         if let Some(bindings) = self.module_bindings.get(file) {
             if let Some(tb) = pick_binding(bindings, receiver) {
-                return self.resolve_binding(tb, in_fqcn, file, depth);
+                return self
+                    .resolve_binding(tb, in_fqcn, file, depth)
+                    .map(|fqcn| ResolvedReceiver {
+                        fqcn,
+                        qualifier: tb.qualifier.clone(),
+                    });
             }
         }
 
         // 3. field on the enclosing class or a supertype.
-        self.field_type_in_hierarchy(owner_class, receiver)
+        self.field_receiver_in_hierarchy(owner_class, receiver)
     }
 
     fn resolve_binding(
@@ -497,7 +523,9 @@ impl ResolveIndex {
                 self.resolve_in_type(&tb.raw_type, owner_class)
             }
             // `var y = x;` — raw_type is another bound name; chase it.
-            BindingKind::Alias => self.receiver_type_inner(in_fqcn, &tb.raw_type, file, depth + 1),
+            BindingKind::Alias => self
+                .receiver_inner(in_fqcn, &tb.raw_type, file, depth + 1)
+                .map(|resolved| resolved.fqcn),
             // `var x = m(...);` — raw_type is the method name.
             // 1. Check the enclosing class hierarchy (self/free calls).
             // 2. Scan fields of the enclosing class for the method when step 1 fails
@@ -563,6 +591,40 @@ impl ResolveIndex {
             if let Some(field) = self.fields.get(&(cur.clone(), name.to_string())) {
                 if let Some(raw) = &field.declared_type {
                     return self.resolve_in_type(raw, &cur);
+                }
+            }
+            if let Some(supers) = self.supertypes.get(&cur) {
+                queue.extend(supers.iter().cloned());
+            }
+        }
+        None
+    }
+
+    fn field_receiver_in_hierarchy(
+        &self,
+        owner_class: &str,
+        name: &str,
+    ) -> Option<ResolvedReceiver> {
+        let mut seen = HashSet::new();
+        let mut queue = vec![owner_class.to_string()];
+        while let Some(cur) = queue.pop() {
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if let Some(field) = self.fields.get(&(cur.clone(), name.to_string())) {
+                if let Some(raw) = &field.declared_type {
+                    if let Some(fqcn) = self.resolve_in_type(raw, &cur) {
+                        let qualifier = self
+                            .bindings
+                            .get(&cur)
+                            .and_then(|bindings| {
+                                bindings.iter().find(|binding| {
+                                    binding.kind == BindingKind::Field && binding.name == name
+                                })
+                            })
+                            .and_then(|binding| binding.qualifier.clone());
+                        return Some(ResolvedReceiver { fqcn, qualifier });
+                    }
                 }
             }
             if let Some(supers) = self.supertypes.get(&cur) {
@@ -671,14 +733,6 @@ impl ResolveIndex {
     /// Class FQCN declared for a DI XML bean id/name, if the wiring was provided.
     pub fn bean_class_by_id(&self, id: &str) -> Option<&str> {
         self.di_beans_by_id.get(id).map(String::as_str)
-    }
-
-    /// DI qualifier (`@Qualifier("x")` / `@Resource(name = "x")`) declared on
-    /// `class`'s field `field`, if any.
-    pub fn field_qualifier(&self, class: &str, field: &str) -> Option<&str> {
-        self.field_qualifiers
-            .get(&(class.to_string(), field.to_string()))
-            .map(String::as_str)
     }
 
     /// Get per-language metadata for a type.

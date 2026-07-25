@@ -1,7 +1,9 @@
 use cih_core::{ComplexityRecord, NodeKind, StructuralProfile};
 use tree_sitter::Node as TsNode;
 
-use super::{FileBuilder, annotation_name, annotations, first_named_child, text};
+use super::{
+    FileBuilder, annotation_name, annotations, first_named_child, parameter_count, text,
+};
 
 pub(super) fn class_stereotype(
     node: TsNode<'_>,
@@ -58,37 +60,104 @@ pub(super) fn is_bean_method(node: TsNode<'_>, src: &str) -> bool {
         .any(|ann| annotation_name(ann, src).as_deref() == Some("Bean"))
 }
 
-/// True for trivial bean accessors: `getX`/`setX`/`isX`/`hasX` whose body is at
-/// most one statement and performs no calls — pure field read/write plumbing.
-/// Bodyless declarations (abstract/interface) are not counted: triviality can't
-/// be verified. Persisted as the `isAccessor` node prop so trace filtering can
-/// hide accessor noise.
-pub(super) fn is_trivial_accessor(node: TsNode<'_>, name: &str) -> bool {
-    let prefix_ok = ["get", "set", "is", "has"].iter().any(|p| {
-        name.strip_prefix(p)
-            .and_then(|rest| rest.chars().next())
-            .is_some_and(|c| c.is_ascii_uppercase())
-    });
-    if !prefix_ok {
-        return false;
-    }
+/// True only for an exact bean accessor AST: a zero-argument `get`/`is`/`has`
+/// method returning a field, or a one-argument `set` method assigning that
+/// parameter directly to `this.field`. Prefixes alone are never sufficient.
+pub(super) fn is_trivial_accessor(node: TsNode<'_>, name: &str, src: &str) -> bool {
+    let getter = ["get", "is", "has"]
+        .iter()
+        .any(|prefix| has_accessor_suffix(name, prefix));
+    let setter = has_accessor_suffix(name, "set");
     let Some(body) = node.child_by_field_name("body") else {
         return false;
     };
-    body.named_child_count() <= 1 && !contains_node_kind(body, "method_invocation")
-}
+    let Some(statement) = sole_semantic_child(body) else {
+        return false;
+    };
 
-fn contains_node_kind(node: TsNode<'_>, kind: &str) -> bool {
-    if node.kind() == kind {
-        return true;
+    if getter && parameter_count(node) == 0 {
+        return is_direct_field_return(statement);
     }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if contains_node_kind(child, kind) {
-            return true;
-        }
+    if setter && parameter_count(node) == 1 {
+        let Some(parameter) = sole_parameter_name(node, src) else {
+            return false;
+        };
+        return is_direct_field_assignment(statement, &parameter, src);
     }
     false
+}
+
+fn has_accessor_suffix(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|first| first.is_ascii_uppercase())
+}
+
+fn sole_semantic_child(node: TsNode<'_>) -> Option<TsNode<'_>> {
+    let mut cursor = node.walk();
+    let mut children = node
+        .named_children(&mut cursor)
+        .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"));
+    let only = children.next()?;
+    if children.next().is_some() {
+        return None;
+    }
+    Some(only)
+}
+
+fn is_direct_field_return(statement: TsNode<'_>) -> bool {
+    if statement.kind() != "return_statement" {
+        return false;
+    }
+    let Some(value) = sole_semantic_child(statement) else {
+        return false;
+    };
+    value.kind() == "identifier" || is_this_field(value)
+}
+
+fn sole_parameter_name(node: TsNode<'_>, src: &str) -> Option<String> {
+    let parameters = node.child_by_field_name("parameters")?;
+    let parameter = sole_semantic_child(parameters)?;
+    if !matches!(parameter.kind(), "formal_parameter" | "spread_parameter") {
+        return None;
+    }
+    parameter
+        .child_by_field_name("name")
+        .map(|name| text(name, src))
+        .filter(|name| !name.is_empty())
+}
+
+fn is_direct_field_assignment(statement: TsNode<'_>, parameter: &str, src: &str) -> bool {
+    if statement.kind() != "expression_statement" {
+        return false;
+    }
+    let Some(assignment) = sole_semantic_child(statement) else {
+        return false;
+    };
+    if assignment.kind() != "assignment_expression"
+        || assignment
+            .child_by_field_name("operator")
+            .is_none_or(|operator| text(operator, src) != "=")
+    {
+        return false;
+    }
+    let Some(left) = assignment.child_by_field_name("left") else {
+        return false;
+    };
+    let Some(right) = assignment.child_by_field_name("right") else {
+        return false;
+    };
+    is_this_field(left) && right.kind() == "identifier" && text(right, src) == parameter
+}
+
+fn is_this_field(node: TsNode<'_>) -> bool {
+    node.kind() == "field_access"
+        && node
+            .child_by_field_name("object")
+            .is_some_and(|object| object.kind() == "this")
+        && node
+            .child_by_field_name("field")
+            .is_some_and(|field| field.kind() == "identifier")
 }
 
 pub(super) fn is_test_method(node: TsNode<'_>, src: &str) -> bool {
@@ -346,4 +415,3 @@ pub(super) fn attach_structural_profiles(builder: &mut FileBuilder) {
         }
     }
 }
-

@@ -22,7 +22,7 @@ without reading source files.
 list_repos()
 ```
 
-Returns: `[{ name, path, indexed_at, stats: { nodes, edges, files, routes, communities } }]`
+Returns: `[{ name, path, indexed_at, stats: { nodes, edges, files, routes, routes_current, communities } }]`
 
 Pick the repo whose `name` or `path` matches the user's question. If multiple repos are indexed,
 confirm which one is in scope before proceeding.
@@ -41,7 +41,9 @@ chained together:
   NodeIds ready to paste into `context(name=...)` / `impact(name=...)`
 - `route_groups` — endpoints bucketed by path prefix, with samples like
   `Route:POST /api/v1/loans → Method:acme.LoanApi#create` (the left half is
-  `trace_flow`-ready, the right half is `context`-ready)
+  `trace_flow`-ready, the right half is `context`-ready). Read
+  `total_routes_exact`; false means the 20,000-route serving bound was reached
+  and `total_routes` is a lower bound.
 - `entrypoints` — schedulers/event listeners (from discover) + high-degree hubs
 - `wiki_pages` — slugs for `get_wiki_page(slug=...)`
 - `provenance` + `warnings` — where each number came from and what is stale
@@ -144,6 +146,8 @@ to see which symbols participate.
 - Trust the `warnings` block over any single count: registry, graph, and wiki are
   differently-timestamped sources, and the overview reconciles them for you.
 - `query` with `expand: true` is the fastest way to surface unknown symbol names.
-- If `route_groups.total_routes == 0` this is a library, not a service.
+- Treat `route_groups.total_routes == 0` as evidence of a library only when the
+  section is available and `total_routes_exact == true`. In registry output,
+  require `stats.routes_current == true` before interpreting `stats.routes`.
 - A section with `available: false` names its remedy (`cih-engine discover <repo>`,
   `cih-engine wiki <repo>`) — relay that command to the user verbatim.

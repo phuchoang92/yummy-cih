@@ -3,7 +3,8 @@
 use cih_core::{Node, NodeId, NodeKind};
 use cih_graph_store::{
     CommunityEdge, CommunityInfo, DbEffect, Direction, FlowFilter, FlowHop, GraphStoreError,
-    HotspotNode, Impact, RouteInfo, SimilarMethod, SymbolContext,
+    HotspotNode, Impact, PathAccess, PathFilter, RouteInfo, SimilarMethod, SymbolContext,
+    TraversalStats, FLOW_VISIBLE_WINDOW,
 };
 use serde::Serialize;
 
@@ -128,6 +129,21 @@ impl GraphQueryService {
         &self,
         command: TraceFlowCommand,
     ) -> Result<SymbolQueryOutput<TraceFlowOutput>, AppError> {
+        let window_end = command
+            .offset
+            .checked_add(command.max_nodes)
+            .ok_or_else(|| AppError::InvalidInput {
+                field: "offset",
+                message: "offset + max_nodes overflowed".to_string(),
+            })?;
+        if window_end > FLOW_VISIBLE_WINDOW {
+            return Err(AppError::InvalidInput {
+                field: "offset",
+                message: format!(
+                    "offset + max_nodes must be at most {FLOW_VISIBLE_WINDOW} (got {window_end})"
+                ),
+            });
+        }
         let repo = self
             .repos
             .resolve(RepoSelector::from_wire(&command.repo))
@@ -162,25 +178,38 @@ impl GraphQueryService {
                             || id.as_str().starts_with("Constructor:")
                     })
                     .collect();
-                let db_effects = match repo.store.db_effects_for_methods(&method_ids).await {
-                    Ok(effects) => effects,
+                let (db_effects, db_effects_complete) = match repo
+                    .store
+                    .db_effects_for_methods(&method_ids)
+                    .await
+                {
+                    Ok(effects) => (effects, true),
                     Err(err) => {
                         tracing::warn!(error = %err, "trace_flow: db_effects lookup failed — omitting section");
-                        Vec::new()
+                        (Vec::new(), false)
                     }
                 };
-                let next_offset = page.has_more.then(|| (command.offset + steps.len()) as u32);
+                let next_offset = (page.has_more && !page.traversal.truncated)
+                    .then(|| command.offset.checked_add(steps.len()))
+                    .flatten()
+                    .and_then(|offset| u32::try_from(offset).ok());
+                let completeness = ResultBounds::paged(
+                    steps.len(),
+                    command.offset,
+                    page.has_more,
+                    filter.effective_limit(),
+                    page.traversal.truncated,
+                    db_effects_complete,
+                );
                 Ok(SymbolQueryOutput::Resolved(TraceFlowOutput {
                     entry_point: id,
                     depth_limit: command.max_depth,
                     step_count: steps.len(),
-                    completeness: ResultBounds::paged(
-                        steps.len(),
-                        page.has_more,
-                        filter.effective_limit(),
-                    ),
+                    completeness,
                     next_offset,
                     db_effects,
+                    db_effects_complete,
+                    traversal: page.traversal,
                     steps,
                 }))
             }
@@ -219,25 +248,50 @@ impl GraphQueryService {
             }
             // Bare target names are often table names (`audit_log`) — try the
             // DbTable id (table names are stored uppercase) before giving up.
-            SymbolResolution::NotFound => {
+            SymbolResolution::NotFound if !command.to.contains(':') => {
                 let table = NodeId::new(format!("DbTable:{}", command.to.to_uppercase()));
                 match repo.store.get_node(&table).await.map_err(graph_error)? {
                     Some(node) => node.id,
                     None => return Err(symbol_not_found(command.to)),
                 }
             }
+            SymbolResolution::NotFound => return Err(symbol_not_found(command.to)),
         };
-        let paths = repo
+        let page = repo
             .store
-            .paths_between(&from, &to, command.max_depth, command.max_paths)
+            .paths_between(
+                &from,
+                &to,
+                &PathFilter {
+                    max_depth: command.max_depth,
+                    max_paths: command.max_paths,
+                    access: command.access,
+                },
+            )
             .await
             .map_err(graph_error)?;
+        let status = if !page.paths.is_empty() {
+            ReachesStatus::Reachable
+        } else if page.traversal.truncated {
+            ReachesStatus::Inconclusive
+        } else {
+            ReachesStatus::NotReachable
+        };
+        let completeness = ResultBounds::traversal(
+            page.paths.len(),
+            page.has_more,
+            page.traversal.truncated,
+            command.max_paths,
+        );
         Ok(SymbolQueryOutput::Resolved(ReachesOutput {
-            reachable: !paths.is_empty(),
-            completeness: ResultBounds::backend_limited(paths.len(), command.max_paths),
+            reachable: status == ReachesStatus::Reachable,
+            status,
+            access: command.access,
+            completeness,
+            traversal: page.traversal,
             from,
             to,
-            paths,
+            paths: page.paths,
         }))
     }
 
@@ -352,6 +406,15 @@ pub(crate) struct ReachesCommand {
     pub(crate) to: String,
     pub(crate) max_depth: u32,
     pub(crate) max_paths: usize,
+    pub(crate) access: PathAccess,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReachesStatus {
+    Reachable,
+    NotReachable,
+    Inconclusive,
 }
 
 #[derive(Debug, Serialize)]
@@ -362,7 +425,10 @@ pub(crate) struct ReachesOutput {
     /// "not reachable within max_depth over indexed edges" — not proof of no
     /// runtime path.
     pub(crate) reachable: bool,
+    pub(crate) status: ReachesStatus,
+    pub(crate) access: PathAccess,
     pub(crate) completeness: ResultBounds,
+    pub(crate) traversal: TraversalStats,
     pub(crate) paths: Vec<cih_graph_store::PathInfo>,
 }
 
@@ -456,6 +522,8 @@ pub(crate) struct TraceFlowOutput {
     /// Table reads/writes performed by any traced method (skipped when none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) db_effects: Vec<DbEffect>,
+    pub(crate) db_effects_complete: bool,
+    pub(crate) traversal: TraversalStats,
     pub(crate) steps: Vec<FlowHop>,
 }
 
@@ -486,7 +554,8 @@ pub(crate) async fn resolve_symbol(
     name: &str,
 ) -> Result<SymbolResolution, AppError> {
     if name.contains(':') {
-        return Ok(SymbolResolution::Id(NodeId::new(name.to_string())));
+        let id = NodeId::new(name.to_string());
+        return repo_node_resolution(store, id).await;
     }
     let candidates = store
         .candidates_by_name(name, 10)
@@ -496,6 +565,17 @@ pub(crate) async fn resolve_symbol(
         0 => SymbolResolution::NotFound,
         1 => SymbolResolution::Id(candidates.into_iter().next().expect("one candidate").id),
         _ => SymbolResolution::Ambiguous(candidates),
+    })
+}
+
+async fn repo_node_resolution(
+    store: &std::sync::Arc<dyn cih_graph_store::GraphStore>,
+    id: NodeId,
+) -> Result<SymbolResolution, AppError> {
+    Ok(if store.get_node(&id).await.map_err(graph_error)?.is_some() {
+        SymbolResolution::Id(id)
+    } else {
+        SymbolResolution::NotFound
     })
 }
 
@@ -529,6 +609,10 @@ fn graph_error(error: GraphStoreError) -> AppError {
         GraphStoreError::NotFound(key) => AppError::NotFound {
             entity: "node",
             key,
+        },
+        GraphStoreError::InvalidInput(message) => AppError::InvalidInput {
+            field: "graph query",
+            message,
         },
         other => AppError::Unavailable {
             dependency: "graph store",

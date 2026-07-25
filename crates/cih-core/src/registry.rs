@@ -8,6 +8,11 @@ pub struct RegistryStats {
     pub edges: usize,
     pub files: usize,
     pub routes: usize,
+    /// Whether `routes` was measured by a pipeline version that records Route
+    /// nodes during analyze/discover. Legacy registry entries default to false
+    /// so a historical zero is not presented as a current codebase fact.
+    #[serde(default)]
+    pub routes_current: bool,
     pub communities: usize,
     pub processes: usize,
     /// Index *quality*, not just size — persisted so `status` can answer "is this

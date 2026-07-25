@@ -31,6 +31,10 @@ pub(crate) fn entry_from_analyze(emit: &EmitOutcome, graph_key: &str) -> Registr
             // performs (that was the `routes: 0` status bug). Discover still
             // overwrites it with its richer count when it does run.
             routes: emit.route_node_count,
+            // A no-op reuse does not inspect Route nodes. Its persisted value
+            // is carried from the prior registry entry below; without one it
+            // must remain explicitly stale rather than claiming a current 0.
+            routes_current: !emit.reused_artifacts,
             communities: 0,
             processes: 0,
             resolved_edges: emit.resolved_edge_count,
@@ -47,6 +51,7 @@ pub(crate) fn entry_from_analyze(emit: &EmitOutcome, graph_key: &str) -> Registr
 pub(crate) fn update_entry_from_discover(entry: &mut RegistryEntry, disc: &DiscoverOutcome) {
     entry.community_artifacts_dir = Some(disc.artifacts_dir.display().to_string());
     entry.stats.routes = disc.route_count;
+    entry.stats.routes_current = true;
     entry.stats.communities = disc.community_count;
     entry.stats.processes = disc.process_count;
 }
@@ -65,6 +70,7 @@ pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) {
             entry.stats.unresolved_refs = prev.stats.unresolved_refs;
             entry.stats.callable_coverage = prev.stats.callable_coverage;
             entry.stats.routes = prev.stats.routes;
+            entry.stats.routes_current = prev.stats.routes_current;
         }
     }
     reg.upsert(entry);

@@ -3,21 +3,31 @@
 //! load/publish lifecycle. Cypher is built with the `serialize` helpers; the
 //! `FalkorStore` connection/exec primitives live in `lib.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
-    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction, FlowEdge,
-    FlowFilter, FlowHop, FlowNode, FlowPage, GraphOverview, GraphOverviewEdge, GraphOverviewNode,
-    GraphStore, GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice,
-    KindCount, LoadObserver, LoadStats, NoopObserver, Path, PathEdge, PathInfo, Result, RouteInfo,
-    SimilarMethod, Subgraph, SymbolContext,
+    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction,
+    ExecutionTransition, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore,
+    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, Interception,
+    InterceptingAdvice, KindCount, LoadObserver, LoadStats, NoopObserver, Path, Result, RouteInfo,
+    SimilarMethod, Subgraph, SymbolContext, EXECUTION_BATCH_SIZE,
 };
 
 use crate::neighbor_nodes;
 use crate::serialize::*;
 use crate::FalkorStore;
+
+/// Canonical column order consumed by `node_from_row`. Keep every query that
+/// returns a domain `Node` on this projection so source ranges cannot silently
+/// disappear when a new read path is added.
+fn node_columns(alias: &str) -> String {
+    format!(
+        "{alias}.id, {alias}.kind, {alias}.name, {alias}.qualifiedName, \
+         {alias}.file, {alias}.startLine, {alias}.endLine"
+    )
+}
 
 #[async_trait]
 impl GraphStore for FalkorStore {
@@ -107,14 +117,100 @@ impl GraphStore for FalkorStore {
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        let columns = node_columns("n");
         let q = format!(
             "CYPHER id={id} \
              MATCH (n:Symbol {{id:$id}}) \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine LIMIT 1",
+             RETURN {columns} LIMIT 1",
             id = cstr(id.as_str())
         );
         let rows = self.rows(&q).await?;
         Ok(rows.first().map(|r| node_from_row(r)))
+    }
+
+    async fn execution_transitions(
+        &self,
+        ids: &[NodeId],
+        include_data: bool,
+        limit: usize,
+    ) -> Result<Vec<ExecutionTransition>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ids.len() > EXECUTION_BATCH_SIZE {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "execution transition batch {} exceeds {EXECUTION_BATCH_SIZE}",
+                ids.len()
+            )));
+        }
+        let list = ids
+            .iter()
+            .map(|id| cstr(id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let outgoing = if include_data {
+            "CALLS|EXTERNAL_CALL|PUBLISHES_EVENT|EXECUTES_QUERY|READS_TABLE|WRITES_TABLE"
+        } else {
+            "CALLS|EXTERNAL_CALL|PUBLISHES_EVENT"
+        };
+        let limit = limit.clamp(1, 50_001);
+        let forward = format!(
+            "UNWIND [{list}] AS sid \
+             MATCH (s:Symbol {{id:sid}})-[r:{outgoing}]->(t:Symbol) \
+             RETURN s.id, t.id, t.kind, t.name, t.qualifiedName, t.file, \
+                    t.startLine, t.endLine, coalesce(t.isAccessor, 0), \
+                    type(r), coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
+                    coalesce(r.callSites, '') \
+             ORDER BY t.name, t.id, s.id, type(r) LIMIT {limit}"
+        );
+        let reverse = format!(
+            "UNWIND [{list}] AS sid \
+             MATCH (s:Symbol {{id:sid}})<-[r:HANDLES_ROUTE|LISTENS_TO]-(t:Symbol) \
+             RETURN s.id, t.id, t.kind, t.name, t.qualifiedName, t.file, \
+                    t.startLine, t.endLine, coalesce(t.isAccessor, 0), \
+                    type(r), coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
+                    coalesce(r.callSites, '') \
+             ORDER BY t.name, t.id, s.id, type(r) LIMIT {limit}"
+        );
+        let mut transitions = parse_execution_rows(self.rows(&forward).await?, false);
+        transitions.extend(parse_execution_rows(self.rows(&reverse).await?, true));
+        Ok(transitions)
+    }
+
+    async fn interceptions_for_methods(&self, ids: &[NodeId]) -> Result<Vec<Interception>> {
+        let mut matches = Vec::new();
+        for chunk in ids.chunks(EXECUTION_BATCH_SIZE) {
+            let list = chunk
+                .iter()
+                .map(|id| cstr(id.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if list.is_empty() {
+                continue;
+            }
+            let q = format!(
+                "UNWIND [{list}] AS mid \
+                 MATCH (a:Symbol)-[r:ADVISES]->(m:Symbol {{id: mid}}) \
+                 RETURN m.id, a.id, r.reason"
+            );
+            matches.extend(self.rows(&q).await?.into_iter().filter_map(|row| {
+                if row.len() < 3 {
+                    return None;
+                }
+                let advice_kind = row[2]
+                    .strip_prefix("aop-")
+                    .unwrap_or(&row[2])
+                    .to_string();
+                Some(Interception {
+                    target: NodeId::new(row[0].clone()),
+                    advice: InterceptingAdvice {
+                        advice: NodeId::new(row[1].clone()),
+                        advice_kind,
+                    },
+                })
+            }));
+        }
+        Ok(matches)
     }
 
     async fn neighbors(
@@ -221,73 +317,6 @@ impl GraphStore for FalkorStore {
             .collect())
     }
 
-    async fn paths_between(
-        &self,
-        from: &NodeId,
-        to: &NodeId,
-        max_depth: u32,
-        max_paths: usize,
-    ) -> Result<Vec<PathInfo>> {
-        let d = max_depth.clamp(1, 12);
-        let k = max_paths.clamp(1, 10);
-        let q = format!(
-            "CYPHER from={from} to={to} \
-             MATCH p=(a:Symbol {{id:$from}})\
-             -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO\
-             |EXECUTES_QUERY|READS_TABLE|WRITES_TABLE*1..{d}]->\
-             (b:Symbol {{id:$to}}) \
-             WITH p ORDER BY length(p) LIMIT {k} \
-             RETURN [x IN nodes(p) | x.id], [r IN relationships(p) | type(r)], \
-                    [r IN relationships(p) | r.confidence], \
-                    [r IN relationships(p) | r.reason]",
-            from = cstr(from.as_str()),
-            to = cstr(to.as_str())
-        );
-        let rows = self.rows(&q).await?;
-        Ok(rows
-            .into_iter()
-            .filter(|r| r.len() >= 4)
-            .map(|r| {
-                let list = |cell: &str| -> Vec<String> {
-                    cell.trim_matches(|c| c == '[' || c == ']')
-                        .split(',')
-                        .map(|s| s.trim().trim_matches('"').to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                };
-                let nodes: Vec<NodeId> = list(&r[0]).into_iter().map(NodeId::new).collect();
-                let kinds = list(&r[1]);
-                let confidences = list(&r[2]);
-                let reasons = list(&r[3]);
-                let edges: Vec<PathEdge> = kinds
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, kind)| PathEdge {
-                        kind,
-                        confidence: confidences
-                            .get(i)
-                            .and_then(|c| c.parse().ok())
-                            .unwrap_or(1.0),
-                        reason: reasons.get(i).cloned().unwrap_or_default(),
-                    })
-                    .collect();
-                let min_confidence = edges
-                    .iter()
-                    .map(|e| e.confidence)
-                    .fold(f32::INFINITY, f32::min);
-                PathInfo {
-                    nodes,
-                    edges,
-                    min_confidence: if min_confidence.is_finite() {
-                        min_confidence
-                    } else {
-                        0.0
-                    },
-                }
-            })
-            .collect())
-    }
-
     async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -296,10 +325,11 @@ impl GraphStore for FalkorStore {
             if let Some(n) = self.get_node(seed).await? {
                 nodes.push(n);
             }
+            let columns = node_columns("m");
             let q = format!(
                 "CYPHER id={id} \
                  MATCH (n:Symbol {{id:$id}})-[*1..{r}]-(m:Symbol) \
-                 RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file, m.startLine, m.endLine LIMIT 200",
+                 RETURN DISTINCT {columns} LIMIT 200",
                 id = cstr(seed.as_str())
             );
             for row in self.rows(&q).await? {
@@ -382,6 +412,7 @@ impl GraphStore for FalkorStore {
                 .map(|k| cstr(k))
                 .collect::<Vec<_>>()
                 .join(",");
+            let columns = node_columns("n");
             let node_query = format!(
                 "MATCH (n:Symbol) \
                  WHERE n.kind IN [{kind_literals}] \
@@ -389,28 +420,20 @@ impl GraphStore for FalkorStore {
                  WITH n, count(r) AS degree \
                  ORDER BY degree DESC, n.id ASC \
                  LIMIT {max_nodes} \
-                 RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
+                 RETURN id(n), {columns}, degree"
             );
             for row in self.rows(&node_query).await? {
-                if row.len() < 7 {
+                if row.len() < 9 {
                     continue;
                 }
                 let Ok(internal_id) = row[0].parse::<i64>() else {
                     continue;
                 };
-                let id = NodeId::new(row[1].clone());
-                internal_to_node.insert(internal_id, id.clone());
+                let node = node_from_row(&row[1..8]);
+                internal_to_node.insert(internal_id, node.id.clone());
                 nodes.push(GraphOverviewNode {
-                    node: Node {
-                        id,
-                        kind: NodeKind::from_label(&row[2]),
-                        name: row[3].clone(),
-                        qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
-                        file: row.get(5).cloned().unwrap_or_default(),
-                        range: Range::default(),
-                        props: None,
-                    },
-                    degree: row[6].parse::<u64>().unwrap_or(0),
+                    node,
+                    degree: row[8].parse::<u64>().unwrap_or(0),
                 });
             }
         } else {
@@ -420,31 +443,24 @@ impl GraphStore for FalkorStore {
                   'MessageDestination','KafkaTopic','ExternalEndpoint',\
                   'DbTable','DbQuery']";
             let pass1_limit = max_nodes.min(2_000);
+            let columns = node_columns("n");
             let pass1_query = format!(
                 "MATCH (n:Symbol) \
                  WHERE n.kind IN {structural_kinds} \
-                 RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file \
+                 RETURN id(n), {columns} \
                  LIMIT {pass1_limit}"
             );
             for row in self.rows(&pass1_query).await? {
-                if row.len() < 6 {
+                if row.len() < 8 {
                     continue;
                 }
                 let Ok(internal_id) = row[0].parse::<i64>() else {
                     continue;
                 };
-                let id = NodeId::new(row[1].clone());
-                internal_to_node.insert(internal_id, id.clone());
+                let node = node_from_row(&row[1..8]);
+                internal_to_node.insert(internal_id, node.id.clone());
                 nodes.push(GraphOverviewNode {
-                    node: Node {
-                        id,
-                        kind: NodeKind::from_label(&row[2]),
-                        name: row[3].clone(),
-                        qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
-                        file: row.get(5).cloned().unwrap_or_default(),
-                        range: Range::default(),
-                        props: None,
-                    },
+                    node,
                     degree: 0,
                 });
             }
@@ -453,6 +469,7 @@ impl GraphStore for FalkorStore {
             let remaining = max_nodes.saturating_sub(nodes.len());
             if remaining > 0 {
                 let class_kinds = "['Class','Interface','Enum','Record']";
+                let columns = node_columns("n");
                 let pass2_query = format!(
                     "MATCH (n:Symbol) \
                      WHERE n.kind IN {class_kinds} \
@@ -460,10 +477,10 @@ impl GraphStore for FalkorStore {
                      WITH n, count(r) AS degree \
                      ORDER BY degree DESC, n.id ASC \
                      LIMIT {remaining} \
-                     RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
+                     RETURN id(n), {columns}, degree"
                 );
                 for row in self.rows(&pass2_query).await? {
-                    if row.len() < 7 {
+                    if row.len() < 9 {
                         continue;
                     }
                     let Ok(internal_id) = row[0].parse::<i64>() else {
@@ -472,19 +489,11 @@ impl GraphStore for FalkorStore {
                     if internal_to_node.contains_key(&internal_id) {
                         continue;
                     }
-                    let id = NodeId::new(row[1].clone());
-                    internal_to_node.insert(internal_id, id.clone());
+                    let node = node_from_row(&row[1..8]);
+                    internal_to_node.insert(internal_id, node.id.clone());
                     nodes.push(GraphOverviewNode {
-                        node: Node {
-                            id,
-                            kind: NodeKind::from_label(&row[2]),
-                            name: row[3].clone(),
-                            qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
-                            file: row.get(5).cloned().unwrap_or_default(),
-                            range: Range::default(),
-                            props: None,
-                        },
-                        degree: row[6].parse::<u64>().unwrap_or(0),
+                        node,
+                        degree: row[8].parse::<u64>().unwrap_or(0),
                     });
                 }
             }
@@ -648,10 +657,11 @@ impl GraphStore for FalkorStore {
         let lim = limit.clamp(1, 50);
         // Use n.kind (stored property) not labels(n)[0] (always "Symbol") so
         // node_from_row gets the real kind string.
+        let columns = node_columns("n");
         let q = format!(
             "CYPHER name={name_lit} \
              MATCH (n:Symbol) WHERE n.name = $name \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine \
+             RETURN {columns} \
              ORDER BY n.id LIMIT {lim}",
             name_lit = cstr(name),
         );
@@ -672,11 +682,12 @@ impl GraphStore for FalkorStore {
             files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
         );
         // Limit to callable/structural kinds most useful for change-impact analysis.
+        let columns = node_columns("n");
         let q = format!(
             "MATCH (n:Symbol) \
              WHERE n.file IN {list} \
                AND n.kind IN ['Method', 'Constructor', 'Function', 'Class', 'Interface', 'Enum'] \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine \
+             RETURN {columns} \
              ORDER BY n.file, n.id"
         );
         Ok(self
@@ -746,31 +757,6 @@ impl GraphStore for FalkorStore {
                 Some(DbEffect::from_query_row(method, query, &props, table, &rel))
             })
             .collect())
-    }
-
-    async fn flow_downstream(&self, entry: &NodeId, filter: &FlowFilter) -> Result<FlowPage> {
-        let d = filter.max_depth.clamp(1, 10);
-
-        // A Route node has no *outgoing* flow edges — `HANDLES_ROUTE` is stored
-        // handler→route. When the entry is a route, hop route→handler via the
-        // inverse `HANDLES_ROUTE` first, then trace downstream from each handler
-        // (a handler is a method, so it has no inverse handlers and goes through
-        // the plain method walk).
-        let handlers = self.route_handler_nodes(entry).await?;
-        let mut hops = if !handlers.is_empty() {
-            // Collect each handler with its downstream walk, then assemble the
-            // route-entry flow. The page is sliced once, after assembly.
-            let mut with_downstream = Vec::with_capacity(handlers.len());
-            for handler in handlers {
-                let sub = self.direct_flow_hops(&handler.id, d, filter).await?;
-                with_downstream.push((handler, sub));
-            }
-            assemble_route_flow(entry, with_downstream, filter.budget())
-        } else {
-            self.direct_flow_hops(entry, d, filter).await?
-        };
-        self.annotate_interceptions(&mut hops).await?;
-        Ok(filter.paginate(hops))
     }
 
     async fn complexity_hotspots(
@@ -875,6 +861,7 @@ impl GraphStore for FalkorStore {
 
     async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>> {
         let id_lit = cstr(id.as_str());
+        let columns = node_columns("t");
         // Direct TESTS edges to this symbol, plus TESTS edges to its owner
         // class. Pattern predicate, not `EXISTS { MATCH … }` — FalkorDB
         // rejects the braced-subquery form (contract-tested).
@@ -882,7 +869,7 @@ impl GraphStore for FalkorStore {
             "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
              WHERE target.id = {id_lit} \
                 OR (target)-[:HAS_METHOD]->(:Symbol {{id: {id_lit}}}) \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file, t.startLine, t.endLine \
+             RETURN DISTINCT {columns} \
              ORDER BY t.file, t.name \
              LIMIT 50"
         );
@@ -903,10 +890,11 @@ impl GraphStore for FalkorStore {
             files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
         );
         // Direct TESTS edges where the production target is in the changed files.
+        let columns = node_columns("t");
         let q = format!(
             "MATCH (t:Symbol)-[:TESTS]->(prod:Symbol) \
              WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file, t.startLine, t.endLine \
+             RETURN DISTINCT {columns} \
              ORDER BY t.file, t.name \
              LIMIT 200"
         );
@@ -921,7 +909,7 @@ impl GraphStore for FalkorStore {
         let q2 = format!(
             "MATCH (t:Symbol)-[:TESTS]->(:Symbol)-[:CALLS]->(prod:Symbol) \
              WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file, t.startLine, t.endLine \
+             RETURN DISTINCT {columns} \
              ORDER BY t.file, t.name \
              LIMIT 200"
         );
@@ -947,6 +935,7 @@ impl GraphStore for FalkorStore {
     async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>> {
         let lim = limit.clamp(1, 500);
         let prefix_lit = cstr(file_prefix);
+        let columns = node_columns("n");
         // Two fixes over the original (both contract-tested): pattern
         // predicate instead of the rejected `EXISTS { MATCH … }` form, and
         // explicit NULL handling — `NOT n.stereotype = 'test'` is three-valued
@@ -958,7 +947,7 @@ impl GraphStore for FalkorStore {
                AND n.kind IN ['Method', 'Class', 'Interface'] \
                AND (n.stereotype IS NULL OR n.stereotype <> 'test') \
                AND NOT (:Symbol)-[:TESTS]->(n) \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine \
+             RETURN {columns} \
              ORDER BY n.file, n.name \
              LIMIT {lim}"
         );
@@ -994,267 +983,50 @@ impl GraphStore for FalkorStore {
     }
 }
 
-impl FalkorStore {
-    /// The direct (non-route) walk: BFS from `entry`, kind/accessor exclusions
-    /// applied in Cypher, materializing at most `filter.budget()` rows so the
-    /// page slice can answer `has_more` honestly. Returns root + reached hops,
-    /// unsliced.
-    async fn direct_flow_hops(
-        &self,
-        entry: &NodeId,
-        d: u32,
-        filter: &FlowFilter,
-    ) -> Result<Vec<FlowHop>> {
-        let mut exclusions = String::new();
-        if !filter.exclude_kinds.is_empty() {
-            let labels = filter
-                .exclude_kinds
-                .iter()
-                .map(|k| cstr(k.label()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            exclusions.push_str(&format!(" WHERE NOT m.kind IN [{labels}]"));
-        }
-        if filter.exclude_accessors {
-            // Promoted as 1/null; graphs loaded before the prop existed have
-            // null everywhere, making this a no-op rather than an error.
-            exclusions.push_str(if exclusions.is_empty() {
-                " WHERE"
-            } else {
-                " AND"
-            });
-            exclusions.push_str(" coalesce(m.isAccessor, 0) <> 1");
-        }
-        // Phase 1: BFS to get node order, depth, and parent relationships.
-        let q = format!(
-            "CYPHER id={id} \
-             MATCH p=(start:Symbol {{id:$id}})\
-             -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO*1..{d}]->(m:Symbol)\
-             {exclusions} \
-             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode, \
-                  type(relationships(p)[length(p)-1]) AS etype \
-             ORDER BY m.id, len \
-             WITH m, collect(pnode)[0] AS parent, collect(etype)[0] AS etype, min(len) AS depth \
-             RETURN m.id, m.kind, m.name, m.qualifiedName, m.file, depth, parent.id, etype \
-             ORDER BY depth, m.name LIMIT {budget}",
-            id = cstr(entry.as_str()),
-            budget = filter.budget()
-        );
-        let rows = self.rows(&q).await?;
-        // Build FlowNode list and collect (parent_id, child_id) pairs.
-        let mut flow_nodes: Vec<FlowNode> = rows
-            .iter()
-            .filter(|r| r.len() >= 5)
-            .map(|r| FlowNode {
-                id: NodeId::new(r[0].clone()),
-                kind: NodeKind::from_label(r[1].as_str()),
-                name: r[2].clone(),
-                qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
-                file: r.get(4).cloned().unwrap_or_default(),
-                depth: r.get(5).and_then(|s| s.parse().ok()).unwrap_or(1),
-                parent_id: r
-                    .get(6)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| NodeId::new(s.clone())),
-                intercepted_by: Vec::new(),
-            })
-            .collect();
-
-        // The relationship type of each node's incoming (min-depth) edge, so the
-        // trace labels the real hop kind (EXTERNAL_CALL / PUBLISHES_EVENT / …)
-        // instead of a blanket "CALLS".
-        let edge_kind: HashMap<String, String> = rows
-            .iter()
-            .filter_map(|r| {
-                let etype = r.get(7).filter(|s| !s.is_empty())?;
-                Some((r[0].clone(), etype.clone()))
-            })
-            .collect();
-
-        // Phase 2: for each (parent, child) pair, fetch the CALLS edge callSites.
-        // We do a single batch query returning (src.id, dst.id, r.callSites).
-        let mut call_sites_map: HashMap<(String, String), Vec<CallSiteArgs>> = HashMap::new();
-        if !flow_nodes.is_empty() {
-            // Collect unique (parent_id, child_id) pairs that have a parent.
-            let pairs: Vec<(String, String)> = flow_nodes
-                .iter()
-                .filter_map(|n| {
-                    n.parent_id
-                        .as_ref()
-                        .map(|p| (p.as_str().to_string(), n.id.as_str().to_string()))
-                })
-                .collect();
-            if !pairs.is_empty() {
-                let pair_list = pairs
-                    .iter()
-                    .map(|(s, d)| format!("[{}, {}]", cstr(s), cstr(d)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let eq = format!(
-                    "UNWIND [{pairs}] AS pair \
-                     MATCH (a:Symbol {{id: pair[0]}})-[r:CALLS]->(b:Symbol {{id: pair[1]}}) \
-                     RETURN a.id, b.id, r.callSites",
-                    pairs = pair_list
-                );
-                if let Ok(edge_rows) = self.rows(&eq).await {
-                    for row in edge_rows.iter().filter(|r| r.len() >= 3) {
-                        let src_id = row[0].clone();
-                        let dst_id = row[1].clone();
-                        let cs_json = row[2].as_str();
-                        // callSites is stored as a JSON string
-                        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(cs_json) {
-                            let call_sites: Vec<CallSiteArgs> = arr
-                                .iter()
-                                .filter_map(|v| {
-                                    let args = v.get("args")?.as_array()?;
-                                    Some(CallSiteArgs {
-                                        args: args
-                                            .iter()
-                                            .filter_map(|a| a.as_str().map(|s| s.to_string()))
-                                            .collect(),
-                                    })
-                                })
-                                .collect();
-                            call_sites_map.insert((src_id, dst_id), call_sites);
-                        }
-                    }
-                }
+fn parse_execution_rows(rows: Vec<Vec<String>>, traversed_reverse: bool) -> Vec<ExecutionTransition> {
+    rows.into_iter()
+        .filter_map(|row| {
+            if row.len() < 13 {
+                return None;
             }
-        }
-
-        // Build root hop (no via edge).
-        let entry_node = FlowNode {
-            id: entry.clone(),
-            kind: NodeKind::Method,
-            name: entry.as_str().rsplit('#').next().unwrap_or("").to_string(),
-            qualified_name: None,
-            file: String::new(),
-            depth: 0,
-            parent_id: None,
-            intercepted_by: Vec::new(),
-        };
-        let mut hops: Vec<FlowHop> = vec![FlowHop {
-            node: entry_node,
-            via: None,
-        }];
-        for node in flow_nodes.drain(..) {
-            let via = if let Some(ref parent_id) = node.parent_id {
-                let key = (parent_id.as_str().to_string(), node.id.as_str().to_string());
-                let call_sites = call_sites_map.remove(&key).unwrap_or_default();
-                let kind = edge_kind
-                    .get(node.id.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| "CALLS".to_string());
-                Some(FlowEdge { kind, call_sites })
-            } else {
-                None
-            };
-            hops.push(FlowHop { node, via });
-        }
-        Ok(hops)
-    }
-
-    /// Attach `intercepted_by` to traced hops: one batched query for `ADVISES`
-    /// edges into the hop methods. Advice wraps calls through the Spring proxy
-    /// — it is not a call-graph hop, so it annotates nodes rather than
-    /// extending the path. Idempotent: hops already annotated (route entries
-    /// assembled from recursively traced handlers) are left untouched.
-    pub(crate) async fn annotate_interceptions(&self, hops: &mut [FlowHop]) -> Result<()> {
-        let ids: Vec<&str> = hops
-            .iter()
-            .filter(|h| {
-                h.node.intercepted_by.is_empty()
-                    && matches!(h.node.kind, NodeKind::Method | NodeKind::Function)
+            Some(ExecutionTransition {
+                source: NodeId::new(row[0].clone()),
+                target: Node {
+                    id: NodeId::new(row[1].clone()),
+                    kind: NodeKind::from_label(&row[2]),
+                    name: row[3].clone(),
+                    qualified_name: (!row[4].is_empty()).then(|| row[4].clone()),
+                    file: row[5].clone(),
+                    range: Range {
+                        start_line: row[6].parse().unwrap_or(0),
+                        end_line: row[7].parse().unwrap_or(0),
+                        ..Range::default()
+                    },
+                    props: None,
+                },
+                target_is_accessor: row[8] == "1" || row[8].eq_ignore_ascii_case("true"),
+                kind: row[9].clone(),
+                confidence: row[10].parse().unwrap_or(1.0),
+                reason: row[11].clone(),
+                call_sites: parse_call_sites(&row[12]),
+                traversed_reverse,
             })
-            .map(|h| h.node.id.as_str())
-            .collect();
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let list = ids.iter().map(|s| cstr(s)).collect::<Vec<_>>().join(", ");
-        let q = format!(
-            "UNWIND [{list}] AS mid \
-             MATCH (a:Symbol)-[r:ADVISES]->(m:Symbol {{id: mid}}) \
-             RETURN m.id, a.id, r.reason"
-        );
-        let mut by_target: HashMap<String, Vec<InterceptingAdvice>> = HashMap::new();
-        for row in self.rows(&q).await? {
-            if row.len() < 3 {
-                continue;
-            }
-            let kind = row[2].strip_prefix("aop-").unwrap_or(&row[2]).to_string();
-            by_target
-                .entry(row[0].clone())
-                .or_default()
-                .push(InterceptingAdvice {
-                    advice: NodeId::new(row[1].clone()),
-                    advice_kind: kind,
-                });
-        }
-        if by_target.is_empty() {
-            return Ok(());
-        }
-        for hop in hops.iter_mut() {
-            if let Some(advices) = by_target.get(hop.node.id.as_str()) {
-                if hop.node.intercepted_by.is_empty() {
-                    hop.node.intercepted_by = advices.clone();
-                }
-            }
-        }
-        Ok(())
-    }
+        })
+        .collect()
 }
 
-/// Assemble a route-entry flow: route at depth 0, handlers at depth 1 via
-/// HANDLES_ROUTE, downstream shifted one level, deduped by id, capped at 100.
-pub(crate) fn assemble_route_flow(
-    entry: &NodeId,
-    handlers: Vec<(FlowNode, Vec<FlowHop>)>,
-    budget: usize,
-) -> Vec<FlowHop> {
-    let route_name = entry
-        .as_str()
-        .strip_prefix("Route:")
-        .unwrap_or(entry.as_str())
-        .to_string();
-    let mut hops: Vec<FlowHop> = vec![FlowHop {
-        node: FlowNode {
-            id: entry.clone(),
-            kind: NodeKind::Route,
-            name: route_name,
-            qualified_name: None,
-            file: String::new(),
-            depth: 0,
-            parent_id: None,
-            intercepted_by: Vec::new(),
-        },
-        via: None,
-    }];
-    let mut seen: HashSet<String> = HashSet::new();
-    seen.insert(entry.as_str().to_string());
-    for (mut handler, sub) in handlers {
-        if !seen.insert(handler.id.as_str().to_string()) {
-            continue;
-        }
-        handler.depth = 1;
-        handler.parent_id = Some(entry.clone());
-        hops.push(FlowHop {
-            node: handler,
-            via: Some(FlowEdge {
-                kind: "HANDLES_ROUTE".to_string(),
-                call_sites: Vec::new(),
-            }),
-        });
-        // Drop the handler's own root hop (index 0 — already emitted as the
-        // depth-1 handler above) and shift the rest one level past the route.
-        for mut hop in sub.into_iter().skip(1) {
-            if !seen.insert(hop.node.id.as_str().to_string()) {
-                continue;
-            }
-            hop.node.depth += 1;
-            hops.push(hop);
-        }
-    }
-    hops.truncate(budget);
-    hops
+fn parse_call_sites(raw: &str) -> Vec<CallSiteArgs> {
+    serde_json::from_str::<Vec<serde_json::Value>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| {
+            let args = value.get("args")?.as_array()?;
+            Some(CallSiteArgs {
+                args: args
+                    .iter()
+                    .filter_map(|arg| arg.as_str().map(str::to_string))
+                    .collect(),
+            })
+        })
+        .collect()
 }

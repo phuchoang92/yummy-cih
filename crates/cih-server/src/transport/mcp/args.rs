@@ -264,9 +264,32 @@ pub struct ReachesArgs {
     /// How many shortest paths to return (default 3, clamped to 10).
     #[serde(default)]
     pub max_paths: u32,
+    /// Restrict the final edge into a database table: `any` (default), `read`,
+    /// or `write`. Read/write are rejected for non-table targets.
+    #[serde(default)]
+    pub access: ReachesAccessArg,
     /// Target service: a group member's registry name; empty = primary repo.
     #[serde(default)]
     pub repo: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReachesAccessArg {
+    #[default]
+    Any,
+    Read,
+    Write,
+}
+
+impl From<ReachesAccessArg> for cih_graph_store::PathAccess {
+    fn from(access: ReachesAccessArg) -> Self {
+        match access {
+            ReachesAccessArg::Any => Self::Any,
+            ReachesAccessArg::Read => Self::Read,
+            ReachesAccessArg::Write => Self::Write,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

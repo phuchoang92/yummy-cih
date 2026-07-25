@@ -14,10 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cih_core::{Edge, EdgeKind, GraphArtifacts, Node, NodeId, NodeKind};
-use cih_graph_store::{
-    Direction, FlowNode, GraphStore, GraphStoreError, LoadObserver, LoadStats, Result,
-};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, Node, NodeId};
+use cih_graph_store::{Direction, GraphStore, GraphStoreError, LoadObserver, LoadStats, Result};
 use redis::Value;
 
 use serialize::*;
@@ -489,34 +487,6 @@ impl FalkorStore {
         })
     }
 
-    /// Handlers that serve `route`, found via the **inverse** of the stored
-    /// handler→route `HANDLES_ROUTE` edge. Returns empty when `route` is not a
-    /// route node (nothing `HANDLES_ROUTE`s *to* a method), so this doubles as a
-    /// cheap route/non-route discriminator for `flow_downstream`.
-    async fn route_handler_nodes(&self, route: &NodeId) -> Result<Vec<FlowNode>> {
-        let q = format!(
-            "CYPHER id={id} \
-             MATCH (:Symbol {{id:$id}})<-[:HANDLES_ROUTE]-(h:Symbol) \
-             RETURN h.id, h.kind, h.name, h.qualifiedName, h.file \
-             ORDER BY h.name LIMIT 100",
-            id = cstr(route.as_str())
-        );
-        let rows = self.rows(&q).await?;
-        Ok(rows
-            .iter()
-            .filter(|r| r.len() >= 3)
-            .map(|r| FlowNode {
-                id: NodeId::new(r[0].clone()),
-                kind: NodeKind::from_label(r[1].as_str()),
-                name: r[2].clone(),
-                qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
-                file: r.get(4).cloned().unwrap_or_default(),
-                depth: 1,
-                parent_id: None,
-                intercepted_by: Vec::new(),
-            })
-            .collect())
-    }
 }
 
 // ---- helpers ----

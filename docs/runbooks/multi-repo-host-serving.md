@@ -129,7 +129,7 @@ an atomic repair; concurrent callers for the same version share that result.
 | `CIH_SEARCH_COLD_MAX_CONCURRENT` | 1 | simultaneous decode/build count |
 | `CIH_SEARCH_COLD_MAX_BYTES` | 512 MiB | aggregate cold transient reservation |
 | `CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS` | 5 | cold count/byte admission timeout |
-| `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 1 | repository scans admitted at once |
+| `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 2 | repository scans admitted at once |
 | `CIH_GREP_THREADS` | min(4, CPUs) | process-wide dedicated grep workers |
 | `CIH_GREP_QUEUE_TIMEOUT_SECS` | 2 | wait before `grep capacity saturated` |
 | `CIH_GREP_DEADLINE_SECS` | 80 | cooperative partial-result deadline |

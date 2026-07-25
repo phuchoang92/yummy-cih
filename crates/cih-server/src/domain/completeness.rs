@@ -56,19 +56,60 @@ impl ResultBounds {
 
     /// Metadata for an offset/limit page over a store-side walk. Honest about
     /// truncation: `complete` is false whenever hops beyond this page exist.
-    pub(crate) fn paged(returned: usize, has_more: bool, limit: usize) -> Self {
+    pub(crate) fn paged(
+        returned: usize,
+        offset: usize,
+        has_more: bool,
+        limit: usize,
+        traversal_truncated: bool,
+        db_effects_complete: bool,
+    ) -> Self {
+        let mut reasons = Vec::new();
+        if offset > 0 {
+            reasons.push("page_offset");
+        }
+        if has_more {
+            reasons.push("result_limit");
+        }
+        if traversal_truncated {
+            reasons.push("traversal_budget");
+        }
+        if !db_effects_complete {
+            reasons.push("db_effects_unavailable");
+        }
         Self {
-            complete: !has_more,
+            complete: reasons.is_empty(),
             total_known: None,
             returned,
             omitted: None,
             failed: 0,
             limit: Some(limit),
-            reasons: if has_more {
-                vec!["result_limit"]
-            } else {
-                Vec::new()
-            },
+            reasons,
+        }
+    }
+
+    /// Metadata for a bounded shortest-path search.
+    pub(crate) fn traversal(
+        returned: usize,
+        has_more: bool,
+        traversal_truncated: bool,
+        limit: usize,
+    ) -> Self {
+        let mut reasons = Vec::new();
+        if has_more {
+            reasons.push("result_limit");
+        }
+        if traversal_truncated {
+            reasons.push("traversal_budget");
+        }
+        Self {
+            complete: reasons.is_empty(),
+            total_known: None,
+            returned,
+            omitted: None,
+            failed: 0,
+            limit: Some(limit),
+            reasons,
         }
     }
 

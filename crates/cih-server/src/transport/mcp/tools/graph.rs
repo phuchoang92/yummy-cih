@@ -203,8 +203,8 @@ impl CihServer {
     #[tool(
         description = "Answer 'does X reach Y?': shortest evidence paths from an entry symbol \
             to a target symbol or database table, across call, route, messaging, and SQL edges. \
-            Example: from=`confirmChangePassword`, to=`AUDIT_LOG` proves (or refutes) that the \
-            handler eventually writes the table, with per-edge confidence and provenance."
+            To prove a table write, pass access=`write`; `read` and `write` require a DbTable \
+            target. Results distinguish reachable, not_reachable, and inconclusive."
     )]
     async fn reaches(
         &self,
@@ -228,6 +228,7 @@ impl CihServer {
                     args.max_paths
                 })
                 .clamp(1, 10) as usize,
+                access: args.access.into(),
             })
             .await
             .map_err(app_error_to_mcp)?;

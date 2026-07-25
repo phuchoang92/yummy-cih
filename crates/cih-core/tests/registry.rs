@@ -36,3 +36,19 @@ fn rfc3339_epoch() {
 fn rfc3339_one_day() {
     assert_eq!(unix_secs_to_rfc3339(86400), "1970-01-02T00:00:00Z");
 }
+
+#[test]
+fn legacy_registry_stats_mark_route_count_stale() {
+    let stats: RegistryStats = serde_json::from_value(serde_json::json!({
+        "nodes": 10,
+        "edges": 20,
+        "files": 3,
+        "routes": 0,
+        "communities": 0,
+        "processes": 0
+    }))
+    .unwrap();
+
+    assert_eq!(stats.routes, 0);
+    assert!(!stats.routes_current);
+}

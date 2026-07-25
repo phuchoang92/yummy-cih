@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cih_core::{BindingKind, RefKind, ReferenceSite, TypeBinding};
 use streaming_iterator::StreamingIterator;
@@ -45,6 +45,102 @@ pub(super) fn collect_query_ir(
         if let Some(site) = reference_site(&captures, src, builder) {
             builder.reference_sites.push(site);
         }
+    }
+
+    propagate_parameter_qualifiers(tree.root_node(), src, builder);
+}
+
+/// Carry a qualifier from a constructor/method parameter to its assigned field,
+/// but only for the exact wiring shape `this.field = parameter`. A qualifier is
+/// intentionally attached to the field's existing [`TypeBinding`] so receiver
+/// type and qualifier resolution share one lexical source of truth.
+fn propagate_parameter_qualifiers(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+    let mut assignments = Vec::new();
+    collect_parameter_field_assignments(root, src, builder, &mut assignments);
+
+    let mut inferred: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for (scope, owner, field, parameter) in assignments {
+        let qualifier = builder
+            .type_bindings
+            .iter()
+            .find(|binding| {
+                binding.kind == BindingKind::Param
+                    && binding.in_fqcn == scope
+                    && binding.name == parameter
+            })
+            .and_then(|binding| binding.qualifier.clone());
+        if let Some(qualifier) = qualifier {
+            inferred.entry((owner, field)).or_default().insert(qualifier);
+        }
+    }
+
+    for binding in &mut builder.type_bindings {
+        if binding.kind != BindingKind::Field {
+            continue;
+        }
+        let key = (binding.in_fqcn.clone(), binding.name.clone());
+        let Some(inferred_qualifiers) = inferred.get(&key) else {
+            continue;
+        };
+        let mut candidates = inferred_qualifiers.clone();
+        candidates.extend(binding.qualifier.iter().cloned());
+        if candidates.len() == 1 {
+            binding.qualifier = candidates.into_iter().next();
+        } else {
+            tracing::warn!(
+                file = %builder.file,
+                owner = %binding.in_fqcn,
+                field = %binding.name,
+                qualifiers = ?candidates,
+                "java DI qualifier conflict — field left unqualified"
+            );
+            binding.qualifier = None;
+        }
+    }
+}
+
+fn collect_parameter_field_assignments(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &FileBuilder,
+    out: &mut Vec<(String, String, String, String)>,
+) {
+    if node.kind() == "assignment_expression"
+        && node
+            .child_by_field_name("operator")
+            .is_some_and(|operator| text(operator, src) == "=")
+    {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            if left.kind() == "field_access" && right.kind() == "identifier" {
+                let this_receiver = left
+                    .child_by_field_name("object")
+                    .is_some_and(|object| object.kind() == "this");
+                if this_receiver {
+                    if let (Some(field), Some(scope)) = (
+                        left.child_by_field_name("field"),
+                        context_for(node.start_byte(), builder),
+                    ) {
+                        if let Some((owner, _)) = scope.rsplit_once('#') {
+                            let owner = owner.to_string();
+                            out.push((
+                                scope,
+                                owner,
+                                text(field, src),
+                                text(right, src),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_parameter_field_assignments(child, src, builder, out);
     }
 }
 

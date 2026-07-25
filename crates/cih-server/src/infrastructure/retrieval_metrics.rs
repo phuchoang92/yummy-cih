@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::application::files::grep_runtime_metrics;
+use std::sync::Arc;
+
+use crate::application::files::GrepRuntime;
 use crate::infrastructure::cache::weighted::AsyncCacheMetrics;
 use crate::infrastructure::search_provider::SearchCache;
 use crate::infrastructure::wiki_repository::{wiki_runtime_metrics, WikiSearchState};
@@ -11,11 +13,16 @@ use crate::ports::retrieval_metrics::{
 pub(crate) struct RuntimeRetrievalMetrics {
     search: SearchCache,
     wiki: WikiSearchState,
+    grep: Arc<GrepRuntime>,
 }
 
 impl RuntimeRetrievalMetrics {
-    pub(crate) fn new(search: SearchCache, wiki: WikiSearchState) -> Self {
-        Self { search, wiki }
+    pub(crate) fn new(
+        search: SearchCache,
+        wiki: WikiSearchState,
+        grep: Arc<GrepRuntime>,
+    ) -> Self {
+        Self { search, wiki, grep }
     }
 }
 
@@ -42,7 +49,7 @@ impl RetrievalMetricsProvider for RuntimeRetrievalMetrics {
             search_indexes: self.search.index_metrics(),
             wiki_cache: cache_snapshot(wiki_cache),
             wiki_runtime: wiki_runtime_metrics(),
-            grep: grep_runtime_metrics(),
+            grep: self.grep.metrics(),
         }
     }
 }

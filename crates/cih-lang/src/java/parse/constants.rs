@@ -271,10 +271,11 @@ fn try_extract_execution_site(
     let in_callable = callable_id_for(node.start_byte(), builder);
     let in_fqcn = context_for(node.start_byte(), builder).unwrap_or_default();
 
-    let object = node.child_by_field_name("object")?;
-    let receiver = text(object, src);
+    let receiver = node
+        .child_by_field_name("object")
+        .map(|object| text(object, src));
 
-    if receiver == "DBUtil" && DBUTIL_METHODS.contains(&method.as_str()) {
+    if receiver.as_deref() == Some("DBUtil") && DBUTIL_METHODS.contains(&method.as_str()) {
         let const_ref = nth_identifier_argument(node, src, 1);
         if const_ref.is_some() || method == "prepareStatement" {
             return Some(SqlExecutionSite {
@@ -289,7 +290,9 @@ fn try_extract_execution_site(
     }
 
     if JDBC_TEMPLATE_METHODS.contains(&method.as_str())
-        && receiver_has_type(builder, &in_fqcn, &receiver, "JdbcTemplate")
+        && receiver
+            .as_deref()
+            .is_some_and(|receiver| receiver_has_type(builder, &in_fqcn, receiver, "JdbcTemplate"))
     {
         let (const_ref, inline_sql) = first_sql_argument(node, src);
         if const_ref.is_some() || inline_sql.is_some() {
@@ -308,8 +311,10 @@ fn try_extract_execution_site(
     // `receiver` matches the receiver text (static style) or its declared type.
     for api in extra_apis {
         if method == api.method
-            && (receiver == api.receiver
-                || receiver_has_type(builder, &in_fqcn, &receiver, &api.receiver))
+            && receiver.as_deref().is_some_and(|receiver| {
+                receiver == api.receiver
+                    || receiver_has_type(builder, &in_fqcn, receiver, &api.receiver)
+            })
         {
             let (const_ref, inline_sql) = first_sql_argument(node, src);
             if const_ref.is_some() || inline_sql.is_some() {
@@ -330,7 +335,7 @@ fn try_extract_execution_site(
     // constant reference is trusted — db_access drops the site unless the constant
     // resolves to real SQL. Logger receivers are excluded: methods commonly log the
     // statement they execute, and the log call adds nothing over the real site.
-    if !is_logger_receiver(&receiver) {
+    if receiver.as_deref().is_none_or(|receiver| !is_logger_receiver(receiver)) {
         if let Some(const_ref) = sql_constant_argument(node, src, builder) {
             return Some(SqlExecutionSite {
                 api_name: method,

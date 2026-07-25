@@ -32,7 +32,7 @@ use crate::application::browser::GraphBrowserService;
 use crate::application::browser::ReadinessService;
 use crate::application::change_detection::ChangeDetectionService;
 use crate::application::contracts::ContractService;
-use crate::application::files::{FileService, ReadFileLimits};
+use crate::application::files::{FileService, GrepRuntime, GrepRuntimeConfig, ReadFileLimits};
 use crate::application::graph::GraphQueryService;
 use crate::application::indexing::IndexingService;
 use crate::application::search::SearchService;
@@ -67,6 +67,7 @@ pub(crate) fn assemble_services(
     falkor_url: String,
     store_limits: (usize, Duration),
     read_file_limits: ReadFileLimits,
+    grep_runtime: Arc<GrepRuntime>,
     wiki_state: WikiSearchState,
 ) -> Arc<AppServices> {
     let search_cache = SearchCache::from_env();
@@ -105,6 +106,7 @@ pub(crate) fn assemble_services(
         Arc::new(RuntimeRetrievalMetrics::new(
             search_cache,
             wiki_state.clone(),
+            grep_runtime.clone(),
         )),
     );
     let contract_service = ContractService::new(
@@ -150,7 +152,7 @@ pub(crate) fn assemble_services(
             wiki_page,
         },
         files: FileUseCases {
-            access: FileService::new(repos.clone(), read_file_limits),
+            access: FileService::new(repos.clone(), read_file_limits, grep_runtime),
         },
         admin: AdminUseCases {
             repositories: RepositoryAdminService::new(repos.clone(), graph_key, group),
@@ -175,7 +177,15 @@ pub async fn run() -> Result<()> {
     let cfg = Config::from_env();
     let cache_budgets = CacheBudgets::from_env()?;
     let retrieval = RetrievalConfig::from_env()?;
-    crate::application::files::validate_grep_runtime()?;
+    let grep_runtime = Arc::new(
+        GrepRuntime::new(GrepRuntimeConfig {
+            max_concurrent_requests: retrieval.grep_max_concurrent_requests,
+            threads: retrieval.grep_threads,
+            queue_timeout: Duration::from_secs(retrieval.grep_queue_timeout_secs),
+            deadline: Duration::from_secs(retrieval.grep_deadline_secs),
+        })
+        .map_err(anyhow::Error::msg)?,
+    );
     crate::infrastructure::wiki_repository::validate_live_wiki_config()?;
     tracing::info!(?cfg, "starting CIH MCP server");
     tracing::info!(
@@ -220,6 +230,7 @@ pub async fn run() -> Result<()> {
             max_bytes: cfg.read_file_max_bytes,
             max_lines: cfg.read_file_max_lines,
         },
+        grep_runtime,
         wiki_state.clone(),
     );
     let observability: Arc<dyn crate::ports::observability::ObservabilityPort> =

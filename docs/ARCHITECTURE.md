@@ -448,17 +448,24 @@ companion-object/`object` `val`s with literal initializers):
   implementors outside the indexed modules are not linked.
 - **Spring DI dispatch**: an interface-typed receiver is redirected to the impl
   the container would inject, trying in order — `@Qualifier("id")` /
-  `@Resource(name = "id")` on the injected field matched against DI-XML bean ids
+  `@Resource(name = "id")` on the lexical receiver binding (parameters/locals
+  before fields, including constructor-to-field propagation for exact
+  `this.field = parameter` assignments) matched against DI-XML bean ids
   (reason `di-qualifier`, confidence 0.95) → the unique Spring-stereotyped
   implementor (`di-resolved`, 0.9) → the sole concrete in-scope implementor
   (`di-single-impl`, 0.75). Bean id → class mappings come from the Spring/
   Blueprint XML wiring collected once per analyze (`di_xml::collect_di_wiring`),
-  ahead of resolve. **No strategy may select the call's own enclosing class**;
+  ahead of resolve. XML attributes are scoped to their own element. A bean id
+  repeated for the same class is valid; conflicting id→class declarations are
+  omitted with a warning rather than resolved by file order. **No strategy may
+  select the call's own enclosing class**;
   when every strategy is exhausted the call degrades to the interface-method
   edge — never a fabricated self-recursion.
-- **Trivial accessors** (`getX`/`setX`/`isX`/`hasX` with an at-most-one-statement,
-  call-free body) carry an `isAccessor` prop, promoted into the graph so
-  `trace_flow(business_only: true)` can hide them.
+- **Trivial accessors** carry an `isAccessor` prop only for exact AST forms: a
+  zero-argument getter returning one field, or a one-argument setter assigning
+  that parameter directly to one field. Calculations, constants, validation,
+  branches, calls, and wrong-arity lookalikes remain business logic.
+  `trace_flow(business_only: true)` can hide only those strict accessors.
 
 ## Spring AOP (`cih-resolve/src/lang/java/aop.rs`)
 
@@ -510,7 +517,7 @@ companion-object/`object` `val`s with literal initializers):
 
 - **Layout**: `.cih/parse-cache/v<N>/<blake3-16-of-file-bytes>.json`, one cached
   `ParsedUnit` per source-file content hash, scoped by
-  `cih_lang::PARSE_CACHE_SCHEMA`.
+  `cih_lang::PARSE_CACHE_SCHEMA` (currently **27**).
 - **Invalidation** = file-bytes hash × schema version. A schema bump makes every
   older entry invisible and prunes it on the next analyze (legacy pre-versioning
   flat files included); the analyze no-op gate's config fingerprint also folds
@@ -538,6 +545,15 @@ companion-object/`object` `val`s with literal initializers):
   source-identity-bound `cih-server-index-v1.bin` sidecar. Invalid, stale,
   corrupt, or unwritable sidecars fall back to an in-memory build. Publication
   uses temporary-file rename.
+- Lexical search indexes are stored beside `nodes.jsonl` as checksummed,
+  source-identity-bound `search-index.bin` files (format **2**). A missing,
+  older-format, stale, or corrupt sidecar is rebuilt from canonical JSONL and
+  atomically repaired; repair failure falls back to the in-memory index.
+- `architecture_overview` composes graph sections independently. A summary
+  failure marks only `stats` unavailable; modules, routes, entrypoints,
+  hotspots, and wiki metadata keep their own availability. Route totals use a
+  20,001-row probe: `total_routes_exact=false` means the reported 20,000 is a
+  lower bound, not an exact repository count.
 - Wiki generation writes changed pages and the manifest atomically. A
   `.publishing` marker makes readers return a retryable unavailable result while
   publication is in progress or after an interrupted publication; a successful

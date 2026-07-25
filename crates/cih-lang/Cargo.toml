@@ -24,3 +24,4 @@ tree-sitter-cpp.workspace     = true
 tree-sitter-scala.workspace   = true
 tree-sitter-elixir.workspace  = true
 tree-sitter-bash.workspace    = true
+tracing.workspace = true

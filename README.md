@@ -250,6 +250,7 @@ Available MCP tools:
 | `context` | All | Classes, methods, routes for a symbol |
 | `impact` | Dev | Upstream callers + blast radius of a change |
 | `trace_flow` | PO, BA | End-to-end execution chain from a route or method |
+| `reaches` | Dev, Security | Whether one symbol reaches another, with shortest evidence paths and optional DB read/write filtering |
 | `feature_map` | PO, BA | Map a business keyword to code communities |
 | `query` | All | Hybrid BM25 + semantic search over the graph |
 | `route_map` | PO | All HTTP routes, filterable by prefix |
@@ -401,7 +402,7 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | `CIH_BLOCKING_MAX_CONCURRENT` | 2 | Concurrent heavy artifact loads |
 | `CIH_BLOCKING_QUEUE_TIMEOUT_SECS` | 5 | Wait for a heavy-load slot before shedding |
 | `CIH_BLOCKING_TIMEOUT_SECS` | 90 | Deadline for one blocking load |
-| `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 1 | Concurrent whole-repository grep requests |
+| `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 2 | Concurrent whole-repository grep requests |
 | `CIH_GREP_THREADS` | min(4, CPUs) | Dedicated workers within one admitted grep |
 | `CIH_GREP_QUEUE_TIMEOUT_SECS` | 2 | Wait for grep admission before retryable rejection |
 | `CIH_GREP_DEADLINE_SECS` | 80 | Cooperative scan deadline; returns a partial result |
@@ -415,7 +416,7 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | `CIH_MAX_CONCURRENT_QUERIES` | 64 | Concurrent Cypher queries |
 | `CIH_QUERY_QUEUE_TIMEOUT_MS` | 5000 | Wait for a query slot before shedding |
 
-`cih-engine analyze` writes a versioned `search-index.bin` beside
+`cih-engine analyze` writes search-sidecar format **2** as `search-index.bin` beside
 `nodes.jsonl`. Existing artifacts are backfilled on a no-op analyze, and the
 server repairs missing, stale, or corrupt sidecars from the canonical JSONL.
 Sidecar repair failure is non-fatal, but a read-only deployment should generate
