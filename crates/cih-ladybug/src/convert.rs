@@ -54,9 +54,12 @@ pub(crate) fn cell_f64(v: &Value) -> f64 {
     }
 }
 
+/// Per-rel provenance along a recursive path: `(label, confidence, reason)`.
+pub(crate) type PathRel = (String, f32, String);
+
 /// Unpack a `RecursiveRel` into a full path: interior node ids plus per-rel
-/// `(label, confidence, reason)` — the provenance `paths_between` reports.
-pub(crate) fn recursive_path(v: &Value) -> Option<(Vec<String>, Vec<(String, f32, String)>)> {
+/// provenance — what `paths_between` reports.
+pub(crate) fn recursive_path(v: &Value) -> Option<(Vec<String>, Vec<PathRel>)> {
     let Value::RecursiveRel { nodes, rels } = v else {
         return None;
     };
