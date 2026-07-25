@@ -11,10 +11,62 @@ use cih_core::{Node, NodeId, NodeKind};
 
 use crate::{
     ExecutionTransition, FlowEdge, FlowFilter, FlowHop, FlowNode, FlowPage, GraphStore,
-    GraphStoreError, InterceptingAdvice, PathAccess, PathEdge, PathFilter, PathInfo, PathPage,
-    Result, TraversalStats, EXECUTION_BATCH_SIZE, FLOW_VISIBLE_WINDOW, TRAVERSAL_EDGE_BUDGET,
-    TRAVERSAL_NODE_BUDGET,
+    GraphStoreError, InterceptingAdvice, Interception, PathAccess, PathEdge, PathFilter, PathInfo,
+    PathPage, Result, TraversalStats, EXECUTION_BATCH_SIZE, FLOW_VISIBLE_WINDOW,
+    TRAVERSAL_EDGE_BUDGET, TRAVERSAL_NODE_BUDGET,
 };
+
+#[derive(Clone, Copy)]
+struct TraversalLimits {
+    node_budget: usize,
+    edge_budget: usize,
+    batch_size: usize,
+    visible_window: usize,
+}
+
+impl TraversalLimits {
+    const PRODUCTION: Self = Self {
+        node_budget: TRAVERSAL_NODE_BUDGET,
+        edge_budget: TRAVERSAL_EDGE_BUDGET,
+        batch_size: EXECUTION_BATCH_SIZE,
+        visible_window: FLOW_VISIBLE_WINDOW,
+    };
+}
+
+/// Narrow internal port for the shared traversal. Keeping the BFS dependent on
+/// only its three reads makes its budget behavior directly testable without a
+/// backend or a fake implementation of the entire graph-store API.
+#[async_trait::async_trait]
+trait TraversalSource: Send + Sync {
+    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
+    async fn execution_transitions(
+        &self,
+        ids: &[NodeId],
+        include_data: bool,
+        limit: usize,
+    ) -> Result<Vec<ExecutionTransition>>;
+    async fn interceptions_for_methods(&self, ids: &[NodeId]) -> Result<Vec<Interception>>;
+}
+
+#[async_trait::async_trait]
+impl<S: GraphStore + ?Sized> TraversalSource for S {
+    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        GraphStore::get_node(self, id).await
+    }
+
+    async fn execution_transitions(
+        &self,
+        ids: &[NodeId],
+        include_data: bool,
+        limit: usize,
+    ) -> Result<Vec<ExecutionTransition>> {
+        GraphStore::execution_transitions(self, ids, include_data, limit).await
+    }
+
+    async fn interceptions_for_methods(&self, ids: &[NodeId]) -> Result<Vec<Interception>> {
+        GraphStore::interceptions_for_methods(self, ids).await
+    }
+}
 
 #[derive(Clone)]
 struct ReachedNode {
@@ -36,14 +88,24 @@ pub(crate) async fn flow_downstream<S: GraphStore + ?Sized>(
     entry: &NodeId,
     filter: &FlowFilter,
 ) -> Result<FlowPage> {
+    flow_downstream_with_limits(store, entry, filter, TraversalLimits::PRODUCTION).await
+}
+
+async fn flow_downstream_with_limits<S: TraversalSource + ?Sized>(
+    store: &S,
+    entry: &NodeId,
+    filter: &FlowFilter,
+    limits: TraversalLimits,
+) -> Result<FlowPage> {
     let limit = filter.effective_limit();
     let end = filter
         .offset
         .checked_add(limit)
         .ok_or_else(|| GraphStoreError::InvalidInput("trace offset + limit overflowed".into()))?;
-    if end > FLOW_VISIBLE_WINDOW {
+    if end > limits.visible_window {
         return Err(GraphStoreError::InvalidInput(format!(
-            "trace result window {end} exceeds {FLOW_VISIBLE_WINDOW}"
+            "trace result window {end} exceeds {}",
+            limits.visible_window
         )));
     }
 
@@ -74,13 +136,13 @@ pub(crate) async fn flow_downstream<S: GraphStore + ?Sized>(
             break;
         }
         sort_frontier(&mut frontier, &reached);
-        let transitions = expand_layer(store, &frontier, false, &mut traversal).await?;
+        let transitions = expand_layer(store, &frontier, false, &mut traversal, limits).await?;
         let mut next = Vec::new();
         for transition in transitions {
             if reached.contains_key(&transition.target.id) {
                 continue;
             }
-            if reached.len() >= TRAVERSAL_NODE_BUDGET {
+            if reached.len() >= limits.node_budget {
                 traversal.truncated = true;
                 break;
             }
@@ -134,6 +196,16 @@ pub(crate) async fn paths_between<S: GraphStore + ?Sized>(
     to: &NodeId,
     filter: &PathFilter,
 ) -> Result<PathPage> {
+    paths_between_with_limits(store, from, to, filter, TraversalLimits::PRODUCTION).await
+}
+
+async fn paths_between_with_limits<S: TraversalSource + ?Sized>(
+    store: &S,
+    from: &NodeId,
+    to: &NodeId,
+    filter: &PathFilter,
+    limits: TraversalLimits,
+) -> Result<PathPage> {
     let from_node = store
         .get_node(from)
         .await?
@@ -179,7 +251,7 @@ pub(crate) async fn paths_between<S: GraphStore + ?Sized>(
             break;
         }
         frontier.sort_by(|a, b| node_id_cmp(a, b, &node_meta));
-        let transitions = expand_layer(store, &frontier, true, &mut traversal).await?;
+        let transitions = expand_layer(store, &frontier, true, &mut traversal, limits).await?;
         let mut next = Vec::new();
         for transition in transitions {
             let target_id = transition.target.id.clone();
@@ -192,7 +264,7 @@ pub(crate) async fn paths_between<S: GraphStore + ?Sized>(
                 }
                 Some(_) => continue,
                 None => {
-                    if depth_by_id.len() >= TRAVERSAL_NODE_BUDGET {
+                    if depth_by_id.len() >= limits.node_budget {
                         traversal.truncated = true;
                         break;
                     }
@@ -252,21 +324,22 @@ pub(crate) async fn paths_between<S: GraphStore + ?Sized>(
     })
 }
 
-async fn expand_layer<S: GraphStore + ?Sized>(
+async fn expand_layer<S: TraversalSource + ?Sized>(
     store: &S,
     frontier: &[NodeId],
     include_data: bool,
     traversal: &mut TraversalStats,
+    limits: TraversalLimits,
 ) -> Result<Vec<ExecutionTransition>> {
     let mut transitions = Vec::new();
-    for ids in frontier.chunks(EXECUTION_BATCH_SIZE) {
-        let remaining = TRAVERSAL_EDGE_BUDGET.saturating_sub(traversal.expanded_edges);
+    for ids in frontier.chunks(limits.batch_size.max(1)) {
+        let remaining = limits.edge_budget.saturating_sub(traversal.expanded_edges);
         if remaining == 0 {
             traversal.truncated = true;
             break;
         }
         let mut batch = store
-            .execution_transitions(ids, include_data, remaining + 1)
+            .execution_transitions(ids, include_data, remaining.saturating_add(1))
             .await?;
         batch.sort_by(transition_cmp);
         if batch.len() > remaining {
@@ -340,7 +413,7 @@ fn flow_hop(item: ReachedNode) -> FlowHop {
     }
 }
 
-async fn annotate_interceptions<S: GraphStore + ?Sized>(
+async fn annotate_interceptions<S: TraversalSource + ?Sized>(
     store: &S,
     hops: &mut [FlowHop],
 ) -> Result<()> {
@@ -455,8 +528,86 @@ fn reconstruct_paths(
 
 #[cfg(test)]
 mod tests {
-    use super::final_edge_matches;
-    use crate::PathAccess;
+    use cih_core::{Node, NodeId, NodeKind};
+
+    use super::{
+        final_edge_matches, flow_downstream_with_limits, paths_between_with_limits,
+        TraversalLimits, TraversalSource,
+    };
+    use crate::{
+        ExecutionTransition, FlowFilter, Interception, PathAccess, PathFilter, Result,
+        TRAVERSAL_EDGE_BUDGET, TRAVERSAL_NODE_BUDGET,
+    };
+
+    const ROOT: &str = "Method:test.Root#run/0";
+
+    #[derive(Clone, Copy)]
+    enum FanoutShape {
+        UniqueTargets,
+        DuplicateTarget,
+    }
+
+    struct BudgetSource {
+        fanout: usize,
+        shape: FanoutShape,
+    }
+
+    #[async_trait::async_trait]
+    impl TraversalSource for BudgetSource {
+        async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+            Ok(Some(node(id.clone(), id.as_str())))
+        }
+
+        async fn execution_transitions(
+            &self,
+            ids: &[NodeId],
+            _include_data: bool,
+            limit: usize,
+        ) -> Result<Vec<ExecutionTransition>> {
+            if !ids.iter().any(|id| id.as_str() == ROOT) {
+                return Ok(Vec::new());
+            }
+            Ok((0..self.fanout.min(limit))
+                .map(|index| {
+                    let (target_id, target_name) = match self.shape {
+                        FanoutShape::UniqueTargets => (
+                            NodeId::new(format!("Method:test.Target#{index:05}/0")),
+                            format!("target-{index:05}"),
+                        ),
+                        FanoutShape::DuplicateTarget => {
+                            (NodeId::new("Method:test.Decoy#run/0"), "decoy".to_string())
+                        }
+                    };
+                    ExecutionTransition {
+                        source: NodeId::new(ROOT),
+                        target: node(target_id, &target_name),
+                        kind: "CALLS".to_string(),
+                        confidence: 1.0,
+                        reason: "budget fixture".to_string(),
+                        call_sites: Vec::new(),
+                        traversed_reverse: false,
+                        target_is_accessor: false,
+                    }
+                })
+                .collect())
+        }
+
+        async fn interceptions_for_methods(&self, _ids: &[NodeId]) -> Result<Vec<Interception>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn node(id: NodeId, name: &str) -> Node {
+        Node {
+            id,
+            kind: NodeKind::Method,
+            name: name.to_string(),
+            qualified_name: None,
+            file: "src/Test.java".to_string(),
+            range: Default::default(),
+            props: None,
+        }
+    }
 
     #[test]
     fn access_filter_only_accepts_matching_table_edge() {
@@ -465,5 +616,63 @@ mod tests {
         assert!(!final_edge_matches("WRITES_TABLE", PathAccess::Read));
         assert!(final_edge_matches("WRITES_TABLE", PathAccess::Write));
         assert!(!final_edge_matches("READS_TABLE", PathAccess::Write));
+    }
+
+    #[tokio::test]
+    async fn shared_bfs_enforces_the_ten_thousand_node_budget() {
+        assert_eq!(TraversalLimits::PRODUCTION.node_budget, 10_000);
+        let source = BudgetSource {
+            // The root counts toward the budget, so the final transition cannot
+            // be admitted and must mark the otherwise valid walk as truncated.
+            fanout: TRAVERSAL_NODE_BUDGET,
+            shape: FanoutShape::UniqueTargets,
+        };
+        let page = flow_downstream_with_limits(
+            &source,
+            &NodeId::new(ROOT),
+            &FlowFilter {
+                max_depth: 1,
+                limit: 1,
+                ..FlowFilter::default()
+            },
+            TraversalLimits::PRODUCTION,
+        )
+        .await
+        .expect("budgeted BFS should return a partial page");
+
+        assert_eq!(page.traversal.visited_nodes, TRAVERSAL_NODE_BUDGET);
+        assert_eq!(page.traversal.expanded_edges, TRAVERSAL_NODE_BUDGET);
+        assert!(page.traversal.truncated);
+    }
+
+    #[tokio::test]
+    async fn shared_path_bfs_enforces_fifty_thousand_edges_as_inconclusive() {
+        assert_eq!(TraversalLimits::PRODUCTION.edge_budget, 50_000);
+        let source = BudgetSource {
+            fanout: TRAVERSAL_EDGE_BUDGET + 1,
+            // Duplicate logical rows isolate the edge budget from the node
+            // budget: all rows expand, then canonicalization keeps one decoy.
+            shape: FanoutShape::DuplicateTarget,
+        };
+        let page = paths_between_with_limits(
+            &source,
+            &NodeId::new(ROOT),
+            &NodeId::new("Method:test.Unreachable#run/0"),
+            &PathFilter {
+                max_depth: 2,
+                max_paths: 1,
+                access: PathAccess::Any,
+            },
+            TraversalLimits::PRODUCTION,
+        )
+        .await
+        .expect("budget exhaustion should be reported, not raised as a backend error");
+
+        assert_eq!(page.traversal.expanded_edges, TRAVERSAL_EDGE_BUDGET);
+        assert!(page.paths.is_empty());
+        assert!(
+            page.traversal.truncated,
+            "an empty budget-truncated path result is inconclusive, not unreachable"
+        );
     }
 }

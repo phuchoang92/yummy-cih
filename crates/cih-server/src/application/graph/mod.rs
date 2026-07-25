@@ -185,13 +185,17 @@ impl GraphQueryService {
                 {
                     Ok(effects) => (effects, true),
                     Err(err) => {
-                        tracing::warn!(error = %err, "trace_flow: db_effects lookup failed — omitting section");
+                        tracing::warn!(
+                            error = %err,
+                            "trace_flow: DB-effect evidence unavailable — returning empty db_effects with db_effects_complete=false"
+                        );
                         (Vec::new(), false)
                     }
                 };
                 let next_offset = (page.has_more && !page.traversal.truncated)
                     .then(|| command.offset.checked_add(steps.len()))
                     .flatten()
+                    .filter(|offset| *offset < FLOW_VISIBLE_WINDOW)
                     .and_then(|offset| u32::try_from(offset).ok());
                 let completeness = ResultBounds::paged(
                     steps.len(),
@@ -270,13 +274,7 @@ impl GraphQueryService {
             )
             .await
             .map_err(graph_error)?;
-        let status = if !page.paths.is_empty() {
-            ReachesStatus::Reachable
-        } else if page.traversal.truncated {
-            ReachesStatus::Inconclusive
-        } else {
-            ReachesStatus::NotReachable
-        };
+        let status = reaches_status(!page.paths.is_empty(), page.traversal.truncated);
         let completeness = ResultBounds::traversal(
             page.paths.len(),
             page.has_more,
@@ -519,8 +517,8 @@ pub(crate) struct TraceFlowOutput {
     /// Present when the walk was truncated: pass as `offset` to fetch the next page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) next_offset: Option<u32>,
-    /// Table reads/writes performed by any traced method (skipped when none).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Table reads/writes performed by traced methods. Always present; consult
+    /// `db_effects_complete` before interpreting an empty array as "none".
     pub(crate) db_effects: Vec<DbEffect>,
     pub(crate) db_effects_complete: bool,
     pub(crate) traversal: TraversalStats,
@@ -572,11 +570,13 @@ async fn repo_node_resolution(
     store: &std::sync::Arc<dyn cih_graph_store::GraphStore>,
     id: NodeId,
 ) -> Result<SymbolResolution, AppError> {
-    Ok(if store.get_node(&id).await.map_err(graph_error)?.is_some() {
-        SymbolResolution::Id(id)
-    } else {
-        SymbolResolution::NotFound
-    })
+    Ok(
+        if store.get_node(&id).await.map_err(graph_error)?.is_some() {
+            SymbolResolution::Id(id)
+        } else {
+            SymbolResolution::NotFound
+        },
+    )
 }
 
 /// Parse node-kind labels for filtering, rejecting unknown ones loudly — a typo
@@ -619,5 +619,357 @@ fn graph_error(error: GraphStoreError) -> AppError {
             message: other.to_string(),
             retryable: true,
         },
+    }
+}
+
+fn reaches_status(has_paths: bool, traversal_truncated: bool) -> ReachesStatus {
+    if has_paths {
+        ReachesStatus::Reachable
+    } else if traversal_truncated {
+        ReachesStatus::Inconclusive
+    } else {
+        ReachesStatus::NotReachable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use cih_core::{
+        Edge, EdgeKind, GraphArtifacts, GraphDelta, GroupRegistry, Node, NodeId, NodeKind,
+        Registry, RegistryEntry, RegistryStats,
+    };
+    use cih_graph_store::{
+        CommunityEdge, CommunityInfo, Direction, FlowNode, FlowPage, GraphOverview, GraphStore,
+        GraphSummary, HotspotNode, Impact, LoadStats, Path as GraphPath, Result as StoreResult,
+        RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+    };
+    use cih_search::SearchHit;
+
+    use super::*;
+    use crate::application::app_services::RepoContextService;
+    use crate::application::change_detection::ChangeDetectionService;
+    use crate::domain::repository::{RepoCatalogSnapshot, RepoSelector, ResolvedRepo};
+    use crate::ports::changed_files_source::{ChangeScope, ChangedFilesSource};
+    use crate::ports::repo_context_provider::{RepoContext, RepoContextProvider};
+    use crate::ports::search_provider::{SearchProvider, SearchProviderError};
+
+    struct DbEffectsFailingStore {
+        root: Node,
+    }
+
+    fn unimplemented<T>() -> StoreResult<T> {
+        Err(GraphStoreError::Unimplemented("graph trace test store"))
+    }
+
+    #[async_trait]
+    impl GraphStore for DbEffectsFailingStore {
+        async fn ensure_schema(&self) -> StoreResult<()> {
+            Ok(())
+        }
+
+        async fn bulk_load(&self, _artifacts: &GraphArtifacts) -> StoreResult<LoadStats> {
+            unimplemented()
+        }
+
+        async fn upsert_incremental(&self, _delta: &GraphDelta) -> StoreResult<()> {
+            unimplemented()
+        }
+
+        async fn publish_to(&self, _dest_key: &str) -> StoreResult<()> {
+            unimplemented()
+        }
+
+        async fn drop_graph(&self) -> StoreResult<()> {
+            unimplemented()
+        }
+
+        async fn get_node(&self, id: &NodeId) -> StoreResult<Option<Node>> {
+            Ok((id == &self.root.id).then(|| self.root.clone()))
+        }
+
+        async fn neighbors(
+            &self,
+            _id: &NodeId,
+            _dir: Direction,
+            _kinds: &[EdgeKind],
+        ) -> StoreResult<Vec<Edge>> {
+            unimplemented()
+        }
+
+        async fn impact(
+            &self,
+            _id: &NodeId,
+            _dir: Direction,
+            _max_depth: u32,
+        ) -> StoreResult<Impact> {
+            unimplemented()
+        }
+
+        async fn call_chain(
+            &self,
+            _from: &NodeId,
+            _to: &NodeId,
+            _max_depth: u32,
+        ) -> StoreResult<Vec<GraphPath>> {
+            unimplemented()
+        }
+
+        async fn subgraph(&self, _seeds: &[NodeId], _radius: u32) -> StoreResult<Subgraph> {
+            unimplemented()
+        }
+
+        async fn graph_summary(&self) -> StoreResult<GraphSummary> {
+            unimplemented()
+        }
+
+        async fn graph_overview(
+            &self,
+            _max_nodes: usize,
+            _max_edges: usize,
+            _kinds: Option<&[String]>,
+        ) -> StoreResult<GraphOverview> {
+            unimplemented()
+        }
+
+        async fn context(&self, _id: &NodeId) -> StoreResult<SymbolContext> {
+            unimplemented()
+        }
+
+        async fn communities(&self) -> StoreResult<Vec<CommunityInfo>> {
+            unimplemented()
+        }
+
+        async fn route_map(
+            &self,
+            _prefix: Option<&str>,
+            _limit: usize,
+        ) -> StoreResult<Vec<RouteInfo>> {
+            unimplemented()
+        }
+
+        async fn candidates_by_name(&self, _name: &str, _limit: usize) -> StoreResult<Vec<Node>> {
+            unimplemented()
+        }
+
+        async fn nodes_in_files(&self, _files: &[String]) -> StoreResult<Vec<Node>> {
+            unimplemented()
+        }
+
+        async fn processes_for_symbols(&self, _ids: &[NodeId]) -> StoreResult<Vec<String>> {
+            unimplemented()
+        }
+
+        async fn flow_downstream(
+            &self,
+            entry: &NodeId,
+            _filter: &FlowFilter,
+        ) -> StoreResult<FlowPage> {
+            assert_eq!(entry, &self.root.id);
+            Ok(FlowPage {
+                hops: vec![FlowHop {
+                    node: FlowNode {
+                        id: self.root.id.clone(),
+                        kind: self.root.kind,
+                        name: self.root.name.clone(),
+                        qualified_name: self.root.qualified_name.clone(),
+                        file: self.root.file.clone(),
+                        depth: 0,
+                        parent_id: None,
+                        intercepted_by: Vec::new(),
+                    },
+                    via: None,
+                }],
+                has_more: false,
+                traversal: TraversalStats {
+                    visited_nodes: 1,
+                    expanded_edges: 0,
+                    truncated: false,
+                },
+            })
+        }
+
+        async fn db_effects_for_methods(&self, ids: &[NodeId]) -> StoreResult<Vec<DbEffect>> {
+            assert_eq!(ids, std::slice::from_ref(&self.root.id));
+            Err(GraphStoreError::Backend(
+                "intentional db-effect failure".to_string(),
+            ))
+        }
+
+        async fn complexity_hotspots(
+            &self,
+            _min_cyclomatic: Option<u16>,
+            _min_cognitive: Option<u16>,
+            _min_transitive_loop: Option<u8>,
+            _limit: usize,
+        ) -> StoreResult<Vec<HotspotNode>> {
+            unimplemented()
+        }
+
+        async fn similar_methods(
+            &self,
+            _id: &NodeId,
+            _min_jaccard: f32,
+            _limit: usize,
+        ) -> StoreResult<Vec<SimilarMethod>> {
+            unimplemented()
+        }
+
+        async fn symbol_communities(
+            &self,
+            _ids: &[NodeId],
+        ) -> StoreResult<Vec<(NodeId, CommunityInfo)>> {
+            unimplemented()
+        }
+
+        async fn test_coverage(&self, _id: &NodeId) -> StoreResult<Vec<Node>> {
+            unimplemented()
+        }
+
+        async fn tests_for_files(&self, _files: &[String]) -> StoreResult<Vec<Node>> {
+            unimplemented()
+        }
+
+        async fn untested_symbols(
+            &self,
+            _file_prefix: &str,
+            _limit: usize,
+        ) -> StoreResult<Vec<Node>> {
+            unimplemented()
+        }
+
+        async fn community_graph(&self) -> StoreResult<Vec<CommunityEdge>> {
+            unimplemented()
+        }
+    }
+
+    struct FixedRepoContext {
+        context: Arc<RepoContext>,
+        catalog: RepoCatalogSnapshot,
+    }
+
+    #[async_trait]
+    impl RepoContextProvider for FixedRepoContext {
+        fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
+            self.catalog.clone()
+        }
+
+        fn resolve_repo(&self, _selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
+            Ok(self.context.repo.clone())
+        }
+
+        async fn resolve(&self, _selector: RepoSelector) -> Result<Arc<RepoContext>, AppError> {
+            Ok(self.context.clone())
+        }
+    }
+
+    struct EmptySearch;
+
+    #[async_trait]
+    impl SearchProvider for EmptySearch {
+        async fn query_hits(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<SearchHit>, SearchProviderError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct EmptyChangedFiles;
+
+    impl ChangedFilesSource for EmptyChangedFiles {
+        fn changed_files(
+            &self,
+            _repo_path: &str,
+            _scope: ChangeScope,
+            _base_ref: Option<&str>,
+        ) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn trace_service(root: Node) -> GraphQueryService {
+        let entry = RegistryEntry {
+            name: "trace-test".to_string(),
+            path: "/tmp/trace-test".to_string(),
+            graph_key: "trace-test".to_string(),
+            artifacts_dir: String::new(),
+            community_artifacts_dir: None,
+            indexed_at: "2026-01-01T00:00:00Z".to_string(),
+            last_git_head: None,
+            stats: RegistryStats::default(),
+        };
+        let context = Arc::new(RepoContext {
+            repo: ResolvedRepo::from_entry(entry.clone()),
+            store: Arc::new(DbEffectsFailingStore { root }),
+            search: Arc::new(EmptySearch),
+        });
+        let provider = FixedRepoContext {
+            context,
+            catalog: RepoCatalogSnapshot::for_test(
+                entry.graph_key.clone(),
+                Registry {
+                    entries: vec![entry],
+                },
+                GroupRegistry::default(),
+            ),
+        };
+        GraphQueryService::new(
+            RepoContextService::new(Arc::new(provider)),
+            ChangeDetectionService::new(Arc::new(EmptyChangedFiles)),
+        )
+    }
+
+    #[test]
+    fn truncated_empty_path_status_is_inconclusive() {
+        assert_eq!(reaches_status(false, true), ReachesStatus::Inconclusive);
+        assert_eq!(reaches_status(false, false), ReachesStatus::NotReachable);
+        assert_eq!(reaches_status(true, true), ReachesStatus::Reachable);
+    }
+
+    #[tokio::test]
+    async fn trace_serializes_explicit_db_effect_failure_completeness() {
+        let root = Node {
+            id: NodeId::new("Method:test.Trace#run/0"),
+            kind: NodeKind::Method,
+            name: "run".to_string(),
+            qualified_name: Some("test.Trace.run".to_string()),
+            file: "src/test/Trace.java".to_string(),
+            range: Default::default(),
+            props: None,
+        };
+        let output = trace_service(root.clone())
+            .trace_flow(TraceFlowCommand {
+                repo: String::new(),
+                entry_point: root.id.to_string(),
+                max_depth: 3,
+                exclude_kinds: Vec::new(),
+                business_only: false,
+                max_nodes: 20,
+                offset: 0,
+            })
+            .await
+            .expect("the trace itself remains available when DB effects fail");
+        let SymbolQueryOutput::Resolved(trace) = output else {
+            panic!("full node id must resolve without ambiguity");
+        };
+
+        assert!(trace.db_effects.is_empty());
+        assert!(!trace.db_effects_complete);
+        assert!(!trace.completeness.complete);
+        assert_eq!(trace.completeness.failed, 1);
+        assert_eq!(trace.completeness.reasons, vec!["db_effects_unavailable"]);
+
+        let json = serde_json::to_value(&trace).expect("trace output should serialize");
+        assert_eq!(json["db_effects"], serde_json::json!([]));
+        assert_eq!(json["db_effects_complete"], serde_json::json!(false));
+        assert_eq!(json["completeness"]["failed"], serde_json::json!(1));
+        assert_eq!(
+            json["completeness"]["reasons"],
+            serde_json::json!(["db_effects_unavailable"])
+        );
     }
 }

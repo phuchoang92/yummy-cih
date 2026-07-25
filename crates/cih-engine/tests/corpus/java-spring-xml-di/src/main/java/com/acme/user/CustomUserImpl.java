@@ -20,7 +20,7 @@ public class CustomUserImpl implements UserAdmin {
     @Override
     public void modifyUserPassword(PasswordRequest request) {
         validate(request);
-        retailUserAdminRef.modifyUserPassword(request);
+        this.retailUserAdminRef.modifyUserPassword(request);
     }
 
     private void validate(PasswordRequest request) {

@@ -17,11 +17,7 @@ pub(crate) struct RuntimeRetrievalMetrics {
 }
 
 impl RuntimeRetrievalMetrics {
-    pub(crate) fn new(
-        search: SearchCache,
-        wiki: WikiSearchState,
-        grep: Arc<GrepRuntime>,
-    ) -> Self {
+    pub(crate) fn new(search: SearchCache, wiki: WikiSearchState, grep: Arc<GrepRuntime>) -> Self {
         Self { search, wiki, grep }
     }
 }

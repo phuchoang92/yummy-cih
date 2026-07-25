@@ -25,7 +25,7 @@ use cih_core::{
     Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range, VersionId,
 };
 
-use crate::{Direction, FlowFilter, GraphStore, LoadObserver};
+use crate::{Direction, FlowFilter, GraphStore, LoadObserver, PathAccess, PathFilter};
 
 type MkResult = anyhow::Result<Arc<dyn GraphStore>>;
 
@@ -49,8 +49,13 @@ const PROCESS_ID: &str = "Process:com.acme.OrderFlow";
 const WEIRD_ID: &str = "Method:com.acme.Weird#w/0";
 const ADVICE_ID: &str = "Method:com.acme.LogAspect#logCalls/1";
 const DBQUERY_ID: &str = "DbQuery:com.acme.Bar#INSERT_AUDIT";
+const READQUERY_ID: &str = "DbQuery:com.acme.Foo#SELECT_AUDIT";
+const ALT_WRITER_ID: &str = "Method:com.acme.AltAudit#write/0";
+const ALT_WRITEQUERY_ID: &str = "DbQuery:com.acme.AltAudit#INSERT_AUDIT";
 const GETTER_ID: &str = "Method:com.acme.Bar#getStatus/0";
 const DBTABLE_ID: &str = "DbTable:AUDIT_LOG";
+const TOPIC_ID: &str = "KafkaTopic:audit-events";
+const LISTENER_ID: &str = "Method:com.acme.AuditListener#onAudit/1";
 /// Quote + backslash + newline: proves the bulk path's cell escaping
 /// round-trips (CSV COPY loaders are the usual victims).
 const WEIRD_NAME: &str = "wei\"rd\\na\nme";
@@ -63,8 +68,8 @@ const WEIRD_FILE: &str = "com/acme/Weird.java";
 
 /// Distinct nodes in the fixture (edges list below has one deliberate
 /// duplicate that adapters must collapse).
-const FIXTURE_NODES: u64 = 15;
-const FIXTURE_EDGES: u64 = 15;
+const FIXTURE_NODES: u64 = 20;
+const FIXTURE_EDGES: u64 = 23;
 
 fn node(id: &str, kind: NodeKind, name: &str, file: &str) -> Node {
     Node {
@@ -100,6 +105,11 @@ fn edge(src: &str, dst: &str, kind: EdgeKind) -> Edge {
 /// ```
 fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
     let mut caller = node(CALLER_ID, NodeKind::Method, "caller", CALLER_FILE);
+    caller.range = Range {
+        start_line: 3,
+        end_line: 8,
+        ..Range::default()
+    };
     caller.props = Some(serde_json::json!({
         "cyclomatic": 7, "cognitive": 9, "loopDepth": 1, "transitiveLoopDepth": 2,
     }));
@@ -135,6 +145,36 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
         "tables": ["AUDIT_LOG"],
     }));
     let dbtable = node(DBTABLE_ID, NodeKind::DbTable, "AUDIT_LOG", "");
+    let mut read_query = node(READQUERY_ID, NodeKind::DbQuery, "SELECT_AUDIT", CALLER_FILE);
+    read_query.props = Some(serde_json::json!({
+        "operation": "SELECT",
+        "sqlPreview": "SELECT ID FROM AUDIT_LOG",
+        "tables": ["AUDIT_LOG"],
+    }));
+    let alt_writer = node(
+        ALT_WRITER_ID,
+        NodeKind::Method,
+        "write",
+        "com/acme/AltAudit.java",
+    );
+    let mut alt_write_query = node(
+        ALT_WRITEQUERY_ID,
+        NodeKind::DbQuery,
+        "INSERT_AUDIT",
+        "com/acme/AltAudit.java",
+    );
+    alt_write_query.props = Some(serde_json::json!({
+        "operation": "INSERT",
+        "sqlPreview": "INSERT INTO AUDIT_LOG (ID) VALUES (?)",
+        "tables": ["AUDIT_LOG"],
+    }));
+    let topic = node(TOPIC_ID, NodeKind::KafkaTopic, "audit-events", "");
+    let listener = node(
+        LISTENER_ID,
+        NodeKind::Method,
+        "onAudit",
+        "com/acme/AuditListener.java",
+    );
     // Trivial accessor on the callee's class, reached from the caller — the
     // `exclude_accessors` flow filter must hide it (promoted `isAccessor` prop).
     let mut getter = node(GETTER_ID, NodeKind::Method, "getStatus", CALLEE_FILE);
@@ -163,6 +203,17 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
         edge(CALLER_ID, PROCESS_ID, EdgeKind::StepInProcess),
         edge(CALLEE_ID, DBQUERY_ID, EdgeKind::ExecutesQuery),
         edge(DBQUERY_ID, DBTABLE_ID, EdgeKind::WritesTable),
+        edge(CALLER_ID, READQUERY_ID, EdgeKind::ExecutesQuery),
+        edge(READQUERY_ID, DBTABLE_ID, EdgeKind::ReadsTable),
+        // A second equal-length write path exercises same-depth predecessor
+        // retention and deterministic shortest-path reconstruction.
+        edge(CALLER_ID, ALT_WRITER_ID, EdgeKind::Calls),
+        edge(ALT_WRITER_ID, ALT_WRITEQUERY_ID, EdgeKind::ExecutesQuery),
+        edge(ALT_WRITEQUERY_ID, DBTABLE_ID, EdgeKind::WritesTable),
+        edge(CALLEE_ID, TOPIC_ID, EdgeKind::PublishesEvent),
+        edge(LISTENER_ID, TOPIC_ID, EdgeKind::ListensTo),
+        // Runtime cycle: shared BFS must terminate and emit each node once.
+        edge(LISTENER_ID, CALLER_ID, EdgeKind::Calls),
         edge(CALLER_ID, GETTER_ID, EdgeKind::Calls),
         similar,
         advises,
@@ -183,7 +234,12 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
             advice,
             dbquery,
             dbtable,
+            read_query,
+            alt_writer,
+            alt_write_query,
             getter,
+            topic,
+            listener,
         ],
         edges,
     )
@@ -329,7 +385,7 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         .find(|k| k.kind == "Method")
         .map(|k| k.count)
         .unwrap_or(0);
-    check!(methods == 8, "summary Method count {methods} != 8");
+    check!(methods == 10, "summary Method count {methods} != 10");
 
     // -- get_node (incl. escaping round-trip) -------------------------------
     let n = store.get_node(&callee_id).await?.context("callee exists")?;
@@ -548,6 +604,11 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
             && !untested_ids.contains(TEST_METHOD_ID),
         "tested/test symbols excluded: {untested_ids:?}"
     );
+    let untested_caller = untested.iter().find(|n| n.id.as_str() == CALLER_ID);
+    check!(
+        untested_caller.is_some_and(|n| n.range.start_line == 3 && n.range.end_line == 8),
+        "untested_symbols preserves source ranges: {untested_caller:?}"
+    );
 
     // -- similarity / complexity --------------------------------------------
     let sim = store
@@ -581,10 +642,16 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         .graph_overview(50, 100, Some(&["Method".to_string()]))
         .await?;
     check!(
-        mv.nodes.len() == 8 && mv.total_nodes == FIXTURE_NODES,
+        mv.nodes.len() == 10 && mv.total_nodes == FIXTURE_NODES,
         "kind-filtered overview: {} nodes, total {}",
         mv.nodes.len(),
         mv.total_nodes
+    );
+    let overview_callee = mv.nodes.iter().find(|n| n.node.id.as_str() == CALLEE_ID);
+    check!(
+        overview_callee
+            .is_some_and(|n| n.node.range.start_line == 10 && n.node.range.end_line == 20),
+        "graph_overview preserves source ranges: {overview_callee:?}"
     );
     // Edges are listed only among SELECTED nodes; the Method selection has
     // caller→callee CALLS (the default structural selection below has no
@@ -623,11 +690,21 @@ fn ids_of_path(p: &crate::Path) -> Vec<&str> {
 /// recursive-path features this exercises multi-relationship-type recursion.)
 async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result<()> {
     let store = load_fixture(mk, &key).await?;
-    let hops = store
+    let flow_page = store
         .flow_downstream(&NodeId::new(ROUTE_ID), &FlowFilter::depth(6))
         .await
-        .context("flow_downstream")?
-        .hops;
+        .context("flow_downstream")?;
+    check!(
+        !flow_page.traversal.truncated && flow_page.traversal.visited_nodes >= flow_page.hops.len(),
+        "small fixture completes within shared traversal budgets: {:?}",
+        flow_page.traversal
+    );
+    let hops = flow_page.hops;
+    let unique_ids: HashSet<&str> = hops.iter().map(|hop| hop.node.id.as_str()).collect();
+    check!(
+        unique_ids.len() == hops.len(),
+        "cycles do not duplicate flow nodes: {hops:?}"
+    );
     let find = |id: &str| {
         hops.iter()
             .find(|h| h.node.id.as_str() == id)
@@ -674,17 +751,30 @@ async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result
         !hops.iter().any(|h| h.node.id.as_str() == DBQUERY_ID),
         "DbQuery nodes are not flow hops"
     );
+    let topic = find(TOPIC_ID)?;
+    check!(
+        topic.node.depth == 4
+            && topic.via.as_ref().map(|v| v.kind.as_str()) == Some("PUBLISHES_EVENT"),
+        "publisher reaches topic in stored direction: {topic:?}"
+    );
+    let listener = find(LISTENER_ID)?;
+    check!(
+        listener.node.depth == 5
+            && listener.node.parent_id.as_ref().map(NodeId::as_str) == Some(TOPIC_ID)
+            && listener.via.as_ref().map(|v| v.kind.as_str()) == Some("LISTENS_TO"),
+        "topic reaches listener by reversing stored LISTENS_TO: {listener:?}"
+    );
 
     // -- db_effects_for_methods ---------------------------------------------
     let effects = store
         .db_effects_for_methods(&[NodeId::new(CALLER_ID), NodeId::new(CALLEE_ID)])
         .await
         .context("db_effects_for_methods")?;
-    check!(
-        effects.len() == 1,
-        "exactly the callee's write: {effects:?}"
-    );
-    let fx = &effects[0];
+    check!(effects.len() == 2, "one read and one write: {effects:?}");
+    let fx = effects
+        .iter()
+        .find(|effect| effect.access == "WRITE")
+        .context("write effect")?;
     check!(
         fx.method.as_str() == CALLEE_ID
             && fx.query.as_str() == DBQUERY_ID
@@ -694,36 +784,115 @@ async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result
             && fx.sql_preview.starts_with("INSERT INTO AUDIT_LOG"),
         "db effect fields from props JSON: {fx:?}"
     );
+    check!(
+        effects.iter().any(|effect| {
+            effect.method.as_str() == CALLER_ID
+                && effect.query.as_str() == READQUERY_ID
+                && effect.access == "READ"
+                && effect.operation == "SELECT"
+        }),
+        "read effect fields: {effects:?}"
+    );
     let none = store.db_effects_for_methods(&[]).await?;
     check!(none.is_empty(), "empty input → empty effects");
 
     // -- paths_between: "does the handler reach the audit table?" ------------
-    let paths = store
-        .paths_between(&NodeId::new(HANDLER_ID), &NodeId::new(DBTABLE_ID), 8, 3)
+    let page = store
+        .paths_between(
+            &NodeId::new(ROUTE_ID),
+            &NodeId::new(DBTABLE_ID),
+            &PathFilter {
+                max_depth: 8,
+                max_paths: 3,
+                access: PathAccess::Write,
+            },
+        )
         .await
         .context("paths_between")?;
-    check!(!paths.is_empty(), "handler must reach AUDIT_LOG");
-    let p = &paths[0];
+    let paths = page.paths;
+    check!(
+        paths.len() == 2 && !page.has_more && !page.traversal.truncated,
+        "both equal shortest write paths are retained: {paths:?}"
+    );
+    let p = paths
+        .iter()
+        .find(|path| path.nodes.iter().any(|id| id.as_str() == DBQUERY_ID))
+        .context("primary write path")?;
     let ids: Vec<&str> = p.nodes.iter().map(NodeId::as_str).collect();
     check!(
-        ids == vec![HANDLER_ID, CALLER_ID, CALLEE_ID, DBQUERY_ID, DBTABLE_ID],
+        ids == vec![ROUTE_ID, HANDLER_ID, CALLER_ID, CALLEE_ID, DBQUERY_ID, DBTABLE_ID],
         "full path with endpoints: {ids:?}"
     );
     let kinds: Vec<&str> = p.edges.iter().map(|e| e.kind.as_str()).collect();
     check!(
-        kinds == vec!["CALLS", "CALLS", "EXECUTES_QUERY", "WRITES_TABLE"],
+        kinds
+            == vec![
+                "HANDLES_ROUTE",
+                "CALLS",
+                "CALLS",
+                "EXECUTES_QUERY",
+                "WRITES_TABLE"
+            ],
         "edge kinds along the path: {kinds:?}"
+    );
+    check!(
+        p.edges[0].traversed_reverse && p.edges.iter().skip(1).all(|edge| !edge.traversed_reverse),
+        "only Route→handler reports reverse stored orientation: {p:?}"
     );
     check!(
         (p.min_confidence - 1.0).abs() < f32::EPSILON
             && p.edges.iter().all(|e| e.reason == "contract"),
         "edge provenance carried through: {p:?}"
     );
-    let unreachable = store
-        .paths_between(&NodeId::new(DBTABLE_ID), &NodeId::new(HANDLER_ID), 8, 3)
+    let read = store
+        .paths_between(
+            &NodeId::new(ROUTE_ID),
+            &NodeId::new(DBTABLE_ID),
+            &PathFilter {
+                max_depth: 8,
+                max_paths: 3,
+                access: PathAccess::Read,
+            },
+        )
         .await?;
     check!(
-        unreachable.is_empty(),
+        read.paths.first().is_some_and(|path| {
+            path.nodes.iter().any(|id| id.as_str() == READQUERY_ID)
+                && path
+                    .edges
+                    .last()
+                    .is_some_and(|edge| edge.kind == "READS_TABLE")
+        }),
+        "read access selects the READS_TABLE path: {read:?}"
+    );
+    let invalid_access = store
+        .paths_between(
+            &NodeId::new(ROUTE_ID),
+            &NodeId::new(CALLEE_ID),
+            &PathFilter {
+                max_depth: 8,
+                max_paths: 3,
+                access: PathAccess::Write,
+            },
+        )
+        .await;
+    check!(
+        matches!(invalid_access, Err(crate::GraphStoreError::InvalidInput(_))),
+        "read/write filters reject non-table targets: {invalid_access:?}"
+    );
+    let unreachable = store
+        .paths_between(
+            &NodeId::new(DBTABLE_ID),
+            &NodeId::new(ROUTE_ID),
+            &PathFilter {
+                max_depth: 8,
+                max_paths: 3,
+                access: PathAccess::Any,
+            },
+        )
+        .await?;
+    check!(
+        unreachable.paths.is_empty() && !unreachable.traversal.truncated,
         "reverse direction has no path: {unreachable:?}"
     );
 
@@ -765,8 +934,22 @@ async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result
         .context("flow_downstream exclude_kinds")?
         .hops;
     check!(
-        !no_methods.iter().any(|h| h.node.id.as_str() == CALLEE_ID),
-        "exclude_kinds hides Method hops"
+        !no_methods.iter().any(|h| h.node.kind == NodeKind::Method),
+        "exclude_kinds hides every Method hop, including route handlers"
+    );
+
+    let depth_one = store
+        .flow_downstream(&NodeId::new(ROUTE_ID), &FlowFilter::depth(1))
+        .await?
+        .hops;
+    check!(
+        depth_one
+            .iter()
+            .any(|hop| hop.node.id.as_str() == HANDLER_ID)
+            && !depth_one
+                .iter()
+                .any(|hop| hop.node.id.as_str() == CALLER_ID),
+        "route→handler consumes exactly one depth: {depth_one:?}"
     );
 
     // -- paging --------------------------------------------------------------

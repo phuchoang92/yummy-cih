@@ -82,7 +82,7 @@ impl ResultBounds {
             total_known: None,
             returned,
             omitted: None,
-            failed: 0,
+            failed: usize::from(!db_effects_complete),
             limit: Some(limit),
             reasons,
         }
@@ -166,5 +166,40 @@ impl Completeness {
             failed,
             reasons,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResultBounds;
+
+    #[test]
+    fn trace_page_reports_every_independent_incompleteness_reason() {
+        let bounds = ResultBounds::paged(10, 10, true, 10, true, false);
+        assert!(!bounds.complete);
+        assert_eq!(
+            bounds.reasons,
+            vec![
+                "page_offset",
+                "result_limit",
+                "traversal_budget",
+                "db_effects_unavailable"
+            ]
+        );
+        assert_eq!(bounds.failed, 1);
+    }
+
+    #[test]
+    fn first_complete_trace_page_is_complete() {
+        let bounds = ResultBounds::paged(4, 0, false, 100, false, true);
+        assert!(bounds.complete);
+        assert!(bounds.reasons.is_empty());
+    }
+
+    #[test]
+    fn bounded_path_search_never_calls_budget_exhaustion_not_reachable() {
+        let bounds = ResultBounds::traversal(0, false, true, 3);
+        assert!(!bounds.complete);
+        assert_eq!(bounds.reasons, vec!["traversal_budget"]);
     }
 }

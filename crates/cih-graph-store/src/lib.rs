@@ -282,7 +282,7 @@ impl DbEffect {
 /// Node and paging filter for [`GraphStore::flow_downstream`].
 #[derive(Clone, Debug, Default)]
 pub struct FlowFilter {
-    /// Maximum traversal depth (adapters clamp to 1..=10; 0 = adapter default).
+    /// Maximum traversal depth (the shared walk clamps to 1..=10).
     pub max_depth: u32,
     /// Node kinds hidden from the reported hops. Paths still traverse hidden
     /// nodes, so a visible hop may name a hidden parent.
@@ -311,33 +311,6 @@ impl FlowFilter {
             100
         } else {
             self.limit
-        }
-    }
-
-    /// Rows required to cover the requested page plus one continuation probe.
-    /// The shared walker rejects overflow and windows beyond
-    /// [`FLOW_VISIBLE_WINDOW`]; this helper remains saturating for callers that
-    /// only use it for capacity hints.
-    pub fn budget(&self) -> usize {
-        self.offset
-            .saturating_add(self.effective_limit())
-            .saturating_add(1)
-    }
-
-    /// Slice an assembled, ordered hop list into the requested page.
-    pub fn paginate(&self, mut hops: Vec<FlowHop>) -> FlowPage {
-        let end = self.offset.saturating_add(self.effective_limit());
-        let has_more = hops.len() > end;
-        hops.truncate(end.min(hops.len()));
-        let hops = if self.offset >= hops.len() {
-            Vec::new()
-        } else {
-            hops.split_off(self.offset)
-        };
-        FlowPage {
-            hops,
-            has_more,
-            traversal: TraversalStats::default(),
         }
     }
 }

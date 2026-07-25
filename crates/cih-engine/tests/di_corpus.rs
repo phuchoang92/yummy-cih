@@ -22,7 +22,12 @@ fn corpus_dir() -> PathBuf {
 /// Analyze in a temp copy so the vendored tree keeps no `.cih/` and the run
 /// can never be served by a cache (mirrors `aop_corpus.rs`). `tag` keeps the
 /// copies of concurrently-running tests from clobbering each other.
-fn analyze_corpus(tag: &str) -> String {
+struct CorpusArtifacts {
+    nodes: String,
+    edges: String,
+}
+
+fn analyze_corpus(tag: &str) -> CorpusArtifacts {
     let src = corpus_dir();
     let dst = std::env::temp_dir().join(format!("cih-di-corpus-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dst);
@@ -37,9 +42,12 @@ fn analyze_corpus(tag: &str) -> String {
         },
     )
     .expect("analyze corpus");
-    let edges = std::fs::read_to_string(&outcome.artifacts.edges_path).unwrap_or_default();
+    let artifacts = CorpusArtifacts {
+        nodes: std::fs::read_to_string(&outcome.artifacts.nodes_path).unwrap_or_default(),
+        edges: std::fs::read_to_string(&outcome.artifacts.edges_path).unwrap_or_default(),
+    };
     let _ = std::fs::remove_dir_all(&dst);
-    edges
+    artifacts
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -58,8 +66,9 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[test]
 fn constructor_qualifier_field_call_redirects_to_xml_wired_impl() {
-    let edges = analyze_corpus("qualifier");
-    let calls: Vec<serde_json::Value> = edges
+    let artifacts = analyze_corpus("qualifier");
+    let calls: Vec<serde_json::Value> = artifacts
+        .edges
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("Calls"))
@@ -89,8 +98,9 @@ fn constructor_qualifier_field_call_redirects_to_xml_wired_impl() {
 /// exact table-write visibility the OCB trace investigation lacked.
 #[test]
 fn audit_queue_sql_constant_produces_table_write_edges() {
-    let edges = analyze_corpus("audit");
-    let all: Vec<serde_json::Value> = edges
+    let artifacts = analyze_corpus("audit");
+    let all: Vec<serde_json::Value> = artifacts
+        .edges
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .collect();
@@ -115,8 +125,9 @@ fn audit_queue_sql_constant_produces_table_write_edges() {
 
 #[test]
 fn objectless_sql_constant_call_produces_query_edge() {
-    let edges = analyze_corpus("objectless-sql");
-    let all: Vec<serde_json::Value> = edges
+    let artifacts = analyze_corpus("objectless-sql");
+    let all: Vec<serde_json::Value> = artifacts
+        .edges
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .collect();
@@ -129,4 +140,107 @@ fn objectless_sql_constant_call_produces_query_edge() {
         }),
         "objectless custom wrapper call must retain SQL-constant execution evidence"
     );
+}
+
+#[test]
+fn route_handler_keeps_dotted_constructor_qualifier_redirect() {
+    let artifacts = analyze_corpus("route");
+    let nodes: Vec<serde_json::Value> = artifacts
+        .nodes
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let edges: Vec<serde_json::Value> = artifacts
+        .edges
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let route = "Route:POST /api/passwords/change";
+    let handler = "Method:com.acme.user.PasswordController#change/1";
+
+    assert!(nodes.iter().any(|node| node["id"] == route));
+    assert!(edges.iter().any(|edge| edge["kind"] == "HandlesRoute"
+        && edge["src"] == handler
+        && edge["dst"] == route));
+    let redirect = edges
+        .iter()
+        .find(|edge| {
+            edge["kind"] == "Calls"
+                && edge["src"] == handler
+                && edge["dst"] == "Method:com.acme.user.UserImpl#modifyUserPassword/1"
+        })
+        .expect("this.userAdmin must retain its constructor-propagated qualifier");
+    assert_eq!(redirect["reason"], "di-qualifier");
+}
+
+#[test]
+fn async_spring_listener_emits_topic_and_listener_edge() {
+    let artifacts = analyze_corpus("async-listener");
+    let nodes: Vec<serde_json::Value> = artifacts
+        .nodes
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let edges: Vec<serde_json::Value> = artifacts
+        .edges
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let topic = "KafkaTopic:PasswordChangedEvent";
+    let listener = "Method:com.acme.user.PasswordChangedListener#onPasswordChanged/1";
+
+    assert!(nodes.iter().any(|node| node["id"] == topic));
+    let edge = edges
+        .iter()
+        .find(|edge| edge["kind"] == "ListensTo" && edge["src"] == listener && edge["dst"] == topic)
+        .expect("@Async @EventListener method should retain its Spring event-listen edge");
+    assert_eq!(edge["props"]["messaging_framework"], "spring");
+}
+
+#[test]
+fn unicode_non_sql_is_ignored_and_static_final_getter_is_not_accessor() {
+    let artifacts = analyze_corpus("unicode-accessor");
+    let nodes: Vec<serde_json::Value> = artifacts
+        .nodes
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    assert!(
+        !nodes.iter().any(|node| {
+            node["kind"] == "DbQuery"
+                && node["id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("unicodeLabel"))
+        }),
+        "non-SQL Unicode text must not create a query"
+    );
+    let getter = nodes
+        .iter()
+        .find(|node| node["id"] == "Method:com.acme.user.PasswordRequest#getDefault/0")
+        .expect("constant getter method");
+    assert_ne!(getter["props"]["isAccessor"], true);
+    let field_getter = nodes
+        .iter()
+        .find(|node| node["id"] == "Method:com.acme.user.PasswordRequest#getNewPassword/0")
+        .expect("field getter method");
+    assert_eq!(field_getter["props"]["isAccessor"], true);
+}
+
+#[test]
+fn malformed_adjacent_xml_keeps_valid_prefix_without_attribute_bleed() {
+    let wiring = cih_resolve::di_xml::collect_di_wiring(&corpus_dir());
+
+    assert_eq!(
+        wiring
+            .beans_by_id
+            .get("validBeforeMalformedTail")
+            .map(String::as_str),
+        Some("com.acme.user.AuditQueue")
+    );
+    assert!(!wiring.beans_by_id.contains_key("missingClass"));
+    assert!(!wiring
+        .beans
+        .iter()
+        .any(|bean| bean.fqcn == "com.acme.user.NotABean" || bean.fqcn == "com.acme.user.Broken"));
 }

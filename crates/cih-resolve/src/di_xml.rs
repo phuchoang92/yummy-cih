@@ -63,7 +63,10 @@ pub fn collect_di_wiring(repo_root: &Path) -> DiWiring {
     let mut beans_by_id: HashMap<String, String> = HashMap::new();
     for (id, classes) in candidates {
         if classes.len() == 1 {
-            beans_by_id.insert(id.to_string(), classes.into_iter().next().unwrap().to_string());
+            beans_by_id.insert(
+                id.to_string(),
+                classes.into_iter().next().unwrap().to_string(),
+            );
         } else {
             tracing::warn!(
                 bean_id = id,
@@ -136,8 +139,8 @@ pub fn parse_di_document(rel: &str, content: &str) -> (Vec<BeanDef>, Vec<Referen
                 match element.local_name().as_ref() {
                     b"bean" => {
                         if let Some(class) = xml_attr(&element, b"class") {
-                            let id = xml_attr(&element, b"id")
-                                .or_else(|| xml_attr(&element, b"name"));
+                            let id =
+                                xml_attr(&element, b"id").or_else(|| xml_attr(&element, b"name"));
                             beans.push(BeanDef {
                                 id,
                                 fqcn: class,

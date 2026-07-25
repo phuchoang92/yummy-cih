@@ -151,6 +151,31 @@ async fn dispatch_call_that_cannot_resolve_returns_error() {
 }
 
 #[tokio::test]
+async fn dispatch_trace_flow_rejects_windows_beyond_shared_cap() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "trace_flow".into(),
+            arguments: Some(
+                serde_json::json!({
+                    "entry_point": "Route:GET /x",
+                    "offset": 4_999,
+                    "max_nodes": 2,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "offset + max_nodes beyond 5,000 must fail before graph resolution"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn dispatch_crossrepo_validation_returns_error() {
     let client = serve_test_server().await;
     let res = client

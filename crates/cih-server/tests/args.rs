@@ -173,13 +173,12 @@ fn reaches_args_defaults() {
 
 #[test]
 fn reaches_args_accepts_table_access_filter() {
-    let args: ReachesArgs = serde_json::from_str(
-        r#"{"from":"Route:POST /x","to":"AUDIT_LOG","access":"write"}"#,
-    )
-    .unwrap();
+    let args: ReachesArgs =
+        serde_json::from_str(r#"{"from":"Route:POST /x","to":"AUDIT_LOG","access":"write"}"#)
+            .unwrap();
     assert_eq!(args.access, cih_server::args::ReachesAccessArg::Write);
-    assert!(serde_json::from_str::<ReachesArgs>(
-        r#"{"from":"x","to":"T","access":"mutation"}"#
-    )
-    .is_err());
+    assert!(
+        serde_json::from_str::<ReachesArgs>(r#"{"from":"x","to":"T","access":"mutation"}"#)
+            .is_err()
+    );
 }

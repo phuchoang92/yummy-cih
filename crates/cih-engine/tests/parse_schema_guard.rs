@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (27, "0de9127a9aaea189");
+const GOLDEN: (u32, &str) = (27, "e469e8a47abc703e");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -64,7 +64,7 @@ public class UserFacade implements UserAdmin {
         // SQL-valued constant (non-UPPER_SNAKE name) + heuristic execution site
         // (constant flowing into custom queue APIs) → SqlConstant + SqlExecutionSite.
         // Constructor qualifier assignment also pins inferred field qualifiers;
-        // the constant-returning isReady method pins strict accessor detection.
+        // isReady/getDefault pin literal and static-final accessor rejections.
         "src/main/java/com/acme/AuditAdapter.java",
         r#"package com.acme;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -72,6 +72,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 public class AuditAdapter {
     private static final String insertAudit =
         "INSERT INTO AUDIT_LOG (ID, ACTION) VALUES (?, ?)";
+    private static final String DEFAULT = "fallback";
     private AuditQueue auditQueue;
 
     public AuditAdapter(@Qualifier("auditQueueBean") AuditQueue queue) {
@@ -93,6 +94,10 @@ public class AuditAdapter {
 
     public boolean isReady() {
         return true;
+    }
+
+    public String getDefault() {
+        return DEFAULT;
     }
 }
 "#,

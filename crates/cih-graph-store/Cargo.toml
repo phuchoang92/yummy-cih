@@ -16,3 +16,6 @@ serde_json.workspace = true
 # Backend contract suite (`contract::run_contract_suite`) — adapter test code,
 # not for production builds.
 test-support = []
+
+[dev-dependencies]
+tokio.workspace = true

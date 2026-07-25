@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans">
+    <bean id="missingClass"/>
+    <service class="com.acme.user.NotABean"/>
+    <bean id="validBeforeMalformedTail" class="com.acme.user.AuditQueue"/>
+    <bean id="unterminated class="com.acme.user.Broken"/>
+</beans>

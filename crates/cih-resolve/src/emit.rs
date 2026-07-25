@@ -614,13 +614,7 @@ impl<'a> EdgeEmitter<'a> {
                                     qualifier: None,
                                 });
                         }
-                        return self
-                            .index
-                            .field_type_in_hierarchy(&fqcn, right)
-                            .map(|fqcn| ResolvedReceiver {
-                                fqcn,
-                                qualifier: None,
-                            });
+                        return self.index.field_receiver_in_hierarchy(&fqcn, right);
                     }
                 }
             }
@@ -636,13 +630,7 @@ impl<'a> EdgeEmitter<'a> {
                         qualifier: None,
                     });
             }
-            return self
-                .index
-                .field_type_in_hierarchy(&owner, right)
-                .map(|fqcn| ResolvedReceiver {
-                    fqcn,
-                    qualifier: None,
-                });
+            return self.index.field_receiver_in_hierarchy(&owner, right);
         }
 
         None

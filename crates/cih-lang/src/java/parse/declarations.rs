@@ -1,18 +1,18 @@
 use cih_core::{
-    constructor_id, field_id, file_id, method_id, type_id, Edge, EdgeKind, Node, NodeId,
-    NodeKind, SymbolDef,
+    constructor_id, field_id, file_id, method_id, type_id, Edge, EdgeKind, Node, NodeId, NodeKind,
+    SymbolDef,
 };
 use tree_sitter::Node as TsNode;
 
-use super::{
-    CallableContext, FileBuilder, TypeContext, annotation_metadata, jaxrs_class_prefix, modifiers,
-    param_type_names, parameter_count, range_of, return_type_name, spring_class_prefix, text,
-    type_fqcn, type_kind,
-};
 use super::metrics::{compute_complexity, java_body_fingerprint};
 use super::structural::{
-    build_class_props, class_stereotype, is_bean_method, is_mock_or_injected_field, is_test_method,
-    is_trivial_accessor, simple_type_name,
+    accessor_fields, build_class_props, class_stereotype, is_bean_method,
+    is_mock_or_injected_field, is_test_method, is_trivial_accessor, simple_type_name,
+};
+use super::{
+    annotation_metadata, jaxrs_class_prefix, modifiers, param_type_names, parameter_count,
+    range_of, return_type_name, spring_class_prefix, text, type_fqcn, type_kind, CallableContext,
+    FileBuilder, TypeContext,
 };
 
 pub(super) fn collect_declarations(
@@ -87,6 +87,7 @@ pub(super) fn collect_declarations(
             fqcn,
             spring_prefix: spring_class_prefix(node, src).or_else(|| jaxrs_class_prefix(node, src)),
             is_test: stereotype.as_deref() == Some("test"),
+            accessor_fields: accessor_fields(node, src),
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
         };
@@ -134,7 +135,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let param_types = param_type_names(node, src);
     let is_test_method = owner.is_test && is_test_method(node, src);
     let is_bean = is_bean_method(node, src);
-    let is_accessor = is_trivial_accessor(node, &name, src);
+    let is_accessor = is_trivial_accessor(node, &name, src, &owner.accessor_fields);
 
     let complexity = node
         .child_by_field_name("body")
@@ -170,9 +171,18 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
             );
         }
         if let Some(ref cx) = complexity {
-            obj.insert("cyclomatic".into(), serde_json::Value::Number(cx.cyclomatic.into()));
-            obj.insert("cognitive".into(), serde_json::Value::Number(cx.cognitive.into()));
-            obj.insert("loopDepth".into(), serde_json::Value::Number(cx.loop_depth.into()));
+            obj.insert(
+                "cyclomatic".into(),
+                serde_json::Value::Number(cx.cyclomatic.into()),
+            );
+            obj.insert(
+                "cognitive".into(),
+                serde_json::Value::Number(cx.cognitive.into()),
+            );
+            obj.insert(
+                "loopDepth".into(),
+                serde_json::Value::Number(cx.loop_depth.into()),
+            );
         }
         if let Some(ref fp) = body_fingerprint {
             if let Ok(v) = serde_json::to_value(fp) {
@@ -183,7 +193,11 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         if !annotations.is_empty() {
             obj.insert("annotations".into(), serde_json::Value::Array(annotations));
         }
-        if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(obj))
+        }
     };
     builder.nodes.push(Node {
         id: id.clone(),
@@ -257,16 +271,29 @@ fn collect_constructor(
     let props = {
         let mut obj = serde_json::Map::new();
         if let Some(ref cx) = complexity {
-            obj.insert("cyclomatic".into(), serde_json::Value::Number(cx.cyclomatic.into()));
-            obj.insert("cognitive".into(), serde_json::Value::Number(cx.cognitive.into()));
-            obj.insert("loopDepth".into(), serde_json::Value::Number(cx.loop_depth.into()));
+            obj.insert(
+                "cyclomatic".into(),
+                serde_json::Value::Number(cx.cyclomatic.into()),
+            );
+            obj.insert(
+                "cognitive".into(),
+                serde_json::Value::Number(cx.cognitive.into()),
+            );
+            obj.insert(
+                "loopDepth".into(),
+                serde_json::Value::Number(cx.loop_depth.into()),
+            );
         }
         if let Some(ref fp) = body_fingerprint {
             if let Ok(v) = serde_json::to_value(fp) {
                 obj.insert("bodyFingerprint".into(), v);
             }
         }
-        if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(obj))
+        }
     };
 
     builder.nodes.push(Node {

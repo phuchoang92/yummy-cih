@@ -500,18 +500,30 @@ companion-object/`object` `val`s with literal initializers):
   affected hops (both backends) instead of extra path hops; the wiki dev pages
   render per-method **Intercepted by (AOP)** / **Advises (AOP)** sections.
 
-## Flow traversal (`trace_flow`, `cih-falkor::flow_downstream`)
+## Execution traversal (`trace_flow`, `reaches`, `cih-graph-store::traversal`)
 
-- Single-repo `trace_flow` walks **outgoing** `CALLS` / `HANDLES_ROUTE` /
-  `EXTERNAL_CALL` / `PUBLISHES_EVENT` / `LISTENS_TO` edges from the entry.
-- **A `Route` node can be the entry point.** `HandlesRoute` is stored
-  handler→route, so a route has no outgoing flow edges; `flow_downstream` detects
-  a route entry (via the *inverse* `HandlesRoute`) and prepends the hop
-  route→handler(s) at depth 1, then traces downstream from each handler. This
-  works for every route source — Java/Kotlin/Go HTTP routes and TS GraphQL/tRPC
-  `Route` nodes alike — so `trace_flow(entry_point="Route:…")` yields the full
-  `route → handler → call chain`, not just the route node. Method entries are
-  unchanged. (Mirrors the artifact-side cross-repo `trace_flow_x` Route handling.)
+- Both stores expose deterministic batched one-hop transitions; one shared BFS
+  owns depth, cycle handling, filters, pagination, shortest-path reconstruction,
+  and budgets. Adapter batches contain at most 256 source ids. A walk visits at
+  most 10,000 nodes and expands at most 50,000 edges; `traversal.truncated=true`
+  means the result is inconclusive, never proof of unreachability.
+- Logical execution preserves stored graph orientation while walking two
+  relationships in reverse: `Route → handler` over stored `HANDLES_ROUTE`
+  (handler→route), and topic/destination `→ listener` over stored `LISTENS_TO`
+  (listener→topic). `CALLS`, `EXTERNAL_CALL`, `PUBLISHES_EVENT`, and optional DB
+  execution/read/write edges remain forward. Evidence edges mark reverse walks
+  with `traversed_reverse=true`.
+- `trace_flow` loads the real root node and orders visible hops by
+  `(depth, name, id)`. `exclude_kinds` and `business_only` hide non-root results
+  without severing traversal. The visible `offset + max_nodes` window is capped
+  at 5,000; continuation is emitted only for a reproducible, non-budget-truncated
+  walk. `completeness.reasons` distinguishes `page_offset`, `result_limit`,
+  `traversal_budget`, and `db_effects_unavailable`.
+- `reaches` returns bounded shortest evidence paths. `access="read"` or
+  `access="write"` is valid only for a `DbTable` target and requires the final
+  edge to be `READS_TABLE` or `WRITES_TABLE`. Its status is `reachable`,
+  `not_reachable`, or `inconclusive`; the compatibility boolean `reachable`
+  remains present.
 
 ## Parse cache (`cih-engine/src/file_cache.rs`)
 

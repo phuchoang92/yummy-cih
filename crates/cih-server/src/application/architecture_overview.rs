@@ -829,7 +829,8 @@ fn build_warnings(
         } else {
             let live_nodes = summary.total_nodes as f64;
             let registry_nodes = entry.stats.nodes as f64;
-            if (live_nodes - registry_nodes).abs() / live_nodes.max(registry_nodes).max(1.0) > 0.10 {
+            if (live_nodes - registry_nodes).abs() / live_nodes.max(registry_nodes).max(1.0) > 0.10
+            {
                 warnings.push(format!(
                     "graph store size ({} nodes) diverges from registry stats ({} nodes) — the loaded graph may not match the latest artifacts; reload: {}",
                     summary.total_nodes,
@@ -884,28 +885,34 @@ async fn build_modules(
 
             // Anchor attribution is the only dependent query in this section.
             let mut anchors: HashMap<String, Vec<(u64, String)>> = HashMap::new();
-            if let Some(pool) = pool.and_then(|result| result.as_ref().ok()) {
-                let degrees: HashMap<&str, u64> = pool
-                    .nodes
-                    .iter()
-                    .map(|node| (node.node.id.as_str(), node.degree))
-                    .collect();
-                let ids: Vec<cih_core::NodeId> =
-                    pool.nodes.iter().map(|node| node.node.id.clone()).collect();
-                match store.symbol_communities(&ids).await {
-                    Ok(pairs) => {
-                        for (id, community) in pairs {
-                            let degree = degrees.get(id.as_str()).copied().unwrap_or(0);
-                            anchors
-                                .entry(community.id)
-                                .or_default()
-                                .push((degree, id.as_str().to_string()));
+            match pool {
+                Some(Ok(pool)) => {
+                    let degrees: HashMap<&str, u64> = pool
+                        .nodes
+                        .iter()
+                        .map(|node| (node.node.id.as_str(), node.degree))
+                        .collect();
+                    let ids: Vec<cih_core::NodeId> =
+                        pool.nodes.iter().map(|node| node.node.id.clone()).collect();
+                    match store.symbol_communities(&ids).await {
+                        Ok(pairs) => {
+                            for (id, community) in pairs {
+                                let degree = degrees.get(id.as_str()).copied().unwrap_or(0);
+                                anchors
+                                    .entry(community.id)
+                                    .or_default()
+                                    .push((degree, id.as_str().to_string()));
+                            }
                         }
+                        Err(e) => warnings.push(format!(
+                            "anchor-symbol attribution unavailable (symbol_communities failed: {e}) — module rows carry no anchors"
+                        )),
                     }
-                    Err(e) => warnings.push(format!(
-                        "anchor-symbol attribution unavailable (symbol_communities failed: {e}) — module rows carry no anchors"
-                    )),
                 }
+                Some(Err(e)) => warnings.push(format!(
+                    "module anchor-symbol pool unavailable (graph_overview failed: {e}) — module rows carry no anchors"
+                )),
+                None => {}
             }
 
             let items = communities
@@ -1078,8 +1085,7 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     // These reads are independent. The backend's query semaphore remains the
     // concurrency bound; symbol-community attribution runs later because it
     // depends on the overview pool.
-    let (fetched_summary, pool, fetched_communities, fetched_routes, fetched_hotspots) =
-        tokio::join!(
+    let (fetched_summary, pool, fetched_communities, fetched_routes, fetched_hotspots) = tokio::join!(
         async {
             if want_stats {
                 Some(ctx.store.graph_summary().await)
@@ -1131,21 +1137,23 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
 
     let mut summary_for_warning = None;
     let stats = if want_stats {
-        Some(match fetched_summary.expect("summary is fetched whenever stats is selected") {
-            Err(error) => Section::store_err(&error),
-            Ok(mut summary) => {
-                summary
-                    .kinds
-                    .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
-                let body = StatsBody {
-                    total_nodes: summary.total_nodes,
-                    total_edges: summary.total_edges,
-                    kinds: summary.kinds.clone(),
-                };
-                summary_for_warning = Some(summary);
-                Section::ok("graph", body)
-            }
-        })
+        Some(
+            match fetched_summary.expect("summary is fetched whenever stats is selected") {
+                Err(error) => Section::store_err(&error),
+                Ok(mut summary) => {
+                    summary
+                        .kinds
+                        .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
+                    let body = StatsBody {
+                        total_nodes: summary.total_nodes,
+                        total_edges: summary.total_edges,
+                        kinds: summary.kinds.clone(),
+                    };
+                    summary_for_warning = Some(summary);
+                    Section::ok("graph", body)
+                }
+            },
+        )
     } else {
         None
     };
@@ -1308,6 +1316,7 @@ mod tests {
         hotspots: Vec<HotspotNode>,
         fail_summary: bool,
         fail_communities: bool,
+        fail_overview: bool,
     }
 
     struct FixedRepoContexts {
@@ -1433,6 +1442,9 @@ mod tests {
             _max_edges: usize,
             _kinds: Option<&[String]>,
         ) -> StoreResult<GraphOverview> {
+            if self.fail_overview {
+                return Err(GraphStoreError::Backend("overview down".into()));
+            }
             Ok(GraphOverview {
                 nodes: self
                     .pool
@@ -1483,9 +1495,8 @@ mod tests {
             &self,
             _from: &NodeId,
             _to: &NodeId,
-            _max_depth: u32,
-            _max_paths: usize,
-        ) -> StoreResult<Vec<cih_graph_store::PathInfo>> {
+            _filter: &cih_graph_store::PathFilter,
+        ) -> StoreResult<cih_graph_store::PathPage> {
             unimpl()
         }
         async fn flow_downstream(
@@ -2051,6 +2062,30 @@ mod tests {
         assert_eq!(v["modules"]["available"], true);
         assert_eq!(v["route_groups"]["available"], true);
         assert_eq!(v["route_groups"]["total_routes"], 3);
+    }
+
+    #[tokio::test]
+    async fn overview_pool_failure_keeps_modules_and_warns_about_missing_anchors() {
+        let mut store = populated_store();
+        store.fail_overview = true;
+        let entry = entry("/nonexistent/demo", Some("/x"), 100);
+        let v = compose_json(ctx_with(&store, &entry, vec!["modules".into()], 0)).await;
+
+        assert_eq!(v["modules"]["available"], true);
+        assert!(v["modules"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|module| module
+                .get("anchor_symbols")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty)));
+        assert!(v["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning.as_str().is_some_and(|warning| {
+                warning.contains("module anchor-symbol pool unavailable")
+                    && warning.contains("overview down")
+            })
+        }));
     }
 
     #[test]

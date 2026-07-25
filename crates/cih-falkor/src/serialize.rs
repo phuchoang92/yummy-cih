@@ -5,6 +5,16 @@
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 use redis::Value;
 
+/// Canonical column order consumed by [`node_from_row`]. Keep every query that
+/// returns a domain `Node` on this projection so source ranges cannot silently
+/// disappear when a new read path is added.
+pub(super) fn node_columns(alias: &str) -> String {
+    format!(
+        "{alias}.id, {alias}.kind, {alias}.name, {alias}.qualifiedName, \
+         {alias}.file, {alias}.startLine, {alias}.endLine"
+    )
+}
+
 pub(super) fn node_from_row(r: &[String]) -> Node {
     Node {
         id: NodeId::new(r.first().cloned().unwrap_or_default()),

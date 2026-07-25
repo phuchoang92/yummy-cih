@@ -477,12 +477,12 @@ impl ResolveIndex {
         // 1. param / local / pattern / alias / call-result in this callable.
         if let Some(bindings) = self.bindings.get(in_fqcn) {
             if let Some(tb) = pick_binding(bindings, receiver) {
-                return self
-                    .resolve_binding(tb, in_fqcn, file, depth)
-                    .map(|fqcn| ResolvedReceiver {
+                return self.resolve_binding(tb, in_fqcn, file, depth).map(|fqcn| {
+                    ResolvedReceiver {
                         fqcn,
                         qualifier: tb.qualifier.clone(),
-                    });
+                    }
+                });
             }
         }
 
@@ -490,12 +490,12 @@ impl ResolveIndex {
         //    after callable-scoped bindings so a function-local shadows it).
         if let Some(bindings) = self.module_bindings.get(file) {
             if let Some(tb) = pick_binding(bindings, receiver) {
-                return self
-                    .resolve_binding(tb, in_fqcn, file, depth)
-                    .map(|fqcn| ResolvedReceiver {
+                return self.resolve_binding(tb, in_fqcn, file, depth).map(|fqcn| {
+                    ResolvedReceiver {
                         fqcn,
                         qualifier: tb.qualifier.clone(),
-                    });
+                    }
+                });
             }
         }
 
@@ -582,25 +582,11 @@ impl ResolveIndex {
     }
 
     pub fn field_type_in_hierarchy(&self, owner_class: &str, name: &str) -> Option<String> {
-        let mut seen = HashSet::new();
-        let mut queue = vec![owner_class.to_string()];
-        while let Some(cur) = queue.pop() {
-            if !seen.insert(cur.clone()) {
-                continue;
-            }
-            if let Some(field) = self.fields.get(&(cur.clone(), name.to_string())) {
-                if let Some(raw) = &field.declared_type {
-                    return self.resolve_in_type(raw, &cur);
-                }
-            }
-            if let Some(supers) = self.supertypes.get(&cur) {
-                queue.extend(supers.iter().cloned());
-            }
-        }
-        None
+        self.field_receiver_in_hierarchy(owner_class, name)
+            .map(|resolved| resolved.fqcn)
     }
 
-    fn field_receiver_in_hierarchy(
+    pub(crate) fn field_receiver_in_hierarchy(
         &self,
         owner_class: &str,
         name: &str,

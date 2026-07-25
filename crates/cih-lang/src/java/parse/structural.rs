@@ -2,8 +2,47 @@ use cih_core::{ComplexityRecord, NodeKind, StructuralProfile};
 use tree_sitter::Node as TsNode;
 
 use super::{
-    FileBuilder, annotation_name, annotations, first_named_child, parameter_count, text,
+    annotation_name, annotations, first_named_child, modifiers, parameter_count, text, FileBuilder,
 };
+
+#[derive(Clone, Debug)]
+pub(in crate::java) struct AccessorField {
+    name: String,
+    is_static_final: bool,
+}
+
+/// Direct fields declared by one Java type, captured before its methods are
+/// classified so accessor detection does not confuse constants or arbitrary
+/// identifiers with instance state.
+pub(super) fn accessor_fields(type_node: TsNode<'_>, src: &str) -> Vec<AccessorField> {
+    let Some(body) = type_node.child_by_field_name("body") else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    let mut body_cursor = body.walk();
+    for declaration in body.named_children(&mut body_cursor) {
+        if declaration.kind() != "field_declaration" {
+            continue;
+        }
+        let field_modifiers = modifiers(declaration, src);
+        let is_static_final = field_modifiers.iter().any(|modifier| modifier == "static")
+            && field_modifiers.iter().any(|modifier| modifier == "final");
+        let mut declaration_cursor = declaration.walk();
+        for declarator in declaration.named_children(&mut declaration_cursor) {
+            if declarator.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(name) = declarator.child_by_field_name("name") else {
+                continue;
+            };
+            fields.push(AccessorField {
+                name: text(name, src),
+                is_static_final,
+            });
+        }
+    }
+    fields
+}
 
 pub(super) fn class_stereotype(
     node: TsNode<'_>,
@@ -63,7 +102,12 @@ pub(super) fn is_bean_method(node: TsNode<'_>, src: &str) -> bool {
 /// True only for an exact bean accessor AST: a zero-argument `get`/`is`/`has`
 /// method returning a field, or a one-argument `set` method assigning that
 /// parameter directly to `this.field`. Prefixes alone are never sufficient.
-pub(super) fn is_trivial_accessor(node: TsNode<'_>, name: &str, src: &str) -> bool {
+pub(super) fn is_trivial_accessor(
+    node: TsNode<'_>,
+    name: &str,
+    src: &str,
+    fields: &[AccessorField],
+) -> bool {
     let getter = ["get", "is", "has"]
         .iter()
         .any(|prefix| has_accessor_suffix(name, prefix));
@@ -76,13 +120,13 @@ pub(super) fn is_trivial_accessor(node: TsNode<'_>, name: &str, src: &str) -> bo
     };
 
     if getter && parameter_count(node) == 0 {
-        return is_direct_field_return(statement);
+        return is_direct_field_return(statement, src, fields);
     }
     if setter && parameter_count(node) == 1 {
         let Some(parameter) = sole_parameter_name(node, src) else {
             return false;
         };
-        return is_direct_field_assignment(statement, &parameter, src);
+        return is_direct_field_assignment(statement, &parameter, src, fields);
     }
     false
 }
@@ -105,14 +149,22 @@ fn sole_semantic_child(node: TsNode<'_>) -> Option<TsNode<'_>> {
     Some(only)
 }
 
-fn is_direct_field_return(statement: TsNode<'_>) -> bool {
+fn is_direct_field_return(statement: TsNode<'_>, src: &str, fields: &[AccessorField]) -> bool {
     if statement.kind() != "return_statement" {
         return false;
     }
     let Some(value) = sole_semantic_child(statement) else {
         return false;
     };
-    value.kind() == "identifier" || is_this_field(value)
+    let field_name = match value.kind() {
+        "identifier" => text(value, src),
+        "field_access" => this_field_name(value, src).unwrap_or_default(),
+        _ => return false,
+    };
+    fields
+        .iter()
+        .find(|field| field.name == field_name)
+        .is_some_and(|field| !field.is_static_final)
 }
 
 fn sole_parameter_name(node: TsNode<'_>, src: &str) -> Option<String> {
@@ -127,7 +179,12 @@ fn sole_parameter_name(node: TsNode<'_>, src: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-fn is_direct_field_assignment(statement: TsNode<'_>, parameter: &str, src: &str) -> bool {
+fn is_direct_field_assignment(
+    statement: TsNode<'_>,
+    parameter: &str,
+    src: &str,
+    fields: &[AccessorField],
+) -> bool {
     if statement.kind() != "expression_statement" {
         return false;
     }
@@ -147,17 +204,25 @@ fn is_direct_field_assignment(statement: TsNode<'_>, parameter: &str, src: &str)
     let Some(right) = assignment.child_by_field_name("right") else {
         return false;
     };
-    is_this_field(left) && right.kind() == "identifier" && text(right, src) == parameter
+    let Some(field_name) = this_field_name(left, src) else {
+        return false;
+    };
+    fields.iter().any(|field| field.name == field_name)
+        && right.kind() == "identifier"
+        && text(right, src) == parameter
 }
 
-fn is_this_field(node: TsNode<'_>) -> bool {
-    node.kind() == "field_access"
-        && node
+fn this_field_name(node: TsNode<'_>, src: &str) -> Option<String> {
+    if node.kind() != "field_access"
+        || node
             .child_by_field_name("object")
-            .is_some_and(|object| object.kind() == "this")
-        && node
-            .child_by_field_name("field")
-            .is_some_and(|field| field.kind() == "identifier")
+            .is_none_or(|object| object.kind() != "this")
+    {
+        return None;
+    }
+    node.child_by_field_name("field")
+        .filter(|field| field.kind() == "identifier")
+        .map(|field| text(field, src))
 }
 
 pub(super) fn is_test_method(node: TsNode<'_>, src: &str) -> bool {
@@ -264,14 +329,24 @@ pub(super) fn build_class_props(
     };
 
     let mut obj = serde_json::Map::new();
-    if let Some(s) = effective_stereotype { obj.insert("stereotype".into(), s.into()); }
-    if let Some(e) = entity_opt           { obj.insert("entityType".into(), e.into()); }
-    if let Some(t) = table_name           { obj.insert("tableName".into(), t.into()); }
+    if let Some(s) = effective_stereotype {
+        obj.insert("stereotype".into(), s.into());
+    }
+    if let Some(e) = entity_opt {
+        obj.insert("entityType".into(), e.into());
+    }
+    if let Some(t) = table_name {
+        obj.insert("tableName".into(), t.into());
+    }
     let annotations = super::annotation_metadata(node, src);
     if !annotations.is_empty() {
         obj.insert("annotations".into(), serde_json::Value::Array(annotations));
     }
-    if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
 }
 
 fn extract_table_annotation_name(text: &str) -> Option<String> {
@@ -306,8 +381,7 @@ fn extract_table_annotation_name(text: &str) -> Option<String> {
 }
 
 pub(super) fn attach_structural_profiles(builder: &mut FileBuilder) {
-    let mut extends_count: std::collections::HashMap<&str, u16> =
-        std::collections::HashMap::new();
+    let mut extends_count: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
     let mut implements_count: std::collections::HashMap<&str, u16> =
         std::collections::HashMap::new();
     for site in &builder.reference_sites {
@@ -362,14 +436,17 @@ pub(super) fn attach_structural_profiles(builder: &mut FileBuilder) {
         let n = cxs.len() as f32;
 
         let avg_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
-            if n == 0.0 { 0.0 } else { cxs.iter().map(|c| f(c)).sum::<f32>() / n }
+            if n == 0.0 {
+                0.0
+            } else {
+                cxs.iter().map(|c| f(c)).sum::<f32>() / n
+            }
         };
         let max_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
             cxs.iter().map(|c| f(c)).fold(0f32, f32::max)
         };
-        let sum_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
-            cxs.iter().map(|c| f(c)).sum::<f32>()
-        };
+        let sum_of =
+            |f: fn(&ComplexityRecord) -> f32| -> f32 { cxs.iter().map(|c| f(c)).sum::<f32>() };
 
         let loc = (def.range.end_line.saturating_sub(def.range.start_line)) as f32 / 1000.0;
 

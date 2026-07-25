@@ -9,19 +9,17 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
 use cih_graph_store::{
     risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction,
     ExecutionTransition, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore,
-    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, Interception,
-    InterceptingAdvice, KindCount, LoadObserver, LoadStats, NoopObserver, Path, Result, RouteInfo,
+    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice,
+    Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path, Result, RouteInfo,
     SimilarMethod, Subgraph, SymbolContext, EXECUTION_BATCH_SIZE,
 };
 use lbug::{Connection, Value};
 
-use crate::convert::{
-    cell_f64, cell_opt_str, cell_str, cell_u64, cstr, node_from_row, recursive_rel,
-};
+use crate::convert::{cell_f64, cell_str, cell_u64, cstr, node_from_row, recursive_rel};
 use crate::{run_blocking, LadybugStore};
 
 /// Collect a query's rows. Runs inside a `with_read_conn` closure.
@@ -68,9 +66,10 @@ impl LadybugStore {
             Direction::Downstream => "-[:CALLS]->",
             Direction::Both => "-[:CALLS]-",
         };
+        let columns = node_columns("m");
         let q = format!(
             "MATCH (n:Symbol {{id: {id}}}){arrow}(m:Symbol) \
-             RETURN DISTINCT m.id, m.kind, m.name, m.qn, m.file, m.sl, m.el LIMIT 100",
+             RETURN DISTINCT {columns} LIMIT 100",
             id = cstr(id.as_str())
         );
         let out = self
@@ -262,11 +261,11 @@ impl GraphStore for LadybugStore {
             "CALLS|:EXTERNAL_CALL|:PUBLISHES_EVENT"
         };
         let limit = limit.clamp(1, 50_001);
+        let target_columns = node_columns("t");
         let forward = format!(
             "MATCH (s:Symbol)-[r:{outgoing}]->(t:Symbol) \
              WHERE s.id IN [{list}] \
-             RETURN s.id, t.id, t.kind, t.name, t.qn, t.file, t.sl, t.el, \
-                    coalesce(t.isAccessor, 0), label(r), \
+             RETURN s.id, {target_columns}, coalesce(t.isAccessor, 0), label(r), \
                     coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
                     coalesce(r.callSites, '') \
              ORDER BY t.name, t.id, s.id, label(r) LIMIT {limit}"
@@ -274,8 +273,7 @@ impl GraphStore for LadybugStore {
         let reverse = format!(
             "MATCH (s:Symbol)<-[r:HANDLES_ROUTE|:LISTENS_TO]-(t:Symbol) \
              WHERE s.id IN [{list}] \
-             RETURN s.id, t.id, t.kind, t.name, t.qn, t.file, t.sl, t.el, \
-                    coalesce(t.isAccessor, 0), label(r), \
+             RETURN s.id, {target_columns}, coalesce(t.isAccessor, 0), label(r), \
                     coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
                     coalesce(r.callSites, '') \
              ORDER BY t.name, t.id, s.id, label(r) LIMIT {limit}"

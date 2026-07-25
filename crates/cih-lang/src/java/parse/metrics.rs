@@ -1,5 +1,5 @@
-use cih_core::ComplexityRecord;
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_java};
+use cih_core::ComplexityRecord;
 use tree_sitter::Node as TsNode;
 
 pub(super) fn compute_complexity(body: TsNode<'_>) -> ComplexityRecord {
@@ -7,7 +7,15 @@ pub(super) fn compute_complexity(body: TsNode<'_>) -> ComplexityRecord {
     let mut cognitive: u16 = 0;
     let mut loop_depth: u8 = 0;
     let mut counts = ControlFlowCounts::default();
-    compute_complexity_inner(body, 0, 0, &mut cyclomatic, &mut cognitive, &mut loop_depth, &mut counts);
+    compute_complexity_inner(
+        body,
+        0,
+        0,
+        &mut cyclomatic,
+        &mut cognitive,
+        &mut loop_depth,
+        &mut counts,
+    );
     ComplexityRecord {
         provider: "java".to_string(),
         cyclomatic,
@@ -106,9 +114,7 @@ fn compute_complexity_inner(
             *cognitive = cognitive.saturating_add(1 + nesting);
             (nesting, loop_nesting)
         }
-        "binary_expression" => {
-            (nesting, loop_nesting)
-        }
+        "binary_expression" => (nesting, loop_nesting),
         "else" => {
             *cognitive = cognitive.saturating_add(1);
             (nesting, loop_nesting)
@@ -119,9 +125,7 @@ fn compute_complexity_inner(
             }
             (nesting, loop_nesting)
         }
-        "lambda_expression" => {
-            (0, loop_nesting)
-        }
+        "lambda_expression" => (0, loop_nesting),
         _ => (nesting, loop_nesting),
     };
 

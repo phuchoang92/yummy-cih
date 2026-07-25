@@ -486,7 +486,6 @@ impl FalkorStore {
             edges: total_edges,
         })
     }
-
 }
 
 // ---- helpers ----
@@ -497,10 +496,11 @@ async fn neighbor_nodes(store: &FalkorStore, id: &NodeId, dir: Direction) -> Res
         Direction::Downstream => "-[:CALLS]->",
         Direction::Both => "-[:CALLS]-",
     };
+    let columns = node_columns("m");
     let q = format!(
         "CYPHER id={id} \
          MATCH (n:Symbol {{id:$id}}){arrow}(m:Symbol) \
-         RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file, m.startLine, m.endLine LIMIT 100",
+         RETURN DISTINCT {columns} LIMIT 100",
         id = cstr(id.as_str())
     );
     Ok(store

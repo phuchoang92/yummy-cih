@@ -6,28 +6,18 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
 use cih_graph_store::{
     risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction,
     ExecutionTransition, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore,
-    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, Interception,
-    InterceptingAdvice, KindCount, LoadObserver, LoadStats, NoopObserver, Path, Result, RouteInfo,
+    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice,
+    Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path, Result, RouteInfo,
     SimilarMethod, Subgraph, SymbolContext, EXECUTION_BATCH_SIZE,
 };
 
 use crate::neighbor_nodes;
 use crate::serialize::*;
 use crate::FalkorStore;
-
-/// Canonical column order consumed by `node_from_row`. Keep every query that
-/// returns a domain `Node` on this projection so source ranges cannot silently
-/// disappear when a new read path is added.
-fn node_columns(alias: &str) -> String {
-    format!(
-        "{alias}.id, {alias}.kind, {alias}.name, {alias}.qualifiedName, \
-         {alias}.file, {alias}.startLine, {alias}.endLine"
-    )
-}
 
 #[async_trait]
 impl GraphStore for FalkorStore {
@@ -154,11 +144,11 @@ impl GraphStore for FalkorStore {
             "CALLS|EXTERNAL_CALL|PUBLISHES_EVENT"
         };
         let limit = limit.clamp(1, 50_001);
+        let target_columns = node_columns("t");
         let forward = format!(
             "UNWIND [{list}] AS sid \
              MATCH (s:Symbol {{id:sid}})-[r:{outgoing}]->(t:Symbol) \
-             RETURN s.id, t.id, t.kind, t.name, t.qualifiedName, t.file, \
-                    t.startLine, t.endLine, coalesce(t.isAccessor, 0), \
+             RETURN s.id, {target_columns}, coalesce(t.isAccessor, 0), \
                     type(r), coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
                     coalesce(r.callSites, '') \
              ORDER BY t.name, t.id, s.id, type(r) LIMIT {limit}"
@@ -166,8 +156,7 @@ impl GraphStore for FalkorStore {
         let reverse = format!(
             "UNWIND [{list}] AS sid \
              MATCH (s:Symbol {{id:sid}})<-[r:HANDLES_ROUTE|LISTENS_TO]-(t:Symbol) \
-             RETURN s.id, t.id, t.kind, t.name, t.qualifiedName, t.file, \
-                    t.startLine, t.endLine, coalesce(t.isAccessor, 0), \
+             RETURN s.id, {target_columns}, coalesce(t.isAccessor, 0), \
                     type(r), coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
                     coalesce(r.callSites, '') \
              ORDER BY t.name, t.id, s.id, type(r) LIMIT {limit}"
@@ -197,10 +186,7 @@ impl GraphStore for FalkorStore {
                 if row.len() < 3 {
                     return None;
                 }
-                let advice_kind = row[2]
-                    .strip_prefix("aop-")
-                    .unwrap_or(&row[2])
-                    .to_string();
+                let advice_kind = row[2].strip_prefix("aop-").unwrap_or(&row[2]).to_string();
                 Some(Interception {
                     target: NodeId::new(row[0].clone()),
                     advice: InterceptingAdvice {
@@ -459,10 +445,7 @@ impl GraphStore for FalkorStore {
                 };
                 let node = node_from_row(&row[1..8]);
                 internal_to_node.insert(internal_id, node.id.clone());
-                nodes.push(GraphOverviewNode {
-                    node,
-                    degree: 0,
-                });
+                nodes.push(GraphOverviewNode { node, degree: 0 });
             }
 
             // Pass 2: fill remaining budget with Class-family nodes ordered by degree.
@@ -983,7 +966,10 @@ impl GraphStore for FalkorStore {
     }
 }
 
-fn parse_execution_rows(rows: Vec<Vec<String>>, traversed_reverse: bool) -> Vec<ExecutionTransition> {
+fn parse_execution_rows(
+    rows: Vec<Vec<String>>,
+    traversed_reverse: bool,
+) -> Vec<ExecutionTransition> {
     rows.into_iter()
         .filter_map(|row| {
             if row.len() < 13 {
@@ -991,19 +977,7 @@ fn parse_execution_rows(rows: Vec<Vec<String>>, traversed_reverse: bool) -> Vec<
             }
             Some(ExecutionTransition {
                 source: NodeId::new(row[0].clone()),
-                target: Node {
-                    id: NodeId::new(row[1].clone()),
-                    kind: NodeKind::from_label(&row[2]),
-                    name: row[3].clone(),
-                    qualified_name: (!row[4].is_empty()).then(|| row[4].clone()),
-                    file: row[5].clone(),
-                    range: Range {
-                        start_line: row[6].parse().unwrap_or(0),
-                        end_line: row[7].parse().unwrap_or(0),
-                        ..Range::default()
-                    },
-                    props: None,
-                },
+                target: node_from_row(&row[1..8]),
                 target_is_accessor: row[8] == "1" || row[8].eq_ignore_ascii_case("true"),
                 kind: row[9].clone(),
                 confidence: row[10].parse().unwrap_or(1.0),

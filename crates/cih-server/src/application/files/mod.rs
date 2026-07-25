@@ -536,7 +536,11 @@ fn blocking_error(error: crate::ports::blocking_runtime::BlockingError) -> AppEr
 
 fn grep_blocking_error(error: BlockingError) -> AppError {
     let message = match error {
-        BlockingError::TimedOut { secs, .. } => format!("grep timed out after {secs}s"),
+        BlockingError::TimedOut { secs, .. } => format!(
+            "grep timed out after {secs}s; tune CIH_GREP_DEADLINE_SECS and keep \
+             CIH_BLOCKING_TIMEOUT_SECS at least CIH_GREP_QUEUE_TIMEOUT_SECS + \
+             CIH_GREP_DEADLINE_SECS + 5"
+        ),
         BlockingError::Panicked { detail, .. } => format!("grep task panicked: {detail}"),
         BlockingError::Saturated { waited_secs, .. } => {
             format!(
@@ -661,16 +665,16 @@ fn plan_walk(root: &Path, glob: &str) -> Result<WalkPlan, AppError> {
         };
         let last = index + 1 == components.len();
         if metadata.file_type().is_symlink() {
-            if !last || !whole_glob {
-                return Ok(WalkPlan::Empty);
-            }
             let canonical_root = root
                 .canonicalize()
                 .map_err(|error| invalid("glob", format!("cannot resolve repo root: {error}")))?;
             let target = candidate.canonicalize().map_err(|error| {
                 invalid(
                     "glob",
-                    format!("cannot resolve literal path '{}': {error}", prefix.display()),
+                    format!(
+                        "cannot resolve literal path '{}': {error}",
+                        prefix.display()
+                    ),
                 )
             })?;
             if !target.starts_with(&canonical_root) {
@@ -681,6 +685,12 @@ fn plan_walk(root: &Path, glob: &str) -> Result<WalkPlan, AppError> {
                         prefix.display()
                     ),
                 ));
+            }
+            if !last || !whole_glob {
+                // Directory-link prefixes are never traversed. We still resolve
+                // them first so an outside-root target is rejected rather than
+                // reported as an ordinary empty match.
+                return Ok(WalkPlan::Empty);
             }
             return match target.metadata() {
                 Ok(target_metadata) if target_metadata.is_file() => Ok(WalkPlan::SingleFile {
@@ -1053,7 +1063,12 @@ mod tests {
         regex::Regex::new(pattern).unwrap()
     }
 
-    fn test_grep(root: &Path, pattern: &str, glob: &str, limit: usize) -> GrepScan {
+    fn test_grep_result(
+        root: &Path,
+        pattern: &str,
+        glob: &str,
+        limit: usize,
+    ) -> Result<GrepScan, AppError> {
         let regex = re(pattern);
         let overrides = compile_glob_override(root, glob).unwrap();
         let pool = rayon::ThreadPoolBuilder::new()
@@ -1076,7 +1091,10 @@ mod tests {
                 threads: 2,
             },
         )
-        .unwrap()
+    }
+
+    fn test_grep(root: &Path, pattern: &str, glob: &str, limit: usize) -> GrepScan {
+        test_grep_result(root, pattern, glob, limit).unwrap()
     }
 
     #[test]
@@ -1214,6 +1232,34 @@ mod tests {
         assert!(scan.matches.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn grep_rejects_an_outside_root_directory_symlink_prefix() {
+        use std::os::unix::fs::symlink;
+
+        let root = grep_root("fastpath-escaping-directory-symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "cih-grepfiles-outside-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_under(&outside, "Secret.java", b"// TODO secret\n");
+        symlink(&outside, root.join("escape")).unwrap();
+
+        let plan_error = plan_walk(&root, "escape/**/*.java").unwrap_err();
+        assert!(plan_error
+            .to_string()
+            .contains("outside the repository root"));
+        let grep_error = test_grep_result(&root, "TODO", "escape/**/*.java", 100).unwrap_err();
+        assert!(grep_error
+            .to_string()
+            .contains("outside the repository root"));
+        std::fs::remove_dir_all(outside).ok();
+    }
+
     /// A literal directory prefix roots the walk at that subtree; match paths
     /// stay repo-relative.
     #[test]
@@ -1237,10 +1283,7 @@ mod tests {
     fn grep_missing_literal_prefix_returns_empty() {
         let root = grep_root("fastpath-missing");
         write_under(&root, "src/App.java", b"// TODO\n");
-        assert_eq!(
-            plan_walk(&root, "nope/**/*.java").unwrap(),
-            WalkPlan::Empty
-        );
+        assert_eq!(plan_walk(&root, "nope/**/*.java").unwrap(), WalkPlan::Empty);
         let scan = test_grep(&root, "TODO", "nope/**/*.java", 100);
         assert!(scan.complete);
         assert_eq!(scan.candidate_files, 0);
@@ -1355,5 +1398,25 @@ mod tests {
             err.to_string().contains("invalid regex"),
             "unexpected: {err}"
         );
+    }
+
+    #[test]
+    fn grep_blocking_errors_name_their_tuning_knobs() {
+        let timed_out = grep_blocking_error(BlockingError::TimedOut {
+            label: "grep",
+            secs: 90,
+        });
+        let timed_out = timed_out.to_string();
+        assert!(timed_out.contains("CIH_GREP_DEADLINE_SECS"));
+        assert!(timed_out.contains("CIH_GREP_QUEUE_TIMEOUT_SECS"));
+        assert!(timed_out.contains("CIH_BLOCKING_TIMEOUT_SECS"));
+
+        let saturated = grep_blocking_error(BlockingError::Saturated {
+            label: "grep",
+            waited_secs: 5,
+        });
+        let saturated = saturated.to_string();
+        assert!(saturated.contains("CIH_BLOCKING_MAX_CONCURRENT"));
+        assert!(saturated.contains("CIH_BLOCKING_QUEUE_TIMEOUT_SECS"));
     }
 }

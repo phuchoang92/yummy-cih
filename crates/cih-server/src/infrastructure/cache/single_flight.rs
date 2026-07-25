@@ -93,6 +93,16 @@ impl<V: Clone, E: Clone> SingleFlight<V, E> {
 
             let (flight, leader) = {
                 let mut flights = self.flights.lock().await;
+
+                // The fast-path miss was observed before this lock was acquired.
+                // A ready/very fast initializer may have published its value and
+                // removed its flight in that window. Recheck while generation
+                // creation is serialized, otherwise the stale miss can start a
+                // redundant initializer after the successful flight completed.
+                if let Some(value) = self.values.read().await.get(key).cloned() {
+                    return Ok(value);
+                }
+
                 let existing = flights.get(key).cloned().filter(|flight| {
                     let mut state = flight
                         .state
@@ -229,6 +239,49 @@ mod tests {
             1,
             "initializer must run once despite 16 concurrent misses"
         );
+    }
+
+    /// A ready initializer has no `.await` point of its own. Under scheduler
+    /// contention, callers can observe the initial cache miss but reach the
+    /// flight lock only after the first generation has already published and
+    /// removed itself. The locked cache recheck must prevent those stale misses
+    /// from creating additional generations.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ready_initializer_is_not_repeated_for_stale_concurrent_misses() {
+        const CALLERS: usize = 64;
+        const ROUNDS: usize = 25;
+
+        for _ in 0..ROUNDS {
+            let cache: Arc<SingleFlight<usize>> = Arc::new(SingleFlight::with([]));
+            let inits = Arc::new(AtomicUsize::new(0));
+            let start = Arc::new(tokio::sync::Barrier::new(CALLERS + 1));
+            let mut handles = Vec::with_capacity(CALLERS);
+
+            for _ in 0..CALLERS {
+                let cache = cache.clone();
+                let inits = inits.clone();
+                let start = start.clone();
+                handles.push(tokio::spawn(async move {
+                    start.wait().await;
+                    cache
+                        .get_or_init("ready-key", || async move {
+                            inits.fetch_add(1, Ordering::SeqCst);
+                            7
+                        })
+                        .await
+                }));
+            }
+            start.wait().await;
+
+            for handle in handles {
+                assert_eq!(handle.await.unwrap(), 7);
+            }
+            assert_eq!(
+                inits.load(Ordering::SeqCst),
+                1,
+                "one burst must create exactly one ready generation"
+            );
+        }
     }
 
     /// §14.2: failures are not cached — a later caller retries and succeeds.

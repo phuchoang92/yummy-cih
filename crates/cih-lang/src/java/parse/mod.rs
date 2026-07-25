@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use cih_core::{
-    file_id, ContractSite, Edge, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, RawImport, Range,
+    file_id, ContractSite, Edge, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport,
     ReferenceSite, RouteSource, SqlConstant, SqlExecutionSite, StringConstant, SymbolDef,
     TypeBinding,
 };
@@ -27,6 +27,7 @@ pub(super) struct TypeContext {
     pub(super) fqcn: String,
     pub(super) spring_prefix: Option<String>,
     pub(super) is_test: bool,
+    pub(super) accessor_fields: Vec<structural::AccessorField>,
     pub(super) start_byte: usize,
     pub(super) end_byte: usize,
 }
@@ -107,8 +108,8 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
             sql_constants: builder.sql_constants,
             sql_execution_sites: builder.sql_execution_sites,
             string_constants: builder.string_constants,
-        http_wrappers: Vec::new(),
-    },
+            http_wrappers: Vec::new(),
+        },
     })
 }
 
@@ -234,7 +235,9 @@ pub(super) fn annotation_metadata(node: TsNode<'_>, src: &str) -> Vec<serde_json
                                     attrs.insert(
                                         key,
                                         serde_json::Value::Array(
-                                            vals.into_iter().map(serde_json::Value::String).collect(),
+                                            vals.into_iter()
+                                                .map(serde_json::Value::String)
+                                                .collect(),
                                         ),
                                     );
                                 }
@@ -315,9 +318,7 @@ fn fold_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<cih_core::UrlPart>) 
             out.push(UrlPart::Lit(value));
         }
         "binary_expression" => {
-            let op = node
-                .child_by_field_name("operator")
-                .map(|op| text(op, src));
+            let op = node.child_by_field_name("operator").map(|op| text(op, src));
             if op.as_deref() != Some("+") {
                 out.push(UrlPart::Dynamic);
                 return;
@@ -417,11 +418,7 @@ pub(super) fn jaxrs_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> 
 pub(super) fn method_routes(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
     let mut routes = spring_method_routes_inner(node, src);
     routes.extend(jaxrs_method_routes_inner(node, src));
-    routes.sort_by(|a, b| {
-        a.http_method
-            .cmp(b.http_method)
-            .then(a.path.cmp(&b.path))
-    });
+    routes.sort_by(|a, b| a.http_method.cmp(b.http_method).then(a.path.cmp(&b.path)));
     routes.dedup_by(|a, b| a.http_method == b.http_method && a.path == b.path);
     routes
 }
@@ -460,14 +457,12 @@ pub(super) fn spring_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<Met
 }
 
 fn jaxrs_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
-    let verb = annotations(node)
-        .into_iter()
-        .find_map(|annotation| {
-            annotation_name(annotation, src)
-                .as_deref()
-                .and_then(jaxrs_http_method)
-                .map(|method| (method, annotation))
-        });
+    let verb = annotations(node).into_iter().find_map(|annotation| {
+        annotation_name(annotation, src)
+            .as_deref()
+            .and_then(jaxrs_http_method)
+            .map(|method| (method, annotation))
+    });
     let Some((http_method, verb_annotation)) = verb else {
         return Vec::new();
     };
@@ -478,7 +473,8 @@ fn jaxrs_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
     let paths = path_annotation
         .map(|annotation| route_values(annotation, src))
         .unwrap_or_default();
-    let verb_name = annotation_name(verb_annotation, src).unwrap_or_else(|| http_method.to_string());
+    let verb_name =
+        annotation_name(verb_annotation, src).unwrap_or_else(|| http_method.to_string());
     let mut annotation_names = vec![verb_name];
     if path_annotation.is_some() {
         annotation_names.push("Path".to_string());
@@ -866,7 +862,9 @@ pub(super) fn modifiers(node: TsNode<'_>, src: &str) -> Vec<String> {
 
 pub(super) fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     let mut cursor = node.walk();
-    let result = node.named_children(&mut cursor).find(|child| child.kind() == kind);
+    let result = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == kind);
     result
 }
 

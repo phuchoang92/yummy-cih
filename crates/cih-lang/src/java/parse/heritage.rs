@@ -1,13 +1,9 @@
 use cih_core::{file_id, NodeId, RefKind, ReferenceSite};
 use tree_sitter::Node as TsNode;
 
-use super::{FileBuilder, base_name_node, range_of, text, type_context_at};
+use super::{base_name_node, range_of, text, type_context_at, FileBuilder};
 
-pub(super) fn collect_heritage_references(
-    node: TsNode<'_>,
-    src: &str,
-    builder: &mut FileBuilder,
-) {
+pub(super) fn collect_heritage_references(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
     match node.kind() {
         "class_declaration" => {
             let (in_fqcn, owner_id) = heritage_owner(node, builder);

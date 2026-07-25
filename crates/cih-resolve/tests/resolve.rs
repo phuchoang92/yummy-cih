@@ -981,6 +981,99 @@ fn parameter_qualifier_redirect_uses_the_lexically_selected_binding() {
 }
 
 #[test]
+fn dotted_this_field_receiver_preserves_its_qualifier() {
+    let mut files = make_qualifier_scenario(true, Some("fieldBean"));
+    files[1]
+        .reference_sites
+        .iter_mut()
+        .find(|site| site.kind == RefKind::Call)
+        .expect("delegating call")
+        .receiver = Some("this.retailUserAdminRef".into());
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("fieldBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::Calls
+                && edge.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1)
+        })
+        .expect("this.field qualifier should redirect to its XML bean");
+    assert_eq!(edge.reason, "di-qualifier");
+}
+
+#[test]
+fn nested_holder_field_receiver_preserves_the_leaf_qualifier() {
+    let mut files = make_qualifier_scenario(true, None);
+    files[1]
+        .reference_sites
+        .iter_mut()
+        .find(|site| site.kind == RefKind::Call)
+        .expect("delegating call")
+        .receiver = Some("holder.service".into());
+    files[1].defs.extend([
+        type_def(NodeKind::Class, "com.acme.Holder"),
+        field_def("com.acme.Holder", "service", "UserAdmin"),
+        field_def("com.acme.CustomUserImpl", "holder", "Holder"),
+    ]);
+    files[1].type_bindings.extend([
+        TypeBinding {
+            name: "holder".into(),
+            raw_type: "Holder".into(),
+            kind: BindingKind::Field,
+            in_fqcn: "com.acme.CustomUserImpl".into(),
+            qualifier: None,
+            range: Range::default(),
+        },
+        TypeBinding {
+            name: "service".into(),
+            raw_type: "UserAdmin".into(),
+            kind: BindingKind::Field,
+            in_fqcn: "com.acme.Holder".into(),
+            qualifier: Some("nestedBean".into()),
+            range: Range::default(),
+        },
+    ]);
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("nestedBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::Calls
+                && edge.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1)
+        })
+        .expect("holder.service qualifier should redirect to its XML bean");
+    assert_eq!(edge.reason, "di-qualifier");
+}
+
+#[test]
 fn unqualified_local_shadows_a_qualified_field() {
     let mut files = make_qualifier_scenario(true, Some("fieldBean"));
     files[1].type_bindings.push(TypeBinding {
@@ -1012,9 +1105,9 @@ fn unqualified_local_shadows_a_qualified_field() {
         .filter(|edge| edge.kind == EdgeKind::Calls)
         .collect();
     assert!(
-        calls.iter().any(|edge| {
-            edge.dst == method_id("com.acme.UserAdmin", "modifyUserPassword", 1)
-        }),
+        calls
+            .iter()
+            .any(|edge| { edge.dst == method_id("com.acme.UserAdmin", "modifyUserPassword", 1) }),
         "ambiguous unqualified local should fall back to the interface method"
     );
     assert!(!calls.iter().any(|edge| edge.reason == "di-qualifier"));

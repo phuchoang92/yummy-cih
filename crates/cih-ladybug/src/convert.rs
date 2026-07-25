@@ -54,41 +54,6 @@ pub(crate) fn cell_f64(v: &Value) -> f64 {
     }
 }
 
-/// Per-rel provenance along a recursive path: `(label, confidence, reason)`.
-pub(crate) type PathRel = (String, f32, String);
-
-/// Unpack a `RecursiveRel` into a full path: interior node ids plus per-rel
-/// provenance — what `paths_between` reports.
-pub(crate) fn recursive_path(v: &Value) -> Option<(Vec<String>, Vec<PathRel>)> {
-    let Value::RecursiveRel { nodes, rels } = v else {
-        return None;
-    };
-    let interior = nodes
-        .iter()
-        .filter_map(|n| {
-            n.get_properties()
-                .iter()
-                .find_map(|(k, val)| (k == "id").then(|| cell_str(val)).filter(|s| !s.is_empty()))
-        })
-        .collect();
-    let edges = rels
-        .iter()
-        .map(|r| {
-            let mut confidence = 1.0f32;
-            let mut reason = String::new();
-            for (k, val) in r.get_properties() {
-                match k.as_str() {
-                    "confidence" => confidence = cell_f64(val) as f32,
-                    "reason" => reason = cell_str(val),
-                    _ => {}
-                }
-            }
-            (r.get_label_name().clone(), confidence, reason)
-        })
-        .collect();
-    Some((interior, edges))
-}
-
 /// Unpack a `RecursiveRel` cell: (hop count, interior node ids in pattern
 /// order, rel labels in pattern order). Interior nodes exclude both endpoints.
 pub(crate) fn recursive_rel(v: &Value) -> Option<(u32, Vec<String>, Vec<String>)> {

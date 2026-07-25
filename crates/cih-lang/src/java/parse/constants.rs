@@ -3,8 +3,8 @@ use tree_sitter::Node as TsNode;
 
 use super::super::SqlApi;
 use super::{
-    FileBuilder, callable_id_for, context_for, modifiers, range_of, receiver_has_type, text,
-    type_context_at, unquote_spring_literal,
+    callable_id_for, context_for, modifiers, range_of, receiver_has_type, text, type_context_at,
+    unquote_spring_literal, FileBuilder,
 };
 
 pub(super) fn collect_sql_constants(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
@@ -131,11 +131,7 @@ fn collect_sql_constants_in(
     }
 }
 
-fn try_extract_sql_constant(
-    node: TsNode<'_>,
-    src: &str,
-    owner_fqcn: &str,
-) -> Option<SqlConstant> {
+fn try_extract_sql_constant(node: TsNode<'_>, src: &str, owner_fqcn: &str) -> Option<SqlConstant> {
     let mods = modifiers(node, src);
     if !mods.iter().any(|m| m == "static") || !mods.iter().any(|m| m == "final") {
         return None;
@@ -184,7 +180,11 @@ fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
     match node.kind() {
         "string_literal" => {
             let raw = text(node, src);
-            let inner = if raw.len() >= 2 { &raw[1..raw.len() - 1] } else { "" };
+            let inner = if raw.len() >= 2 {
+                &raw[1..raw.len() - 1]
+            } else {
+                ""
+            };
             let unescaped = inner
                 .replace("\\n", " ")
                 .replace("\\r", " ")
@@ -335,7 +335,10 @@ fn try_extract_execution_site(
     // constant reference is trusted — db_access drops the site unless the constant
     // resolves to real SQL. Logger receivers are excluded: methods commonly log the
     // statement they execute, and the log call adds nothing over the real site.
-    if receiver.as_deref().is_none_or(|receiver| !is_logger_receiver(receiver)) {
+    if receiver
+        .as_deref()
+        .is_none_or(|receiver| !is_logger_receiver(receiver))
+    {
         if let Some(const_ref) = sql_constant_argument(node, src, builder) {
             return Some(SqlExecutionSite {
                 api_name: method,

@@ -5,8 +5,8 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, QueryCursor, Tree};
 
 use super::{
-    FileBuilder, call_arity, callable_id_for, capture_arg_texts, context_for, parse_import,
-    range_of, should_emit_field_read, text,
+    call_arity, callable_id_for, capture_arg_texts, context_for, parse_import, range_of,
+    should_emit_field_read, text, FileBuilder,
 };
 use crate::{java::JavaProvider, LanguageProvider};
 
@@ -70,7 +70,10 @@ fn propagate_parameter_qualifiers(root: TsNode<'_>, src: &str, builder: &mut Fil
             })
             .and_then(|binding| binding.qualifier.clone());
         if let Some(qualifier) = qualifier {
-            inferred.entry((owner, field)).or_default().insert(qualifier);
+            inferred
+                .entry((owner, field))
+                .or_default()
+                .insert(qualifier);
         }
     }
 
@@ -125,12 +128,7 @@ fn collect_parameter_field_assignments(
                     ) {
                         if let Some((owner, _)) = scope.rsplit_once('#') {
                             let owner = owner.to_string();
-                            out.push((
-                                scope,
-                                owner,
-                                text(field, src),
-                                text(right, src),
-                            ));
+                            out.push((scope, owner, text(field, src), text(right, src)));
                         }
                     }
                 }

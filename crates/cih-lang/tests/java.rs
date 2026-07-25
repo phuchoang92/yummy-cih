@@ -733,20 +733,26 @@ fn trivial_accessors_get_the_is_accessor_prop() {
         class User {
             private String name;
             private boolean active;
+            private final String id = "user-id";
+            private static final String DEFAULT = "fallback";
 
             public String getName() { return name; }
             public void setName(String name) { this.name = name; }
             public boolean isActive() { return this.active; }
             public boolean hasName() { return name; }
+            public String getId() { return id; }
 
             // Accessor-shaped names with non-accessor bodies.
             public boolean isConstant() { return true; }
+            public String getDefault() { return DEFAULT; }
+            public String getDefaultViaThis() { return this.DEFAULT; }
             public String getCalculated() { return name + "!"; }
             public String getConditional() { if (active) return name; return ""; }
             public String getWithArg(String fallback) { return name; }
             public void setCalculated(String name) { this.name = normalize(name); }
             public void setWrong(String value) { this.name = name; }
             public void setMissing() { this.name = "x"; }
+            public void setGhost(String ghost) { this.ghost = ghost; }
 
             // Same prefix, but real logic — must NOT be flagged.
             public String getDisplayName() { return format(name); }
@@ -771,14 +777,18 @@ fn trivial_accessors_get_the_is_accessor_prop() {
     assert!(accessor_flag("setName"));
     assert!(accessor_flag("isActive"));
     assert!(accessor_flag("hasName"));
+    assert!(accessor_flag("getId"), "instance-final fields are state");
     for name in [
         "isConstant",
+        "getDefault",
+        "getDefaultViaThis",
         "getCalculated",
         "getConditional",
         "getWithArg",
         "setCalculated",
         "setWrong",
         "setMissing",
+        "setGhost",
     ] {
         assert!(!accessor_flag(name), "{name} is not an exact accessor");
     }
