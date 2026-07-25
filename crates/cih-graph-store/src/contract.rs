@@ -25,7 +25,7 @@ use cih_core::{
     Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range, VersionId,
 };
 
-use crate::{Direction, GraphStore, LoadObserver};
+use crate::{Direction, FlowFilter, GraphStore, LoadObserver};
 
 type MkResult = anyhow::Result<Arc<dyn GraphStore>>;
 
@@ -48,6 +48,9 @@ const COMM_B_ID: &str = "Community:com.acme.b";
 const PROCESS_ID: &str = "Process:com.acme.OrderFlow";
 const WEIRD_ID: &str = "Method:com.acme.Weird#w/0";
 const ADVICE_ID: &str = "Method:com.acme.LogAspect#logCalls/1";
+const DBQUERY_ID: &str = "DbQuery:com.acme.Bar#INSERT_AUDIT";
+const GETTER_ID: &str = "Method:com.acme.Bar#getStatus/0";
+const DBTABLE_ID: &str = "DbTable:AUDIT_LOG";
 /// Quote + backslash + newline: proves the bulk path's cell escaping
 /// round-trips (CSV COPY loaders are the usual victims).
 const WEIRD_NAME: &str = "wei\"rd\\na\nme";
@@ -60,8 +63,8 @@ const WEIRD_FILE: &str = "com/acme/Weird.java";
 
 /// Distinct nodes in the fixture (edges list below has one deliberate
 /// duplicate that adapters must collapse).
-const FIXTURE_NODES: u64 = 12;
-const FIXTURE_EDGES: u64 = 12;
+const FIXTURE_NODES: u64 = 15;
+const FIXTURE_EDGES: u64 = 15;
 
 fn node(id: &str, kind: NodeKind, name: &str, file: &str) -> Node {
     Node {
@@ -100,7 +103,13 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
     caller.props = Some(serde_json::json!({
         "cyclomatic": 7, "cognitive": 9, "loopDepth": 1, "transitiveLoopDepth": 2,
     }));
-    let callee = node(CALLEE_ID, NodeKind::Method, "callee", CALLEE_FILE);
+    let mut callee = node(CALLEE_ID, NodeKind::Method, "callee", CALLEE_FILE);
+    // Real line range: graph reads must return it (the range-0 regression).
+    callee.range = Range {
+        start_line: 10,
+        end_line: 20,
+        ..Range::default()
+    };
     let handler = node(HANDLER_ID, NodeKind::Method, "getThings", API_FILE);
     let mut route = node(ROUTE_ID, NodeKind::Route, "GET /api/things", API_FILE);
     route.props = Some(serde_json::json!({"path": "/api/things", "httpMethod": "GET"}));
@@ -116,6 +125,20 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
     let process = node(PROCESS_ID, NodeKind::Process, "OrderFlow", "");
     let weird = node(WEIRD_ID, NodeKind::Method, WEIRD_NAME, WEIRD_FILE);
     let advice = node(ADVICE_ID, NodeKind::Method, "logCalls", CALLER_FILE);
+    // DB effect chain: callee ─EXECUTES_QUERY→ dbquery ─WRITES_TABLE→ dbtable,
+    // with operation/sqlPreview carried in the DbQuery's props JSON (matching
+    // the db_access emit pass — they are not promoted columns).
+    let mut dbquery = node(DBQUERY_ID, NodeKind::DbQuery, "INSERT_AUDIT", CALLEE_FILE);
+    dbquery.props = Some(serde_json::json!({
+        "operation": "INSERT",
+        "sqlPreview": "INSERT INTO AUDIT_LOG (ID) VALUES (?)",
+        "tables": ["AUDIT_LOG"],
+    }));
+    let dbtable = node(DBTABLE_ID, NodeKind::DbTable, "AUDIT_LOG", "");
+    // Trivial accessor on the callee's class, reached from the caller — the
+    // `exclude_accessors` flow filter must hide it (promoted `isAccessor` prop).
+    let mut getter = node(GETTER_ID, NodeKind::Method, "getStatus", CALLEE_FILE);
+    getter.props = Some(serde_json::json!({"isAccessor": true}));
 
     let mut similar = edge(CALLER_ID, CALLEE_ID, EdgeKind::SimilarTo);
     similar.confidence = 0.9;
@@ -138,6 +161,9 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
         edge(HANDLER_ID, COMM_A_ID, EdgeKind::MemberOf),
         edge(CALLEE_ID, COMM_B_ID, EdgeKind::MemberOf),
         edge(CALLER_ID, PROCESS_ID, EdgeKind::StepInProcess),
+        edge(CALLEE_ID, DBQUERY_ID, EdgeKind::ExecutesQuery),
+        edge(DBQUERY_ID, DBTABLE_ID, EdgeKind::WritesTable),
+        edge(CALLER_ID, GETTER_ID, EdgeKind::Calls),
         similar,
         advises,
     ];
@@ -155,6 +181,9 @@ fn fixture_nodes_edges() -> (Vec<Node>, Vec<Edge>) {
             process,
             weird,
             advice,
+            dbquery,
+            dbtable,
+            getter,
         ],
         edges,
     )
@@ -300,11 +329,16 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         .find(|k| k.kind == "Method")
         .map(|k| k.count)
         .unwrap_or(0);
-    check!(methods == 7, "summary Method count {methods} != 7");
+    check!(methods == 8, "summary Method count {methods} != 8");
 
     // -- get_node (incl. escaping round-trip) -------------------------------
     let n = store.get_node(&callee_id).await?.context("callee exists")?;
     check!(n.name == "callee" && n.file == CALLEE_FILE, "callee fields");
+    check!(
+        n.range.start_line == 10 && n.range.end_line == 20,
+        "get_node returns the persisted line range, not zeros: {:?}",
+        n.range
+    );
     let weird = store
         .get_node(&NodeId::new(WEIRD_ID))
         .await?
@@ -430,13 +464,23 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
     // -- name/file lookups --------------------------------------------------
     let cands = store.candidates_by_name("callee", 10).await?;
     check!(
-        cands.iter().any(|n| n.id.as_str() == CALLEE_ID),
-        "callee found by short name"
+        cands
+            .iter()
+            .any(|n| n.id.as_str() == CALLEE_ID && n.range.start_line == 10),
+        "callee found by short name, with its line range"
     );
-    let in_files = store.nodes_in_files(&[CALLER_FILE.to_string()]).await?;
+    let in_files = store
+        .nodes_in_files(&[CALLER_FILE.to_string(), CALLEE_FILE.to_string()])
+        .await?;
     check!(
         in_files.iter().any(|n| n.id.as_str() == CALLER_ID),
         "caller found via nodes_in_files"
+    );
+    check!(
+        in_files
+            .iter()
+            .any(|n| n.id.as_str() == CALLEE_ID && n.range.start_line == 10),
+        "callee found via nodes_in_files, with its line range"
     );
 
     // -- processes / communities --------------------------------------------
@@ -537,7 +581,7 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         .graph_overview(50, 100, Some(&["Method".to_string()]))
         .await?;
     check!(
-        mv.nodes.len() == 7 && mv.total_nodes == FIXTURE_NODES,
+        mv.nodes.len() == 8 && mv.total_nodes == FIXTURE_NODES,
         "kind-filtered overview: {} nodes, total {}",
         mv.nodes.len(),
         mv.total_nodes
@@ -580,9 +624,10 @@ fn ids_of_path(p: &crate::Path) -> Vec<&str> {
 async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result<()> {
     let store = load_fixture(mk, &key).await?;
     let hops = store
-        .flow_downstream(&NodeId::new(ROUTE_ID), 6)
+        .flow_downstream(&NodeId::new(ROUTE_ID), &FlowFilter::depth(6))
         .await
-        .context("flow_downstream")?;
+        .context("flow_downstream")?
+        .hops;
     let find = |id: &str| {
         hops.iter()
             .find(|h| h.node.id.as_str() == id)
@@ -625,6 +670,150 @@ async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result
             && callee.node.parent_id.as_ref().map(NodeId::as_str) == Some(CALLER_ID),
         "callee at depth 3 from caller: {callee:?}"
     );
+    check!(
+        !hops.iter().any(|h| h.node.id.as_str() == DBQUERY_ID),
+        "DbQuery nodes are not flow hops"
+    );
+
+    // -- db_effects_for_methods ---------------------------------------------
+    let effects = store
+        .db_effects_for_methods(&[NodeId::new(CALLER_ID), NodeId::new(CALLEE_ID)])
+        .await
+        .context("db_effects_for_methods")?;
+    check!(
+        effects.len() == 1,
+        "exactly the callee's write: {effects:?}"
+    );
+    let fx = &effects[0];
+    check!(
+        fx.method.as_str() == CALLEE_ID
+            && fx.query.as_str() == DBQUERY_ID
+            && fx.table == "AUDIT_LOG"
+            && fx.access == "WRITE"
+            && fx.operation == "INSERT"
+            && fx.sql_preview.starts_with("INSERT INTO AUDIT_LOG"),
+        "db effect fields from props JSON: {fx:?}"
+    );
+    let none = store.db_effects_for_methods(&[]).await?;
+    check!(none.is_empty(), "empty input → empty effects");
+
+    // -- paths_between: "does the handler reach the audit table?" ------------
+    let paths = store
+        .paths_between(&NodeId::new(HANDLER_ID), &NodeId::new(DBTABLE_ID), 8, 3)
+        .await
+        .context("paths_between")?;
+    check!(!paths.is_empty(), "handler must reach AUDIT_LOG");
+    let p = &paths[0];
+    let ids: Vec<&str> = p.nodes.iter().map(NodeId::as_str).collect();
+    check!(
+        ids == vec![HANDLER_ID, CALLER_ID, CALLEE_ID, DBQUERY_ID, DBTABLE_ID],
+        "full path with endpoints: {ids:?}"
+    );
+    let kinds: Vec<&str> = p.edges.iter().map(|e| e.kind.as_str()).collect();
+    check!(
+        kinds == vec!["CALLS", "CALLS", "EXECUTES_QUERY", "WRITES_TABLE"],
+        "edge kinds along the path: {kinds:?}"
+    );
+    check!(
+        (p.min_confidence - 1.0).abs() < f32::EPSILON
+            && p.edges.iter().all(|e| e.reason == "contract"),
+        "edge provenance carried through: {p:?}"
+    );
+    let unreachable = store
+        .paths_between(&NodeId::new(DBTABLE_ID), &NodeId::new(HANDLER_ID), 8, 3)
+        .await?;
+    check!(
+        unreachable.is_empty(),
+        "reverse direction has no path: {unreachable:?}"
+    );
+
+    // -- filters -------------------------------------------------------------
+    check!(
+        hops.iter().any(|h| h.node.id.as_str() == GETTER_ID),
+        "unfiltered walk includes the accessor"
+    );
+    let business = store
+        .flow_downstream(
+            &NodeId::new(ROUTE_ID),
+            &FlowFilter {
+                max_depth: 6,
+                exclude_accessors: true,
+                ..FlowFilter::default()
+            },
+        )
+        .await
+        .context("flow_downstream exclude_accessors")?
+        .hops;
+    check!(
+        !business.iter().any(|h| h.node.id.as_str() == GETTER_ID),
+        "exclude_accessors hides the isAccessor method: {business:?}"
+    );
+    check!(
+        business.iter().any(|h| h.node.id.as_str() == CALLEE_ID),
+        "exclude_accessors keeps real methods"
+    );
+    let no_methods = store
+        .flow_downstream(
+            &NodeId::new(ROUTE_ID),
+            &FlowFilter {
+                max_depth: 6,
+                exclude_kinds: vec![NodeKind::Method],
+                ..FlowFilter::default()
+            },
+        )
+        .await
+        .context("flow_downstream exclude_kinds")?
+        .hops;
+    check!(
+        !no_methods.iter().any(|h| h.node.id.as_str() == CALLEE_ID),
+        "exclude_kinds hides Method hops"
+    );
+
+    // -- paging --------------------------------------------------------------
+    let page = |offset: usize| FlowFilter {
+        max_depth: 6,
+        limit: 2,
+        offset,
+        ..FlowFilter::default()
+    };
+    let p1 = store
+        .flow_downstream(&NodeId::new(ROUTE_ID), &page(0))
+        .await
+        .context("page 1")?;
+    check!(
+        p1.hops.len() == 2 && p1.has_more,
+        "page 1 holds 2 hops with more to come: {} / {}",
+        p1.hops.len(),
+        p1.has_more
+    );
+    let p2 = store
+        .flow_downstream(&NodeId::new(ROUTE_ID), &page(2))
+        .await
+        .context("page 2")?;
+    let paged_ids: Vec<&str> = p1
+        .hops
+        .iter()
+        .chain(p2.hops.iter())
+        .map(|h| h.node.id.as_str())
+        .collect();
+    let unpaged_ids: Vec<&str> = hops
+        .iter()
+        .take(paged_ids.len())
+        .map(|h| h.node.id.as_str())
+        .collect();
+    check!(
+        paged_ids == unpaged_ids,
+        "pages are a deterministic slicing of the unpaged walk: {paged_ids:?} vs {unpaged_ids:?}"
+    );
+    let beyond = store
+        .flow_downstream(&NodeId::new(ROUTE_ID), &page(100))
+        .await
+        .context("page beyond end")?;
+    check!(
+        beyond.hops.is_empty() && !beyond.has_more,
+        "offset past the end → empty page, no more"
+    );
+
     store.drop_graph().await.context("drop_graph cleanup")?;
     Ok(())
 }

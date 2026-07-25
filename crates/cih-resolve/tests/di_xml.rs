@@ -114,6 +114,7 @@ fn field_injection_emits_calls_edge() {
             raw_type: "OrderService".into(),
             kind: BindingKind::Field,
             in_fqcn: consumer_fqcn.into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
@@ -211,4 +212,37 @@ fn osgi_reference_in_meta_inf_spring_emits_calls_edge() {
         .expect("interface -> implementor edge from <osgi:reference>");
     assert_eq!(edge.reason, "di-xml-blueprint-reference");
     assert!((edge.confidence - 0.7).abs() < f32::EPSILON);
+}
+
+#[test]
+fn collect_di_wiring_maps_bean_ids_to_classes() {
+    let dir = std::env::temp_dir().join(format!("cih-di-wiring-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("META-INF/spring")).unwrap();
+    std::fs::write(
+        dir.join("META-INF/spring/bundle-context.xml"),
+        r#"<beans xmlns="http://www.springframework.org/schema/beans">
+            <bean id="retailUserAdminRef" class="com.acme.UserImpl"/>
+            <bean name="auditLogSvc" class="com.acme.AuditLogServiceImpl"/>
+            <bean class="com.acme.Anonymous"/>
+        </beans>"#,
+    )
+    .unwrap();
+
+    let wiring = cih_resolve::di_xml::collect_di_wiring(&dir);
+    assert_eq!(wiring.beans.len(), 3);
+    assert_eq!(
+        wiring
+            .beans_by_id
+            .get("retailUserAdminRef")
+            .map(String::as_str),
+        Some("com.acme.UserImpl")
+    );
+    assert_eq!(
+        wiring.beans_by_id.get("auditLogSvc").map(String::as_str),
+        Some("com.acme.AuditLogServiceImpl")
+    );
+    assert_eq!(wiring.beans_by_id.len(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

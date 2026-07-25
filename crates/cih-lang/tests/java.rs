@@ -516,3 +516,173 @@ fn entity_header_slice_clamps_to_char_boundary() {
         Some("orders"),
     );
 }
+
+#[test]
+fn field_qualifier_lands_on_type_binding() {
+    let src = r#"
+        package com.acme;
+
+        class CustomUserImpl implements UserAdmin {
+            @Autowired
+            @Qualifier("retailUserAdminRef")
+            private UserAdmin retailUserAdminRef;
+
+            @Resource(name = "auditLogSvc")
+            private AuditLogService auditLogService;
+
+            private UserAdmin unqualified;
+
+            public void run(@Qualifier("other") UserAdmin param) {}
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/CustomUserImpl.java", src)
+        .expect("parse");
+    let bindings = &unit.parsed_file.type_bindings;
+    let by_name = |name: &str| {
+        bindings
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("binding {name}"))
+    };
+    assert_eq!(
+        by_name("retailUserAdminRef").qualifier.as_deref(),
+        Some("retailUserAdminRef")
+    );
+    assert_eq!(
+        by_name("auditLogService").qualifier.as_deref(),
+        Some("auditLogSvc")
+    );
+    assert_eq!(by_name("unqualified").qualifier, None);
+    assert_eq!(by_name("param").qualifier.as_deref(), Some("other"));
+}
+
+#[test]
+fn sql_value_shaped_constants_are_captured_without_upper_snake_names() {
+    let src = r#"
+        package com.acme;
+
+        class UserDao {
+            private static final String insertAuditLog =
+                "INSERT INTO AUDIT_LOG (ID, ACTION) VALUES (?, ?)";
+            private static final String greetingText = "hello world";
+            static final String LEGACY_UPPER = "not sql but captured by name";
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/UserDao.java", src)
+        .expect("parse");
+    let names: Vec<&str> = unit
+        .parsed_file
+        .sql_constants
+        .iter()
+        .map(|c| c.const_name.as_str())
+        .collect();
+    assert!(names.contains(&"insertAuditLog"), "{names:?}");
+    assert!(names.contains(&"LEGACY_UPPER"), "{names:?}");
+    assert!(!names.contains(&"greetingText"), "{names:?}");
+}
+
+#[test]
+fn configured_sql_api_and_const_flow_heuristic_emit_execution_sites() {
+    let src = r#"
+        package com.acme;
+
+        class AuditAdapter {
+            private static final String INSERT_AUDIT =
+                "INSERT INTO AUDIT_LOG (ID) VALUES (?)";
+            private static final String NOT_SQL = "plain text";
+            private AuditQueue auditQueue;
+
+            void record() {
+                auditQueue.enqueue(INSERT_AUDIT, 1);
+            }
+
+            void trace() {
+                logger.info(INSERT_AUDIT);
+            }
+
+            void custom() {
+                CustomRunner.run(INSERT_AUDIT);
+            }
+
+            void noise() {
+                CustomRunner.run(NOT_SQL);
+            }
+        }
+    "#;
+    let provider =
+        cih_lang::java::JavaProvider::with_sql_apis(vec![cih_lang::java::SqlApi::parse(
+            "AuditQueue.enqueue",
+        )
+        .expect("valid spec")]);
+    let unit = provider
+        .parse_file("com/acme/AuditAdapter.java", src)
+        .expect("parse");
+    let sites = &unit.parsed_file.sql_execution_sites;
+
+    let configured = sites
+        .iter()
+        .find(|s| s.api_name == "AuditQueue.enqueue")
+        .expect("configured API site");
+    assert_eq!(configured.const_ref.as_deref(), Some("INSERT_AUDIT"));
+    assert!(!configured.heuristic, "configured APIs are trusted");
+
+    let heuristic = sites
+        .iter()
+        .find(|s| s.api_name == "run")
+        .expect("heuristic site for SQL constant flowing into a custom call");
+    assert_eq!(heuristic.const_ref.as_deref(), Some("INSERT_AUDIT"));
+    assert!(heuristic.heuristic);
+
+    assert!(
+        !sites.iter().any(|s| s.api_name == "info"),
+        "logger receivers must not become execution sites"
+    );
+    assert_eq!(
+        sites.len(),
+        2,
+        "non-SQL constants must not create heuristic sites: {sites:?}"
+    );
+}
+
+#[test]
+fn trivial_accessors_get_the_is_accessor_prop() {
+    let src = r#"
+        package com.acme;
+
+        class User {
+            private String name;
+
+            public String getName() { return name; }
+            public void setName(String name) { this.name = name; }
+            public boolean isActive() { return true; }
+
+            // Same prefix, but real logic — must NOT be flagged.
+            public String getDisplayName() { return format(name); }
+            public void process() { name = "x"; }
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/User.java", src)
+        .expect("parse");
+    let accessor_flag = |name: &str| {
+        unit.nodes
+            .iter()
+            .find(|n| n.kind == cih_core::NodeKind::Method && n.name == name)
+            .unwrap_or_else(|| panic!("method {name}"))
+            .props
+            .as_ref()
+            .and_then(|p| p.get("isAccessor"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    assert!(accessor_flag("getName"));
+    assert!(accessor_flag("setName"));
+    assert!(accessor_flag("isActive"));
+    assert!(
+        !accessor_flag("getDisplayName"),
+        "calls format() — not trivial"
+    );
+    assert!(!accessor_flag("process"), "no accessor prefix");
+}

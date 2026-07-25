@@ -231,6 +231,39 @@ pub struct TraceFlowArgs {
     /// Output format. Omit or pass empty for default JSON. Pass `"mermaid"` for a Mermaid flowchart string.
     #[serde(default)]
     pub format: TraceFlowFormat,
+    /// Node kinds to hide from the trace (e.g. `["Constructor"]`). Paths still
+    /// traverse hidden nodes. Unknown kind names are rejected.
+    #[serde(default)]
+    pub exclude_kinds: Vec<String>,
+    /// Business-logic view: hide constructors and trivial getters/setters so
+    /// service/DB/audit steps aren't buried in plumbing.
+    #[serde(default)]
+    pub business_only: bool,
+    /// Page size (default 100, clamped to 1..=500).
+    #[serde(default)]
+    pub max_nodes: u32,
+    /// Continuation: pass the previous page's `next_offset` to fetch more.
+    #[serde(default)]
+    pub offset: u32,
+    /// Target service: a group member's registry name; empty = primary repo.
+    #[serde(default)]
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReachesArgs {
+    /// Start symbol: full node id (`Method:pkg.Cls#m/1`, `Route:POST /x`) or a
+    /// unique short name (ambiguity returns candidates).
+    pub from: String,
+    /// Target: a symbol id/name, or a table name (`AUDIT_LOG` — bare names fall
+    /// back to the `DbTable:` id).
+    pub to: String,
+    /// Maximum path length (default 8, clamped to 12, pass 0 for default).
+    #[serde(default)]
+    pub max_depth: u32,
+    /// How many shortest paths to return (default 3, clamped to 10).
+    #[serde(default)]
+    pub max_paths: u32,
     /// Target service: a group member's registry name; empty = primary repo.
     #[serde(default)]
     pub repo: String,

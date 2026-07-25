@@ -5,6 +5,14 @@ Status: Proposed
 Date: 2026-07-19
 Last revised: 2026-07-23
 
+Revision note (2026-07-23): corrected current-state claims against the code (§7.2
+`LAYERS` map already includes `cih-ladybug`/`cih-store-factory`; §18.3 job states
+already include `Queued`/`TimedOut`/`Cancelled`; §2.1 dual-path duplication is
+enumeration/dispatch, not the shared `pages::*` body renderers; §8.3 community
+directory is `.cih/artifacts-community`). Added §13.1a (evidence→knowledge projection
+rules for the MVP kinds, grounded in the real `NodeKind`/`EdgeKind` schema) and §12.12
+(authored-state backup/recovery).
+
 Target: Replace the current hardcoded wiki generation and Docusaurus viewer with a
 versioned, scalable knowledge system for source code and technical assets.
 
@@ -79,8 +87,11 @@ pipeline (`cih-wiki/src/lib.rs`) and the live single-page path (`render.rs`),
 guarded only by the `resident_parity` tests — and that guard is an ignored,
 env-gated comparison requiring a prebuilt fixture wiki
 (`CIH_TEST_REPO`/`CIH_TEST_WIKI`); it does not run in CI. Sidebar and search
-indexing are manifest-generic and usually unaffected; the dual-path duplication is
-the real change tax.
+indexing are manifest-generic and usually unaffected. The leaf body renderers in
+`cih-wiki/src/pages/*` are already shared by both paths, so the duplication is the
+page enumeration, slug construction, and render dispatch (`lib.rs` `emit_*` vs.
+`render.rs` `build_page_index`/`render_subject`) — not the render logic itself — but
+that scaffolding is the real change tax.
 
 The resident serving path improves per-page latency but retains a complete node and
 edge graph and constructs additional `WikiGraph`, render-context, page-index, page
@@ -371,9 +382,11 @@ cih-doc-store / cih-docs --------> cih-server
 ```
 
 The workspace layering check (`scripts/check_layering.py`, CI-enforced) must
-include the new crates and reject reverse dependencies. Its `LAYERS` map currently
-omits the existing members `cih-ladybug` and `cih-store-factory`; bring it up to
-date in the same change. `cih-llm` is consumed by `cih-engine` only (§15.10).
+include the new crates and reject reverse dependencies. Its `LAYERS` map already
+covers every existing member (including `cih-ladybug` and `cih-store-factory` in the
+storage layer); this change only adds the four new crates (`cih-knowledge`,
+`cih-doc-store`, `cih-docs`, `cih-llm`) at their correct levels. `cih-llm` is
+consumed by `cih-engine` only (§15.10).
 CI must additionally run a transitive dependency assertion equivalent to
 `cargo tree -p cih-server -i cih-llm` and fail when `cih-llm` is reachable. There is
 no `cih-docs` feature that enables LLM support, so a server feature combination
@@ -399,7 +412,11 @@ CI checks the default server tree for absence of `cih-embed`, `fastembed`, `ort`
 and the selected USearch package, in addition to `cih-llm`. It separately compiles
 and tests the `local-semantic` and `pgvector-semantic` profiles to prove that
 feature propagation is intentional. The default standalone server therefore
-contains SQLite/FTS but no model or native vector runtime (§12.7).
+contains SQLite/FTS but no model or native vector runtime (§12.7). Dropping
+`fastembed`/ORT from the default build also removes the one remaining non-LLM
+outbound path documented in `docs/SECURITY.md` §2 (the embedding-model download from
+huggingface.co) from the default posture — a security improvement, not just a size
+reduction.
 
 ## 8. Universal Evidence Layer
 
@@ -462,8 +479,9 @@ below; the remainder land in Phase 5.
    - Streams `nodes.jsonl` and `edges.jsonl` via the existing
      `stream_nodes()`/`stream_edges()` iterators (`cih-core/src/artifacts.rs`).
    - Reads the graph version from the artifacts; the community version comes from
-     the registry's community-artifacts sibling directory (`GraphArtifacts`
-     itself carries only the graph version).
+     the `.cih/artifacts-community` sibling directory (registry field
+     `community_artifacts_dir`), since `GraphArtifacts` itself carries only the
+     graph version.
    - Emits code entities, APIs, events, processes, data access, tests, and source
      evidence.
    - Never calls `read_nodes` or `read_edges` for a full in-memory copy.
@@ -2364,6 +2382,46 @@ compactor may checkpoint a complete canonical authored state and remove unreacha
 prefix deltas only after proving the checkpoint hash equals the original logical
 state; ordinary revision archiving never deletes compiler intent.
 
+### 12.12 Authored-state backup and recovery
+
+§12.3 argues that losing every inactive pack directory cannot drop accepted content,
+because durable authored state is the real compiler input and packs are reproducible.
+That argument makes the mutable `state.sqlite` the one irreplaceable artifact in the
+system: it holds accepted-AI content, reviewed human edits, pins, aliases, and
+reviewed taxonomy decisions that are **not** in the git-committed overlays and cannot
+be regenerated from evidence. Pack immutability is specified in detail (§12.8, §12.11);
+the recovery story for the file everything else depends on must be equally explicit.
+
+Export (`cih docs export-state`, §20):
+
+- Serializes `authored_current_entities` plus the `authored_state_versions` parent
+  chain and `authored_entity_revisions` needed to reconstruct the active version, as
+  canonical, key-sorted JSONL — the same canonicalization used to compute
+  `state_hash` (§12.3).
+- Records schema version, workspace/repository immutable IDs, the active
+  authored-state version number, and its `state_hash` in a header.
+- Carries authored *intent only* — stable knowledge/evidence IDs and typed payloads.
+  It excludes generation IDs, activation timestamps, workflow status, and
+  change-set/review IDs, exactly as §12.3 keeps those out of the content hash, so the
+  export is portable across machines and re-index reproduces packs deterministically.
+- Does not need to include immutable generation packs (reproducible), source-controlled
+  overlays (already versioned in git), or `audit_events` (exported separately, §12.11).
+  The export is safe to commit: it contains principal/credential IDs and human content,
+  never bearer tokens, provider payloads, or secrets.
+
+Import and verify (`cih docs import-state --verify`, §20):
+
+- Loads the export into a fresh `state.sqlite`, materializes
+  `authored_current_entities`, recomputes the canonical `state_hash`, and **refuses to
+  activate** unless it equals the header hash. Round-tripping export→import yields the
+  same `state_hash`; a mismatch is a blocking error, never a silent partial restore.
+- Requires the target workspace/repository IDs to match the export header, so authored
+  state cannot be grafted onto the wrong repository (which would violate the §11.1
+  single-owner rule).
+- After a verified import, a clean full rebuild (§13.1) reproduces every accepted AI,
+  reviewed human, pinned, aliased, and taxonomy decision — the Phase 4A guarantee,
+  now with an operational recovery path rather than only an in-place durability claim.
+
 ## 13. Knowledge Compilation
 
 ### 13.1 Full service build
@@ -2459,6 +2517,70 @@ No pass constructs a complete `WikiGraph` or renders every possible document.
 A clean build with no prior generation uses evidence, configuration, taxonomy,
 overlays, and current authored state to reproduce all accepted content. Revision
 history and old packs are never required as hidden compiler inputs.
+
+### 13.1a Evidence→knowledge projection rules (MVP kinds)
+
+Pass 4 (§13.1) and classification (§14) are the parts of this system that decide
+whether the output is *good*, so the MVP projectors are specified here against the
+repo's actual graph schema rather than left abstract. The source kinds are the real
+`NodeKind` and `EdgeKind` variants in `crates/cih-core/src/lib.rs` (node labels are
+the variant name verbatim; edge Cypher labels are `SCREAMING_SNAKE`). The MVP builds
+these object kinds only; the remaining §9.3 kinds arrive with the Phase 5 adapters.
+
+| Object (`core:`) | Source node kinds | Source edge kinds | Claims (all reference their evidence) | Emitted `core:` relations (stored direction) | Stable-ID evidence anchor |
+| --- | --- | --- | --- | --- | --- |
+| Service | repository registry entry (no single graph node) | — | `core:summary` | `core:contains` → Component; `core:exposes` → API/Event | `repo_id` |
+| Component | `Community` | `MemberOf` (member → community), `Contains` | `core:summary` (label + anchors) | `core:contains` → CodeEntity; inbound `core:owned-by` ← Service | `community_id` |
+| API | `Route` (props `httpMethod`, `path`) | `HandlesRoute` (Method → Route) | `core:summary`; a `Properties` claim `{method, path}` | inbound `core:exposes` ← Service/Component; `core:invokes` (handler `Calls` chain) | route `method` + `path` |
+| Event | `KafkaTopic`, `MessageDestination` | `PublishesEvent` (producer → topic), `ListensTo` (consumer → topic), `IntegrationLink` | `core:summary` | inbound `core:publishes` ← producer; inbound `core:consumes` ← consumer | `kafka_topic_id` / `message_destination_id` |
+| Job | Method/Function referenced by the `.cih/entrypoints.json` sidecar with `EntrypointKind ∈ {Scheduled, EventListener}` | `ListensTo` (for event jobs) | `core:summary`; a `Properties` claim `{schedule|topics}` | `core:participates-in` → Process; `core:consumes` → Event | `method_id` + entrypoint kind |
+| DataAsset | `DbTable` (and `DbQuery`) | `ReadsTable` / `WritesTable` (reader/writer → table), `ExecutesQuery` (callable → query) | `core:summary` | inbound `core:reads` ← reader; inbound `core:writes` ← writer | `db_table_id` |
+| Process | `Process` | `StepInProcess` (process → step) | `core:summary`; a `Flow` claim of ordered steps | inbound `core:participates-in` ← Capability/Service/API/Event | `process_id` |
+| TestCase | Method/Class flagged test (name `Test`/`Tests`/`IT`/`Spec`, `/test/` path, or `isTest`/`stereotype` prop; see `entrypoints.rs`) | `Tests` (test → tested symbol) | `core:summary` | `core:tests` → CodeEntity/API/Component/Service; derived `core:covers` → Capability/Process | test method `NodeId` |
+| CodeEntity (excluded from primary nav) | `Class`, `Interface`, `Enum`, `Record`, `Annotation`, `Method`, `Function`, `Constructor`, `Field` | `Calls`, `Uses`, `Accesses`, `Extends`, `Implements`, `HasMethod`, `HasField` → **compact `technical_edges`, not rich relations** | — | technical adjacency only (§12.3) | graph `NodeId` |
+| SourceFile (excluded from primary nav) | `File`, `Folder` | `Contains` | — | `core:contains` | repo-relative path |
+
+Direction note: the graph's `PublishesEvent`/`ListensTo`/`ReadsTable`/`WritesTable`/
+`Tests` edges already point in the canonical §9.4 stored direction, so they project
+without inversion. `core:exposes` is the one that does **not** come straight from an
+edge: `HandlesRoute` links a *handler* to the route, but the API's exposer is the
+handler's owning Service/Component (derived), matching the §10.2 example
+`payment-service --core:exposes--> POST /payments/{id}/refund`.
+
+Placement signals (Pass 5 / §14.2) are read from `cih-grouping`, not reinvented. Each
+`FeatureGroupEntry` (`crates/cih-grouping/src/entry.rs`) supplies: `strategy ∈
+{package, structural, embed, llm, override}` → `Classification.authority`;
+`confidence` → `Classification.score`; `pinned` → a pinned placement (precedence 1,
+§11.4); `evidence` → `PlacementSignal`. The §14.2 "module and package" signal is
+`PackageStrategy`; "structural community" + "naming" are `StructuralStrategy` (name
+keyword / infrastructure path / call in-degree spanning ≥2 prior-phase features);
+"route path" and "event/table access" are the projected `core:api`/`core:event`/
+`core:dataAsset` relations above. Component identity and anchors reuse the existing
+`architecture_overview` `ModuleEntry.anchor_symbols` (top-degree
+Class/Interface/Function/Method per `Community`), so the MVP does not build a second
+module-anchoring pass.
+
+Worked example (Spring refund endpoint). Graph facts: `Route POST /payments/{id}/refund`;
+`Method RefundController#refund --HandlesRoute--> Route`; `refund --Calls-->
+RefundService#process`; `process --WritesTable--> DbTable REFUND`; `process
+--PublishesEvent--> KafkaTopic RefundRequested`; `RefundControllerTest#refund
+--Tests--> RefundController#refund`; `PackageStrategy` assigns feature slug
+`payments`. Projection: `core:api post-payments-id-refund` (anchor `POST` +
+`/payments/{id}/refund`) with an Observed, attested `core:summary` claim and a
+`{method,path}` Properties claim; `payment-service --core:exposes--> API`;
+`core:event RefundRequested` with `process --core:publishes--> Event`; `core:dataAsset
+REFUND` with `process --core:writes--> DataAsset`; a `core:testCase` with
+`--core:tests--> the refund handler`. Classification: `{subject: api, relation:
+core:implements, target: capability payment-refunds, score:
+FeatureGroupEntry.confidence, signals: [route-prefix:/payments, package:…payments],
+authority: Generated}` → auto-apply only at ≥0.90 with ≥2 independent signals, else
+review (§14.3).
+
+Measuring projectors (per the CLAUDE.md corpus mandate): each projector reports
+emitted object/claim/relation counts per source kind on the benchmark service, and a
+projector change that does not move those counts — like the `callable_coverage`
+alarm — did nothing regardless of unit-test color. These counts, not a green suite,
+are the acceptance evidence for a projection change.
 
 ### 13.2 Workspace build
 
@@ -3202,9 +3324,12 @@ documentation proposal, apply, export, and publication job kinds. There is one
 scheduler and one `JobRepository`; this subsystem does not add another shared jobs
 map.
 
-Today jobs are in-memory and MCP-only (`index_repo`/`index_status`, states
-Running/Done/Failed). The HTTP surface below, durable `jobs` rows (§12.3), and the
-additional states are new:
+Today jobs are in-memory and MCP-only
+(`index_repo`/`index_status`/`index_cancel`). The in-memory model already has
+`Queued`, `Running`, `Done`, `Failed`, `TimedOut`, and `Cancelled` states
+(`crates/cih-server/src/domain/indexing.rs`). New here are the durable `jobs` rows
+(§12.3), the HTTP job surface below, and the `AwaitingReview` and `Interrupted`
+states:
 
 ```text
 POST /proposals -> 202 { job_id }
@@ -3349,6 +3474,8 @@ cih docs review show
 cih docs review accept
 cih docs review reject
 cih docs export
+cih docs export-state
+cih docs import-state
 cih docs publish confluence
 cih docs migrate-wiki
 cih docs gc
@@ -3932,6 +4059,7 @@ Deliverables:
 
 - Authored-state versions, typed revisions, current materialization, canonical hash,
   and source-controlled-overlay precedence.
+- Canonical authored-state export/import with hash verification (§12.12).
 - Typed object, relation, claim, block, placement, alias, and taxonomy operations.
 - Snapshot-bound change-set validation and idempotent apply.
 - Generic multi-pack activation journal used by index, sync, apply, review,
@@ -3950,6 +4078,9 @@ Acceptance:
 - Process termination at every activation step for every operation kind converges
   to one consistent snapshot, authored-state version, and workflow state.
 - A repository cannot be written through two documentation coordinators.
+- Authored state survives loss of `state.sqlite`: a verified `export-state` /
+  `import-state --verify` round-trip reproduces the same canonical `state_hash`, and a
+  clean rebuild from the imported state reproduces all accepted content (§12.12).
 
 ### Phase 4B: Workflow, review, history, and retention
 

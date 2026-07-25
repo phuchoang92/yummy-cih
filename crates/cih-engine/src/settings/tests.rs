@@ -189,3 +189,23 @@ fn wiki_precedence_and_defaults() {
     assert_eq!(r.wiki_mode, "llm-full");
     assert!(r.html);
 }
+
+#[test]
+fn analyze_sql_apis_layer_flag_over_repo_over_home() {
+    let layers = layers(
+        "[analyze]\nsql_apis = [\"RepoQueue.push\"]",
+        "[analyze]\nsql_apis = [\"HomeQueue.push\"]",
+    );
+    let r = resolve_analyze(
+        AnalyzeFlagInputs {
+            sql_apis: vec!["FlagQueue.push".into()],
+            ..Default::default()
+        },
+        &layers,
+    );
+    assert_eq!(r.sql_apis, vec!["FlagQueue.push"]);
+    let r = resolve_analyze(AnalyzeFlagInputs::default(), &layers);
+    assert_eq!(r.sql_apis, vec!["RepoQueue.push"]);
+    let r = resolve_analyze(AnalyzeFlagInputs::default(), &Layers::default());
+    assert!(r.sql_apis.is_empty());
+}

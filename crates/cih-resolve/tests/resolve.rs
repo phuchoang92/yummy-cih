@@ -95,6 +95,7 @@ fn binding(name: &str, raw: &str, kind: BindingKind, in_fqcn: &str, line: u32) -
         raw_type: raw.into(),
         kind,
         in_fqcn: in_fqcn.into(),
+        qualifier: None,
         range: Range {
             start_line: line,
             ..Range::default()
@@ -742,6 +743,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
             raw_type: "UserService".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.OrderController".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
@@ -798,7 +800,170 @@ fn di_redirects_to_single_impl_even_without_stereotype() {
         .iter()
         .find(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1))
         .expect("single un-stereotyped impl should still receive the DI redirect");
-    assert_eq!(di_edge.reason, "di-resolved");
+    // A stereotype-less sole implementor is a guess (the real impl may be out of
+    // scope), so it carries its own reason and demoted confidence.
+    assert_eq!(di_edge.reason, "di-single-impl");
+    assert_eq!(di_edge.confidence, 0.75);
+}
+
+/// OCB regression shape: `CustomUserImpl` implements `UserAdmin` and calls
+/// `retailUserAdminRef.modifyUserPassword(...)` through an injected `UserAdmin`
+/// field. `with_second_impl` puts `UserImpl` (the XML-wired real target) in scope.
+fn make_qualifier_scenario(with_second_impl: bool, qualifier: Option<&str>) -> Vec<ParsedFile> {
+    let iface = ParsedFile {
+        file: "com/acme/UserAdmin.java".into(),
+        language: String::new(),
+        package: Some("com.acme".into()),
+        defs: vec![
+            type_def(NodeKind::Interface, "com.acme.UserAdmin"),
+            method_def(
+                "com.acme.UserAdmin",
+                "modifyUserPassword",
+                &["Request"],
+                None,
+            ),
+        ],
+        imports: vec![],
+        reference_sites: vec![],
+        type_bindings: vec![],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: Vec::new(),
+    };
+    let caller = ParsedFile {
+        file: "com/acme/CustomUserImpl.java".into(),
+        language: String::new(),
+        package: Some("com.acme".into()),
+        defs: vec![
+            type_def(NodeKind::Class, "com.acme.CustomUserImpl"),
+            method_def(
+                "com.acme.CustomUserImpl",
+                "modifyUserPassword",
+                &["Request"],
+                None,
+            ),
+            field_def("com.acme.CustomUserImpl", "retailUserAdminRef", "UserAdmin"),
+        ],
+        imports: vec![],
+        reference_sites: vec![
+            heritage("com.acme.CustomUserImpl", "UserAdmin", RefKind::Implements),
+            ReferenceSite {
+                name: "modifyUserPassword".into(),
+                receiver: Some("retailUserAdminRef".into()),
+                kind: RefKind::Call,
+                arity: Some(1),
+                range: Range::default(),
+                in_fqcn: "com.acme.CustomUserImpl#modifyUserPassword/1".into(),
+                in_callable: method_id("com.acme.CustomUserImpl", "modifyUserPassword", 1),
+                arg_texts: vec![],
+            },
+        ],
+        type_bindings: vec![TypeBinding {
+            name: "retailUserAdminRef".into(),
+            raw_type: "UserAdmin".into(),
+            kind: BindingKind::Field,
+            in_fqcn: "com.acme.CustomUserImpl".into(),
+            qualifier: qualifier.map(str::to_string),
+            range: Range::default(),
+        }],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: Vec::new(),
+    };
+    let mut files = vec![iface, caller];
+    if with_second_impl {
+        files.push(ParsedFile {
+            file: "com/acme/UserImpl.java".into(),
+            language: String::new(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.UserImpl"),
+                method_def(
+                    "com.acme.UserImpl",
+                    "modifyUserPassword",
+                    &["Request"],
+                    None,
+                ),
+            ],
+            imports: vec![],
+            reference_sites: vec![heritage(
+                "com.acme.UserImpl",
+                "UserAdmin",
+                RefKind::Implements,
+            )],
+            type_bindings: vec![],
+            contract_sites: vec![],
+            sql_constants: vec![],
+            sql_execution_sites: vec![],
+            string_constants: vec![],
+            http_wrappers: Vec::new(),
+        });
+    }
+    files
+}
+
+/// `@Qualifier("retailUserAdminRef")` on the injected field + an XML bean id map
+/// must pick the XML-wired impl — not the caller's own class, and not fall to the
+/// interface — even though two implementors are in scope (ambiguous by count).
+#[test]
+fn qualifier_redirect_follows_xml_bean_id() {
+    let files = make_qualifier_scenario(true, Some("retailUserAdminRef"));
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("retailUserAdminRef".into(), "com.acme.UserImpl".into());
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let calls: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .collect();
+    let di_edge = calls
+        .iter()
+        .find(|e| e.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1))
+        .expect("qualifier should redirect to the XML-wired impl");
+    assert_eq!(di_edge.reason, "di-qualifier");
+    assert_eq!(di_edge.confidence, 0.95);
+    assert!(
+        !calls.iter().any(|e| e.src == e.dst),
+        "no fabricated self-recursion"
+    );
+}
+
+/// The sole in-scope implementor being the caller's own class must NOT produce a
+/// `caller → caller` self-loop (the OCB false-recursion bug): the redirect skips
+/// the enclosing class and the call degrades to the interface method.
+#[test]
+fn programmatic_fallback_never_targets_enclosing_class() {
+    let files = make_qualifier_scenario(false, None);
+    let out = resolve_edges(&files);
+    let calls: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .collect();
+    assert!(
+        !calls.iter().any(|e| e.src == e.dst),
+        "must not fabricate self-recursion when the caller is the sole implementor"
+    );
+    let iface_edge = calls
+        .iter()
+        .find(|e| e.dst == method_id("com.acme.UserAdmin", "modifyUserPassword", 1))
+        .expect("call should degrade to the truthful interface-method edge");
+    assert_eq!(iface_edge.reason, "receiver-bound");
 }
 
 #[test]
@@ -910,6 +1075,7 @@ fn di_falls_back_when_multiple_service_impls() {
             raw_type: "UserService".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.OrderController".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
@@ -1020,6 +1186,7 @@ fn di_not_applied_to_concrete_class_receiver() {
                 raw_type: "UserServiceImpl".into(),
                 kind: BindingKind::Field,
                 in_fqcn: "com.acme.OrderController".into(),
+                qualifier: None,
                 range: Range::default(),
             }],
             contract_sites: vec![],
@@ -1143,6 +1310,7 @@ fn unresolved_ref_member_not_found() {
             raw_type: "MyService".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.Caller".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
@@ -1248,6 +1416,7 @@ fn callresult_factory_pattern_resolved() {
                 raw_type: "OrderFactory".into(),
                 kind: BindingKind::Field,
                 in_fqcn: "com.acme.OrderService".into(),
+                qualifier: None,
                 range: Range::default(),
             },
             TypeBinding {
@@ -1255,6 +1424,7 @@ fn callresult_factory_pattern_resolved() {
                 raw_type: "create".into(),
                 kind: BindingKind::CallResult,
                 in_fqcn: "com.acme.OrderService#run/0".into(),
+                qualifier: None,
                 range: Range::default(),
             },
         ],
@@ -1306,6 +1476,7 @@ fn callresult_factory_pattern_unresolved_when_return_type_absent() {
             raw_type: "create".into(),
             kind: BindingKind::CallResult,
             in_fqcn: "com.acme.OrderService#run/0".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
@@ -1428,6 +1599,7 @@ fn resolve_with_constants(parsed: Vec<ParsedFile>) -> cih_resolve::ResolveOutput
             repo_root: None,
             enable_xml_integrations: false,
             constant_resolver: Some(Box::new(resolver)),
+            di_wiring: None,
         },
     )
 }

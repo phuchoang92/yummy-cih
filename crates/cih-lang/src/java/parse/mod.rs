@@ -85,7 +85,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
     framework::collect_method_routes(root, src, &mut builder);
     framework::collect_contract_sites(root, src, &mut builder);
     constants::collect_sql_constants(root, src, &mut builder);
-    constants::collect_sql_execution_sites(root, src, &mut builder);
+    constants::collect_sql_execution_sites(root, src, &mut builder, provider.sql_apis());
     constants::collect_static_string_constants(root, src, &mut builder);
     structural::attach_structural_profiles(&mut builder);
     normalize::normalize_builder(&mut builder);

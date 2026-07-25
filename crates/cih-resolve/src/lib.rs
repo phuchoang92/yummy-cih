@@ -89,6 +89,9 @@ pub struct ResolveOptions<'a> {
     /// Optional constant resolver to enrich CALLS edge call-site args (Gap 3/4).
     /// Pass `None` to use the no-op `NullConstantResolver`.
     pub constant_resolver: Option<Box<dyn cih_lang::constant_resolver::ConstantResolver>>,
+    /// Pre-collected DI XML wiring (bean ids → classes). Enables qualifier-aware
+    /// DI redirect during edge emission; `None` keeps count-based redirect only.
+    pub di_wiring: Option<&'a di_xml::DiWiring>,
 }
 
 /// Build the default registry with all supported language resolvers.
@@ -111,6 +114,7 @@ pub fn resolve_edges(parsed: &[ParsedFile]) -> ResolveOutput {
             repo_root: None,
             enable_xml_integrations: false,
             constant_resolver: None,
+            di_wiring: None,
         },
     )
 }
@@ -121,7 +125,10 @@ pub fn resolve_with_registry(
     registry: &ResolverRegistry,
     options: ResolveOptions<'_>,
 ) -> ResolveOutput {
-    let index = ResolveIndex::build(parsed, registry);
+    let mut index = ResolveIndex::build(parsed, registry);
+    if let Some(wiring) = options.di_wiring {
+        index.set_di_wiring(wiring);
+    }
     let emitter = EdgeEmitter::new(parsed, index, registry);
     let emitter = if let Some(cr) = options.constant_resolver {
         emitter.with_constant_resolver_boxed(cr)

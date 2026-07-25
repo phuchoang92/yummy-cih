@@ -87,19 +87,19 @@ pub fn hash_all(repo_root: &Path, files: &[String]) -> HashMap<String, String> {
     out
 }
 
-pub fn load_cached_parsed(cih_dir: &Path, schema: u32, file_hash: &str) -> Option<ParsedUnit> {
-    let path = cache_path(cih_dir, schema, file_hash);
+pub fn load_cached_parsed(cih_dir: &Path, namespace: &str, file_hash: &str) -> Option<ParsedUnit> {
+    let path = cache_path(cih_dir, namespace, file_hash);
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
 pub fn save_cached_parsed(
     cih_dir: &Path,
-    schema: u32,
+    namespace: &str,
     file_hash: &str,
     parsed: &ParsedUnit,
 ) -> Result<()> {
-    let path = cache_path(cih_dir, schema, file_hash);
+    let path = cache_path(cih_dir, namespace, file_hash);
     let dir = path.parent().expect("cache path always has a parent");
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let encoded = serde_json::to_string(parsed)?;
@@ -108,14 +108,15 @@ pub fn save_cached_parsed(
     Ok(())
 }
 
-/// Prepare the versioned parse-cache dir: create `parse-cache/v<schema>/` and
-/// prune every OTHER schema's dir plus legacy flat (pre-versioning) entries.
-/// Cached units are only valid for the parser schema that wrote them — a
-/// schema bump means every parser output may differ, so stale entries must
+/// Prepare the versioned parse-cache dir: create `parse-cache/v<namespace>/` and
+/// prune every OTHER namespace's dir plus legacy flat (pre-versioning) entries.
+/// The namespace is the parser schema, optionally suffixed with a config
+/// fingerprint (`26-ab12cd34`) — cached units are only valid for the exact
+/// parser schema *and* parser config that wrote them, so stale entries must
 /// never be readable again.
-pub fn prepare_parse_cache(cih_dir: &Path, schema: u32) -> Result<()> {
+pub fn prepare_parse_cache(cih_dir: &Path, namespace: &str) -> Result<()> {
     let root = cih_dir.join(PARSE_CACHE_DIR);
-    let keep = format!("v{schema}");
+    let keep = format!("v{namespace}");
     let mut pruned = false;
     if root.exists() {
         // Other schema dirs.
@@ -149,17 +150,17 @@ pub fn prepare_parse_cache(cih_dir: &Path, schema: u32) -> Result<()> {
         .with_context(|| format!("failed to create {}", root.join(&keep).display()))?;
     if pruned {
         tracing::info!(
-            schema,
-            "parse cache schema v{schema} — stale cache cleared, this run re-parses all files"
+            namespace,
+            "parse cache v{namespace} — stale cache cleared, this run re-parses all files"
         );
     }
     Ok(())
 }
 
-fn cache_path(cih_dir: &Path, schema: u32, file_hash: &str) -> std::path::PathBuf {
+fn cache_path(cih_dir: &Path, namespace: &str, file_hash: &str) -> std::path::PathBuf {
     cih_dir
         .join(PARSE_CACHE_DIR)
-        .join(format!("v{schema}"))
+        .join(format!("v{namespace}"))
         .join(format!("{file_hash}.json"))
 }
 

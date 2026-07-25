@@ -47,6 +47,12 @@ pub struct ResolveIndex {
     /// `./services/index`, which the parser cannot do because it is per-file and
     /// never sees its siblings.
     known_modules: HashSet<String>,
+    /// DI XML bean id/name → declared class FQCN (from [`crate::di_xml::DiWiring`],
+    /// when the caller pre-collected it). Consulted by qualifier-aware DI redirect.
+    di_beans_by_id: HashMap<String, String>,
+    /// `(class FQCN, field name)` → DI qualifier (`@Qualifier`/`@Resource(name)`)
+    /// declared on that injected field.
+    field_qualifiers: HashMap<(String, String), String>,
 }
 
 #[derive(Debug, Default)]
@@ -141,6 +147,13 @@ impl ResolveIndex {
                 cih_lang::strip_source_extension(&pf.file).unwrap_or(pf.file.as_str());
             idx.known_modules.insert(module_scope.to_string());
             for tb in &pf.type_bindings {
+                if tb.kind == BindingKind::Field {
+                    if let Some(qualifier) = &tb.qualifier {
+                        // Field bindings carry the enclosing type FQCN in `in_fqcn`.
+                        idx.field_qualifiers
+                            .insert((tb.in_fqcn.clone(), tb.name.clone()), qualifier.clone());
+                    }
+                }
                 idx.bindings
                     .entry(tb.in_fqcn.clone())
                     .or_default()
@@ -648,6 +661,24 @@ impl ResolveIndex {
             hit = Some(fqcn.as_str());
         }
         hit
+    }
+
+    /// Install the DI XML wiring facts (bean id → class) collected by the engine.
+    pub fn set_di_wiring(&mut self, wiring: &crate::di_xml::DiWiring) {
+        self.di_beans_by_id = wiring.beans_by_id.clone();
+    }
+
+    /// Class FQCN declared for a DI XML bean id/name, if the wiring was provided.
+    pub fn bean_class_by_id(&self, id: &str) -> Option<&str> {
+        self.di_beans_by_id.get(id).map(String::as_str)
+    }
+
+    /// DI qualifier (`@Qualifier("x")` / `@Resource(name = "x")`) declared on
+    /// `class`'s field `field`, if any.
+    pub fn field_qualifier(&self, class: &str, field: &str) -> Option<&str> {
+        self.field_qualifiers
+            .get(&(class.to_string(), field.to_string()))
+            .map(String::as_str)
     }
 
     /// Get per-language metadata for a type.

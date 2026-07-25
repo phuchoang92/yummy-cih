@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
 use cih_graph_store::{
-    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge, FlowHop,
-    FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError,
-    GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice, KindCount, LoadObserver,
-    LoadStats, NoopObserver, Path, Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction, FlowEdge,
+    FlowFilter, FlowHop, FlowNode, FlowPage, GraphOverview, GraphOverviewEdge, GraphOverviewNode,
+    GraphStore, GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice,
+    KindCount, LoadObserver, LoadStats, NoopObserver, Path, PathEdge, PathInfo, Result, RouteInfo,
+    SimilarMethod, Subgraph, SymbolContext,
 };
 
 use crate::neighbor_nodes;
@@ -109,7 +110,7 @@ impl GraphStore for FalkorStore {
         let q = format!(
             "CYPHER id={id} \
              MATCH (n:Symbol {{id:$id}}) \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file LIMIT 1",
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine LIMIT 1",
             id = cstr(id.as_str())
         );
         let rows = self.rows(&q).await?;
@@ -220,6 +221,73 @@ impl GraphStore for FalkorStore {
             .collect())
     }
 
+    async fn paths_between(
+        &self,
+        from: &NodeId,
+        to: &NodeId,
+        max_depth: u32,
+        max_paths: usize,
+    ) -> Result<Vec<PathInfo>> {
+        let d = max_depth.clamp(1, 12);
+        let k = max_paths.clamp(1, 10);
+        let q = format!(
+            "CYPHER from={from} to={to} \
+             MATCH p=(a:Symbol {{id:$from}})\
+             -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO\
+             |EXECUTES_QUERY|READS_TABLE|WRITES_TABLE*1..{d}]->\
+             (b:Symbol {{id:$to}}) \
+             WITH p ORDER BY length(p) LIMIT {k} \
+             RETURN [x IN nodes(p) | x.id], [r IN relationships(p) | type(r)], \
+                    [r IN relationships(p) | r.confidence], \
+                    [r IN relationships(p) | r.reason]",
+            from = cstr(from.as_str()),
+            to = cstr(to.as_str())
+        );
+        let rows = self.rows(&q).await?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| r.len() >= 4)
+            .map(|r| {
+                let list = |cell: &str| -> Vec<String> {
+                    cell.trim_matches(|c| c == '[' || c == ']')
+                        .split(',')
+                        .map(|s| s.trim().trim_matches('"').to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+                let nodes: Vec<NodeId> = list(&r[0]).into_iter().map(NodeId::new).collect();
+                let kinds = list(&r[1]);
+                let confidences = list(&r[2]);
+                let reasons = list(&r[3]);
+                let edges: Vec<PathEdge> = kinds
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, kind)| PathEdge {
+                        kind,
+                        confidence: confidences
+                            .get(i)
+                            .and_then(|c| c.parse().ok())
+                            .unwrap_or(1.0),
+                        reason: reasons.get(i).cloned().unwrap_or_default(),
+                    })
+                    .collect();
+                let min_confidence = edges
+                    .iter()
+                    .map(|e| e.confidence)
+                    .fold(f32::INFINITY, f32::min);
+                PathInfo {
+                    nodes,
+                    edges,
+                    min_confidence: if min_confidence.is_finite() {
+                        min_confidence
+                    } else {
+                        0.0
+                    },
+                }
+            })
+            .collect())
+    }
+
     async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -231,7 +299,7 @@ impl GraphStore for FalkorStore {
             let q = format!(
                 "CYPHER id={id} \
                  MATCH (n:Symbol {{id:$id}})-[*1..{r}]-(m:Symbol) \
-                 RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file LIMIT 200",
+                 RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file, m.startLine, m.endLine LIMIT 200",
                 id = cstr(seed.as_str())
             );
             for row in self.rows(&q).await? {
@@ -583,7 +651,7 @@ impl GraphStore for FalkorStore {
         let q = format!(
             "CYPHER name={name_lit} \
              MATCH (n:Symbol) WHERE n.name = $name \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine \
              ORDER BY n.id LIMIT {lim}",
             name_lit = cstr(name),
         );
@@ -608,7 +676,7 @@ impl GraphStore for FalkorStore {
             "MATCH (n:Symbol) \
              WHERE n.file IN {list} \
                AND n.kind IN ['Method', 'Constructor', 'Function', 'Class', 'Interface', 'Enum'] \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine \
              ORDER BY n.file, n.id"
         );
         Ok(self
@@ -645,41 +713,332 @@ impl GraphStore for FalkorStore {
             .collect())
     }
 
-    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowHop>> {
-        let d = max_depth.clamp(1, 10);
+    async fn db_effects_for_methods(&self, ids: &[NodeId]) -> Result<Vec<DbEffect>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| cstr(id.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        // `operation`/`sqlPreview` live inside the DbQuery's serialized `props`
+        // JSON (they are not promoted graph properties) — parse client-side.
+        let q = format!(
+            "MATCH (m:Symbol)-[:EXECUTES_QUERY]->(q:Symbol)-[r:READS_TABLE|WRITES_TABLE]->(t:Symbol) \
+             WHERE m.id IN {list} \
+             RETURN m.id, q.id, coalesce(q.props, ''), t.name, type(r) \
+             ORDER BY m.id, t.name"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                let method = NodeId::new(it.next()?);
+                let query = NodeId::new(it.next()?);
+                let props = it.next()?;
+                let table = it.next()?;
+                let rel = it.next()?;
+                Some(DbEffect::from_query_row(method, query, &props, table, &rel))
+            })
+            .collect())
+    }
+
+    async fn flow_downstream(&self, entry: &NodeId, filter: &FlowFilter) -> Result<FlowPage> {
+        let d = filter.max_depth.clamp(1, 10);
 
         // A Route node has no *outgoing* flow edges — `HANDLES_ROUTE` is stored
         // handler→route. When the entry is a route, hop route→handler via the
         // inverse `HANDLES_ROUTE` first, then trace downstream from each handler
-        // (recursion terminates: a handler is a method, so it has no inverse
-        // handlers and falls through to the plain method walk below).
+        // (a handler is a method, so it has no inverse handlers and goes through
+        // the plain method walk).
         let handlers = self.route_handler_nodes(entry).await?;
-        if !handlers.is_empty() {
+        let mut hops = if !handlers.is_empty() {
             // Collect each handler with its downstream walk, then assemble the
-            // route-entry flow. Recursion terminates: a handler is a method, so
-            // it has no inverse handlers and falls through to the method walk.
+            // route-entry flow. The page is sliced once, after assembly.
             let mut with_downstream = Vec::with_capacity(handlers.len());
             for handler in handlers {
-                let sub = self.flow_downstream(&handler.id, d).await?;
+                let sub = self.direct_flow_hops(&handler.id, d, filter).await?;
                 with_downstream.push((handler, sub));
             }
-            let mut hops = assemble_route_flow(entry, with_downstream);
-            self.annotate_interceptions(&mut hops).await?;
-            return Ok(hops);
-        }
+            assemble_route_flow(entry, with_downstream, filter.budget())
+        } else {
+            self.direct_flow_hops(entry, d, filter).await?
+        };
+        self.annotate_interceptions(&mut hops).await?;
+        Ok(filter.paginate(hops))
+    }
 
+    async fn complexity_hotspots(
+        &self,
+        min_cyclomatic: Option<u16>,
+        min_cognitive: Option<u16>,
+        min_transitive_loop: Option<u8>,
+        limit: usize,
+    ) -> Result<Vec<HotspotNode>> {
+        let min_cc = min_cyclomatic.unwrap_or(5) as i64;
+        let min_cog = min_cognitive.unwrap_or(0) as i64;
+        let min_tl = min_transitive_loop.unwrap_or(1) as i64;
+        let lim = limit.clamp(1, 200) as i64;
+        let q = format!(
+            "MATCH (n:Symbol) WHERE n.kind IN ['Method', 'Constructor'] \
+             AND n.transitiveLoopDepth >= {min_tl} \
+             AND n.cyclomatic >= {min_cc} \
+             AND n.cognitive >= {min_cog} \
+             RETURN n.id, n.name, n.file, n.cyclomatic, n.cognitive, n.transitiveLoopDepth \
+             ORDER BY n.transitiveLoopDepth DESC, n.cyclomatic DESC LIMIT {lim}"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 6)
+            .map(|r| HotspotNode {
+                id: NodeId::new(r[0].clone()),
+                name: r[1].clone(),
+                file: r[2].clone(),
+                cyclomatic: r[3].parse().unwrap_or(0),
+                cognitive: r[4].parse().unwrap_or(0),
+                transitive_loop_depth: r[5].parse().unwrap_or(0),
+            })
+            .collect())
+    }
+
+    async fn similar_methods(
+        &self,
+        id: &NodeId,
+        _min_jaccard: f32,
+        limit: usize,
+    ) -> Result<Vec<SimilarMethod>> {
+        let _id_lit = cstr(id.as_str());
+        let lim = limit.clamp(1, 50) as i64;
+        // SIMILAR_TO edges carry confidence = Jaccard score.
+        let q = format!(
+            "CYPHER id={id_lit} \
+             MATCH (a:Symbol {{id:$id}})-[r:SIMILAR_TO]->(b:Symbol) \
+             RETURN b.id, b.name, b.file, r.confidence \
+             ORDER BY r.confidence DESC LIMIT {lim}",
+            id_lit = cstr(id.as_str())
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 4)
+            .map(|r| SimilarMethod {
+                id: NodeId::new(r[0].clone()),
+                name: r[1].clone(),
+                file: r[2].clone(),
+                jaccard: r[3].parse().unwrap_or(0.0),
+            })
+            .collect())
+    }
+
+    async fn symbol_communities(&self, ids: &[NodeId]) -> Result<Vec<(NodeId, CommunityInfo)>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| cstr(id.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let q = format!(
+            "MATCH (n:Symbol)-[:MEMBER_OF]->(c:Symbol) \
+             WHERE n.id IN {list} AND c.kind = 'Community' \
+             RETURN n.id, c.id, c.name, c.symbolCount, c.cohesion"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 5)
+            .map(|r| {
+                (
+                    NodeId::new(r[0].clone()),
+                    CommunityInfo {
+                        id: r[1].clone(),
+                        name: r[2].clone(),
+                        symbol_count: r[3].parse().unwrap_or(0),
+                        cohesion: r[4].parse().unwrap_or(0.0),
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>> {
+        let id_lit = cstr(id.as_str());
+        // Direct TESTS edges to this symbol, plus TESTS edges to its owner
+        // class. Pattern predicate, not `EXISTS { MATCH … }` — FalkorDB
+        // rejects the braced-subquery form (contract-tested).
+        let q = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
+             WHERE target.id = {id_lit} \
+                OR (target)-[:HAS_METHOD]->(:Symbol {{id: {id_lit}}}) \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file, t.startLine, t.endLine \
+             ORDER BY t.file, t.name \
+             LIMIT 50"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect())
+    }
+
+    async fn tests_for_files(&self, files: &[String]) -> Result<Vec<Node>> {
+        if files.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = format!(
+            "[{}]",
+            files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
+        );
+        // Direct TESTS edges where the production target is in the changed files.
+        let q = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(prod:Symbol) \
+             WHERE prod.file IN {list} \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file, t.startLine, t.endLine \
+             ORDER BY t.file, t.name \
+             LIMIT 200"
+        );
+        let mut results: Vec<Node> = self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect();
+
+        // Also catch test methods that CALL into the changed files (one-hop indirect).
+        let q2 = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(:Symbol)-[:CALLS]->(prod:Symbol) \
+             WHERE prod.file IN {list} \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file, t.startLine, t.endLine \
+             ORDER BY t.file, t.name \
+             LIMIT 200"
+        );
+        let indirect: Vec<Node> = self
+            .rows(&q2)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect();
+
+        // Merge, dedup by id.
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|n| seen.insert(n.id.clone()));
+        for n in indirect {
+            if seen.insert(n.id.clone()) {
+                results.push(n);
+            }
+        }
+        results.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
+        Ok(results)
+    }
+
+    async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>> {
+        let lim = limit.clamp(1, 500);
+        let prefix_lit = cstr(file_prefix);
+        // Two fixes over the original (both contract-tested): pattern
+        // predicate instead of the rejected `EXISTS { MATCH … }` form, and
+        // explicit NULL handling — `NOT n.stereotype = 'test'` is three-valued
+        // NULL for nodes without a stereotype, which silently excluded every
+        // unannotated symbol (i.e. almost all of them).
+        let q = format!(
+            "MATCH (n:Symbol) \
+             WHERE n.file STARTS WITH {prefix_lit} \
+               AND n.kind IN ['Method', 'Class', 'Interface'] \
+               AND (n.stereotype IS NULL OR n.stereotype <> 'test') \
+               AND NOT (:Symbol)-[:TESTS]->(n) \
+             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file, n.startLine, n.endLine \
+             ORDER BY n.file, n.name \
+             LIMIT {lim}"
+        );
+        Ok(self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect())
+    }
+
+    async fn community_graph(&self) -> Result<Vec<CommunityEdge>> {
+        // Count CALLS edges that cross community boundaries. Each unit of weight
+        // represents one caller→callee pair where caller and callee belong to
+        // different communities. Capped at 500 pairs to avoid a mega-result.
+        let q = "MATCH (a:Symbol)-[:MEMBER_OF]->(ca:Symbol), \
+                       (b:Symbol)-[:MEMBER_OF]->(cb:Symbol) \
+                 WHERE ca.kind = 'Community' AND cb.kind = 'Community' \
+                   AND (a)-[:CALLS]->(b) AND ca.id <> cb.id \
+                 RETURN ca.id, cb.id, count(*) AS weight \
+                 LIMIT 500";
+        Ok(self
+            .rows(q)
+            .await?
+            .into_iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| CommunityEdge {
+                src: r[0].clone(),
+                dst: r[1].clone(),
+                weight: r[2].parse().unwrap_or(0),
+            })
+            .collect())
+    }
+}
+
+impl FalkorStore {
+    /// The direct (non-route) walk: BFS from `entry`, kind/accessor exclusions
+    /// applied in Cypher, materializing at most `filter.budget()` rows so the
+    /// page slice can answer `has_more` honestly. Returns root + reached hops,
+    /// unsliced.
+    async fn direct_flow_hops(
+        &self,
+        entry: &NodeId,
+        d: u32,
+        filter: &FlowFilter,
+    ) -> Result<Vec<FlowHop>> {
+        let mut exclusions = String::new();
+        if !filter.exclude_kinds.is_empty() {
+            let labels = filter
+                .exclude_kinds
+                .iter()
+                .map(|k| cstr(k.label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            exclusions.push_str(&format!(" WHERE NOT m.kind IN [{labels}]"));
+        }
+        if filter.exclude_accessors {
+            // Promoted as 1/null; graphs loaded before the prop existed have
+            // null everywhere, making this a no-op rather than an error.
+            exclusions.push_str(if exclusions.is_empty() {
+                " WHERE"
+            } else {
+                " AND"
+            });
+            exclusions.push_str(" coalesce(m.isAccessor, 0) <> 1");
+        }
         // Phase 1: BFS to get node order, depth, and parent relationships.
         let q = format!(
             "CYPHER id={id} \
              MATCH p=(start:Symbol {{id:$id}})\
-             -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO*1..{d}]->(m:Symbol) \
+             -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO*1..{d}]->(m:Symbol)\
+             {exclusions} \
              WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode, \
                   type(relationships(p)[length(p)-1]) AS etype \
              ORDER BY m.id, len \
              WITH m, collect(pnode)[0] AS parent, collect(etype)[0] AS etype, min(len) AS depth \
              RETURN m.id, m.kind, m.name, m.qualifiedName, m.file, depth, parent.id, etype \
-             ORDER BY depth, m.name LIMIT 100",
-            id = cstr(entry.as_str())
+             ORDER BY depth, m.name LIMIT {budget}",
+            id = cstr(entry.as_str()),
+            budget = filter.budget()
         );
         let rows = self.rows(&q).await?;
         // Build FlowNode list and collect (parent_id, child_id) pairs.
@@ -792,232 +1151,9 @@ impl GraphStore for FalkorStore {
             };
             hops.push(FlowHop { node, via });
         }
-        self.annotate_interceptions(&mut hops).await?;
         Ok(hops)
     }
 
-    async fn complexity_hotspots(
-        &self,
-        min_cyclomatic: Option<u16>,
-        min_cognitive: Option<u16>,
-        min_transitive_loop: Option<u8>,
-        limit: usize,
-    ) -> Result<Vec<HotspotNode>> {
-        let min_cc = min_cyclomatic.unwrap_or(5) as i64;
-        let min_cog = min_cognitive.unwrap_or(0) as i64;
-        let min_tl = min_transitive_loop.unwrap_or(1) as i64;
-        let lim = limit.clamp(1, 200) as i64;
-        let q = format!(
-            "MATCH (n:Symbol) WHERE n.kind IN ['Method', 'Constructor'] \
-             AND n.transitiveLoopDepth >= {min_tl} \
-             AND n.cyclomatic >= {min_cc} \
-             AND n.cognitive >= {min_cog} \
-             RETURN n.id, n.name, n.file, n.cyclomatic, n.cognitive, n.transitiveLoopDepth \
-             ORDER BY n.transitiveLoopDepth DESC, n.cyclomatic DESC LIMIT {lim}"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 6)
-            .map(|r| HotspotNode {
-                id: NodeId::new(r[0].clone()),
-                name: r[1].clone(),
-                file: r[2].clone(),
-                cyclomatic: r[3].parse().unwrap_or(0),
-                cognitive: r[4].parse().unwrap_or(0),
-                transitive_loop_depth: r[5].parse().unwrap_or(0),
-            })
-            .collect())
-    }
-
-    async fn similar_methods(
-        &self,
-        id: &NodeId,
-        _min_jaccard: f32,
-        limit: usize,
-    ) -> Result<Vec<SimilarMethod>> {
-        let _id_lit = cstr(id.as_str());
-        let lim = limit.clamp(1, 50) as i64;
-        // SIMILAR_TO edges carry confidence = Jaccard score.
-        let q = format!(
-            "CYPHER id={id_lit} \
-             MATCH (a:Symbol {{id:$id}})-[r:SIMILAR_TO]->(b:Symbol) \
-             RETURN b.id, b.name, b.file, r.confidence \
-             ORDER BY r.confidence DESC LIMIT {lim}",
-            id_lit = cstr(id.as_str())
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 4)
-            .map(|r| SimilarMethod {
-                id: NodeId::new(r[0].clone()),
-                name: r[1].clone(),
-                file: r[2].clone(),
-                jaccard: r[3].parse().unwrap_or(0.0),
-            })
-            .collect())
-    }
-
-    async fn symbol_communities(&self, ids: &[NodeId]) -> Result<Vec<(NodeId, CommunityInfo)>> {
-        if ids.is_empty() {
-            return Ok(vec![]);
-        }
-        let list = format!(
-            "[{}]",
-            ids.iter()
-                .map(|id| cstr(id.as_str()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let q = format!(
-            "MATCH (n:Symbol)-[:MEMBER_OF]->(c:Symbol) \
-             WHERE n.id IN {list} AND c.kind = 'Community' \
-             RETURN n.id, c.id, c.name, c.symbolCount, c.cohesion"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 5)
-            .map(|r| {
-                (
-                    NodeId::new(r[0].clone()),
-                    CommunityInfo {
-                        id: r[1].clone(),
-                        name: r[2].clone(),
-                        symbol_count: r[3].parse().unwrap_or(0),
-                        cohesion: r[4].parse().unwrap_or(0.0),
-                    },
-                )
-            })
-            .collect())
-    }
-
-    async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>> {
-        let id_lit = cstr(id.as_str());
-        // Direct TESTS edges to this symbol, plus TESTS edges to its owner
-        // class. Pattern predicate, not `EXISTS { MATCH … }` — FalkorDB
-        // rejects the braced-subquery form (contract-tested).
-        let q = format!(
-            "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
-             WHERE target.id = {id_lit} \
-                OR (target)-[:HAS_METHOD]->(:Symbol {{id: {id_lit}}}) \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
-             ORDER BY t.file, t.name \
-             LIMIT 50"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect())
-    }
-
-    async fn tests_for_files(&self, files: &[String]) -> Result<Vec<Node>> {
-        if files.is_empty() {
-            return Ok(vec![]);
-        }
-        let list = format!(
-            "[{}]",
-            files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
-        );
-        // Direct TESTS edges where the production target is in the changed files.
-        let q = format!(
-            "MATCH (t:Symbol)-[:TESTS]->(prod:Symbol) \
-             WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
-             ORDER BY t.file, t.name \
-             LIMIT 200"
-        );
-        let mut results: Vec<Node> = self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect();
-
-        // Also catch test methods that CALL into the changed files (one-hop indirect).
-        let q2 = format!(
-            "MATCH (t:Symbol)-[:TESTS]->(:Symbol)-[:CALLS]->(prod:Symbol) \
-             WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
-             ORDER BY t.file, t.name \
-             LIMIT 200"
-        );
-        let indirect: Vec<Node> = self
-            .rows(&q2)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect();
-
-        // Merge, dedup by id.
-        let mut seen = std::collections::HashSet::new();
-        results.retain(|n| seen.insert(n.id.clone()));
-        for n in indirect {
-            if seen.insert(n.id.clone()) {
-                results.push(n);
-            }
-        }
-        results.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
-        Ok(results)
-    }
-
-    async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>> {
-        let lim = limit.clamp(1, 500);
-        let prefix_lit = cstr(file_prefix);
-        // Two fixes over the original (both contract-tested): pattern
-        // predicate instead of the rejected `EXISTS { MATCH … }` form, and
-        // explicit NULL handling — `NOT n.stereotype = 'test'` is three-valued
-        // NULL for nodes without a stereotype, which silently excluded every
-        // unannotated symbol (i.e. almost all of them).
-        let q = format!(
-            "MATCH (n:Symbol) \
-             WHERE n.file STARTS WITH {prefix_lit} \
-               AND n.kind IN ['Method', 'Class', 'Interface'] \
-               AND (n.stereotype IS NULL OR n.stereotype <> 'test') \
-               AND NOT (:Symbol)-[:TESTS]->(n) \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
-             ORDER BY n.file, n.name \
-             LIMIT {lim}"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect())
-    }
-
-    async fn community_graph(&self) -> Result<Vec<CommunityEdge>> {
-        // Count CALLS edges that cross community boundaries. Each unit of weight
-        // represents one caller→callee pair where caller and callee belong to
-        // different communities. Capped at 500 pairs to avoid a mega-result.
-        let q = "MATCH (a:Symbol)-[:MEMBER_OF]->(ca:Symbol), \
-                       (b:Symbol)-[:MEMBER_OF]->(cb:Symbol) \
-                 WHERE ca.kind = 'Community' AND cb.kind = 'Community' \
-                   AND (a)-[:CALLS]->(b) AND ca.id <> cb.id \
-                 RETURN ca.id, cb.id, count(*) AS weight \
-                 LIMIT 500";
-        Ok(self
-            .rows(q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 3)
-            .map(|r| CommunityEdge {
-                src: r[0].clone(),
-                dst: r[1].clone(),
-                weight: r[2].parse().unwrap_or(0),
-            })
-            .collect())
-    }
-}
-
-impl FalkorStore {
     /// Attach `intercepted_by` to traced hops: one batched query for `ADVISES`
     /// edges into the hop methods. Advice wraps calls through the Spring proxy
     /// — it is not a call-graph hop, so it annotates nodes rather than
@@ -1074,6 +1210,7 @@ impl FalkorStore {
 pub(crate) fn assemble_route_flow(
     entry: &NodeId,
     handlers: Vec<(FlowNode, Vec<FlowHop>)>,
+    budget: usize,
 ) -> Vec<FlowHop> {
     let route_name = entry
         .as_str()
@@ -1118,6 +1255,6 @@ pub(crate) fn assemble_route_flow(
             hops.push(hop);
         }
     }
-    hops.truncate(100);
+    hops.truncate(budget);
     hops
 }

@@ -31,7 +31,7 @@ pub use contracts_common::normalize_external_url;
 /// `parse_schema_guard` test in cih-engine fails when parser output changes
 /// without a bump. Starts at 2: the flat pre-versioning cache layout is
 /// implicitly v1 and is pruned on first contact.
-pub const PARSE_CACHE_SCHEMA: u32 = 25;
+pub const PARSE_CACHE_SCHEMA: u32 = 26;
 
 /// Declares all language modules and generates `all_providers()`.
 /// To add a new language: add one line here (plus the implementation files).
@@ -59,6 +59,27 @@ languages! {
     cpp: CppProvider,
     bash: BashProvider,
     elixir: ElixirProvider,
+}
+
+/// [`all_providers`] with the Java provider configured for repo-specific SQL
+/// execution APIs (`[analyze] sql_apis` in `cih.toml` / `--sql-api`).
+pub fn all_providers_with_java_sql_apis(
+    sql_apis: Vec<java::SqlApi>,
+) -> Vec<Box<dyn LanguageProvider>> {
+    if sql_apis.is_empty() {
+        return all_providers();
+    }
+    all_providers()
+        .into_iter()
+        .map(|provider| {
+            if provider.language_id() == "java" {
+                Box::new(java::JavaProvider::with_sql_apis(sql_apis.clone()))
+                    as Box<dyn LanguageProvider>
+            } else {
+                provider
+            }
+        })
+        .collect()
 }
 
 /// Maps a file path to its syntax-highlight language tag via the provider registry.

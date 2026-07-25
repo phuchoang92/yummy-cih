@@ -143,7 +143,7 @@ fn assemble_route_flow_prepends_handler_via_handles_route() {
         )),
     ];
 
-    let hops = assemble_route_flow(&route, vec![(handler, sub)]);
+    let hops = assemble_route_flow(&route, vec![(handler, sub)], 100);
 
     // Root is the route itself: depth 0, no via, kind Route, "Route:" stripped.
     assert_eq!(hops[0].node.id.as_str(), "Route:graphql:MUTATION:signup");
@@ -188,7 +188,7 @@ fn assemble_route_flow_dedups_nodes_shared_across_handlers() {
         calls_hop(fnode("Function:Shared", "shared", 1, Some("Function:H2"))),
     ];
 
-    let hops = assemble_route_flow(&route, vec![(h1, sub1), (h2, sub2)]);
+    let hops = assemble_route_flow(&route, vec![(h1, sub1), (h2, sub2)], 100);
 
     // A downstream node reachable from both handlers is emitted once (first
     // occurrence wins), and no handler root leaks in as a duplicate.

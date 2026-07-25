@@ -12,7 +12,7 @@ use super::{
 use super::metrics::{compute_complexity, java_body_fingerprint};
 use super::structural::{
     build_class_props, class_stereotype, is_bean_method, is_mock_or_injected_field, is_test_method,
-    simple_type_name,
+    is_trivial_accessor, simple_type_name,
 };
 
 pub(super) fn collect_declarations(
@@ -134,6 +134,7 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
     let param_types = param_type_names(node, src);
     let is_test_method = owner.is_test && is_test_method(node, src);
     let is_bean = is_bean_method(node, src);
+    let is_accessor = is_trivial_accessor(node, &name);
 
     let complexity = node
         .child_by_field_name("body")
@@ -150,6 +151,9 @@ fn collect_method(node: TsNode<'_>, src: &str, builder: &mut FileBuilder, owner:
         }
         if is_test_method {
             obj.insert("isTest".into(), serde_json::Value::Bool(true));
+        }
+        if is_accessor {
+            obj.insert("isAccessor".into(), serde_json::Value::Bool(true));
         }
         if let Some(ref rt) = return_type {
             obj.insert("returnType".into(), serde_json::Value::String(rt.clone()));

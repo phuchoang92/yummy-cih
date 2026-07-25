@@ -26,7 +26,11 @@ pub(crate) fn entry_from_analyze(emit: &EmitOutcome, graph_key: &str) -> Registr
             nodes: emit.node_count,
             edges: emit.edge_count,
             files: emit.parsed_file_count,
-            routes: 0, // filled in by discover
+            // Analyze owns the route stat: Route nodes are emitted here, so the
+            // count must never wait for a `discover` run that MCP indexing never
+            // performs (that was the `routes: 0` status bug). Discover still
+            // overwrites it with its richer count when it does run.
+            routes: emit.route_node_count,
             communities: 0,
             processes: 0,
             resolved_edges: emit.resolved_edge_count,
@@ -60,6 +64,7 @@ pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) {
             entry.stats.resolved_edges = prev.stats.resolved_edges;
             entry.stats.unresolved_refs = prev.stats.unresolved_refs;
             entry.stats.callable_coverage = prev.stats.callable_coverage;
+            entry.stats.routes = prev.stats.routes;
         }
     }
     reg.upsert(entry);

@@ -46,6 +46,9 @@ pub struct AnalyzeFlags {
     /// (e.g. CXF `<jaxrs:server>`). Framework-agnostic at the core; the resolver
     /// that owns the framework interprets it.
     pub route_base_path: Option<String>,
+    /// Extra SQL execution APIs (`"Receiver.method"`) the Java parser should treat
+    /// as DbQuery sites (resolved flag > `cih.toml` > home config).
+    pub sql_apis: Vec<String>,
 }
 
 pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -81,6 +84,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
             skip_xml_integration: flags.skip_xml_integration,
             route_base_path: flags.route_base_path.clone(),
             quiet: flags.json,
+            sql_apis: flags.sql_apis.clone(),
         },
     )?;
 
@@ -178,6 +182,7 @@ pub fn run_resolve(
             skip_xml_integration: false,
             route_base_path,
             quiet: json,
+            sql_apis: Vec::new(),
         },
     )?;
 
@@ -230,6 +235,7 @@ pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<Em
             skip_xml_integration: false,
             route_base_path: None,
             quiet: false,
+            sql_apis: Vec::new(),
         },
     )
 }
@@ -260,6 +266,7 @@ pub fn analyze_from_scope(
             skip_xml_integration: false,
             route_base_path: None,
             quiet: false,
+            sql_apis: Vec::new(),
         },
     )
 }
@@ -305,6 +312,7 @@ fn run_graph_augmentation(
     unresolved_external_fqcns: &[String],
     skip_xml_integration: bool,
     resolvers: &cih_resolve::ResolverRegistry,
+    di_wiring: Option<&cih_resolve::di_xml::DiWiring>,
 ) -> (Vec<cih_core::Node>, Vec<cih_core::Edge>) {
     let languages_in_scope = cih_lang::language_ids_for_paths(scope_files);
     let ctx = cih_resolve::AugmentCtx {
@@ -315,6 +323,7 @@ fn run_graph_augmentation(
         languages_in_scope: &languages_in_scope,
         skip_xml_integration,
         resolvers,
+        di_wiring,
     };
     let mut augs = cih_resolve::language_augmentors();
     augs.sort_by_key(|a| a.order());
@@ -441,6 +450,7 @@ pub fn analyze_from_scope_with_options(
             // `None` ("unknown") rather than falsely claiming zero coverage.
             syntactic_callables: 0,
             callable_node_count: 0,
+            route_node_count: 0,
         });
     }
 
@@ -473,6 +483,13 @@ pub fn analyze_from_scope_with_options(
 
     let java_const_resolver = cih_resolve::build_java_constant_resolver(&parse_output.parsed_files);
 
+    // Collect Spring/Blueprint DI XML wiring once, ahead of resolve: the emitter
+    // needs bean id → class for qualifier-aware DI redirect, and the DI augmentor
+    // reuses the same walk afterwards.
+    let di_wiring = (!cache.skip_xml_integration
+        && cih_lang::language_ids_for_paths(&scope_file.files).contains("java"))
+    .then(|| cih_resolve::di_xml::collect_di_wiring(&repo_root));
+
     let mut resolve_output = cih_resolve::resolve_with_registry(
         &parse_output.parsed_files,
         &resolvers,
@@ -480,6 +497,7 @@ pub fn analyze_from_scope_with_options(
             repo_root: Some(&repo_root),
             enable_xml_integrations: !cache.skip_xml_integration,
             constant_resolver: Some(Box::new(java_const_resolver)),
+            di_wiring: di_wiring.as_ref(),
         },
     );
     tracing::info!(
@@ -512,6 +530,7 @@ pub fn analyze_from_scope_with_options(
         &resolve_output.unresolved_external_fqcns,
         cache.skip_xml_integration,
         &resolvers,
+        di_wiring.as_ref(),
     );
 
     let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
@@ -598,6 +617,10 @@ pub fn analyze_from_scope_with_options(
         .iter()
         .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
         .count();
+    let route_node_count = all_nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Route)
+        .count();
     drop(edges);
     drop(std::mem::take(&mut resolve_output.edges));
     drop(std::mem::take(&mut resolve_output.unresolved_refs));
@@ -655,6 +678,7 @@ pub fn analyze_from_scope_with_options(
         cache_stats,
         syntactic_callables,
         callable_node_count,
+        route_node_count,
     })
 }
 
@@ -786,6 +810,10 @@ pub struct AnalyzeCacheOptions {
     /// on stderr — matching `wiki`/`taint`. Display-only: intentionally excluded
     /// from `analyze_config_fingerprint`, so it never affects the no-op cache.
     pub quiet: bool,
+    /// Extra SQL execution APIs (`"Receiver.method"`). Parser output depends on
+    /// these, so they feed both `analyze_config_fingerprint` (no-op gate) and the
+    /// per-file parse-cache namespace (stale-IR guard).
+    pub sql_apis: Vec<String>,
 }
 
 /// Fingerprint of the analyze inputs that affect graph output but are **not** source-file
@@ -806,13 +834,17 @@ fn analyze_config_fingerprint_with(
     parse_schema: u32,
 ) -> String {
     let patterns = cih_patterns::load_patterns(repo_root);
+    let mut sql_apis = cache.sql_apis.clone();
+    sql_apis.sort();
+    sql_apis.dedup();
     let material = format!(
         // Key string kept as `cxf_base_path` deliberately: it's the persisted
         // fingerprint material — renaming it would bust every repo's analyze cache.
-        "cxf_base_path={:?}\nskip_xml_integration={}\nparse_cache_schema={}\npatterns=\n{}",
+        "cxf_base_path={:?}\nskip_xml_integration={}\nparse_cache_schema={}\nsql_apis={:?}\npatterns=\n{}",
         cache.route_base_path,
         cache.skip_xml_integration,
         parse_schema,
+        sql_apis,
         cih_patterns::to_toml(&patterns),
     );
     blake3::hash(material.as_bytes()).to_hex()[..16].to_string()
@@ -885,6 +917,9 @@ pub struct EmitOutcome {
     pub syntactic_callables: u32,
     /// `Function`/`Method` nodes we actually emitted (numerator).
     pub callable_node_count: usize,
+    /// `Route` nodes in the emitted graph — analyze owns the registry route
+    /// stat now (discover may later overwrite it with its richer count).
+    pub route_node_count: usize,
 }
 
 /// Extraction coverage: emitted callable nodes ÷ callables the AST contains.
@@ -1066,6 +1101,7 @@ mod tests {
             skip_xml_integration: false,
             route_base_path: None,
             quiet: false,
+            sql_apis: Vec::new(),
         };
 
         let v1 = analyze_config_fingerprint_with(&dir, &cache, 1);

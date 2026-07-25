@@ -111,6 +111,13 @@ fn process_site(
         (None, None) => return,
     };
 
+    // Heuristic sites (a SQL constant flowing into an arbitrary call) are only
+    // trusted when the resolved text actually reads as SQL — an unresolved or
+    // non-SQL constant would emit a junk DbQuery for e.g. a message constant.
+    if site.heuristic && !cih_core::looks_like_sql(&sql_text) {
+        return;
+    }
+
     let table_accesses = if sql_text.is_empty() {
         Vec::new()
     } else {
@@ -136,7 +143,7 @@ fn process_site(
     let sql_preview = sql_text.chars().take(120).collect::<String>();
     let table_names: Vec<String> = table_accesses.iter().map(|t| t.table.clone()).collect();
 
-    let props = serde_json::json!({
+    let mut props = serde_json::json!({
         "operation": sql_op,
         "primaryAccess": primary_op,
         "sqlPreview": sql_preview,
@@ -144,6 +151,9 @@ fn process_site(
         "tables": table_names,
         "dialect": "oracle-like",
     });
+    if site.heuristic {
+        props["heuristic"] = serde_json::Value::Bool(true);
+    }
     let props = if let Some(name) = &const_name_opt {
         let mut obj = props.as_object().cloned().unwrap_or_default();
         obj.insert(

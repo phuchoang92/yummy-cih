@@ -451,11 +451,12 @@ mod tests {
         let router = crate::transport::mcp::router();
         assert_eq!(
             router.list_all().len(),
-            31,
+            32,
             "tool count changed after the split — a tool was dropped or duplicated"
         );
         for tool in [
             "read_file",
+            "reaches",
             "grep_files",
             "group_contracts",
             "taint_paths",

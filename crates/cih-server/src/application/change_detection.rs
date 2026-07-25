@@ -105,7 +105,7 @@ impl ChangeDetectionService {
 
 fn blocking_error(error: BlockingError) -> AppError {
     AppError::Unavailable {
-        dependency: "blocking runtime",
+        dependency: "change detection",
         message: error.to_string(),
         retryable: true,
     }

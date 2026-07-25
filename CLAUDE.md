@@ -55,8 +55,9 @@ Full: `Kind:fully.qualified.Name` (e.g. `Class:com.acme.OrderService`,
 | One-call orientation (modules + anchors, route groups, entrypoints, wiki pointers) | `architecture_overview` |
 | Symbol context (callers/callees/processes) | `context` |
 | Blast radius of a change | `impact` |
-| End-to-end request/execution chain | `trace_flow` |
+| End-to-end request/execution chain | `trace_flow` (`business_only`/`exclude_kinds` filter plumbing; `max_nodes`+`offset` page; `db_effects` lists table reads/writes) |
 | All HTTP routes (OpenAPI export) | `route_map` |
+| Does X reach Y (symbol or DB table)? | `reaches` (shortest evidence paths with per-edge confidence/provenance) |
 | Keyword/semantic search | `search_code`, `query` |
 | Business keyword → code clusters | `feature_map`, `communities` |
 | Git-aware change impact | `detect_changes` |

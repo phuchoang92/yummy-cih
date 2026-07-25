@@ -147,6 +147,9 @@ pub struct AnalyzeSettings {
     /// Explicit CXF servlet base path (e.g. `/rest`) prepended to `<jaxrs:server>`
     /// route paths. Overrides auto-detection when set.
     pub cxf_base_path: Option<String>,
+    /// Extra SQL execution APIs as `"Receiver.method"` (e.g. `"AuditQueue.enqueue"`) —
+    /// calls to them with a SQL constant/literal argument become DbQuery sites.
+    pub sql_apis: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

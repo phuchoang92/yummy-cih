@@ -88,6 +88,7 @@ fn binding(name: &str, raw: &str, kind: BindingKind, in_fqcn: &str, line: u32) -
         raw_type: raw.into(),
         kind,
         in_fqcn: in_fqcn.into(),
+        qualifier: None,
         range: Range {
             start_line: line,
             ..Range::default()

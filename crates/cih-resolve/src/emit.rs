@@ -10,7 +10,7 @@ use cih_lang::constant_resolver::{ConstantResolver, NullConstantResolver, Resolu
 use crate::contracts::resolve_contract_edges;
 use crate::index::ResolveIndex;
 use crate::inheritance::build_mro_map;
-use crate::lang::{InheritanceModel, ResolverRegistry};
+use crate::lang::{DiSite, InheritanceModel, ResolverRegistry};
 use crate::types::{
     call_name, class_of, is_simple_ident, split_last_dot_outside_parens, starts_uppercase,
 };
@@ -414,28 +414,48 @@ impl<'a> EdgeEmitter<'a> {
         }
 
         if let Some(owner) = self.resolve_receiver_expr_type(pf, site, receiver) {
-            // DI redirect: interface receiver with exactly one @Service impl → use the impl.
-            let effective_owner = if self.index.is_interface_type(&owner) {
-                self.registry
-                    .for_language(lang)
-                    .di_redirect(&owner, &self.index)
-                    .unwrap_or_else(|| owner.clone())
-            } else {
-                owner.clone()
-            };
+            let bare_receiver = !receiver.contains('.') && !receiver.contains('(');
 
-            if let Some(dst) =
-                self.index
-                    .find_member_in_hierarchy(&effective_owner, &site.name, site.arity)
-            {
-                let (confidence, reason) = if effective_owner != owner {
-                    (0.9, "di-resolved")
-                } else if receiver.contains('.') || receiver.contains('(') {
-                    (0.7, "receiver-bound")
+            // DI redirect: interface receiver → the impl the container would inject
+            // (qualifier/bean-id, unique bean, or sole implementor — see di_redirect).
+            if self.index.is_interface_type(&owner) {
+                let enclosing = class_of(&site.in_fqcn).to_string();
+                // A bare identifier receiver is (potentially) an injected field whose
+                // declaration may carry a @Qualifier.
+                let qualifier = if bare_receiver {
+                    self.index
+                        .field_qualifier(&enclosing, receiver)
+                        .map(str::to_string)
                 } else {
-                    (1.0, "receiver-bound")
+                    None
                 };
-                return Some((dst, confidence, reason.to_string()));
+                let di_site = DiSite {
+                    qualifier: qualifier.as_deref(),
+                    enclosing_class: &enclosing,
+                };
+                if let Some(redirect) =
+                    self.registry
+                        .for_language(lang)
+                        .di_redirect(&owner, &di_site, &self.index)
+                {
+                    if let Some(dst) = self.index.find_member_in_hierarchy(
+                        &redirect.target,
+                        &site.name,
+                        site.arity,
+                    ) {
+                        return Some((dst, redirect.confidence, redirect.reason.to_string()));
+                    }
+                }
+                // No (usable) redirect: fall through to the interface method below —
+                // a truthful interface-level edge, never a fabricated impl guess.
+            }
+
+            if let Some(dst) = self
+                .index
+                .find_member_in_hierarchy(&owner, &site.name, site.arity)
+            {
+                let confidence = if bare_receiver { 1.0 } else { 0.7 };
+                return Some((dst, confidence, "receiver-bound".to_string()));
             }
             if owner.contains('.') && !self.index.is_known_type(&owner) {
                 self.unresolved_external_fqcns.insert(owner);
@@ -620,8 +640,9 @@ impl<'a> EdgeEmitter<'a> {
             return;
         }
         let strategy: Option<&str> = match (&kind, reason.as_str()) {
+            (EdgeKind::Calls, "di-qualifier") => Some("di_bean_id"),
             (EdgeKind::Calls, "di-resolved") => Some("di_xml"),
-            (EdgeKind::Calls, "interface_single_impl") => Some("iface_single"),
+            (EdgeKind::Calls, "di-single-impl") => Some("iface_single"),
             (EdgeKind::Calls, "receiver-bound") => Some("type_inferred"),
             (EdgeKind::Calls, "self-receiver") => Some("self_recv"),
             (EdgeKind::Calls, "free-call-fallback") => Some("free_call"),

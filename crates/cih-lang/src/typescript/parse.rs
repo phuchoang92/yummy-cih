@@ -333,6 +333,7 @@ fn walk_lexical_declaration(
                 raw_type: ty,
                 kind: BindingKind::Local,
                 in_fqcn: sig,
+                qualifier: None,
                 range: range_of(declarator),
             });
         }
@@ -596,6 +597,7 @@ fn try_emit_exports_reexport(assign: TsNode<'_>, src: &str, builder: &mut Builde
         raw_type: module,
         kind: BindingKind::ModuleRef,
         in_fqcn: sig,
+        qualifier: None,
         range: range_of(assign),
     });
     true

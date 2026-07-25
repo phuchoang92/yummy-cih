@@ -8,13 +8,14 @@ use super::super::CihServer;
 use crate::application::change_detection::DetectChangesCommand;
 use crate::application::graph::{
     CommunitiesCommand, ComplexityHotspotsCommand, ContextCommand, DetectChangesForRepoCommand,
-    FindDuplicatesCommand, ImpactCommand, RouteMapCommand, SymbolQueryOutput, TraceFlowCommand,
+    FindDuplicatesCommand, ImpactCommand, ReachesCommand, RouteMapCommand, SymbolQueryOutput,
+    TraceFlowCommand,
 };
 use crate::ports::changed_files_source::ChangeScope;
 use crate::transport::mcp::args::{
     CommunitiesArgs, CommunitiesFormat, ComplexityHotspotsArgs, ContextArgs, DetectChangesArgs,
-    DiffScope, FindDuplicatesArgs, ImpactArgs, ImpactFormat, RouteMapArgs, RouteMapFormat,
-    TraceFlowArgs, TraceFlowFormat,
+    DiffScope, FindDuplicatesArgs, ImpactArgs, ImpactFormat, ReachesArgs, RouteMapArgs,
+    RouteMapFormat, TraceFlowArgs, TraceFlowFormat,
 };
 use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi};
 
@@ -175,14 +176,61 @@ impl CihServer {
                     args.max_depth
                 })
                 .clamp(1, 10),
+                exclude_kinds: args.exclude_kinds,
+                business_only: args.business_only,
+                max_nodes: (if args.max_nodes == 0 {
+                    100
+                } else {
+                    args.max_nodes
+                })
+                .clamp(1, 500) as usize,
+                offset: args.offset as usize,
             })
             .await
             .map_err(app_error_to_mcp)?;
         if format == TraceFlowFormat::Mermaid {
             if let SymbolQueryOutput::Resolved(flow) = &output {
-                return text_result(render_mermaid_flow(&flow.entry_point, &flow.steps));
+                let mut rendered = render_mermaid_flow(&flow.entry_point, &flow.steps);
+                if let Some(next) = flow.next_offset {
+                    rendered.push_str(&format!("\n%% truncated — continue with offset={next}"));
+                }
+                return text_result(rendered);
             }
         }
+        json_result(&output)
+    }
+
+    #[tool(
+        description = "Answer 'does X reach Y?': shortest evidence paths from an entry symbol \
+            to a target symbol or database table, across call, route, messaging, and SQL edges. \
+            Example: from=`confirmChangePassword`, to=`AUDIT_LOG` proves (or refutes) that the \
+            handler eventually writes the table, with per-edge confidence and provenance."
+    )]
+    async fn reaches(
+        &self,
+        Parameters(args): Parameters<ReachesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let output = self
+            .graph_queries()
+            .reaches(ReachesCommand {
+                repo: args.repo,
+                from: args.from,
+                to: args.to,
+                max_depth: (if args.max_depth == 0 {
+                    8
+                } else {
+                    args.max_depth
+                })
+                .clamp(1, 12),
+                max_paths: (if args.max_paths == 0 {
+                    3
+                } else {
+                    args.max_paths
+                })
+                .clamp(1, 10) as usize,
+            })
+            .await
+            .map_err(app_error_to_mcp)?;
         json_result(&output)
     }
 

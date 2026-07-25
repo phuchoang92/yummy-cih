@@ -115,9 +115,10 @@ impl GraphBrowserService {
     ) -> Result<BrowserFlow, AppError> {
         let hops = self
             .store
-            .flow_downstream(entry_id, depth)
+            .flow_downstream(entry_id, &cih_graph_store::FlowFilter::depth(depth))
             .await
-            .map_err(graph_error)?;
+            .map_err(graph_error)?
+            .hops;
         let entry_node = self.store.get_node(entry_id).await.map_err(graph_error)?;
         Ok(BrowserFlow { entry_node, hops })
     }

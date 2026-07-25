@@ -31,12 +31,49 @@ pub fn make_parser() -> Parser {
     parser
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct JavaProvider;
+/// A configured SQL execution API: a `Receiver.method` pair the analyzer should
+/// treat like `DBUtil.executeQuery` (repo-specific DAO/queue wrappers).
+/// `receiver` matches either the receiver expression text (static-call style,
+/// `AuditQueue.enqueue(...)`) or the receiver's declared type
+/// (`auditQueue.enqueue(...)` where `auditQueue: AuditQueue`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqlApi {
+    pub receiver: String,
+    pub method: String,
+}
+
+impl SqlApi {
+    /// Parse a `"Receiver.method"` spec (as written in `cih.toml` / `--sql-api`).
+    pub fn parse(spec: &str) -> Option<Self> {
+        let (receiver, method) = spec.trim().rsplit_once('.')?;
+        if receiver.is_empty() || method.is_empty() {
+            return None;
+        }
+        Some(Self {
+            receiver: receiver.to_string(),
+            method: method.to_string(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JavaProvider {
+    /// Extra SQL execution APIs from repo config (`[analyze] sql_apis`).
+    sql_apis: Vec<SqlApi>,
+}
 
 impl JavaProvider {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// A provider that also recognizes the given APIs as SQL execution sites.
+    pub fn with_sql_apis(sql_apis: Vec<SqlApi>) -> Self {
+        Self { sql_apis }
+    }
+
+    pub(crate) fn sql_apis(&self) -> &[SqlApi] {
+        &self.sql_apis
     }
 
     pub fn parse(&self, src: &str) -> Option<tree_sitter::Tree> {

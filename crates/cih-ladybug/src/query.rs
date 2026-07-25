@@ -11,15 +11,16 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use cih_graph_store::{
-    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge, FlowHop,
-    FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError,
-    GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice, KindCount, LoadObserver,
-    LoadStats, NoopObserver, Path, Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction, FlowEdge,
+    FlowFilter, FlowHop, FlowNode, FlowPage, GraphOverview, GraphOverviewEdge, GraphOverviewNode,
+    GraphStore, GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice,
+    KindCount, LoadObserver, LoadStats, NoopObserver, Path, PathEdge, PathInfo, Result, RouteInfo,
+    SimilarMethod, Subgraph, SymbolContext,
 };
 use lbug::{Connection, Value};
 
 use crate::convert::{
-    cell_f64, cell_opt_str, cell_str, cell_u64, cstr, node_from_row, recursive_rel,
+    cell_f64, cell_opt_str, cell_str, cell_u64, cstr, node_from_row, recursive_path, recursive_rel,
 };
 use crate::{run_blocking, LadybugStore};
 
@@ -67,7 +68,11 @@ fn flow_node_from_row(r: &[Value], depth: u32) -> FlowNode {
 /// Assemble a route-entry flow: route at depth 0, handlers at depth 1 via
 /// HANDLES_ROUTE, downstream shifted one level, deduped by id, capped at 100.
 /// (Verbatim port of the reference implementation.)
-fn assemble_route_flow(entry: &NodeId, handlers: Vec<(FlowNode, Vec<FlowHop>)>) -> Vec<FlowHop> {
+fn assemble_route_flow(
+    entry: &NodeId,
+    handlers: Vec<(FlowNode, Vec<FlowHop>)>,
+    budget: usize,
+) -> Vec<FlowHop> {
     let route_name = entry
         .as_str()
         .strip_prefix("Route:")
@@ -109,7 +114,7 @@ fn assemble_route_flow(entry: &NodeId, handlers: Vec<(FlowNode, Vec<FlowHop>)>) 
             hops.push(hop);
         }
     }
-    hops.truncate(100);
+    hops.truncate(budget);
     hops
 }
 
@@ -141,7 +146,7 @@ impl LadybugStore {
         };
         let q = format!(
             "MATCH (n:Symbol {{id: {id}}}){arrow}(m:Symbol) \
-             RETURN DISTINCT m.id, m.kind, m.name, m.qn, m.file LIMIT 100",
+             RETURN DISTINCT m.id, m.kind, m.name, m.qn, m.file, m.sl, m.el LIMIT 100",
             id = cstr(id.as_str())
         );
         let out = self
@@ -297,7 +302,7 @@ impl GraphStore for LadybugStore {
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
         let q = format!(
             "MATCH (n:Symbol {{id: {id}}}) \
-             RETURN n.id, n.kind, n.name, n.qn, n.file LIMIT 1",
+             RETURN n.id, n.kind, n.name, n.qn, n.file, n.sl, n.el LIMIT 1",
             id = cstr(id.as_str())
         );
         let out = self
@@ -422,6 +427,60 @@ impl GraphStore for LadybugStore {
             .collect())
     }
 
+    async fn paths_between(
+        &self,
+        from: &NodeId,
+        to: &NodeId,
+        max_depth: u32,
+        max_paths: usize,
+    ) -> Result<Vec<PathInfo>> {
+        let d = max_depth.clamp(1, 12);
+        let k = max_paths.clamp(1, 10);
+        let q = format!(
+            "MATCH (a:Symbol {{id: {from}}})\
+             -[e:CALLS|:HANDLES_ROUTE|:EXTERNAL_CALL|:PUBLISHES_EVENT|:LISTENS_TO\
+             |:EXECUTES_QUERY|:READS_TABLE|:WRITES_TABLE*1..{d}]->\
+             (b:Symbol {{id: {to}}}) \
+             RETURN e LIMIT {k}",
+            from = cstr(from.as_str()),
+            to = cstr(to.as_str())
+        );
+        let (from_id, to_id) = (from.clone(), to.clone());
+        let out = self
+            .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
+            .await?;
+        Ok(out
+            .iter()
+            .filter_map(|r| {
+                let (interior, rels) = recursive_path(r.first()?)?;
+                let mut nodes = vec![from_id.clone()];
+                nodes.extend(interior.into_iter().map(NodeId::new));
+                nodes.push(to_id.clone());
+                let edges: Vec<PathEdge> = rels
+                    .into_iter()
+                    .map(|(kind, confidence, reason)| PathEdge {
+                        kind,
+                        confidence,
+                        reason,
+                    })
+                    .collect();
+                let min_confidence = edges
+                    .iter()
+                    .map(|e| e.confidence)
+                    .fold(f32::INFINITY, f32::min);
+                Some(PathInfo {
+                    nodes,
+                    edges,
+                    min_confidence: if min_confidence.is_finite() {
+                        min_confidence
+                    } else {
+                        0.0
+                    },
+                })
+            })
+            .collect())
+    }
+
     async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -432,7 +491,7 @@ impl GraphStore for LadybugStore {
             }
             let q = format!(
                 "MATCH (n:Symbol {{id: {id}}})-[e*1..{r}]-(m:Symbol) \
-                 RETURN DISTINCT m.id, m.kind, m.name, m.qn, m.file LIMIT 200",
+                 RETURN DISTINCT m.id, m.kind, m.name, m.qn, m.file, m.sl, m.el LIMIT 200",
                 id = cstr(seed.as_str())
             );
             let out = self
@@ -518,13 +577,13 @@ impl GraphStore for LadybugStore {
                 "MATCH (n:Symbol) WHERE n.kind IN [{kind_literals}] \
                  OPTIONAL MATCH (n)-[r]-(:Symbol) \
                  WITH n, count(r) AS degree ORDER BY degree DESC, n.id ASC LIMIT {max_nodes} \
-                 RETURN n.id, n.kind, n.name, n.qn, n.file, degree"
+                 RETURN n.id, n.kind, n.name, n.qn, n.file, n.sl, n.el, degree"
             );
             let out = self
                 .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
                 .await?;
-            for r in out.iter().filter(|r| r.len() >= 6) {
-                push_row(&mut nodes, &mut selected, r, cell_u64(&r[5]));
+            for r in out.iter().filter(|r| r.len() >= 8) {
+                push_row(&mut nodes, &mut selected, r, cell_u64(&r[7]));
             }
         } else {
             let structural = "['Community','Process','Route','IntegrationRoute',\
@@ -532,7 +591,7 @@ impl GraphStore for LadybugStore {
             let pass1_limit = max_nodes.min(2_000);
             let q1 = format!(
                 "MATCH (n:Symbol) WHERE n.kind IN {structural} \
-                 RETURN n.id, n.kind, n.name, n.qn, n.file LIMIT {pass1_limit}"
+                 RETURN n.id, n.kind, n.name, n.qn, n.file, n.sl, n.el LIMIT {pass1_limit}"
             );
             let out = self
                 .with_read_conn(Vec::new(), move |conn| rows(conn, &q1))
@@ -546,13 +605,13 @@ impl GraphStore for LadybugStore {
                     "MATCH (n:Symbol) WHERE n.kind IN ['Class','Interface','Enum','Record'] \
                      OPTIONAL MATCH (n)-[r]-(:Symbol) \
                      WITH n, count(r) AS degree ORDER BY degree DESC, n.id ASC LIMIT {remaining} \
-                     RETURN n.id, n.kind, n.name, n.qn, n.file, degree"
+                     RETURN n.id, n.kind, n.name, n.qn, n.file, n.sl, n.el, degree"
                 );
                 let out = self
                     .with_read_conn(Vec::new(), move |conn| rows(conn, &q2))
                     .await?;
-                for r in out.iter().filter(|r| r.len() >= 6) {
-                    push_row(&mut nodes, &mut selected, r, cell_u64(&r[5]));
+                for r in out.iter().filter(|r| r.len() >= 8) {
+                    push_row(&mut nodes, &mut selected, r, cell_u64(&r[7]));
                 }
             }
         }
@@ -690,7 +749,7 @@ impl GraphStore for LadybugStore {
         let lim = limit.clamp(1, 50);
         let q = format!(
             "MATCH (n:Symbol) WHERE n.name = {name} \
-             RETURN n.id, n.kind, n.name, n.qn, n.file ORDER BY n.id LIMIT {lim}",
+             RETURN n.id, n.kind, n.name, n.qn, n.file, n.sl, n.el ORDER BY n.id LIMIT {lim}",
             name = cstr(name)
         );
         let out = self
@@ -710,7 +769,7 @@ impl GraphStore for LadybugStore {
         let q = format!(
             "MATCH (n:Symbol) WHERE n.file IN {list} \
                AND n.kind IN ['Method', 'Constructor', 'Function', 'Class', 'Interface', 'Enum'] \
-             RETURN n.id, n.kind, n.name, n.qn, n.file ORDER BY n.file, n.id"
+             RETURN n.id, n.kind, n.name, n.qn, n.file, n.sl, n.el ORDER BY n.file, n.id"
         );
         let out = self
             .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
@@ -744,140 +803,61 @@ impl GraphStore for LadybugStore {
             .collect())
     }
 
-    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowHop>> {
-        let d = max_depth.clamp(1, 10);
-
-        // Route entry: hop route→handler via inverse HANDLES_ROUTE first.
-        let handlers = self.route_handler_nodes(entry).await?;
-        if !handlers.is_empty() {
-            let mut with_downstream = Vec::with_capacity(handlers.len());
-            for handler in handlers {
-                let sub = self.flow_downstream(&handler.id, d).await?;
-                with_downstream.push((handler, sub));
-            }
-            let mut hops = assemble_route_flow(entry, with_downstream);
-            self.annotate_interceptions(&mut hops).await?;
-            return Ok(hops);
+    async fn db_effects_for_methods(&self, ids: &[NodeId]) -> Result<Vec<DbEffect>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
         }
-
-        // One shortest path per reachable node; depth, parent, and the
-        // incoming hop kind all come from the RecursiveRel value.
-        let q = format!(
-            "MATCH (start:Symbol {{id: {id}}})\
-             -[e:CALLS|:HANDLES_ROUTE|:EXTERNAL_CALL|:PUBLISHES_EVENT|:LISTENS_TO* SHORTEST 1..{d}]->\
-             (m:Symbol) \
-             RETURN m.id, m.kind, m.name, m.qn, m.file, e LIMIT 100",
-            id = cstr(entry.as_str())
+        let list = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| cstr(id.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
-        let root = entry.as_str().to_string();
+        // `operation`/`sqlPreview` live inside the DbQuery's serialized `props`
+        // JSON (not promoted columns) — parse client-side.
+        let q = format!(
+            "MATCH (m:Symbol)-[:EXECUTES_QUERY]->(q:Symbol)-[r:READS_TABLE|:WRITES_TABLE]->(t:Symbol) \
+             WHERE m.id IN {list} \
+             RETURN m.id, q.id, coalesce(q.props, ''), t.name, label(r) \
+             ORDER BY m.id, t.name"
+        );
         let out = self
             .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
             .await?;
-
-        struct Reached {
-            node: FlowNode,
-            etype: String,
-        }
-        let mut reached: Vec<Reached> = out
-            .iter()
-            .filter(|r| r.len() >= 6)
-            .filter_map(|r| {
-                let (depth, interior, labels) = recursive_rel(&r[5])?;
-                let parent = interior.last().cloned().unwrap_or_else(|| root.clone());
-                let mut node = flow_node_from_row(r, depth);
-                node.parent_id = Some(NodeId::new(parent));
-                Some(Reached {
-                    node,
-                    etype: labels.last().cloned().unwrap_or_else(|| "CALLS".into()),
-                })
+        Ok(out
+            .into_iter()
+            .filter(|r| r.len() >= 5)
+            .map(|r| {
+                DbEffect::from_query_row(
+                    NodeId::new(cell_str(&r[0])),
+                    NodeId::new(cell_str(&r[1])),
+                    &cell_str(&r[2]),
+                    cell_str(&r[3]),
+                    &cell_str(&r[4]),
+                )
             })
-            .collect();
-        reached.sort_by(|a, b| {
-            a.node
-                .depth
-                .cmp(&b.node.depth)
-                .then_with(|| a.node.name.cmp(&b.node.name))
-        });
-        reached.truncate(100);
+            .collect())
+    }
 
-        // Batch-fetch CALLS call-site args per (parent, child) pair.
-        let pairs: Vec<(String, String)> = reached
-            .iter()
-            .filter_map(|hop| {
-                hop.node
-                    .parent_id
-                    .as_ref()
-                    .map(|p| (p.as_str().to_string(), hop.node.id.as_str().to_string()))
-            })
-            .collect();
-        let mut call_sites_map: HashMap<(String, String), Vec<CallSiteArgs>> = HashMap::new();
-        if !pairs.is_empty() {
-            let pair_list = pairs
-                .iter()
-                .map(|(s, dst)| format!("[{}, {}]", cstr(s), cstr(dst)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            // List indexing is 1-based in this dialect: pair[1] = src.
-            let eq = format!(
-                "UNWIND [{pair_list}] AS pair \
-                 MATCH (a:Symbol)-[r:CALLS]->(b:Symbol) \
-                 WHERE a.id = pair[1] AND b.id = pair[2] \
-                 RETURN a.id, b.id, r.callSites"
-            );
-            if let Ok(edge_rows) = self
-                .with_read_conn(Vec::new(), move |conn| rows(conn, &eq))
-                .await
-            {
-                for row in edge_rows.iter().filter(|r| r.len() >= 3) {
-                    let cs_json = cell_str(&row[2]);
-                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&cs_json) {
-                        let call_sites: Vec<CallSiteArgs> = arr
-                            .iter()
-                            .filter_map(|v| {
-                                let args = v.get("args")?.as_array()?;
-                                Some(CallSiteArgs {
-                                    args: args
-                                        .iter()
-                                        .filter_map(|a| a.as_str().map(|s| s.to_string()))
-                                        .collect(),
-                                })
-                            })
-                            .collect();
-                        call_sites_map.insert((cell_str(&row[0]), cell_str(&row[1])), call_sites);
-                    }
-                }
+    async fn flow_downstream(&self, entry: &NodeId, filter: &FlowFilter) -> Result<FlowPage> {
+        let d = filter.max_depth.clamp(1, 10);
+
+        // Route entry: hop route→handler via inverse HANDLES_ROUTE first. The
+        // page is sliced once, after assembly.
+        let handlers = self.route_handler_nodes(entry).await?;
+        let mut hops = if !handlers.is_empty() {
+            let mut with_downstream = Vec::with_capacity(handlers.len());
+            for handler in handlers {
+                let sub = self.direct_flow_hops(&handler.id, d, filter).await?;
+                with_downstream.push((handler, sub));
             }
-        }
-
-        let entry_node = FlowNode {
-            id: entry.clone(),
-            kind: NodeKind::Method,
-            name: entry.as_str().rsplit('#').next().unwrap_or("").to_string(),
-            qualified_name: None,
-            file: String::new(),
-            depth: 0,
-            parent_id: None,
-            intercepted_by: Vec::new(),
+            assemble_route_flow(entry, with_downstream, filter.budget())
+        } else {
+            self.direct_flow_hops(entry, d, filter).await?
         };
-        let mut hops: Vec<FlowHop> = vec![FlowHop {
-            node: entry_node,
-            via: None,
-        }];
-        for r in reached {
-            let via = r.node.parent_id.as_ref().map(|parent_id| {
-                let key = (
-                    parent_id.as_str().to_string(),
-                    r.node.id.as_str().to_string(),
-                );
-                FlowEdge {
-                    kind: r.etype.clone(),
-                    call_sites: call_sites_map.remove(&key).unwrap_or_default(),
-                }
-            });
-            hops.push(FlowHop { node: r.node, via });
-        }
         self.annotate_interceptions(&mut hops).await?;
-        Ok(hops)
+        Ok(filter.paginate(hops))
     }
 
     async fn complexity_hotspots(
@@ -989,7 +969,7 @@ impl GraphStore for LadybugStore {
                       MATCH (owner:Symbol)-[:HAS_METHOD]->(target2:Symbol) \
                       WHERE target2.id = {id_lit} AND owner.id = target.id \
                    }} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qn, t.file \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qn, t.file, t.sl, t.el \
              ORDER BY t.file, t.name LIMIT 50"
         );
         let out = self
@@ -1008,13 +988,13 @@ impl GraphStore for LadybugStore {
         );
         let q1 = format!(
             "MATCH (t:Symbol)-[:TESTS]->(prod:Symbol) WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qn, t.file \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qn, t.file, t.sl, t.el \
              ORDER BY t.file, t.name LIMIT 200"
         );
         let q2 = format!(
             "MATCH (t:Symbol)-[:TESTS]->(:Symbol)-[:CALLS]->(prod:Symbol) \
              WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qn, t.file \
+             RETURN DISTINCT t.id, t.kind, t.name, t.qn, t.file, t.sl, t.el \
              ORDER BY t.file, t.name LIMIT 200"
         );
         let direct = self
@@ -1079,6 +1059,154 @@ impl GraphStore for LadybugStore {
 }
 
 impl LadybugStore {
+    /// The direct (non-route) walk: one shortest path per reachable node with
+    /// kind/accessor exclusions applied in Cypher, materializing at most
+    /// `filter.budget()` rows. Returns root + reached hops, unsliced.
+    async fn direct_flow_hops(
+        &self,
+        entry: &NodeId,
+        d: u32,
+        filter: &FlowFilter,
+    ) -> Result<Vec<FlowHop>> {
+        let mut exclusions = String::new();
+        if !filter.exclude_kinds.is_empty() {
+            let labels = filter
+                .exclude_kinds
+                .iter()
+                .map(|k| cstr(k.label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            exclusions.push_str(&format!(" WHERE NOT m.kind IN [{labels}]"));
+        }
+        if filter.exclude_accessors {
+            // Promoted as 1/NULL (INT64 column).
+            exclusions.push_str(if exclusions.is_empty() {
+                " WHERE"
+            } else {
+                " AND"
+            });
+            exclusions.push_str(" coalesce(m.isAccessor, 0) <> 1");
+        }
+        // One shortest path per reachable node; depth, parent, and the
+        // incoming hop kind all come from the RecursiveRel value.
+        let q = format!(
+            "MATCH (start:Symbol {{id: {id}}})\
+             -[e:CALLS|:HANDLES_ROUTE|:EXTERNAL_CALL|:PUBLISHES_EVENT|:LISTENS_TO* SHORTEST 1..{d}]->\
+             (m:Symbol){exclusions} \
+             RETURN m.id, m.kind, m.name, m.qn, m.file, e LIMIT {budget}",
+            id = cstr(entry.as_str()),
+            budget = filter.budget()
+        );
+        let root = entry.as_str().to_string();
+        let out = self
+            .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
+            .await?;
+
+        struct Reached {
+            node: FlowNode,
+            etype: String,
+        }
+        let mut reached: Vec<Reached> = out
+            .iter()
+            .filter(|r| r.len() >= 6)
+            .filter_map(|r| {
+                let (depth, interior, labels) = recursive_rel(&r[5])?;
+                let parent = interior.last().cloned().unwrap_or_else(|| root.clone());
+                let mut node = flow_node_from_row(r, depth);
+                node.parent_id = Some(NodeId::new(parent));
+                Some(Reached {
+                    node,
+                    etype: labels.last().cloned().unwrap_or_else(|| "CALLS".into()),
+                })
+            })
+            .collect();
+        reached.sort_by(|a, b| {
+            a.node
+                .depth
+                .cmp(&b.node.depth)
+                .then_with(|| a.node.name.cmp(&b.node.name))
+        });
+        reached.truncate(filter.budget());
+
+        // Batch-fetch CALLS call-site args per (parent, child) pair.
+        let pairs: Vec<(String, String)> = reached
+            .iter()
+            .filter_map(|hop| {
+                hop.node
+                    .parent_id
+                    .as_ref()
+                    .map(|p| (p.as_str().to_string(), hop.node.id.as_str().to_string()))
+            })
+            .collect();
+        let mut call_sites_map: HashMap<(String, String), Vec<CallSiteArgs>> = HashMap::new();
+        if !pairs.is_empty() {
+            let pair_list = pairs
+                .iter()
+                .map(|(s, dst)| format!("[{}, {}]", cstr(s), cstr(dst)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // List indexing is 1-based in this dialect: pair[1] = src.
+            let eq = format!(
+                "UNWIND [{pair_list}] AS pair \
+                 MATCH (a:Symbol)-[r:CALLS]->(b:Symbol) \
+                 WHERE a.id = pair[1] AND b.id = pair[2] \
+                 RETURN a.id, b.id, r.callSites"
+            );
+            if let Ok(edge_rows) = self
+                .with_read_conn(Vec::new(), move |conn| rows(conn, &eq))
+                .await
+            {
+                for row in edge_rows.iter().filter(|r| r.len() >= 3) {
+                    let cs_json = cell_str(&row[2]);
+                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&cs_json) {
+                        let call_sites: Vec<CallSiteArgs> = arr
+                            .iter()
+                            .filter_map(|v| {
+                                let args = v.get("args")?.as_array()?;
+                                Some(CallSiteArgs {
+                                    args: args
+                                        .iter()
+                                        .filter_map(|a| a.as_str().map(|s| s.to_string()))
+                                        .collect(),
+                                })
+                            })
+                            .collect();
+                        call_sites_map.insert((cell_str(&row[0]), cell_str(&row[1])), call_sites);
+                    }
+                }
+            }
+        }
+
+        let entry_node = FlowNode {
+            id: entry.clone(),
+            kind: NodeKind::Method,
+            name: entry.as_str().rsplit('#').next().unwrap_or("").to_string(),
+            qualified_name: None,
+            file: String::new(),
+            depth: 0,
+            parent_id: None,
+            intercepted_by: Vec::new(),
+        };
+        let mut hops: Vec<FlowHop> = vec![FlowHop {
+            node: entry_node,
+            via: None,
+        }];
+        for r in reached {
+            let via = r.node.parent_id.as_ref().map(|parent_id| {
+                let key = (
+                    parent_id.as_str().to_string(),
+                    r.node.id.as_str().to_string(),
+                );
+                FlowEdge {
+                    kind: r.etype.clone(),
+                    call_sites: call_sites_map.remove(&key).unwrap_or_default(),
+                }
+            });
+            hops.push(FlowHop { node: r.node, via });
+        }
+        Ok(hops)
+    }
+
     /// Attach `intercepted_by` to traced hops via one batched `ADVISES` query
     /// (dialect port of the reference in `cih-falkor/src/query.rs` — advice
     /// annotates nodes instead of extending the path). Idempotent on hops

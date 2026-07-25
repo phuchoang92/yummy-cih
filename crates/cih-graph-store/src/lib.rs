@@ -70,6 +70,27 @@ pub struct Path {
     pub nodes: Vec<NodeId>,
 }
 
+/// One edge along a [`PathInfo`], with resolution provenance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PathEdge {
+    /// Edge kind label (`CALLS`, `EXECUTES_QUERY`, `WRITES_TABLE`, …).
+    pub kind: String,
+    pub confidence: f32,
+    /// Resolution reason (`di-qualifier`, `receiver-bound`, `sql-scan`, …).
+    pub reason: String,
+}
+
+/// A start→target path across call and side-effect edges, answering
+/// "does X reach Y?" with evidence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PathInfo {
+    /// Every node along the path, endpoints included.
+    pub nodes: Vec<NodeId>,
+    pub edges: Vec<PathEdge>,
+    /// The weakest edge's confidence — the path is only as trustworthy as that.
+    pub min_confidence: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Subgraph {
     pub nodes: Vec<Node>,
@@ -145,6 +166,126 @@ pub struct InterceptingAdvice {
     pub advice: NodeId,
     /// `around` / `before` / `after` / `after_returning` / `after_throwing`.
     pub advice_kind: String,
+}
+
+/// A database effect of a traced method: the DbQuery it executes and one table
+/// that query touches. A method executing two queries (or one query touching two
+/// tables) yields one entry per (query, table) pair.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DbEffect {
+    /// The method/constructor executing the query.
+    pub method: NodeId,
+    /// The DbQuery node.
+    pub query: NodeId,
+    /// SQL operation (`SELECT`/`INSERT`/`UPDATE`/`DELETE`/…, `UNKNOWN` when undetected).
+    pub operation: String,
+    /// Table name.
+    pub table: String,
+    /// `READ` or `WRITE`.
+    pub access: String,
+    /// Truncated SQL text for display.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sql_preview: String,
+}
+
+impl DbEffect {
+    /// Build from a raw adapter row: the DbQuery's serialized `props` JSON (source
+    /// of `operation`/`sqlPreview` — they are not promoted graph properties) and
+    /// the relationship label (`WRITES_TABLE` / `READS_TABLE`).
+    pub fn from_query_row(
+        method: NodeId,
+        query: NodeId,
+        props_json: &str,
+        table: String,
+        rel_label: &str,
+    ) -> Self {
+        let props: serde_json::Value =
+            serde_json::from_str(props_json).unwrap_or(serde_json::Value::Null);
+        let str_prop = |key: &str, default: &str| {
+            props
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or(default)
+                .to_string()
+        };
+        Self {
+            method,
+            query,
+            operation: str_prop("operation", "UNKNOWN"),
+            sql_preview: str_prop("sqlPreview", ""),
+            table,
+            access: if rel_label == "WRITES_TABLE" {
+                "WRITE"
+            } else {
+                "READ"
+            }
+            .to_string(),
+        }
+    }
+}
+
+/// Node and paging filter for [`GraphStore::flow_downstream`].
+#[derive(Clone, Debug, Default)]
+pub struct FlowFilter {
+    /// Maximum traversal depth (adapters clamp to 1..=10; 0 = adapter default).
+    pub max_depth: u32,
+    /// Node kinds hidden from the reported hops. Paths still traverse hidden
+    /// nodes, so a visible hop may name a hidden parent.
+    pub exclude_kinds: Vec<NodeKind>,
+    /// Hide trivial accessors (`isAccessor` promoted prop). No-op on graphs
+    /// loaded before the prop existed.
+    pub exclude_accessors: bool,
+    /// Page size; 0 = default (100).
+    pub limit: usize,
+    /// Hops to skip — the continuation offset from a prior page.
+    pub offset: usize,
+}
+
+impl FlowFilter {
+    /// Depth-only filter: everything included, first page, default size.
+    pub fn depth(max_depth: u32) -> Self {
+        Self {
+            max_depth,
+            ..Self::default()
+        }
+    }
+
+    /// Effective page size (0 → 100).
+    pub fn effective_limit(&self) -> usize {
+        if self.limit == 0 {
+            100
+        } else {
+            self.limit
+        }
+    }
+
+    /// Rows an adapter must materialize before slicing: everything up to the
+    /// end of the requested page, plus one row to answer `has_more` honestly.
+    pub fn budget(&self) -> usize {
+        self.offset + self.effective_limit() + 1
+    }
+
+    /// Slice an assembled, ordered hop list into the requested page.
+    pub fn paginate(&self, mut hops: Vec<FlowHop>) -> FlowPage {
+        let end = self.offset + self.effective_limit();
+        let has_more = hops.len() > end;
+        hops.truncate(end.min(hops.len()));
+        let hops = if self.offset >= hops.len() {
+            Vec::new()
+        } else {
+            hops.split_off(self.offset)
+        };
+        FlowPage { hops, has_more }
+    }
+}
+
+/// One page of a trace_flow walk.
+#[derive(Clone, Debug)]
+pub struct FlowPage {
+    pub hops: Vec<FlowHop>,
+    /// True when hops beyond this page exist (fetch the next page via
+    /// `offset + hops.len()`).
+    pub has_more: bool,
 }
 
 /// One step in a trace_flow result: the symbol reached, and the edge used to reach it.
@@ -290,9 +431,27 @@ pub trait GraphStore: Send + Sync {
 
     /// Trace the downstream execution chain from an entry point.
     /// Traverses CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT, LISTENS_TO edges.
-    /// Returns all reachable hops ordered by minimum depth, capped at 100.
+    /// Returns one page of reachable hops ordered by minimum depth, filtered and
+    /// sliced per `filter` (kind/accessor exclusion, offset/limit continuation).
     /// Each hop carries the edge used to reach it (with call-site args if available).
-    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowHop>>;
+    async fn flow_downstream(&self, entry: &NodeId, filter: &FlowFilter) -> Result<FlowPage>;
+
+    /// Database effects of the given methods: every `(method)-[:EXECUTES_QUERY]->
+    /// (DbQuery)-[:READS_TABLE|WRITES_TABLE]->(DbTable)` chain, one entry per
+    /// (method, query, table). Used to surface table reads/writes on traces.
+    async fn db_effects_for_methods(&self, ids: &[NodeId]) -> Result<Vec<DbEffect>>;
+
+    /// Shortest directed paths from `from` to `to` over execution and
+    /// side-effect edges (CALLS, HANDLES_ROUTE, EXTERNAL_CALL, PUBLISHES_EVENT,
+    /// LISTENS_TO, EXECUTES_QUERY, READS_TABLE, WRITES_TABLE), each with
+    /// per-edge provenance. Powers "does X reach a write to table Y?".
+    async fn paths_between(
+        &self,
+        from: &NodeId,
+        to: &NodeId,
+        max_depth: u32,
+        max_paths: usize,
+    ) -> Result<Vec<PathInfo>>;
 
     /// Return methods with complexity above the given thresholds (Gap 1).
     /// `min_transitive_loop` defaults to 1 if None.

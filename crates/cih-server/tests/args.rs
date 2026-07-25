@@ -1,7 +1,7 @@
 use cih_graph_store::Direction;
 use cih_server::args::{
     DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs, ImpactFormat,
-    RegressionScopeArgs, RouteMapArgs, RouteMapFormat, TraceFlowArgs, TraceFlowFormat,
+    ReachesArgs, RegressionScopeArgs, RouteMapArgs, RouteMapFormat, TraceFlowArgs, TraceFlowFormat,
     UntestedPathsArgs,
 };
 
@@ -61,6 +61,23 @@ fn trace_flow_args_defaults() {
     assert_eq!(args.entry_point, "Route:GET /");
     assert_eq!(args.max_depth, 0);
     assert_eq!(args.format, TraceFlowFormat::Json);
+    assert!(args.exclude_kinds.is_empty());
+    assert!(!args.business_only);
+    assert_eq!(args.max_nodes, 0);
+    assert_eq!(args.offset, 0);
+}
+
+#[test]
+fn trace_flow_args_accepts_filters_and_paging() {
+    let args: TraceFlowArgs = serde_json::from_str(
+        r#"{"entry_point":"Route:GET /","exclude_kinds":["Constructor"],
+            "business_only":true,"max_nodes":50,"offset":100}"#,
+    )
+    .unwrap();
+    assert_eq!(args.exclude_kinds, vec!["Constructor"]);
+    assert!(args.business_only);
+    assert_eq!(args.max_nodes, 50);
+    assert_eq!(args.offset, 100);
 }
 
 #[test]
@@ -136,4 +153,15 @@ fn trace_flow_x_args_repo_defaults_empty() {
         serde_json::from_str(r#"{"entry_point":"Route:GET /x","group":"g"}"#).unwrap();
     assert!(args.repo.is_empty());
     assert_eq!(args.max_depth, 0);
+}
+
+#[test]
+fn reaches_args_defaults() {
+    let args: ReachesArgs =
+        serde_json::from_str(r#"{"from":"confirmChangePassword","to":"AUDIT_LOG"}"#).unwrap();
+    assert_eq!(args.from, "confirmChangePassword");
+    assert_eq!(args.to, "AUDIT_LOG");
+    assert_eq!(args.max_depth, 0, "0 = server default (8)");
+    assert_eq!(args.max_paths, 0, "0 = server default (3)");
+    assert!(args.repo.is_empty());
 }

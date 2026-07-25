@@ -28,10 +28,40 @@ pub struct DiXmlOutput {
 #[derive(Clone, Debug)]
 #[doc(hidden)]
 pub struct BeanDef {
-    #[allow(dead_code)]
     pub id: Option<String>,
     pub fqcn: String,
     pub file: String,
+}
+
+/// All DI wiring facts collected from a repo's Spring/Blueprint XML, gathered once
+/// per analyze so both the resolver (qualifier → bean-id redirect) and the
+/// [`extract_di_xml_from`] augmentor consume the same walk.
+#[derive(Debug, Default)]
+pub struct DiWiring {
+    pub beans: Vec<BeanDef>,
+    pub references: Vec<ReferenceDef>,
+    /// Bean id/name → declared class FQCN. First declaration wins on duplicate ids
+    /// (Spring itself rejects duplicate ids per context; across contexts the
+    /// earliest walk hit is as good a tie-break as any).
+    pub beans_by_id: HashMap<String, String>,
+}
+
+/// Walk `repo_root` for DI XML files and collect every bean/reference definition.
+pub fn collect_di_wiring(repo_root: &Path) -> DiWiring {
+    let (beans, references) = collect_di_definitions(repo_root);
+    let mut beans_by_id: HashMap<String, String> = HashMap::new();
+    for bean in &beans {
+        if let Some(id) = &bean.id {
+            beans_by_id
+                .entry(id.clone())
+                .or_insert_with(|| bean.fqcn.clone());
+        }
+    }
+    DiWiring {
+        beans,
+        references,
+        beans_by_id,
+    }
 }
 
 /// A `<reference interface="...">` lookup parsed from Blueprint or Spring-DM
@@ -165,7 +195,13 @@ fn calls_edge(src: NodeId, dst_kind: NodeKind, dst_fqcn: &str, reason: &str) -> 
 /// 4. For each Blueprint `<reference interface="I">`, look up who implements `I`
 ///    among the parsed classes and emit a `CALLS` edge from `I` to each implementor.
 pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
-    let (beans, references) = collect_di_definitions(repo_root);
+    extract_di_xml_from(&collect_di_wiring(repo_root), parsed)
+}
+
+/// [`extract_di_xml`] over pre-collected wiring — callers that already ran
+/// [`collect_di_wiring`] (the analyze pipeline) avoid a second repo walk.
+pub fn extract_di_xml_from(wiring: &DiWiring, parsed: &[ParsedFile]) -> DiXmlOutput {
+    let (beans, references) = (&wiring.beans, &wiring.references);
 
     if beans.is_empty() && references.is_empty() {
         return DiXmlOutput {
@@ -176,7 +212,7 @@ pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
 
     // Index bean classes by their simple name (multiple beans may share a class).
     let mut beans_by_simple: HashMap<&str, Vec<&BeanDef>> = HashMap::new();
-    for bean in &beans {
+    for bean in beans {
         beans_by_simple
             .entry(simple_name(&bean.fqcn))
             .or_default()
@@ -288,7 +324,7 @@ pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
     }
 
     // 4. Blueprint `<reference interface="I">` → CALLS edge from I to each implementor.
-    for reference in &references {
+    for reference in references {
         let iface_simple = simple_name(&reference.interface);
         let Some(impls) = implementors.get(iface_simple) else {
             continue;

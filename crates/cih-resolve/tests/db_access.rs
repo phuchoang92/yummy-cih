@@ -45,6 +45,7 @@ fn make_site(
         api_name: api_name.to_string(),
         const_ref: const_ref.map(str::to_string),
         inline_sql: None,
+        heuristic: false,
         in_callable,
         range: Range::default(),
     }
@@ -368,5 +369,67 @@ fn emit_db_access_marks_dynamic_when_const_name_ambiguous() {
     assert!(
         table_edges.is_empty(),
         "ambiguous const must not emit table edges: {table_edges:?}"
+    );
+}
+
+/// Heuristic sites (SQL constant flowing into an arbitrary call) are emitted only
+/// when the referenced constant resolves to text that actually reads as SQL; a
+/// message constant or an unresolvable reference must not fabricate a DbQuery.
+#[test]
+fn heuristic_sites_require_sql_shaped_text() {
+    let fqcn = "com.bank.AuditAdapter";
+    let callable = method_id(fqcn, "record", 1);
+    let heuristic_site = |const_ref: &str| SqlExecutionSite {
+        api_name: "enqueue".to_string(),
+        const_ref: Some(const_ref.to_string()),
+        inline_sql: None,
+        heuristic: true,
+        in_callable: callable.clone(),
+        range: Range::default(),
+    };
+    let pf = make_parsed_file(
+        "src/main/java/AuditAdapter.java",
+        fqcn,
+        vec![
+            make_constant(
+                "INSERT_AUDIT",
+                fqcn,
+                "INSERT INTO AUDIT_LOG (ID) VALUES (?)",
+            ),
+            make_constant("MSG_TEXT", fqcn, "password changed"),
+        ],
+        vec![
+            heuristic_site("INSERT_AUDIT"),
+            heuristic_site("MSG_TEXT"),
+            heuristic_site("UNKNOWN_CONST"),
+        ],
+    );
+
+    let (nodes, edges) = emit_db_access(&[pf]);
+
+    let queries: Vec<&cih_core::Node> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::DbQuery)
+        .collect();
+    assert_eq!(queries.len(), 1, "only the real SQL constant: {queries:?}");
+    assert_eq!(queries[0].id, db_query_const_id(fqcn, "INSERT_AUDIT"));
+    assert_eq!(
+        queries[0].props.as_ref().unwrap()["heuristic"],
+        serde_json::Value::Bool(true),
+        "heuristic provenance must be visible on the DbQuery"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::WritesTable && e.dst == db_table_id("AUDIT_LOG")),
+        "the audit INSERT must produce a WRITES_TABLE edge"
+    );
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::ExecutesQuery)
+            .count(),
+        1,
+        "non-SQL and unresolved heuristic sites are dropped"
     );
 }

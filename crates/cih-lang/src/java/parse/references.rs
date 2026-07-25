@@ -160,13 +160,41 @@ fn type_binding(
     if raw_type.is_empty() || name.is_empty() {
         return None;
     }
+    let kind = binding_kind(anchor_tag.as_str(), *anchor_node);
+    let qualifier = match kind {
+        BindingKind::Field | BindingKind::Param => di_qualifier(*anchor_node, src),
+        _ => None,
+    };
     Some(TypeBinding {
         name,
         raw_type,
-        kind: binding_kind(anchor_tag.as_str(), *anchor_node),
+        kind,
         in_fqcn: context_for(anchor_node.start_byte(), builder).unwrap_or_default(),
+        qualifier,
         range: range_of(*name_node),
     })
+}
+
+/// Bean name requested by the injection point: `@Qualifier("x")` (value) or
+/// `@Resource(name = "x")` on a field/parameter declaration.
+fn di_qualifier(declaration: TsNode<'_>, src: &str) -> Option<String> {
+    for annotation in super::annotations(declaration) {
+        let Some(name) = super::annotation_name(annotation, src) else {
+            continue;
+        };
+        let keys: &[&str] = match name.as_str() {
+            "Qualifier" => &["value"],
+            "Resource" => &["name"],
+            _ => continue,
+        };
+        if let Some(value) = super::annotation_string_values(annotation, src, keys)
+            .into_iter()
+            .next()
+        {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn binding_kind(tag: &str, anchor: TsNode<'_>) -> BindingKind {

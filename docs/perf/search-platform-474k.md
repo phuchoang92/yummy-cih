@@ -87,6 +87,87 @@ The command must exit zero and every JSON gate must pass. In particular:
 | Scoped Java grep | `<= 10 s` |
 | Worst-case grep | complete or explicit partial response `<= 85 s` |
 
-After this passes, run the scheduled 30-minute mixed soak and the alternating
-test against eight distinct production repositories. Those are the final
-rollout gates before removing the sidecar rollback switch.
+After this passes, run the production 30-minute mixed soak and alternating test
+against eight distinct repositories. Those are the final rollout gates before
+removing the sidecar rollback switch.
+
+## Eight-repository production soak
+
+The scheduled `cih-server-soak.yml` workflow is a synthetic regression test. It
+does not satisfy the production gate because it repeatedly drives generated
+artifacts rather than one long-lived MCP server with eight real repositories.
+Use `scripts/validate-retrieval-production-soak.py` for the rollout decision.
+
+Copy
+`docs/perf/retrieval-production-soak-manifest.example.json` outside the checkout,
+then replace every placeholder with one registered production repository. Each
+entry needs a query and grep pattern known to exist in that repository. The
+runner verifies that the eight selectors, canonical artifact roots, and full
+`nodes.jsonl` hashes are distinct; hard-linked or copied synthetic fixtures do
+not pass. Keep the completed manifest outside version control because it
+contains production selectors, paths, queries, and grep patterns.
+
+Size the final server from decoded `search_indexes[*].index_bytes`, not
+`search-index.bin` file sizes. On a temporary lexical-only server with a safe
+high cache budget, search each repository once, sum its eight observed index
+sizes, and configure at least 10% headroom. The total cache-family budget must
+also include the artifact, wiki, and resource-index cache ceilings. Stop that
+measurement server before acceptance.
+
+```text
+CIH_SEARCH_CACHE_MAX_BYTES >= ceil(sum(index_bytes) * 1.10)
+CIH_CACHE_MAX_BYTES >= CIH_ARTIFACT_CACHE_MAX_BYTES
+                     + CIH_WIKI_CACHE_MAX_BYTES
+                     + CIH_SEARCH_CACHE_MAX_BYTES
+                     + CIH_RESOURCE_INDEX_CACHE_MAX_BYTES
+```
+
+Start a fresh, otherwise idle Linux server with the final decimal-byte budgets.
+The runner must be the same user and share the PID, network, and mount namespaces
+with `cih-server` so it can read `/proc/<pid>/{cmdline,environ,status}` and the
+same artifacts. It accepts only a direct `http://127.0.0.1` URL and verifies
+that the server process owns that IPv4 loopback (or wildcard) listening port:
+
+```bash
+: "${CIH_SEARCH_CACHE_MAX_BYTES:?set sum(index_bytes) plus 10 percent first}"
+: "${CIH_CACHE_MAX_BYTES:?set the total cache-family budget first}"
+
+env -u CIH_PG_URL \
+  CIH_SEARCH_SIDECAR_ENABLED=1 \
+  CIH_SEARCH_CACHE_MAX_ENTRIES=8 \
+  CIH_SEARCH_CACHE_MAX_BYTES="$CIH_SEARCH_CACHE_MAX_BYTES" \
+  CIH_CACHE_MAX_BYTES="$CIH_CACHE_MAX_BYTES" \
+  target/release/cih-server &
+CIH_ACCEPT_SERVER_PID=$!
+```
+
+Wait for `/ready`, but do not send any search request. If the single-repository
+`platform` validator used this process, restart it again: the soak requires
+empty search counters and no retained indexes.
+
+```bash
+CIH_API_TOKEN='<token-if-configured>' \
+python3 scripts/validate-retrieval-production-soak.py \
+  --server-url http://127.0.0.1:8080 \
+  --server-pid "$CIH_ACCEPT_SERVER_PID" \
+  --manifest /run/secrets/cih-production-soak.json \
+  --duration-secs 1800 \
+  --warmup-secs 300 \
+  --sample-interval-secs 5 \
+  --output docs/perf/retrieval-production-soak.json
+```
+
+Omit `CIH_API_TOKEN` for an intentionally unauthenticated server. For a
+container, execute the runner inside that container or its PID namespace; a
+container PID passed from the host (or a host PID passed from the container)
+is invalid. The server process environment is the source of truth for cache
+limits.
+
+The runner deliberately fails when RSS is unavailable, the server restarts,
+cumulative counters decrease, fewer than 90% of memory/health samples arrive,
+or any repository reloads/builds/evicts after warm-up. It also requires every
+repository to exercise `search_code`, `architecture_overview`, and `grep_files`,
+checks tool latency and stable search-result hashes, and evaluates 60-second RSS
+medians after the five-minute allocator warm-up. Reports contain hashed labels
+and bounded metrics only; selectors, paths, queries, grep patterns, and tool
+result bodies are omitted.

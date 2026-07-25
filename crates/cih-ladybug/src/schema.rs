@@ -16,9 +16,9 @@ pub(crate) const SYMBOL_DDL: &str = "CREATE NODE TABLE IF NOT EXISTS Symbol(
     sl INT64, el INT64, props STRING, stereotype STRING, httpMethod STRING,
     path STRING, decorator STRING, handler STRING, symbolCount INT64,
     cohesion DOUBLE, processType STRING, cyclomatic INT64, cognitive INT64,
-    loopDepth INT64, transitiveLoopDepth INT64)";
+    loopDepth INT64, transitiveLoopDepth INT64, isAccessor INT64)";
 
-pub(crate) const NODE_COLUMNS: [&str; 20] = [
+pub(crate) const NODE_COLUMNS: [&str; 21] = [
     "id",
     "name",
     "kind",
@@ -39,6 +39,7 @@ pub(crate) const NODE_COLUMNS: [&str; 20] = [
     "cognitive",
     "loopDepth",
     "transitiveLoopDepth",
+    "isAccessor",
 ];
 
 pub(crate) const EDGE_COLUMNS: [&str; 5] = ["src", "dst", "confidence", "reason", "callSites"];

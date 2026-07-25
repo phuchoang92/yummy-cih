@@ -283,7 +283,7 @@ impl GrepRuntime {
             .map(usize::from)
             .unwrap_or(1);
         let config = GrepConfig {
-            max_concurrent_requests: env_positive_usize("CIH_GREP_MAX_CONCURRENT_REQUESTS", 1)?,
+            max_concurrent_requests: env_positive_usize("CIH_GREP_MAX_CONCURRENT_REQUESTS", 2)?,
             threads: env_positive_usize("CIH_GREP_THREADS", logical_cpus.min(4))?,
             queue_timeout: Duration::from_secs(env_positive_u64("CIH_GREP_QUEUE_TIMEOUT_SECS", 2)?),
             deadline: Duration::from_secs(env_positive_u64("CIH_GREP_DEADLINE_SECS", 80)?),
@@ -431,6 +431,7 @@ async fn grep_files(
     let deadline = started + runtime.config.deadline;
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut cancellation = CancellationGuard::new(cancelled.clone());
+    let glob = command.glob.clone();
     let scan = run_blocking(blocking_timeout(), "grep", move || {
         // The permit deliberately lives in the closure. If the async caller
         // disconnects or the outer timeout fires, no second repository scan
@@ -442,6 +443,7 @@ async fn grep_files(
             &regex,
             GrepScanOptions {
                 overrides,
+                glob: &glob,
                 limit,
                 started,
                 deadline,
@@ -569,7 +571,7 @@ fn invalid(field: &'static str, message: impl Into<String>) -> AppError {
 
 fn blocking_error(error: crate::ports::blocking_runtime::BlockingError) -> AppError {
     AppError::Unavailable {
-        dependency: "blocking runtime",
+        dependency: "file read",
         message: error.to_string(),
         retryable: true,
     }
@@ -580,7 +582,10 @@ fn grep_blocking_error(error: BlockingError) -> AppError {
         BlockingError::TimedOut { secs, .. } => format!("grep timed out after {secs}s"),
         BlockingError::Panicked { detail, .. } => format!("grep task panicked: {detail}"),
         BlockingError::Saturated { waited_secs, .. } => {
-            format!("grep capacity saturated after {waited_secs}s")
+            format!(
+                "grep concurrency limit reached (CIH_GREP_MAX_CONCURRENT_REQUESTS) \
+                 after waiting {waited_secs}s"
+            )
         }
     };
     AppError::Unavailable {
@@ -625,12 +630,70 @@ struct FileScan {
 
 struct GrepScanOptions<'a> {
     overrides: Option<ignore::overrides::Override>,
+    /// The raw glob (already compiled into `overrides`) — its literal prefix
+    /// prunes the walk.
+    glob: &'a str,
     limit: usize,
     started: Instant,
     deadline: Instant,
     cancelled: &'a AtomicBool,
     pool: &'a rayon::ThreadPool,
     threads: usize,
+}
+
+/// How much of the repo the walk must visit for a given glob.
+#[derive(Debug, PartialEq, Eq)]
+enum WalkPlan {
+    /// No usable literal prefix — walk the whole repo root.
+    Full,
+    /// The glob's literal prefix is a directory — walk only that subtree.
+    Subtree(PathBuf),
+    /// The whole glob is a literal path to one file — scan just it (repo-relative).
+    SingleFile(PathBuf),
+    /// The literal prefix does not exist — nothing can match.
+    Empty,
+}
+
+/// Deepest metacharacter-free, `..`-free path prefix of a glob, and whether the
+/// prefix is the entire glob. `None` when the very first segment is a pattern.
+fn literal_walk_prefix(glob: &str) -> Option<(PathBuf, bool)> {
+    fn is_literal(segment: &str) -> bool {
+        !segment.is_empty()
+            && segment != ".."
+            && segment != "."
+            && !segment
+                .chars()
+                .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}' | '!' | '\\'))
+    }
+    let glob = glob.strip_prefix("./").unwrap_or(glob);
+    if glob.starts_with('/') {
+        return None;
+    }
+    let segments: Vec<&str> = glob.split('/').collect();
+    let literal_count = segments.iter().take_while(|s| is_literal(s)).count();
+    if literal_count == 0 {
+        return None;
+    }
+    let prefix: PathBuf = segments[..literal_count].iter().collect();
+    Some((prefix, literal_count == segments.len()))
+}
+
+/// Decide the walk scope from the glob's literal prefix. On a 500k-file volume
+/// this is the difference between one `stat` and a full-tree traversal for a
+/// single-file grep.
+fn plan_walk(root: &Path, glob: &str) -> WalkPlan {
+    if glob.is_empty() {
+        return WalkPlan::Full;
+    }
+    let Some((prefix, whole_glob)) = literal_walk_prefix(glob) else {
+        return WalkPlan::Full;
+    };
+    match root.join(&prefix).metadata() {
+        Ok(md) if md.is_dir() => WalkPlan::Subtree(root.join(&prefix)),
+        Ok(md) if md.is_file() && whole_glob => WalkPlan::SingleFile(prefix),
+        // A file mid-glob, or something unreadable: the glob cannot match.
+        Ok(_) | Err(_) => WalkPlan::Empty,
+    }
 }
 
 fn cooperative_stop(cancelled: &AtomicBool, deadline: Instant) -> Option<GrepTruncationReason> {
@@ -649,6 +712,7 @@ fn cooperative_stop(cancelled: &AtomicBool, deadline: Instant) -> Option<GrepTru
 fn grep_dir(root: &Path, regex: &regex::Regex, options: GrepScanOptions<'_>) -> GrepScan {
     let GrepScanOptions {
         overrides,
+        glob,
         limit,
         started,
         deadline,
@@ -656,67 +720,89 @@ fn grep_dir(root: &Path, regex: &regex::Regex, options: GrepScanOptions<'_>) -> 
         pool,
         threads,
     } = options;
-    let mut builder = ignore::WalkBuilder::new(root);
-    builder
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .add_custom_ignore_filename(".cihignore")
-        .filter_entry(|entry| {
-            if entry.depth() > 0 && entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                let name = entry.file_name().to_string_lossy();
-                return !GREP_SKIP_DIRS.contains(&name.as_ref());
-            }
-            true
-        });
-    if let Some(overrides) = overrides {
-        builder.overrides(overrides);
-    }
 
     let mut candidates = Vec::new();
     let mut candidate_files = 0usize;
     let mut files_skipped = 0usize;
     let mut traversal_stop = None;
-    for entry in builder.build() {
-        if let Some(reason) = cooperative_stop(cancelled, deadline) {
-            traversal_stop = Some(reason);
-            break;
-        }
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => {
-                files_skipped = files_skipped.saturating_add(1);
-                continue;
-            }
-        };
-        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            continue;
-        }
-        if entry.path_is_symlink() {
-            files_skipped = files_skipped.saturating_add(1);
-            continue;
-        }
-        let rel = match entry.path().strip_prefix(root) {
-            Ok(rel) => rel,
-            Err(_) => {
-                files_skipped = files_skipped.saturating_add(1);
-                continue;
-            }
-        };
-        candidate_files = candidate_files.saturating_add(1);
-        match entry.metadata() {
-            Ok(md) if md.len() <= GREP_MAX_FILE_BYTES => {}
-            _ => {
-                files_skipped = files_skipped.saturating_add(1);
-                continue;
+    match plan_walk(root, glob) {
+        WalkPlan::Empty => {}
+        WalkPlan::SingleFile(relative) => {
+            // The glob names exactly one real file — no traversal at all.
+            let path = root.join(&relative);
+            candidate_files = 1;
+            match path.metadata() {
+                Ok(md) if md.len() <= GREP_MAX_FILE_BYTES && !md.is_symlink() => {
+                    candidates.push(CandidateFile { path, relative });
+                }
+                _ => files_skipped = 1,
             }
         }
-        let relative = rel.to_path_buf();
-        candidates.push(CandidateFile {
-            path: entry.into_path(),
-            relative,
-        });
+        plan => {
+            let walk_root = match plan {
+                WalkPlan::Subtree(dir) => dir,
+                _ => root.to_path_buf(),
+            };
+            let mut builder = ignore::WalkBuilder::new(&walk_root);
+            builder
+                .hidden(false)
+                .git_ignore(true)
+                .git_exclude(true)
+                .git_global(true)
+                .add_custom_ignore_filename(".cihignore")
+                .filter_entry(|entry| {
+                    if entry.depth() > 0 && entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                    {
+                        let name = entry.file_name().to_string_lossy();
+                        return !GREP_SKIP_DIRS.contains(&name.as_ref());
+                    }
+                    true
+                });
+            if let Some(overrides) = overrides {
+                builder.overrides(overrides);
+            }
+
+            for entry in builder.build() {
+                if let Some(reason) = cooperative_stop(cancelled, deadline) {
+                    traversal_stop = Some(reason);
+                    break;
+                }
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        files_skipped = files_skipped.saturating_add(1);
+                        continue;
+                    }
+                };
+                if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                if entry.path_is_symlink() {
+                    files_skipped = files_skipped.saturating_add(1);
+                    continue;
+                }
+                let rel = match entry.path().strip_prefix(root) {
+                    Ok(rel) => rel,
+                    Err(_) => {
+                        files_skipped = files_skipped.saturating_add(1);
+                        continue;
+                    }
+                };
+                candidate_files = candidate_files.saturating_add(1);
+                match entry.metadata() {
+                    Ok(md) if md.len() <= GREP_MAX_FILE_BYTES => {}
+                    _ => {
+                        files_skipped = files_skipped.saturating_add(1);
+                        continue;
+                    }
+                }
+                let relative = rel.to_path_buf();
+                candidates.push(CandidateFile {
+                    path: entry.into_path(),
+                    relative,
+                });
+            }
+        }
     }
     candidates.sort_by(|left, right| left.relative.cmp(&right.relative));
 
@@ -965,6 +1051,7 @@ mod tests {
             &regex,
             GrepScanOptions {
                 overrides,
+                glob,
                 limit,
                 started,
                 deadline: started + Duration::from_secs(5),
@@ -1003,6 +1090,82 @@ mod tests {
         assert_eq!(scan.candidate_files, 1, "glob must prune during traversal");
         assert_eq!(scan.matches.len(), 1);
         assert_eq!(scan.matches[0].file, "a/Foo.java");
+    }
+
+    #[test]
+    fn literal_walk_prefix_extracts_metachar_free_prefixes() {
+        let p = |g: &str| {
+            literal_walk_prefix(g).map(|(p, whole)| (p.to_string_lossy().into_owned(), whole))
+        };
+        assert_eq!(
+            p("src/main/App.java"),
+            Some(("src/main/App.java".into(), true))
+        );
+        assert_eq!(
+            p("./src/main/App.java"),
+            Some(("src/main/App.java".into(), true))
+        );
+        assert_eq!(p("src/main/**/*.java"), Some(("src/main".into(), false)));
+        assert_eq!(p("src/*.java"), Some(("src".into(), false)));
+        assert_eq!(p("**/*.java"), None);
+        assert_eq!(p("*.java"), None);
+        assert_eq!(
+            p("../src/App.java"),
+            None,
+            "parent-dir escapes are never literal"
+        );
+        assert_eq!(p("src/../App.java"), Some(("src".into(), false)));
+        assert_eq!(p("/abs/path.java"), None);
+    }
+
+    /// A single-file glob must stat that one file — never walk the tree.
+    #[test]
+    fn grep_single_file_glob_takes_the_fast_path() {
+        let root = grep_root("fastpath-file");
+        write_under(&root, "src/main/App.java", b"// TODO one\n");
+        write_under(&root, "src/other/Noise.java", b"// TODO noise\n");
+        assert_eq!(
+            plan_walk(&root, "src/main/App.java"),
+            WalkPlan::SingleFile(std::path::PathBuf::from("src/main/App.java"))
+        );
+        let scan = test_grep(&root, "TODO", "src/main/App.java", 100);
+        assert!(scan.complete);
+        assert_eq!(
+            scan.candidate_files, 1,
+            "no traversal beyond the named file"
+        );
+        assert_eq!(scan.matches.len(), 1);
+        assert_eq!(scan.matches[0].file, "src/main/App.java");
+    }
+
+    /// A literal directory prefix roots the walk at that subtree; match paths
+    /// stay repo-relative.
+    #[test]
+    fn grep_literal_prefix_prunes_walk_to_subtree() {
+        let root = grep_root("fastpath-subtree");
+        write_under(&root, "src/main/App.java", b"// TODO in scope\n");
+        write_under(&root, "vendor/big/Other.java", b"// TODO out of scope\n");
+        assert!(matches!(
+            plan_walk(&root, "src/main/**/*.java"),
+            WalkPlan::Subtree(_)
+        ));
+        let scan = test_grep(&root, "TODO", "src/main/**/*.java", 100);
+        assert_eq!(scan.candidate_files, 1, "walk must not visit vendor/");
+        assert_eq!(scan.matches.len(), 1);
+        assert_eq!(scan.matches[0].file, "src/main/App.java");
+    }
+
+    /// A literal prefix that doesn't exist can't match anything — complete
+    /// empty result, no walk.
+    #[test]
+    fn grep_missing_literal_prefix_returns_empty() {
+        let root = grep_root("fastpath-missing");
+        write_under(&root, "src/App.java", b"// TODO\n");
+        assert_eq!(plan_walk(&root, "nope/**/*.java"), WalkPlan::Empty);
+        let scan = test_grep(&root, "TODO", "nope/**/*.java", 100);
+        assert!(scan.complete);
+        assert_eq!(scan.candidate_files, 0);
+        assert!(scan.matches.is_empty());
     }
 
     #[test]
@@ -1092,6 +1255,7 @@ mod tests {
             &regex,
             GrepScanOptions {
                 overrides: None,
+                glob: "",
                 limit: 100,
                 started,
                 deadline: started,

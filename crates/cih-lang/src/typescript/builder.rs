@@ -860,6 +860,7 @@ impl Builder {
                         raw_type: module,
                         kind: BindingKind::ModuleRef,
                         in_fqcn: sig,
+                        qualifier: None,
                         range,
                     });
                 }
@@ -896,6 +897,7 @@ impl Builder {
                         raw_type: format!("{module}#{member}"),
                         kind: BindingKind::ModuleMember,
                         in_fqcn: sig.clone(),
+                        qualifier: None,
                         range,
                     });
                     // Free-call use (`a()`): the static import feeds
@@ -1049,6 +1051,7 @@ impl Builder {
                 raw_type: ty,
                 kind: BindingKind::Param,
                 in_fqcn: sig.to_string(),
+                qualifier: None,
                 range: range_of(p),
             });
         }

@@ -31,6 +31,9 @@ pub struct AugmentCtx<'a> {
     pub skip_xml_integration: bool,
     /// The resolver registry (DI augmentor dispatches through it).
     pub resolvers: &'a ResolverRegistry,
+    /// DI XML wiring pre-collected by the engine before resolve; the DI augmentor
+    /// reuses it instead of re-walking the repo.
+    pub di_wiring: Option<&'a crate::di_xml::DiWiring>,
 }
 
 /// Nodes + edges an augmentor contributes to the graph.
@@ -149,6 +152,21 @@ impl GraphAugmentor for DiXmlAugmentor {
         !ctx.skip_xml_integration && ctx.languages_in_scope.contains("java")
     }
     fn augment(&self, ctx: &AugmentCtx) -> AugmentOutput {
+        // With pre-collected wiring, run the (Java-only) DI XML pass directly on the
+        // Java files instead of re-walking the repo through `extra_edges`.
+        if let Some(wiring) = ctx.di_wiring {
+            let java_files: Vec<ParsedFile> = ctx
+                .parsed
+                .iter()
+                .filter(|pf| pf.language == "java")
+                .cloned()
+                .collect();
+            let result = crate::di_xml::extract_di_xml_from(wiring, &java_files);
+            return AugmentOutput {
+                nodes: result.nodes,
+                edges: result.edges,
+            };
+        }
         let (nodes, edges) = ctx.resolvers.extra_edges(ctx.repo_root, ctx.parsed);
         AugmentOutput { nodes, edges }
     }

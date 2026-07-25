@@ -176,10 +176,36 @@ impl FalkorStore {
             .map_err(|e| GraphStoreError::Backend(e.to_string()))
     }
 
+    /// Max time a READ waits out a loading FalkorDB before failing, from
+    /// `CIH_FALKOR_READ_LOAD_WAIT_SECS` (default 20s — bounded, unlike the
+    /// write budget: a read caller is interactive and can retry).
+    fn read_load_wait_budget() -> Duration {
+        Duration::from_secs(
+            std::env::var("CIH_FALKOR_READ_LOAD_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+        )
+    }
+
+    /// Run a read query, waiting out a `BusyLoadingError` once within the
+    /// (short) read budget. Without this, every read during a restart's
+    /// dataset load surfaced as "graph store unavailable" with no retry —
+    /// writes already waited (`run_write`), reads did not.
+    async fn run_read(&self, cypher: &str) -> Result<Value> {
+        match self.run(cypher).await {
+            Err(e) if Self::is_loading_error(&e) => {
+                self.wait_until_ready(Self::read_load_wait_budget()).await?;
+                self.run(cypher).await
+            }
+            other => other,
+        }
+    }
+
     /// Result rows (the second element of a GRAPH.QUERY reply) as stringified
     /// cells. Good enough for scalar `RETURN` columns.
     async fn rows(&self, cypher: &str) -> Result<Vec<Vec<String>>> {
-        let reply = self.run(cypher).await?;
+        let reply = self.run_read(cypher).await?;
         let top = as_array(&reply);
         let Some(rows_val) = top.get(1) else {
             return Ok(vec![]);
@@ -286,7 +312,8 @@ impl FalkorStore {
                      n.symbolCount = row.symbolCount, n.cohesion = row.cohesion, \
                      n.processType = row.processType, \
                      n.cyclomatic = row.cyclomatic, n.cognitive = row.cognitive, \
-                     n.loopDepth = row.loopDepth, n.transitiveLoopDepth = row.transitiveLoopDepth",
+                     n.loopDepth = row.loopDepth, n.transitiveLoopDepth = row.transitiveLoopDepth, \
+                     n.isAccessor = row.isAccessor",
                 arr = nodes_to_list(chunk)
             );
             self.run_write(&q).await.inspect_err(|_| {
@@ -503,7 +530,7 @@ async fn neighbor_nodes(store: &FalkorStore, id: &NodeId, dir: Direction) -> Res
     let q = format!(
         "CYPHER id={id} \
          MATCH (n:Symbol {{id:$id}}){arrow}(m:Symbol) \
-         RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file LIMIT 100",
+         RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file, m.startLine, m.endLine LIMIT 100",
         id = cstr(id.as_str())
     );
     Ok(store

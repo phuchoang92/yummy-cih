@@ -21,7 +21,7 @@ use std::io;
 
 use cih_core::{Edge, EdgeKind, Node};
 
-use crate::serialize::{prop_f64, prop_str, prop_u64};
+use crate::serialize::{prop_f64, prop_flag, prop_str, prop_u64};
 
 const T_NULL: u8 = 0;
 const T_DOUBLE: u8 = 2;
@@ -29,7 +29,7 @@ const T_STRING: u8 = 3;
 const T_LONG: u8 = 4;
 
 /// The fixed `:Symbol` property schema — mirrors `nodes_to_list` exactly.
-const NODE_PROPS: [&str; 20] = [
+const NODE_PROPS: [&str; 21] = [
     "id",
     "name",
     "kind",
@@ -50,6 +50,7 @@ const NODE_PROPS: [&str; 20] = [
     "cognitive",
     "loopDepth",
     "transitiveLoopDepth",
+    "isAccessor",
 ];
 
 const EDGE_PROPS: [&str; 3] = ["confidence", "reason", "callSites"];
@@ -110,7 +111,7 @@ fn write_header(buf: &mut Vec<u8>, name: &str, props: &[&str]) {
     }
 }
 
-/// Encode one node row: the 20 schema values in header order. Value extraction
+/// Encode one node row: the 21 schema values in header order. Value extraction
 /// matches `nodes_to_list` (note `processType` is read from the `process_type`
 /// prop key, and `symbolCount` falls back to `symbol_count`).
 fn encode_node(buf: &mut Vec<u8>, n: &Node) {
@@ -138,6 +139,7 @@ fn encode_node(buf: &mut Vec<u8>, n: &Node) {
     push_opt_long(buf, prop_u64(n, "cognitive"));
     push_opt_long(buf, prop_u64(n, "loopDepth"));
     push_opt_long(buf, prop_u64(n, "transitiveLoopDepth"));
+    push_opt_long(buf, prop_flag(n, "isAccessor"));
 }
 
 // ── payload assembly ─────────────────────────────────────────────────────────

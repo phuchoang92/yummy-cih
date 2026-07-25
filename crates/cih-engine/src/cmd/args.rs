@@ -354,6 +354,11 @@ pub struct AnalyzeArgs {
     /// Overrides auto-detection. Default: cih.toml `cxf_base_path`, else auto-detect.
     #[arg(long)]
     pub cxf_base_path: Option<String>,
+    /// Extra SQL execution API as Receiver.method (e.g. AuditQueue.enqueue) —
+    /// calls to it with a SQL constant/literal argument become DbQuery sites.
+    /// Repeatable / comma-delimited. Default: cih.toml `sql_apis`.
+    #[arg(long = "sql-api", value_delimiter = ',')]
+    pub sql_api: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]

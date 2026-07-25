@@ -167,7 +167,7 @@ fn short_class_name(fqcn: &str) -> &str {
 
 fn blocking_error(error: BlockingError) -> AppError {
     AppError::Unavailable {
-        dependency: "blocking runtime",
+        dependency: "contract computation",
         message: error.to_string(),
         retryable: true,
     }

@@ -29,9 +29,6 @@ impl LanguageResolver for RustResolver {
         parts.get(1).map(|s| s.to_string())
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
-        None
-    }
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None

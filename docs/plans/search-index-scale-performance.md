@@ -1,9 +1,11 @@
 # Plan - Predictable MCP retrieval at 500k-node scale
 
 > **Status:** IMPLEMENTED - synthetic 500k acceptance passed on 2026-07-22.
-> Production acceptance remains open for the sanitized `platform` artifacts, the scheduled
-> 30-minute mixed soak, and the eight-repository alternating hot-set gate. Current measured
-> evidence is in `docs/perf/scale-500k.md` and `docs/perf/scale-500k-local.json`.
+> Production acceptance remains open for the sanitized `platform` artifacts, the 30-minute
+> production mixed soak, and the eight-repository alternating hot-set gate. Current measured
+> evidence is in `docs/perf/scale-500k.md` and `docs/perf/scale-500k-local.json`. The real
+> mixed/hot-set gate is automated by `scripts/validate-retrieval-production-soak.py`; the
+> scheduled Rust soak remains synthetic regression coverage.
 
 ## 1. Objective
 
@@ -884,7 +886,8 @@ tracing. It is not a prerequisite for the performance slices.
 - new `docs/perf/search-platform-474k.md` - sanitized real-repo evidence.
 - `docs/runbooks/multi-repo-host-serving.md` - cache and grep sizing guidance.
 - `README.md` - new environment variables.
-- `.github/workflows/cih-server-soak.yml` - mixed retrieval scenario.
+- `.github/workflows/cih-server-soak.yml` - synthetic scale-soak regression.
+- `scripts/validate-retrieval-production-soak.py` - real mixed retrieval and hot-set gate.
 
 ## 17. Verification Matrix
 
@@ -943,6 +946,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 python3 scripts/check_layering.py
+python3 scripts/validate-retrieval-production.py --self-test
+python3 scripts/validate-retrieval-production-soak.py --self-test
 cargo run --release -p cih-server --example scale_bench -- --enforce
 ```
 

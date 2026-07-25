@@ -54,6 +54,38 @@ pub(crate) fn cell_f64(v: &Value) -> f64 {
     }
 }
 
+/// Unpack a `RecursiveRel` into a full path: interior node ids plus per-rel
+/// `(label, confidence, reason)` — the provenance `paths_between` reports.
+pub(crate) fn recursive_path(v: &Value) -> Option<(Vec<String>, Vec<(String, f32, String)>)> {
+    let Value::RecursiveRel { nodes, rels } = v else {
+        return None;
+    };
+    let interior = nodes
+        .iter()
+        .filter_map(|n| {
+            n.get_properties()
+                .iter()
+                .find_map(|(k, val)| (k == "id").then(|| cell_str(val)).filter(|s| !s.is_empty()))
+        })
+        .collect();
+    let edges = rels
+        .iter()
+        .map(|r| {
+            let mut confidence = 1.0f32;
+            let mut reason = String::new();
+            for (k, val) in r.get_properties() {
+                match k.as_str() {
+                    "confidence" => confidence = cell_f64(val) as f32,
+                    "reason" => reason = cell_str(val),
+                    _ => {}
+                }
+            }
+            (r.get_label_name().clone(), confidence, reason)
+        })
+        .collect();
+    Some((interior, edges))
+}
+
 /// Unpack a `RecursiveRel` cell: (hop count, interior node ids in pattern
 /// order, rel labels in pattern order). Interior nodes exclude both endpoints.
 pub(crate) fn recursive_rel(v: &Value) -> Option<(u32, Vec<String>, Vec<String>)> {
@@ -72,8 +104,9 @@ pub(crate) fn recursive_rel(v: &Value) -> Option<(u32, Vec<String>, Vec<String>)
     Some((rels.len() as u32, interior, labels))
 }
 
-/// Row of `(id, kind, name, qn, file)` string cells → `Node` (same column
-/// convention as the Falkor adapter's `node_from_row`).
+/// Row of `(id, kind, name, qn, file[, sl, el])` cells → `Node` (same column
+/// convention as the Falkor adapter's `node_from_row`). Line-range columns are
+/// optional; rows without them fall back to 0.
 pub(crate) fn node_from_row(r: &[Value]) -> Node {
     Node {
         id: NodeId::new(r.first().map(cell_str).unwrap_or_default()),
@@ -81,7 +114,11 @@ pub(crate) fn node_from_row(r: &[Value]) -> Node {
         name: r.get(2).map(cell_str).unwrap_or_default(),
         qualified_name: r.get(3).and_then(cell_opt_str),
         file: r.get(4).map(cell_str).unwrap_or_default(),
-        range: Range::default(),
+        range: Range {
+            start_line: r.get(5).map(cell_u64).unwrap_or(0) as u32,
+            end_line: r.get(6).map(cell_u64).unwrap_or(0) as u32,
+            ..Range::default()
+        },
         props: None,
     }
 }

@@ -573,6 +573,24 @@ fn collect_node_tokens(node: &Node, tokenizer: &mut Tokenizer, output: &mut Vec<
             tokenizer.tokenize_into(destination_type, output);
         }
     }
+    if matches!(node.kind, NodeKind::DbQuery) {
+        // Make the physical SQL findable by text: `search_code("AUDIT_LOG")`
+        // must surface the INSERT itself, not only symbols named like it.
+        if let Some(operation) = props.get("operation").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(operation, output);
+        }
+        if let Some(constant) = props.get("constantName").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(constant, output);
+        }
+        if let Some(tables) = props.get("tables").and_then(|value| value.as_array()) {
+            for table in tables.iter().filter_map(|value| value.as_str()) {
+                tokenizer.tokenize_into(table, output);
+            }
+        }
+        if let Some(preview) = props.get("sqlPreview").and_then(|value| value.as_str()) {
+            tokenizer.tokenize_into(preview, output);
+        }
+    }
 }
 
 #[cfg(test)]

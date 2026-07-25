@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (25, "96602c0b9e617fd0");
+const GOLDEN: (u32, &str) = (26, "9e723fb179868fb0");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -33,6 +33,51 @@ public class OrderController {
     @GetMapping("/{id}")
     public String get(@PathVariable String id) {
         return rest.getForObject("https://inventory/api/stock/" + id, String.class);
+    }
+}
+"#,
+    ),
+    (
+        // @Qualifier / @Resource(name) on injected fields → TypeBinding.qualifier.
+        "src/main/java/com/acme/UserFacade.java",
+        r#"package com.acme;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import javax.annotation.Resource;
+
+public class UserFacade implements UserAdmin {
+    @Autowired
+    @Qualifier("retailUserAdminRef")
+    private UserAdmin retailUserAdminRef;
+
+    @Resource(name = "auditLogSvc")
+    private AuditLogService auditLogService;
+
+    public void modifyUserPassword(Request request) {
+        retailUserAdminRef.modifyUserPassword(request);
+        auditLogService.audit(request);
+    }
+}
+"#,
+    ),
+    (
+        // SQL-valued constant (non-UPPER_SNAKE name) + heuristic execution site
+        // (constant flowing into a custom queue API) → SqlConstant + SqlExecutionSite.
+        "src/main/java/com/acme/AuditAdapter.java",
+        r#"package com.acme;
+
+public class AuditAdapter {
+    private static final String insertAudit =
+        "INSERT INTO AUDIT_LOG (ID, ACTION) VALUES (?, ?)";
+    private AuditQueue auditQueue;
+
+    public void record(String action) {
+        auditQueue.enqueue(insertAudit, action);
+    }
+
+    // Trivial accessor → isAccessor prop on the Method node.
+    public AuditQueue getAuditQueue() {
+        return auditQueue;
     }
 }
 "#,

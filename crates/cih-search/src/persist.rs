@@ -19,7 +19,7 @@ const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const SCHEMA_DESCRIPTOR: &str = concat!(
     "cih-search-schema-v1;",
     "tokenizer=ascii-alnum-camel-v1;",
-    "fields=kind,name,qualified_name,node_id,file,route,integration,message;",
+    "fields=kind,name,qualified_name,node_id,file,route,integration,message,dbquery;",
     "k1=1.2;b=0.75;",
     "representation=interned-files,boxed-postings,no-text,no-doc-freq"
 );

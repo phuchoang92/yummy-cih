@@ -68,6 +68,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
             skip_xml_integration,
             include_decompiled,
             cxf_base_path: args.cxf_base_path,
+            sql_apis: args.sql_api.into_iter().filter(|s| !s.is_empty()).collect(),
         },
         &layers,
     );
@@ -90,6 +91,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
             skip_xml_integration: resolved.skip_xml_integration,
             languages: resolved.languages,
             route_base_path: resolved.cxf_base_path,
+            sql_apis: resolved.sql_apis,
         },
     )
 }

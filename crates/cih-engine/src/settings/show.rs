@@ -112,6 +112,13 @@ pub fn effective_rows(layers: &Layers) -> Vec<ShowRow> {
         ha.cxf_base_path.clone(),
         "(auto-detect)",
     ));
+    rows.push(opt(
+        "analyze",
+        "sql_apis",
+        ra.sql_apis.as_ref().map(|v| v.join(",")),
+        ha.sql_apis.as_ref().map(|v| v.join(",")),
+        "(none)",
+    ));
 
     // [discover]
     rows.push(req(
@@ -337,6 +344,7 @@ pub fn starter_toml() -> String {
 # skip_xml_integration = false
 # include_decompiled = false
 # cxf_base_path = "/rest"          # CXF servlet base path for <jaxrs:server> routes; default: auto-detect
+# sql_apis = ["AuditQueue.enqueue"] # extra Receiver.method pairs treated as SQL execution sites
 
 [discover]
 # community_strategy = "{cs}"      # package | graph

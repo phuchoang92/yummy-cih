@@ -233,6 +233,7 @@ fn parsed_file_round_trips_json() {
             raw_type: "UserRepository".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.UserService".into(),
+            qualifier: None,
             range: Range {
                 start_line: 6,
                 start_col: 4,

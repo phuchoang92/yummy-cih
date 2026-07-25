@@ -33,8 +33,19 @@ fn opt_u64(v: Option<u64>) -> String {
     v.map(|n| n.to_string()).unwrap_or_default()
 }
 
-/// The 20 CSV cells for a node, in [`NODE_COLUMNS`] order (empty cell = NULL).
-fn node_record(n: &Node) -> [String; 20] {
+/// A boolean prop promoted as `1`/NULL (stored as INT64, matching the Falkor
+/// adapter's promotion of `isAccessor`).
+fn prop_flag(node: &Node, key: &str) -> Option<u64> {
+    node.props
+        .as_ref()?
+        .get(key)?
+        .as_bool()
+        .filter(|&b| b)
+        .map(|_| 1)
+}
+
+/// The 21 CSV cells for a node, in [`NODE_COLUMNS`] order (empty cell = NULL).
+fn node_record(n: &Node) -> [String; 21] {
     [
         n.id.as_str().to_string(),
         n.name.clone(),
@@ -58,6 +69,7 @@ fn node_record(n: &Node) -> [String; 20] {
         opt_u64(prop_u64(n, "cognitive")),
         opt_u64(prop_u64(n, "loopDepth")),
         opt_u64(prop_u64(n, "transitiveLoopDepth")),
+        opt_u64(prop_flag(n, "isAccessor")),
     ]
 }
 
@@ -254,6 +266,7 @@ pub(crate) fn merge_nodes_edges(
                     | "cognitive"
                     | "loopDepth"
                     | "transitiveLoopDepth"
+                    | "isAccessor"
                     | "cohesion" => {
                         if val.is_empty() {
                             "NULL".to_string()

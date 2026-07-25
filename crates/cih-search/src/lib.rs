@@ -33,6 +33,7 @@ pub fn is_searchable_kind(kind: NodeKind) -> bool {
             | NodeKind::Field
             | NodeKind::Route
             | NodeKind::DbTable
+            | NodeKind::DbQuery
             | NodeKind::IntegrationRoute
             | NodeKind::MessageDestination
     )

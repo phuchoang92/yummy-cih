@@ -12,7 +12,13 @@ pub(super) fn node_from_row(r: &[String]) -> Node {
         name: r.get(2).cloned().unwrap_or_default(),
         qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
         file: r.get(4).cloned().unwrap_or_default(),
-        range: Range::default(),
+        // startLine/endLine are persisted at load; queries that don't select
+        // them (older row shapes) fall back to 0.
+        range: Range {
+            start_line: r.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
+            end_line: r.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
+            ..Range::default()
+        },
         props: None,
     }
 }
@@ -43,8 +49,10 @@ pub(super) fn nodes_to_list(nodes: &[Node]) -> String {
             let cognitive = cnum_u64(prop_u64(n, "cognitive"));
             let loop_depth = cnum_u64(prop_u64(n, "loopDepth"));
             let transitive_ld = cnum_u64(prop_u64(n, "transitiveLoopDepth"));
+            // Promoted as 1/null (not bool) so both load paths write one type.
+            let is_accessor = cnum_u64(prop_flag(n, "isAccessor"));
             format!(
-                "{{id:{id}, name:{name}, kind:{kind}, file:{file}, qn:{qn}, sl:{sl}, el:{el}, props:{props}, stereotype:{stereotype}, httpMethod:{http_method}, path:{path}, decorator:{decorator}, handler:{handler}, symbolCount:{symbol_count}, cohesion:{cohesion}, processType:{process_type}, cyclomatic:{cyclomatic}, cognitive:{cognitive}, loopDepth:{loop_depth}, transitiveLoopDepth:{transitive_ld}}}"
+                "{{id:{id}, name:{name}, kind:{kind}, file:{file}, qn:{qn}, sl:{sl}, el:{el}, props:{props}, stereotype:{stereotype}, httpMethod:{http_method}, path:{path}, decorator:{decorator}, handler:{handler}, symbolCount:{symbol_count}, cohesion:{cohesion}, processType:{process_type}, cyclomatic:{cyclomatic}, cognitive:{cognitive}, loopDepth:{loop_depth}, transitiveLoopDepth:{transitive_ld}, isAccessor:{is_accessor}}}"
             )
         })
         .collect();
@@ -57,6 +65,16 @@ pub(super) fn prop_str<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
 
 pub(super) fn prop_u64(node: &Node, key: &str) -> Option<u64> {
     node.props.as_ref()?.get(key)?.as_u64()
+}
+
+/// A boolean prop promoted as `1`/absent (graph writes it as a long, never bool).
+pub(super) fn prop_flag(node: &Node, key: &str) -> Option<u64> {
+    node.props
+        .as_ref()?
+        .get(key)?
+        .as_bool()
+        .filter(|&b| b)
+        .map(|_| 1)
 }
 
 pub(super) fn prop_f64(node: &Node, key: &str) -> Option<f64> {

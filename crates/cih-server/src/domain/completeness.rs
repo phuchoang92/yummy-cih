@@ -54,6 +54,24 @@ impl ResultBounds {
         }
     }
 
+    /// Metadata for an offset/limit page over a store-side walk. Honest about
+    /// truncation: `complete` is false whenever hops beyond this page exist.
+    pub(crate) fn paged(returned: usize, has_more: bool, limit: usize) -> Self {
+        Self {
+            complete: !has_more,
+            total_known: None,
+            returned,
+            omitted: None,
+            failed: 0,
+            limit: Some(limit),
+            reasons: if has_more {
+                vec!["result_limit"]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
     pub(crate) fn requested_scope(returned: usize) -> Self {
         Self {
             complete: true,

@@ -58,6 +58,39 @@ pub(super) fn is_bean_method(node: TsNode<'_>, src: &str) -> bool {
         .any(|ann| annotation_name(ann, src).as_deref() == Some("Bean"))
 }
 
+/// True for trivial bean accessors: `getX`/`setX`/`isX`/`hasX` whose body is at
+/// most one statement and performs no calls — pure field read/write plumbing.
+/// Bodyless declarations (abstract/interface) are not counted: triviality can't
+/// be verified. Persisted as the `isAccessor` node prop so trace filtering can
+/// hide accessor noise.
+pub(super) fn is_trivial_accessor(node: TsNode<'_>, name: &str) -> bool {
+    let prefix_ok = ["get", "set", "is", "has"].iter().any(|p| {
+        name.strip_prefix(p)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_ascii_uppercase())
+    });
+    if !prefix_ok {
+        return false;
+    }
+    let Some(body) = node.child_by_field_name("body") else {
+        return false;
+    };
+    body.named_child_count() <= 1 && !contains_node_kind(body, "method_invocation")
+}
+
+fn contains_node_kind(node: TsNode<'_>, kind: &str) -> bool {
+    if node.kind() == kind {
+        return true;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if contains_node_kind(child, kind) {
+            return true;
+        }
+    }
+    false
+}
+
 pub(super) fn is_test_method(node: TsNode<'_>, src: &str) -> bool {
     annotations(node).into_iter().any(|ann| {
         matches!(

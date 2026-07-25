@@ -92,6 +92,25 @@ pub struct HttpWrapperDef {
     pub range: Range,
 }
 
+/// True when `text` reads like a SQL statement: trimmed, case-insensitive match on
+/// the leading keyword. Shared by the Java parser (SQL-valued constant capture) and
+/// the DB-access emit pass (gating heuristic execution sites).
+pub fn looks_like_sql(text: &str) -> bool {
+    const SQL_STARTERS: &[&str] = &[
+        "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CALL", "WITH",
+    ];
+    let head = text.trim_start();
+    SQL_STARTERS.iter().any(|kw| {
+        head.len() >= kw.len()
+            && head[..kw.len()].eq_ignore_ascii_case(kw)
+            // Keyword boundary: "SELECTION_MODE" is not SQL.
+            && !head[kw.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 /// A `private static final String` field whose initializer is (or folds to) a SQL string.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlConstant {
@@ -117,6 +136,11 @@ pub struct SqlExecutionSite {
     /// Inline SQL literal passed directly as an argument (not via a named constant).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_sql: Option<String>,
+    /// True when the site was inferred from a SQL constant flowing into an
+    /// arbitrary (non-allowlisted) call — custom DAO/queue wrappers. Heuristic
+    /// sites are only emitted downstream when the referenced text is real SQL.
+    #[serde(default)]
+    pub heuristic: bool,
     /// Graph id of the enclosing callable — the `EXECUTES_QUERY` edge source.
     pub in_callable: NodeId,
     pub range: Range,
@@ -431,6 +455,10 @@ pub struct TypeBinding {
     /// Signature of the enclosing callable (`fqcn#name/arity`), or the type FQCN for
     /// a field binding — the lexical scope this binding lives in.
     pub in_fqcn: String,
+    /// DI qualifier naming the wanted bean — `@Qualifier("x")` / `@Resource(name = "x")`
+    /// on the declaration. Only populated for field/param bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualifier: Option<String>,
     pub range: Range,
 }
 

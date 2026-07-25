@@ -670,6 +670,7 @@ fn collect_class_parameter_bindings(
             raw_type,
             kind: BindingKind::Field,
             in_fqcn: fqcn.to_string(),
+            qualifier: None,
             range: range_of(param),
         });
     }
@@ -712,6 +713,7 @@ fn emit_property_decl(
             raw_type,
             kind: BindingKind::Field,
             in_fqcn: in_fqcn.to_string(),
+            qualifier: None,
             range,
         });
     }

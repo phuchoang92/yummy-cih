@@ -97,6 +97,12 @@ pub fn run(args: RefreshArgs) -> Result<()> {
 
     let analyze_out = if analyze_needed {
         let t = Instant::now();
+        // No analyze flags on `refresh`; honor the repo/home cih.toml layers for
+        // the options that change parser/resolver output.
+        let resolved = crate::settings::resolve_analyze(
+            crate::settings::AnalyzeFlagInputs::default(),
+            &crate::settings::Layers::load(&repo),
+        );
         run_analyze(
             repo.clone(),
             AnalyzeFlags {
@@ -112,9 +118,10 @@ pub fn run(args: RefreshArgs) -> Result<()> {
                 graph_key: args.db.graph_key.clone(),
                 no_load: args.db.no_load,
                 no_cache: false,
-                skip_xml_integration: false,
+                skip_xml_integration: resolved.skip_xml_integration,
                 languages: vec![],
-                route_base_path: None,
+                route_base_path: resolved.cxf_base_path,
+                sql_apis: resolved.sql_apis,
             },
         )?;
         let elapsed = t.elapsed();

@@ -24,10 +24,10 @@ pub use group::{
     SyncState,
 };
 pub use ir::{
-    BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind, ContractSite,
-    HttpWrapperDef, MessagingFramework, ParsedFile, ParsedUnit, RawImport, RefKind, ReferenceSite,
-    SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile, SymbolDef, TypeBinding,
-    UrlPart,
+    looks_like_sql, BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind,
+    ContractSite, HttpWrapperDef, MessagingFramework, ParsedFile, ParsedUnit, RawImport, RefKind,
+    ReferenceSite, SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile, SymbolDef,
+    TypeBinding, UrlPart,
 };
 pub use registry::{
     git_changed_files, git_head, now_rfc3339, unix_secs_to_rfc3339, Registry, RegistryEntry,

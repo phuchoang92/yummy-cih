@@ -376,3 +376,40 @@ fn graph_index_matches_field_corpus_for_properties_unicode_and_ties() {
         }
     }
 }
+
+/// DbQuery nodes are searchable by their SQL evidence: table names, operation,
+/// constant name, and the SQL preview — `search_code("AUDIT_LOG")` must surface
+/// the physical INSERT, not only symbols that happen to mention the name.
+#[test]
+fn db_query_nodes_are_searchable_by_table_and_sql_text() {
+    let mut dbquery = node(
+        "DbQuery:com.acme.AuditAdapter#INSERT_AUDIT",
+        NodeKind::DbQuery,
+        "INSERT_AUDIT",
+        None,
+    );
+    dbquery.props = Some(serde_json::json!({
+        "operation": "INSERT",
+        "constantName": "INSERT_AUDIT",
+        "tables": ["AUDIT_LOG"],
+        "sqlPreview": "INSERT INTO AUDIT_LOG (ID, ACTION) VALUES (?, ?)",
+    }));
+    let nodes = vec![
+        dbquery,
+        node(
+            "Method:com.acme.AuditService#audit/1",
+            NodeKind::Method,
+            "audit",
+            Some("com.acme.AuditService.audit"),
+        ),
+    ];
+
+    let index = SearchIndex::build(&nodes);
+    let hits = index.search("audit log insert", 10);
+
+    assert_eq!(
+        hits[0].node_id.as_str(),
+        "DbQuery:com.acme.AuditAdapter#INSERT_AUDIT",
+        "the physical SQL must outrank generically-named audit symbols"
+    );
+}

@@ -14,6 +14,7 @@ pub struct AnalyzeFlagInputs {
     pub skip_xml_integration: Option<bool>,
     pub include_decompiled: Option<bool>,
     pub cxf_base_path: Option<String>,
+    pub sql_apis: Vec<String>,
 }
 
 /// Effective `analyze` values after `flag > repo > home > default`.
@@ -23,6 +24,7 @@ pub struct AnalyzeResolved {
     pub skip_xml_integration: bool,
     pub include_decompiled: bool,
     pub cxf_base_path: Option<String>,
+    pub sql_apis: Vec<String>,
 }
 
 pub fn resolve_analyze(flags: AnalyzeFlagInputs, layers: &Layers) -> AnalyzeResolved {
@@ -59,6 +61,15 @@ pub fn resolve_analyze(flags: AnalyzeFlagInputs, layers: &Layers) -> AnalyzeReso
             .cxf_base_path
             .or_else(|| r.cxf_base_path.clone())
             .or_else(|| h.cxf_base_path.clone()),
+        // Empty --sql-api means "unset" → fall back to config, then none.
+        sql_apis: if flags.sql_apis.is_empty() {
+            r.sql_apis
+                .clone()
+                .or_else(|| h.sql_apis.clone())
+                .unwrap_or_default()
+        } else {
+            flags.sql_apis
+        },
     }
 }
 

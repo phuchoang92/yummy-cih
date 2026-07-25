@@ -62,11 +62,17 @@ pub trait LanguageResolver: Send + Sync {
         None
     }
 
-    /// IoC/DI redirect: for an interface/abstract type, return the unambiguous
-    /// concrete impl if the framework can determine it (Spring @Service).
-    /// Return None when not applicable or ambiguous.
-    fn di_redirect(&self, type_qname: &str, index: &ResolveIndex) -> Option<String> {
-        let _ = (type_qname, index);
+    /// IoC/DI redirect: for an interface/abstract receiver type, return the concrete
+    /// impl the framework would inject at `site`, with per-strategy confidence and
+    /// reason. Return None when not applicable or ambiguous — never guess the call
+    /// site's own enclosing class (that fabricates self-recursion).
+    fn di_redirect(
+        &self,
+        type_qname: &str,
+        site: &DiSite<'_>,
+        index: &ResolveIndex,
+    ) -> Option<DiRedirect> {
+        let _ = (type_qname, site, index);
         None
     }
 
@@ -104,6 +110,22 @@ pub trait LanguageResolver: Send + Sync {
     ) {
         let _ = (repo_root, nodes, edges, options);
     }
+}
+
+/// The injection point a DI redirect is resolved for.
+pub struct DiSite<'a> {
+    /// `@Qualifier("x")` / `@Resource(name = "x")` on the injected field, when the
+    /// receiver is a bare field name that carries one.
+    pub qualifier: Option<&'a str>,
+    /// Class FQCN enclosing the call site — never a valid redirect target.
+    pub enclosing_class: &'a str,
+}
+
+/// A resolved DI redirect: the concrete impl plus edge provenance.
+pub struct DiRedirect {
+    pub target: String,
+    pub confidence: f32,
+    pub reason: &'static str,
 }
 
 /// Language-agnostic knobs handed to [`LanguageResolver::post_process`]. Each resolver

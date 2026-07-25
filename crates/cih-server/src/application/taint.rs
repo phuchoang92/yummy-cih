@@ -267,7 +267,7 @@ fn run_and_shape(
 
 fn blocking_error(error: BlockingError) -> AppError {
     AppError::Unavailable {
-        dependency: "blocking runtime",
+        dependency: "taint analysis",
         message: error.to_string(),
         retryable: true,
     }

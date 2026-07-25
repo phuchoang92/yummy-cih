@@ -424,8 +424,17 @@ companion-object/`object` `val`s with literal initializers):
   UPDATE/DELETE/MERGE, JOINs, comma-joins, sub-queries (including nested), UNION,
   schema-qualified names, and Oracle hint/line comments. `DUAL` is ignored.
   `INSERT ... SELECT` records the target as a write and the source as a read.
-- **DB-constant resolution is same-file / same-class only.** A SQL string assembled
-  from constants defined in another class is not resolved to its tables.
+- **Execution sites** are: the built-in `DBUtil.*` / `JdbcTemplate.*` APIs; any
+  API declared in `cih.toml` (`[analyze] sql_apis = ["AuditQueue.enqueue"]`,
+  matched by receiver text or declared receiver type); and — heuristically — any
+  other call a known SQL constant flows into (custom DAO/queue wrappers).
+  Heuristic sites are emitted only when the referenced constant's text actually
+  reads as SQL, carry `"heuristic": true` in the DbQuery props, and never fire
+  on logger receivers (`log`/`logger`/…).
+- **SQL constants** are `static final String`s captured when the name is
+  UPPER_SNAKE **or** the folded value starts with a SQL keyword. Constant
+  resolution is two-tier: same-file first, then workspace-unique by name
+  (shared `SqlConstants` classes / static imports).
 - **Dynamic SQL is not table-resolved.** When a query is built at runtime from
   non-literal parts, the DbQuery node is marked `dynamic = true` and **no table
   edges** are emitted. Taint analysis still treats such dynamic execution as a
@@ -433,11 +442,23 @@ companion-object/`object` `val`s with literal initializers):
 
 ## Call graph (`cih-resolve`)
 
-- Calls are resolved by receiver type + import/scope binding. **Reflection,
-  runtime dynamic dispatch through framework proxies, and calls through
-  string-named beans can be missed.** Interface calls resolve to declared
-  implementors found in the indexed scope; implementors outside the indexed
-  modules are not linked.
+- Calls are resolved by receiver type + import/scope binding. **Reflection and
+  runtime dynamic dispatch through framework proxies can be missed.** Interface
+  calls resolve to declared implementors found in the indexed scope;
+  implementors outside the indexed modules are not linked.
+- **Spring DI dispatch**: an interface-typed receiver is redirected to the impl
+  the container would inject, trying in order — `@Qualifier("id")` /
+  `@Resource(name = "id")` on the injected field matched against DI-XML bean ids
+  (reason `di-qualifier`, confidence 0.95) → the unique Spring-stereotyped
+  implementor (`di-resolved`, 0.9) → the sole concrete in-scope implementor
+  (`di-single-impl`, 0.75). Bean id → class mappings come from the Spring/
+  Blueprint XML wiring collected once per analyze (`di_xml::collect_di_wiring`),
+  ahead of resolve. **No strategy may select the call's own enclosing class**;
+  when every strategy is exhausted the call degrades to the interface-method
+  edge — never a fabricated self-recursion.
+- **Trivial accessors** (`getX`/`setX`/`isX`/`hasX` with an at-most-one-statement,
+  call-free body) carry an `isAccessor` prop, promoted into the graph so
+  `trace_flow(business_only: true)` can hide them.
 
 ## Spring AOP (`cih-resolve/src/lang/java/aop.rs`)
 

@@ -161,17 +161,20 @@ impl ArchitectureOverviewService {
                 Ok(None)
             }
         };
-        let (sidecars, wiki) = tokio::join!(
-            async {
-                sidecars.await.map_err(|error| AppError::Unavailable {
-                    dependency: "architecture overview sidecars",
-                    message: error.to_string(),
-                    retryable: true,
-                })
-            },
-            wiki
-        );
-        let (registry_stale, groups) = sidecars?;
+        let (sidecars, wiki) = tokio::join!(sidecars, wiki);
+        // Registry/group sidecars are enrichment, not the overview's substance:
+        // a saturated blocking lane must degrade them to a warning, not sink the
+        // graph-backed sections (same convention as the wiki below).
+        let (registry_stale, groups, sidecar_warning) = match sidecars {
+            Ok((registry_stale, groups)) => (registry_stale, groups, None),
+            Err(error) => (
+                false,
+                Vec::new(),
+                Some(format!(
+                    "registry/group metadata unavailable ({error}); graph-backed overview sections remain current"
+                )),
+            ),
+        };
         let (wiki, wiki_warning) = match wiki {
             Ok(wiki) => (wiki, None),
             Err(error) => (
@@ -188,6 +191,7 @@ impl ArchitectureOverviewService {
             groups,
             wiki,
             wiki_warning,
+            sidecar_warning,
             sections,
             limit: command.limit,
         })
@@ -514,6 +518,8 @@ struct ComposeCtx<'a> {
     groups: Vec<GroupOut>,
     wiki: Option<OverviewWikiListing>,
     wiki_warning: Option<String>,
+    /// Registry/group sidecar failure downgraded to a warning (never fatal).
+    sidecar_warning: Option<String>,
     sections: Vec<String>,
     limit: usize,
 }
@@ -839,6 +845,9 @@ fn build_warnings(
         }
     }
     if let Some(warning) = &ctx.wiki_warning {
+        warnings.push(warning.clone());
+    }
+    if let Some(warning) = &ctx.sidecar_warning {
         warnings.push(warning.clone());
     }
     warnings
@@ -1460,11 +1469,26 @@ mod tests {
         async fn processes_for_symbols(&self, _ids: &[NodeId]) -> StoreResult<Vec<String>> {
             unimpl()
         }
+        async fn db_effects_for_methods(
+            &self,
+            _ids: &[NodeId],
+        ) -> StoreResult<Vec<cih_graph_store::DbEffect>> {
+            unimpl()
+        }
+        async fn paths_between(
+            &self,
+            _from: &NodeId,
+            _to: &NodeId,
+            _max_depth: u32,
+            _max_paths: usize,
+        ) -> StoreResult<Vec<cih_graph_store::PathInfo>> {
+            unimpl()
+        }
         async fn flow_downstream(
             &self,
             _entry: &NodeId,
-            _max_depth: u32,
-        ) -> StoreResult<Vec<cih_graph_store::FlowHop>> {
+            _filter: &cih_graph_store::FlowFilter,
+        ) -> StoreResult<cih_graph_store::FlowPage> {
             unimpl()
         }
         async fn complexity_hotspots(
@@ -1622,6 +1646,7 @@ mod tests {
             groups: vec![],
             wiki: None,
             wiki_warning: None,
+            sidecar_warning: None,
             sections,
             limit,
         }
@@ -2226,6 +2251,7 @@ mod tests {
             groups: vec![],
             wiki: None,
             wiki_warning: None,
+            sidecar_warning: None,
             sections: vec![],
             limit: 0,
         })
@@ -2292,6 +2318,7 @@ mod tests {
             groups: vec![],
             wiki: None,
             wiki_warning: None,
+            sidecar_warning: None,
             sections: vec![],
             limit: 0,
         })
