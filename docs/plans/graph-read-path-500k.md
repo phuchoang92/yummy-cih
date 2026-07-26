@@ -1,6 +1,11 @@
 # Graph Read Path Performance and Semantic Hardening at 500k Scale
 
-Status: revised against the current `dev` implementation on 2026-07-26.
+Status: Superseded on 2026-07-26 by
+[`large-repo-correctness-scale-and-reliability.md`](large-repo-correctness-scale-and-reliability.md).
+
+This file is retained as historical graph-fixture and query-research detail.
+The master plan owns all active phases, system invariants, SLOs, implementation
+status, and acceptance gates; do not execute this document as a second program.
 
 ## Summary
 

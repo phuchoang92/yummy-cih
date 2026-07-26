@@ -211,20 +211,21 @@ mod tests {
         );
         let registry_path = temp.path().join("registry.json");
 
-        register_repo_in_registry(
-            &registry_path,
-            &repo,
-            &base,
-            &[&community],
-            "fixture-graph",
-        )
-        .expect("registry promotion");
+        register_repo_in_registry(&registry_path, &repo, &base, &[&community], "fixture-graph")
+            .expect("registry promotion");
 
         let snapshot = RegistryStore::new(&registry_path).load().expect("registry");
-        let entry = snapshot.registry.find(repo.to_string_lossy().as_ref()).unwrap();
+        let entry = snapshot
+            .registry
+            .find(repo.to_string_lossy().as_ref())
+            .unwrap();
         assert_eq!(
             entry.community_artifacts_dir.as_deref(),
-            community.nodes_path.parent().map(|path| path.to_string_lossy()).as_deref()
+            community
+                .nodes_path
+                .parent()
+                .map(|path| path.to_string_lossy())
+                .as_deref()
         );
         assert!(entry.repository_id.is_some());
         assert!(entry.published_epoch.is_some());

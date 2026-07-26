@@ -4,6 +4,7 @@ use cih_core::registry::{
     ensure_repository_id, graph_content_version, new_publication_epoch, unix_secs_to_rfc3339,
     Registry, RegistryEntry, RegistryGraphReport, RegistryStats, RegistryStore, RepositoryId,
 };
+use cih_core::GRAPH_REPORT_MAX_BYTES;
 use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind, Range};
 
 fn entry(name: &str, version: &str) -> RegistryEntry {
@@ -609,5 +610,28 @@ fn graph_report_refuses_unproven_duplicate_or_dangling_artifacts() {
         RegistryGraphReport::try_build("v".into(), &[&nodes], &[&dangling])
             .expect_err("dangling edge is not exact")
             .contains("missing endpoint")
+    );
+}
+
+#[test]
+fn graph_report_strips_properties_and_enforces_a_serialized_byte_limit() {
+    let mut node = graph_node("Method:A#run/0", NodeKind::Method);
+    node.props = Some(serde_json::json!({"large": "x".repeat(GRAPH_REPORT_MAX_BYTES)}));
+    let report = RegistryGraphReport::try_build("v".into(), &[&[node]], &[])
+        .expect("arbitrary properties are not persisted");
+    assert!(report.symbol_hubs[0].node.props.is_none());
+    assert!(serde_json::to_vec(&report).unwrap().len() <= GRAPH_REPORT_MAX_BYTES);
+    assert!(report.is_usable_for("v"));
+
+    let mut unsafe_persisted = report.clone();
+    unsafe_persisted.symbol_hubs[0].node.props = Some(serde_json::json!({"restored": true}));
+    assert!(!unsafe_persisted.is_usable_for("v"));
+
+    let mut oversized = graph_node("Method:B#run/0", NodeKind::Method);
+    oversized.name = "x".repeat(GRAPH_REPORT_MAX_BYTES);
+    assert!(
+        RegistryGraphReport::try_build("v".into(), &[&[oversized]], &[])
+            .expect_err("oversized projections are rejected")
+            .contains("above the")
     );
 }

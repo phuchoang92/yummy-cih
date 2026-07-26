@@ -11,6 +11,7 @@ const REPOSITORY_IDENTITY_SCHEMA: u8 = 1;
 const REPOSITORY_IDENTITY_FILE: &str = "repository-identity.json";
 const GRAPH_REPORT_SCHEMA: u8 = 1;
 pub const GRAPH_REPORT_HUB_LIMIT: usize = 256;
+pub const GRAPH_REPORT_MAX_BYTES: usize = 256 * 1024;
 
 /// Portable identity of a repository, independent of its mutable path, display
 /// name, graph key, or host.
@@ -284,9 +285,16 @@ impl RegistryGraphReport {
                         | crate::NodeKind::Method
                 )
             })
-            .map(|node| RegistryGraphHub {
-                node: (*node).clone(),
-                degree: degrees.get(node.id.as_str()).copied().unwrap_or_default(),
+            .map(|node| {
+                let mut projected = (*node).clone();
+                // Reporting needs identity/source location only. Analyzer and
+                // framework properties can be arbitrarily large and must not
+                // turn the bounded hub list into an unbounded registry value.
+                projected.props = None;
+                RegistryGraphHub {
+                    node: projected,
+                    degree: degrees.get(node.id.as_str()).copied().unwrap_or_default(),
+                }
             })
             .collect::<Vec<_>>();
         symbol_hubs.sort_by(|a, b| {
@@ -296,19 +304,39 @@ impl RegistryGraphReport {
         });
         symbol_hubs.truncate(GRAPH_REPORT_HUB_LIMIT);
 
-        Ok(Self {
+        let report = Self {
             schema_version: GRAPH_REPORT_SCHEMA,
             graph_content_version,
             total_nodes: nodes_by_id.len() as u64,
             total_edges: edge_keys.len() as u64,
             kinds,
             symbol_hubs,
-        })
+        };
+        let encoded_bytes = serde_json::to_vec(&report)
+            .map_err(|error| format!("could not size graph report: {error}"))?
+            .len();
+        if encoded_bytes > GRAPH_REPORT_MAX_BYTES {
+            return Err(format!(
+                "graph report is {encoded_bytes} bytes, above the {GRAPH_REPORT_MAX_BYTES}-byte limit"
+            ));
+        }
+        Ok(report)
     }
 
     pub fn matches_content(&self, graph_content_version: &str) -> bool {
         self.schema_version == GRAPH_REPORT_SCHEMA
             && self.graph_content_version == graph_content_version
+    }
+
+    /// Validate persisted metadata again at the serving boundary. The builder
+    /// enforces these properties for new reports, while this check also protects
+    /// legacy/manual registry JSON from bypassing the hub and byte limits.
+    pub fn is_usable_for(&self, graph_content_version: &str) -> bool {
+        self.matches_content(graph_content_version)
+            && self.kinds.iter().map(|kind| kind.count).sum::<u64>() == self.total_nodes
+            && self.symbol_hubs.len() <= GRAPH_REPORT_HUB_LIMIT
+            && self.symbol_hubs.iter().all(|hub| hub.node.props.is_none())
+            && serde_json::to_vec(self).is_ok_and(|encoded| encoded.len() <= GRAPH_REPORT_MAX_BYTES)
     }
 }
 

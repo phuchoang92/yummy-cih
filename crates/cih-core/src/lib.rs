@@ -34,6 +34,7 @@ pub use registry::{
     new_publication_epoch, now_rfc3339, unix_secs_to_rfc3339, Registry, RegistryEntry,
     RegistryGraphHub, RegistryGraphReport, RegistryKindCount, RegistryRevision, RegistrySnapshot,
     RegistryStats, RegistryStore, RegistryUpdate, RepositoryId, GRAPH_REPORT_HUB_LIMIT,
+    GRAPH_REPORT_MAX_BYTES,
 };
 pub use repo_map::{
     auto_detect_architecture, ArchitectureHint, BuildSystem, JarInfo, ModuleInfo, RepoMap,

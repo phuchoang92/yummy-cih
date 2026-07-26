@@ -12,9 +12,8 @@ pub(crate) fn current(entry: &RegistryEntry) -> Option<&RegistryGraphReport> {
     let report = entry.stats.published_graph_report.as_ref()?;
     (entry.published_artifact_version.is_some()
         && entry.published_epoch.is_some()
-        && report.matches_content(content_version)
-        && report.kinds.iter().map(|kind| kind.count).sum::<u64>() == report.total_nodes)
-        .then_some(report)
+        && report.is_usable_for(content_version))
+    .then_some(report)
 }
 
 pub(crate) fn summary(report: &RegistryGraphReport) -> GraphSummary {
@@ -55,18 +54,20 @@ mod tests {
     use cih_core::{RegistryKindCount, RegistryStats};
 
     fn entry(report_version: Option<&str>) -> RegistryEntry {
-        let mut stats = RegistryStats::default();
-        stats.published_graph_report = report_version.map(|version| RegistryGraphReport {
-            schema_version: 1,
-            graph_content_version: version.to_string(),
-            total_nodes: 2,
-            total_edges: 1,
-            kinds: vec![RegistryKindCount {
-                kind: "Method".into(),
-                count: 2,
-            }],
-            symbol_hubs: Vec::new(),
-        });
+        let stats = RegistryStats {
+            published_graph_report: report_version.map(|version| RegistryGraphReport {
+                schema_version: 1,
+                graph_content_version: version.to_string(),
+                total_nodes: 2,
+                total_edges: 1,
+                kinds: vec![RegistryKindCount {
+                    kind: "Method".into(),
+                    count: 2,
+                }],
+                symbol_hubs: Vec::new(),
+            }),
+            ..Default::default()
+        };
         RegistryEntry {
             repository_id: None,
             name: "demo".into(),

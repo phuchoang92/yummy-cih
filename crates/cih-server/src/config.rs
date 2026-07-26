@@ -721,9 +721,7 @@ mod tests {
     fn grep_partial_deadline_must_precede_operation_deadline() {
         assert!(validate_grep_operation_deadline(2, 10, 15_000).is_ok());
         let error = validate_grep_operation_deadline(5, 10, 15_000).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("CIH_GRAPH_OPERATION_TIMEOUT_MS"));
+        assert!(error.to_string().contains("CIH_GRAPH_OPERATION_TIMEOUT_MS"));
         assert!(validate_grep_operation_deadline(u64::MAX, 1, 15_000).is_err());
     }
 

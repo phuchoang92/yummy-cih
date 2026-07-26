@@ -122,13 +122,18 @@ fn content_version_is_stable_for_identical_content() {
         "changed content must yield a new version"
     );
 
-    // Prune keeps only the current version dir.
+    // DB-free emission must retain both immutable versions. Pruning is a
+    // post-publication action: deleting `first` here would remove the only
+    // version that may still be serving if loading `changed` later fails.
     let artifacts_parent = root.join(".cih").join("artifacts");
-    let dirs: Vec<String> = fs::read_dir(&artifacts_parent)
+    let mut dirs: Vec<String> = fs::read_dir(&artifacts_parent)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(dirs, vec![changed.version.clone()]);
+    dirs.sort();
+    let mut expected = vec![first, changed.version.clone()];
+    expected.sort();
+    assert_eq!(dirs, expected);
 
     fs::remove_dir_all(&root).unwrap();
 }

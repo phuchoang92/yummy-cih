@@ -1,12 +1,13 @@
 # CIH Large-Repository Correctness, Scale, and Reliability Program
 
-Status: Proposed master plan
+Status: Active — implementation checkpoint recorded; program not complete
 
 Owner: CIH maintainers
 
 Created: 2026-07-26
 
-Last verified against CIH commit: `b1420829810f1f4f6533620408006fbab1098963`
+Last verified against CIH commit: `13283959be2d62874dc4c366b0fbecd24c6ec164`
+plus the working-tree checkpoint described in Section 2.1
 
 Primary scale fixture: JetBrains IntelliJ Community commit
 [`f0b8096f352ed37bacfc8a3fcf10e2df3fb916b0`](https://github.com/JetBrains/intellij-community/commit/f0b8096f352ed37bacfc8a3fcf10e2df3fb916b0)
@@ -75,6 +76,56 @@ A plan is not complete merely because unit tests pass. Completion requires its
 live-backend and corpus-specific gates. Completed substantive plans move to
 `docs/archive/plans/YYYY-MM/`; only redundant checklists with no durable evidence
 may be deleted.
+
+### 2.1 Implementation checkpoint — 2026-07-26
+
+This checkpoint records what the first implementation pass actually delivered.
+It does not waive the remaining phase gates, and it does not change an open item
+into an implemented claim merely because an adjacent safeguard exists.
+
+| Program slice | State | Delivered in this checkpoint | Remaining before the phase is complete |
+|---|---|---|---|
+| Phase -1 destructive-path guard | Implemented locally; fault evidence open | Edge-only taint stays `publication_pending`; bootstrap and normal loads use unique staging; base plus overlays are composed as a complete replacement; latest and published registry state are separated; registry promotion and pruning happen only after a successful load; the MCP response guard defaults to warning/measurement | Complete the phase fault-injection report and retain rollback evidence on a qualification host |
+| Phase 0 trustworthy harnesses | Partial | Backend-neutral graph contracts now cover route, topic/listener, table access, cycles, equal shortest paths, filters, budgets, pagination, ranges, and both Ladybug and live Falkor; the pinned IntelliJ fixture provides a real large-repository smoke workload | Freeze the dedicated approximately 500k/1.5M semantic fixture, immutable seed manifest, cleaned-full IntelliJ manifest, qualification-host profile, and three-run release evidence |
+| Phase 1 identity, containment, and readiness | Partial | Registry writes use an inter-process lock, reread under lock, unique temporary files, `fsync`, atomic rename, backup recovery, monotonic revision, and digest; immutable 64-hex `RepositoryId` migration exists; published artifact/content/epoch mirrors update only after load; backend errors are typed; Falkor reads have backend and driver timeouts with cancellation-safe admission; restore readiness uses `INFO persistence`, is cached/single-flight, and gates graph operations while file/search/status remain available; validated cache, grep, response, and inference limits are composed at startup | Add the authoritative backend-local publication store, immutable epoch-specific physical graphs, fenced CAS, request-pinned publication identity, authoritative manifest transport, operational repository readiness, crash reconciliation, and rollback |
+| Phase 2 truthful bounded contracts | Implemented locally; corpus gates open | Authenticated, expiring, operation-bound cursors cover independent context sections and repository pages; cursors bind registry or graph publication identity; expanded search has aggregate node/edge/byte budgets, deduplication, endpoint closure, and honest traversal versus presentation status; legacy repository listing fails loudly when it cannot remain exact; architecture sections degrade independently; exact JSON-RPC envelope measurement and optional hard enforcement are implemented | Run the recorded 2,141-caller, 16,027-impact, multi-page, mutation, and payload gates on immutable published fixtures |
+| Phase 3 shared graph kernel | Core implemented; full specification partial | A backend-neutral BFS owns execution flow, shortest paths, CALLS impact, and multi-root stored-orientation subgraphs; adapters expose deterministic batched one-hop transitions capped at 256 sources; 10,000-node and 50,000-edge budgets, cycles, equal-depth predecessors, reverse evidence, stable ordering, filters, and inconclusive status are shared; Ladybug and live Falkor pass the common contract | Finish the persisted `edge_uid` plus backend keyset-page contract, migrate/deprecate remaining raw neighbor and call-chain paths, and publish the required high-fan release benchmarks |
+| Phase 4 O(1) reporting and indexes | Partial | A publication-bound `RegistryGraphReport` supplies exact reduced totals, per-kind counts, and 256 deterministic symbol hubs to architecture summary/default symbol-pool reads; arbitrary node properties are stripped and serialized reports are capped and revalidated at 256 KiB; stale or inconsistent reports use the legacy fallback; required Falkor indexes for `Symbol.id`, `kind`, `name`, and `file` are centralized and unexpected DDL failures invalidate staging | Move the report into the authoritative graph-content manifest; make general `graph_overview` use bounded structural-node/selected-edge projections; verify operational index state after load; capture live `GRAPH.EXPLAIN`/`GRAPH.PROFILE` evidence; remove repeated global-scan fallback from republished graphs |
+| Phase 5 publication hardening | Open beyond prerequisites | Generation-aware fields, safe staging, and post-publication cleanup are prerequisites now present | Implement one authoritative coordinator, full overlay manifests, fenced pointer CAS, request-aware retention, crash recovery, rollback, and generation-bound graph caching |
+| Phase 6 bounded analyzer | Open | Search-sidecar construction releases large edge collections before building and reporting metadata reuses resident graph data | Implement streaming parse/resolve/emission, disk-backed indexes, bounded queues, explicit size/complexity skips, and the qualification RSS gates |
+| Phase 7 project model and fidelity | Open | Existing DI, SQL, accessor, and parser-schema correctness fixes are preserved | Implement the canonical project model, durable symbol identity, Kotlin reference semantics, IntelliJ extension modeling, and the defined truth-corpus gates |
+| Phase 8 semantic search | Partial containment only | Synchronous inference moved to a bounded blocking lane with admission, timeout, cancellation-safe capacity ownership, metrics, and validated runtime configuration | Bind semantic rows to repository/artifact/model generations, remove production model ambiguity, add rebuild/state transitions, and pass lexical/hybrid isolation and offline gates |
+| Phase 9 knowledge compiler | Open | No completion claim | Implement generation-bound knowledge IR/packs, provenance, OpenWiki import/export validation, and compatibility policy |
+| Phase 10 qualification and closeout | Open | The local gates below are green | Complete pinned release-mode workload evidence, restore/publication/rollback drills, external OCB verification, documentation closeout, and archive only after every mandatory gate passes |
+
+Validation completed for this checkpoint:
+
+- `cargo fmt --all -- --check`;
+- `cargo clippy --workspace --all-targets -- -D warnings`;
+- `cargo test --workspace`;
+- the ignored live Falkor graph-store contract, run explicitly with
+  `cargo test -p cih-falkor --test falkor_integration -- --ignored --nocapture`;
+- focused core, engine, graph-store, Falkor, Ladybug, store-factory, embedding,
+  and server suites;
+- a strictly read-only check of the pinned IntelliJ fixture and its live graph.
+
+The read-only IntelliJ check used the pinned commit and existing artifacts; it
+did not analyze, reindex, prune, migrate, or modify Docker data. The artifact,
+registry, and live graph agree on 415,604 nodes and 941,559 edges. Indexed exact
+node lookup was approximately 0.366 ms internally, a bounded ten-neighbor lookup
+approximately 0.510 ms, and node/edge count probes approximately 0.174/0.233 ms.
+The existing 2.02 GiB `.cih` directory includes parse-cache schema 27 and a
+format-2 search sidecar of 120,409,953 bytes.
+
+The same smoke check deliberately exposes migration work rather than hiding it:
+the IntelliJ publication is legacy and has no repository identity, publication
+epoch, graph-content binding, or persisted graph report, and its live Symbol
+index lacks the newly required `file` field. It therefore does not prove the new
+publication/readiness path. The external OCB repository is not local and its
+change-password gate has not been run. The 50-sample, three-run qualification
+matrix, restore drill, concurrent-publisher fencing, crash matrix, and rollback
+drill also remain mandatory. The macOS Ladybug/server test link still emits the
+known duplicate-Zstd-symbol warning, although the tests pass.
 
 ## 3. Current baseline
 
