@@ -5,6 +5,7 @@ pub(crate) mod artifact_repository;
 pub(crate) mod blocking_runtime;
 pub(crate) mod changed_files_source;
 pub(crate) mod cross_repo_graph_provider;
+pub(crate) mod graph_readiness;
 pub(crate) mod index_target_resolver;
 pub(crate) mod job_scheduler;
 pub(crate) mod observability;

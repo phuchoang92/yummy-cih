@@ -15,10 +15,15 @@ services:
       - falkordb-data:/var/lib/falkordb/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      # PING succeeds while Redis is still restoring a large RDB/AOF. INFO is
+      # explicitly allowed during restore and keeps dependants stopped until
+      # the persisted graph is actually queryable. This is metadata-only: it
+      # neither opens a graph key nor runs schema DDL.
+      test: ["CMD-SHELL", "redis-cli -p 6379 --raw INFO persistence | grep -q '^loading:0'"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      start_period: 120s
+      retries: 60
 
   # Postgres + pgvector — embedding store for the `embed` command and the
   # semantic-search half of the `query` MCP tool. Host port 5433 avoids

@@ -952,10 +952,15 @@ fn synthetic_wiki_documents(count: usize) -> Vec<String> {
 
 fn fixture_repo(fixture_dir: &Path) -> ResolvedRepo {
     ResolvedRepo::from_entry(RegistryEntry {
+        repository_id: None,
         name: "scale-fixture".into(),
         path: fixture_dir.display().to_string(),
         graph_key: "scale-fixture".into(),
         artifacts_dir: fixture_dir.display().to_string(),
+        latest_artifact_version: None,
+        published_artifact_version: None,
+        published_graph_content_version: None,
+        published_epoch: None,
         community_artifacts_dir: Some(fixture_dir.display().to_string()),
         indexed_at: String::new(),
         last_git_head: None,

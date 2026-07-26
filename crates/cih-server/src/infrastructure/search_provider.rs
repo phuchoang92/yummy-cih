@@ -9,13 +9,14 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use cih_embed::{EmbedStore, SemanticHit};
+use cih_embed::{EmbedInferenceError, EmbedStore, SemanticHit};
 use cih_search::{
     rrf_merge, search_index_path, search_schema_fingerprint, SearchHit, SearchIndex,
     SearchIndexInspection, SearchIndexLoad, SearchIndexSource,
 };
 use tokio::sync::{Notify, Semaphore};
 
+use crate::config::RetrievalConfig;
 use crate::infrastructure::cache::weighted::{AsyncCacheMetrics, AsyncWeightedCache};
 use crate::infrastructure::file_search_index_store::FileSearchIndexStore;
 use crate::ports::blocking_runtime::{
@@ -63,6 +64,12 @@ struct SearchRuntimeMetrics {
     scorer_peak_per_query_scratch_bytes: AtomicUsize,
     score_completed: AtomicU64,
     score_elapsed_ms: AtomicU64,
+    semantic_attempted: AtomicU64,
+    semantic_succeeded: AtomicU64,
+    semantic_failed: AtomicU64,
+    semantic_timed_out: AtomicU64,
+    semantic_rejected: AtomicU64,
+    semantic_elapsed_ms: AtomicU64,
     cold_active: AtomicUsize,
     cold_queued: AtomicUsize,
     cold_rejected: AtomicU64,
@@ -96,6 +103,12 @@ impl SearchRuntimeMetrics {
                 .load(Ordering::Relaxed),
             score_completed: self.score_completed.load(Ordering::Relaxed),
             score_elapsed_ms: self.score_elapsed_ms.load(Ordering::Relaxed),
+            semantic_attempted: self.semantic_attempted.load(Ordering::Relaxed),
+            semantic_succeeded: self.semantic_succeeded.load(Ordering::Relaxed),
+            semantic_failed: self.semantic_failed.load(Ordering::Relaxed),
+            semantic_timed_out: self.semantic_timed_out.load(Ordering::Relaxed),
+            semantic_rejected: self.semantic_rejected.load(Ordering::Relaxed),
+            semantic_elapsed_ms: self.semantic_elapsed_ms.load(Ordering::Relaxed),
             cold_active: self.cold_active.load(Ordering::Relaxed),
             cold_queued: self.cold_queued.load(Ordering::Relaxed),
             cold_rejected: self.cold_rejected.load(Ordering::Relaxed),
@@ -119,8 +132,10 @@ impl SearchRuntimeMetrics {
 #[derive(Clone)]
 struct SearchRuntime {
     scorer_lane: Arc<Semaphore>,
+    scorer_max_concurrent: usize,
     scorer_queue_timeout: Duration,
     cold_lane: Arc<Semaphore>,
+    cold_max_concurrent: usize,
     cold_bytes: Arc<Semaphore>,
     cold_max_units: u32,
     cold_queue_timeout: Duration,
@@ -140,17 +155,36 @@ impl SearchRuntime {
             .max(1);
         Self {
             scorer_lane: Arc::new(Semaphore::new(scorer_count)),
+            scorer_max_concurrent: scorer_count,
             scorer_queue_timeout: Duration::from_millis(env_u64(
                 "CIH_SEARCH_SCORE_QUEUE_TIMEOUT_MS",
                 2_000,
             )),
             cold_lane: Arc::new(Semaphore::new(cold_count)),
+            cold_max_concurrent: cold_count,
             cold_bytes: Arc::new(Semaphore::new(cold_max_units as usize)),
             cold_max_units,
             cold_queue_timeout: Duration::from_secs(env_u64(
                 "CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS",
                 5,
             )),
+            metrics: Arc::new(SearchRuntimeMetrics::default()),
+        }
+    }
+
+    fn from_config(config: &RetrievalConfig) -> Self {
+        let cold_max_units = u32::try_from(config.search_cold_max_bytes.div_ceil(MIB))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        Self {
+            scorer_lane: Arc::new(Semaphore::new(config.search_score_max_concurrent)),
+            scorer_max_concurrent: config.search_score_max_concurrent,
+            scorer_queue_timeout: Duration::from_millis(config.search_score_queue_timeout_ms),
+            cold_lane: Arc::new(Semaphore::new(config.search_cold_max_concurrent)),
+            cold_max_concurrent: config.search_cold_max_concurrent,
+            cold_bytes: Arc::new(Semaphore::new(cold_max_units as usize)),
+            cold_max_units,
+            cold_queue_timeout: Duration::from_secs(config.search_cold_queue_timeout_secs),
             metrics: Arc::new(SearchRuntimeMetrics::default()),
         }
     }
@@ -183,7 +217,11 @@ impl SearchRuntime {
             Err(_) => {
                 self.metrics.scorer_rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(SearchProviderError::new(
-                    "search scoring capacity saturated; retry shortly",
+                    format!(
+                        "search scoring capacity saturated after {}ms (max_concurrent={}); tune CIH_SEARCH_SCORE_MAX_CONCURRENT and CIH_SEARCH_SCORE_QUEUE_TIMEOUT_MS",
+                        self.scorer_queue_timeout.as_millis(),
+                        self.scorer_max_concurrent
+                    ),
                     true,
                 ));
             }
@@ -222,7 +260,7 @@ impl SearchRuntime {
             self.metrics.cold_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(SearchProviderError::new(
                 format!(
-                    "search cold-memory capacity saturated: estimated {} bytes exceeds {} bytes",
+                    "search cold-memory capacity saturated: estimated {} bytes exceeds {} bytes; raise CIH_SEARCH_COLD_MAX_BYTES after checking the process memory limit",
                     estimated_bytes,
                     u64::from(self.cold_max_units) * MIB as u64
                 ),
@@ -248,7 +286,11 @@ impl SearchRuntime {
                 self.metrics.cold_queued.fetch_sub(1, Ordering::Relaxed);
                 self.metrics.cold_rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(SearchProviderError::new(
-                    "search cold-load capacity saturated; retry shortly",
+                    format!(
+                        "search cold-load capacity saturated after {}s (max_concurrent={}); tune CIH_SEARCH_COLD_MAX_CONCURRENT and CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS",
+                        self.cold_queue_timeout.as_secs(),
+                        self.cold_max_concurrent
+                    ),
                     true,
                 ));
             }
@@ -273,7 +315,11 @@ impl SearchRuntime {
             Err(_) => {
                 self.metrics.cold_rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(SearchProviderError::new(
-                    "search cold-memory capacity saturated; retry shortly",
+                    format!(
+                        "search cold-memory capacity saturated after {}s (max_bytes={}); tune CIH_SEARCH_COLD_MAX_BYTES and CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS",
+                        self.cold_queue_timeout.as_secs(),
+                        u64::from(self.cold_max_units) * MIB as u64
+                    ),
                     true,
                 ));
             }
@@ -370,6 +416,7 @@ pub(crate) struct SearchCache {
     runtime: SearchRuntime,
     store: Arc<dyn SearchIndexStore>,
     max_weight_bytes: usize,
+    sidecar_enabled: bool,
     warned_oversize: Arc<StdMutex<HashSet<SearchIndexKey>>>,
     observed_indexes: Arc<StdMutex<HashMap<String, SearchIndexMetricsSnapshot>>>,
 }
@@ -381,6 +428,7 @@ impl SearchCache {
             max_weight_bytes,
             SearchRuntime::from_env(),
             Arc::new(FileSearchIndexStore),
+            env_bool("CIH_SEARCH_SIDECAR_ENABLED", true),
         )
     }
 
@@ -389,6 +437,7 @@ impl SearchCache {
         max_weight_bytes: usize,
         runtime: SearchRuntime,
         store: Arc<dyn SearchIndexStore>,
+        sidecar_enabled: bool,
     ) -> Self {
         let metrics = runtime.metrics.clone();
         Self {
@@ -397,11 +446,13 @@ impl SearchCache {
             runtime,
             store,
             max_weight_bytes,
+            sidecar_enabled,
             warned_oversize: Arc::new(StdMutex::new(HashSet::new())),
             observed_indexes: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_env() -> Self {
         Self::new(
             env_usize("CIH_SEARCH_CACHE_MAX_ENTRIES", 32),
@@ -410,6 +461,82 @@ impl SearchCache {
                 crate::config::DEFAULT_SEARCH_CACHE_MAX_BYTES,
             ),
         )
+    }
+
+    pub(crate) fn from_config(config: &RetrievalConfig, max_weight_bytes: usize) -> Self {
+        Self::with_dependencies(
+            config.search_cache_max_entries,
+            max_weight_bytes,
+            SearchRuntime::from_config(config),
+            Arc::new(FileSearchIndexStore),
+            config.search_sidecar_enabled,
+        )
+    }
+
+    /// Inspect the primary repository's sidecar without decoding it. This
+    /// catches a declared-hot index that cannot fit the configured retained or
+    /// cold-load budgets before the first user query pays the cost.
+    pub(crate) fn preflight_artifacts(&self, artifacts_root: &Path) {
+        let artifacts = match cih_core::GraphArtifacts::latest_in_dir(artifacts_root) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                tracing::warn!(
+                    artifacts_root = %artifacts_root.display(),
+                    error = %error,
+                    "search hot-set preflight could not resolve graph artifacts"
+                );
+                return;
+            }
+        };
+        let Some(version_dir) = artifacts.nodes_path.parent() else {
+            return;
+        };
+        let sidecar = search_index_path(version_dir);
+        match self.store.inspect(&sidecar) {
+            Ok(SearchIndexInspection::Present(metadata)) => {
+                let retained_bytes = metadata.retained_size_bytes;
+                let cold_bytes = sidecar_reservation_bytes(&metadata).unwrap_or(u64::MAX);
+                let cold_limit = u64::from(self.runtime.cold_max_units) * MIB as u64;
+                let retained_fits = retained_bytes <= self.max_weight_bytes as u64;
+                let cold_fits = cold_bytes <= cold_limit;
+                let level = if retained_fits && cold_fits {
+                    "ready"
+                } else {
+                    "degraded"
+                };
+                tracing::info!(
+                    status = level,
+                    artifact_version = %artifacts.version,
+                    retained_bytes,
+                    retained_limit_bytes = self.max_weight_bytes,
+                    cold_bytes,
+                    cold_limit_bytes = cold_limit,
+                    "search hot-set capacity preflight"
+                );
+                if !retained_fits || !cold_fits {
+                    tracing::warn!(
+                        retained_fits,
+                        cold_fits,
+                        remediation = "raise CIH_SEARCH_CACHE_MAX_BYTES, CIH_SEARCH_COLD_MAX_BYTES, and CIH_CACHE_MAX_BYTES only after checking the process memory limit",
+                        "primary search index cannot satisfy the warm serving contract"
+                    );
+                }
+            }
+            Ok(SearchIndexInspection::Missing) => tracing::warn!(
+                sidecar = %sidecar.display(),
+                "primary search sidecar is missing; the first query will use the bounded fallback builder"
+            ),
+            Ok(SearchIndexInspection::Invalid(reason)) => tracing::warn!(
+                sidecar = %sidecar.display(),
+                reason,
+                "primary search sidecar is invalid; rebuild is required"
+            ),
+            Err(error) => tracing::warn!(
+                sidecar = %sidecar.display(),
+                error = %error,
+                "primary search sidecar preflight failed"
+            ),
+        }
     }
 
     async fn get(&self, key: &SearchIndexKey) -> Option<Arc<SearchIndex>> {
@@ -804,13 +931,28 @@ impl SearchState {
             let Some(embed_store) = &self.embed_store else {
                 return Ok(Vec::new());
             };
-            embed_store
+            let metrics = self.cache.runtime.metrics.clone();
+            metrics.semantic_attempted.fetch_add(1, Ordering::Relaxed);
+            let started = Instant::now();
+            let result = embed_store
                 .semantic_search(&semantic_query, limit.saturating_mul(2), 0.5)
-                .await
-                .map(|hits| hits.into_iter().map(semantic_to_search_hit).collect())
-                .map_err(|error| {
-                    SearchProviderError::new(format!("semantic search failed: {error}"), true)
-                })
+                .await;
+            metrics
+                .semantic_elapsed_ms
+                .fetch_add(elapsed_ms(started), Ordering::Relaxed);
+            match result {
+                Ok(hits) => {
+                    metrics.semantic_succeeded.fetch_add(1, Ordering::Relaxed);
+                    Ok(hits.into_iter().map(semantic_to_search_hit).collect())
+                }
+                Err(error) => {
+                    record_semantic_failure(&metrics, &error);
+                    Err(SearchProviderError::new(
+                        format!("semantic search failed: {error}"),
+                        true,
+                    ))
+                }
+            }
         };
         let (lexical, semantic) = tokio::join!(lexical, semantic);
         Ok(rrf_merge(lexical?, semantic?, limit))
@@ -862,7 +1004,7 @@ impl SearchCache {
             .ok_or_else(|| SearchProviderError::new("invalid search artifact path", false))?
             .to_path_buf();
         let sidecar_path = search_index_path(&artifacts_dir);
-        let sidecar_enabled = env_bool("CIH_SEARCH_SIDECAR_ENABLED", true);
+        let sidecar_enabled = self.sidecar_enabled;
         let fallback_reservation = source.nodes_len.saturating_mul(2);
         let (estimated_bytes, load_sidecar) = if sidecar_enabled {
             match self.store.inspect(&sidecar_path) {
@@ -1015,6 +1157,18 @@ fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
         hit.score,
         "semantic",
     )
+}
+
+fn record_semantic_failure(metrics: &SearchRuntimeMetrics, error: &anyhow::Error) {
+    metrics.semantic_failed.fetch_add(1, Ordering::Relaxed);
+    if let Some(inference) = error.downcast_ref::<EmbedInferenceError>() {
+        if inference.is_timeout() {
+            metrics.semantic_timed_out.fetch_add(1, Ordering::Relaxed);
+        }
+        if inference.is_saturated() {
+            metrics.semantic_rejected.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 fn canonical_or_absolute(path: &Path) -> PathBuf {
@@ -1210,5 +1364,22 @@ mod tests {
         assert_eq!(idle.scorer_peak_active, 2);
         assert_eq!(idle.scorer_peak_scratch_bytes, 384);
         assert_eq!(idle.scorer_peak_per_query_scratch_bytes, 256);
+    }
+
+    #[test]
+    fn semantic_failure_metrics_distinguish_timeout_and_admission_rejection() {
+        let metrics = SearchRuntimeMetrics::default();
+        let timeout = anyhow::Error::new(EmbedInferenceError::TimedOut { timeout_ms: 1_250 });
+        record_semantic_failure(&metrics, &timeout);
+        let saturated = anyhow::Error::new(EmbedInferenceError::Saturated {
+            waited_ms: 250,
+            max_concurrent: 1,
+        });
+        record_semantic_failure(&metrics, &saturated);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.semantic_failed, 2);
+        assert_eq!(snapshot.semantic_timed_out, 1);
+        assert_eq!(snapshot.semantic_rejected, 1);
     }
 }

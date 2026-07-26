@@ -6,16 +6,18 @@
 //! `RecursiveRel` value carries interior nodes + rel labels — parent and hop
 //! kind fall out of it); result caps match the reference exactly.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
 use cih_graph_store::{
-    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction,
-    ExecutionTransition, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore,
-    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice,
-    Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path, Result, RouteInfo,
-    SimilarMethod, Subgraph, SymbolContext, EXECUTION_BATCH_SIZE,
+    stored_edge_token, CallSiteArgs, CommunityEdge, CommunityInfo, ContextCursorKey, ContextFilter,
+    ContextPage, ContextSection, DbEffect, Direction, ExecutionTransition, GraphOverview,
+    GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError, GraphSummary, HotspotNode,
+    InterceptingAdvice, Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path,
+    Result, RouteInfo, SimilarMethod, StoredTransition, SymbolContext, TransitionBatch,
+    TransitionQuery, EXECUTION_BATCH_SIZE,
 };
 use lbug::{Connection, Value};
 
@@ -60,22 +62,40 @@ fn node_columns(alias: &str) -> String {
 
 impl LadybugStore {
     /// CALLS neighbors as full nodes (context callers/callees).
-    async fn neighbor_nodes(&self, id: &NodeId, dir: Direction) -> Result<Vec<Node>> {
+    async fn neighbor_nodes(
+        &self,
+        id: &NodeId,
+        dir: Direction,
+        limit: usize,
+        after: Option<&ContextCursorKey>,
+    ) -> Result<ContextSection<Node>> {
         let arrow = match dir {
             Direction::Upstream => "<-[:CALLS]-",
             Direction::Downstream => "-[:CALLS]->",
             Direction::Both => "-[:CALLS]-",
         };
         let columns = node_columns("m");
+        let cursor_predicate = after.map_or_else(String::new, |after| {
+            format!(
+                "WHERE m.name > {} OR (m.name = {} AND m.id > {}) ",
+                cstr(&after.name),
+                cstr(&after.name),
+                cstr(&after.id)
+            )
+        });
+        let probe_limit = limit + 1;
         let q = format!(
             "MATCH (n:Symbol {{id: {id}}}){arrow}(m:Symbol) \
-             RETURN DISTINCT {columns} LIMIT 100",
+             {cursor_predicate}\
+             RETURN DISTINCT {columns} \
+             ORDER BY m.name, m.id LIMIT {probe_limit}",
             id = cstr(id.as_str())
         );
         let out = self
             .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
             .await?;
-        Ok(out.iter().map(|r| node_from_row(r)).collect())
+        let nodes = out.iter().map(|r| node_from_row(r)).collect();
+        Ok(ContextSection::from_node_probe(nodes, limit, after))
     }
 
     async fn count_scalar(&self, q: &'static str) -> Result<u64> {
@@ -235,6 +255,72 @@ impl GraphStore for LadybugStore {
         Ok(out.first().map(|r| node_from_row(r)))
     }
 
+    async fn batched_transitions(
+        &self,
+        sources: &[NodeId],
+        query: &TransitionQuery,
+    ) -> Result<TransitionBatch> {
+        query.validate(sources.len())?;
+        if sources.is_empty() {
+            return Ok(TransitionBatch {
+                transitions: Vec::new(),
+                next_cursor: None,
+                backend_limited: false,
+            });
+        }
+        let list = sources
+            .iter()
+            .map(|id| cstr(id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rel = rel_filter(&query.edge_kinds);
+        let columns = node_columns("t");
+        let probe_limit = query.page_limit + 1;
+        let mut transitions = Vec::new();
+        if matches!(query.direction, Direction::Downstream | Direction::Both) {
+            let cursor = transition_cursor_predicate(query.after.as_ref(), false, "label(r)")
+                .map_or_else(String::new, |predicate| format!("AND ({predicate}) "));
+            let q = format!(
+                "MATCH (s:Symbol)-[r{rel}]->(t:Symbol) \
+                 WHERE s.id IN [{list}] {cursor}\
+                 RETURN s.id, {columns}, label(r), coalesce(r.confidence, 1.0), \
+                        coalesce(r.reason, ''), coalesce(r.callSites, '') \
+                 ORDER BY s.id, coalesce(t.name, ''), t.id, label(r) LIMIT {probe_limit}"
+            );
+            let out = self
+                .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
+                .await?;
+            transitions.extend(parse_stored_rows(out, false));
+        }
+        if matches!(query.direction, Direction::Upstream | Direction::Both) {
+            let cursor = transition_cursor_predicate(query.after.as_ref(), true, "label(r)")
+                .map_or_else(String::new, |predicate| format!("AND ({predicate}) "));
+            let q = format!(
+                "MATCH (s:Symbol)<-[r{rel}]-(t:Symbol) \
+                 WHERE s.id IN [{list}] {cursor}\
+                 RETURN s.id, {columns}, label(r), coalesce(r.confidence, 1.0), \
+                        coalesce(r.reason, ''), coalesce(r.callSites, '') \
+                 ORDER BY s.id, coalesce(t.name, ''), t.id, label(r) LIMIT {probe_limit}"
+            );
+            let out = self
+                .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
+                .await?;
+            transitions.extend(parse_stored_rows(out, true));
+        }
+        transitions.sort_by(stored_transition_order);
+        transitions.dedup_by(|a, b| a.cursor_key() == b.cursor_key());
+        let backend_limited = transitions.len() > query.page_limit;
+        transitions.truncate(query.page_limit);
+        let next_cursor = backend_limited
+            .then(|| transitions.last().map(StoredTransition::cursor_key))
+            .flatten();
+        Ok(TransitionBatch {
+            transitions,
+            next_cursor,
+            backend_limited,
+        })
+    }
+
     async fn execution_transitions(
         &self,
         ids: &[NodeId],
@@ -372,51 +458,6 @@ impl GraphStore for LadybugStore {
         Ok(edges)
     }
 
-    async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact> {
-        let d = max_depth.clamp(1, 20);
-        let arrow = match dir {
-            Direction::Upstream => format!("<-[e:CALLS* SHORTEST 1..{d}]-"),
-            Direction::Downstream => format!("-[e:CALLS* SHORTEST 1..{d}]->"),
-            Direction::Both => format!("-[e:CALLS* SHORTEST 1..{d}]-"),
-        };
-        // `* SHORTEST` yields one shortest path per (n, m) pair, replacing the
-        // reference's ORDER BY + collect()[0] min-depth trick (bare ORDER BY
-        // in WITH is rejected in this dialect). Parent of m = last interior
-        // node of the path, or the root when it's a direct edge.
-        let q = format!(
-            "MATCH (n:Symbol {{id: {id}}}){arrow}(m:Symbol) \
-             RETURN m.id, e, m.name, m.kind LIMIT 200",
-            id = cstr(id.as_str())
-        );
-        let root = id.as_str().to_string();
-        let out = self
-            .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
-            .await?;
-        let affected: Vec<ImpactNode> = out
-            .iter()
-            .filter(|r| r.len() >= 4)
-            .filter_map(|r| {
-                let (depth, interior, _labels) = recursive_rel(&r[1])?;
-                let parent = interior.last().cloned().unwrap_or_else(|| root.clone());
-                Some(ImpactNode {
-                    id: NodeId::new(cell_str(&r[0])),
-                    depth,
-                    parent_id: Some(NodeId::new(parent)),
-                    name: cell_str(&r[2]),
-                    kind: cell_str(&r[3]),
-                    via: "CALLS".to_string(),
-                })
-            })
-            .collect();
-        let risk = risk_from_fanout(affected.len()).to_string();
-        Ok(Impact {
-            root: id.clone(),
-            direction: dir,
-            affected,
-            risk,
-        })
-    }
-
     async fn call_chain(&self, from: &NodeId, to: &NodeId, max_depth: u32) -> Result<Vec<Path>> {
         let d = max_depth.clamp(1, 12);
         let q = format!(
@@ -439,29 +480,6 @@ impl GraphStore for LadybugStore {
                 Some(Path { nodes })
             })
             .collect())
-    }
-
-    async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph> {
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
-        let r = radius.clamp(1, 4);
-        for seed in seeds {
-            if let Some(n) = self.get_node(seed).await? {
-                nodes.push(n);
-            }
-            let columns = node_columns("m");
-            let q = format!(
-                "MATCH (n:Symbol {{id: {id}}})-[e*1..{r}]-(m:Symbol) \
-                 RETURN DISTINCT {columns} LIMIT 200",
-                id = cstr(seed.as_str())
-            );
-            let out = self
-                .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
-                .await?;
-            nodes.extend(out.iter().map(|row| node_from_row(row)));
-            edges.extend(self.neighbors(seed, Direction::Both, &[]).await?);
-        }
-        Ok(Subgraph { nodes, edges })
     }
 
     async fn graph_summary(&self) -> Result<GraphSummary> {
@@ -626,29 +644,81 @@ impl GraphStore for LadybugStore {
     }
 
     async fn context(&self, id: &NodeId) -> Result<SymbolContext> {
+        let page = self.context_page(id, &ContextFilter::default()).await?;
+        if page.callers.has_more || page.callees.has_more || page.processes.has_more {
+            return Err(GraphStoreError::InvalidInput(
+                "context exceeds the exact legacy 100-item section cap; use context_page"
+                    .to_string(),
+            ));
+        }
+        Ok(SymbolContext {
+            node: page.node,
+            callers: page.callers.items,
+            callees: page.callees.items,
+            processes: page.processes.items,
+            community: page.community,
+        })
+    }
+
+    async fn context_page(&self, id: &NodeId, filter: &ContextFilter) -> Result<ContextPage> {
+        filter.validate()?;
         let node = self
             .get_node(id)
             .await?
             .ok_or_else(|| GraphStoreError::NotFound(id.to_string()))?;
+        let process_predicate = filter
+            .process_after
+            .as_ref()
+            .map_or_else(String::new, |after| {
+                format!(
+                    "AND (p.name > {} OR (p.name = {} AND p.id > {})) ",
+                    cstr(&after.name),
+                    cstr(&after.name),
+                    cstr(&after.id)
+                )
+            });
+        let process_probe = filter.process_limit + 1;
         let proc_q = format!(
             "MATCH (s:Symbol {{id: {id}}})-[:STEP_IN_PROCESS]->(p:Symbol) \
-             WHERE p.kind = 'Process' RETURN p.id ORDER BY p.name",
+             WHERE p.kind = 'Process' {process_predicate}\
+             RETURN DISTINCT p.name, p.id \
+             ORDER BY p.name, p.id LIMIT {process_probe}",
             id = cstr(id.as_str())
         );
-        let processes = self
+        let process_rows = self
             .with_read_conn(Vec::new(), move |conn| rows(conn, &proc_q))
-            .await?
-            .into_iter()
-            .filter_map(|r| r.first().map(cell_str))
-            .collect();
-        let callers = self.neighbor_nodes(id, Direction::Upstream).await?;
-        let callees = self.neighbor_nodes(id, Direction::Downstream).await?;
+            .await?;
+        let processes = ContextSection::from_process_probe(
+            process_rows
+                .into_iter()
+                .filter(|row| row.len() >= 2)
+                .map(|row| (cell_str(&row[0]), cell_str(&row[1])))
+                .collect(),
+            filter.process_limit,
+            filter.process_after.as_ref(),
+        );
+        let callers = self
+            .neighbor_nodes(
+                id,
+                Direction::Upstream,
+                filter.caller_limit,
+                filter.caller_after.as_ref(),
+            )
+            .await?;
+        let callees = self
+            .neighbor_nodes(
+                id,
+                Direction::Downstream,
+                filter.callee_limit,
+                filter.callee_after.as_ref(),
+            )
+            .await?;
         let community = self
             .symbol_communities(std::slice::from_ref(id))
             .await?
             .into_iter()
             .find_map(|(nid, info)| if &nid == id { Some(info) } else { None });
-        Ok(SymbolContext {
+        Ok(ContextPage {
             node,
             callers,
             callees,
@@ -1028,6 +1098,79 @@ fn parse_execution_rows(
             })
         })
         .collect()
+}
+
+fn transition_cursor_predicate(
+    after: Option<&cih_graph_store::TransitionCursorKey>,
+    traversed_reverse: bool,
+    edge_kind_expression: &str,
+) -> Option<String> {
+    let after = after?;
+    let source = cstr(after.source_id.as_str());
+    let target_name = cstr(&after.target_name);
+    let target_id = cstr(after.target_id.as_str());
+    let edge_kind = cstr(&after.edge_kind);
+    let reverse = usize::from(traversed_reverse);
+    let after_reverse = usize::from(after.traversed_reverse);
+    Some(format!(
+        "s.id > {source} OR (s.id = {source} AND (\
+         coalesce(t.name, '') > {target_name} OR \
+         (coalesce(t.name, '') = {target_name} AND (\
+          t.id > {target_id} OR (t.id = {target_id} AND (\
+           {edge_kind_expression} > {edge_kind} OR \
+           ({edge_kind_expression} = {edge_kind} AND {reverse} > {after_reverse})\
+          ))\
+         ))\
+        ))"
+    ))
+}
+
+fn parse_stored_rows(rows: Vec<Vec<Value>>, traversed_reverse: bool) -> Vec<StoredTransition> {
+    rows.into_iter()
+        .filter_map(|row| {
+            if row.len() < 12 {
+                return None;
+            }
+            let source = NodeId::new(cell_str(&row[0]));
+            let target = node_from_row(&row[1..8]);
+            let kind = edge_from_label(&cell_str(&row[8]));
+            let (stored_src, stored_dst) = if traversed_reverse {
+                (target.id.clone(), source.clone())
+            } else {
+                (source.clone(), target.id.clone())
+            };
+            let call_sites = serde_json::from_str::<serde_json::Value>(&cell_str(&row[11]))
+                .ok()
+                .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+                .map(|value| serde_json::json!({"call_sites": value}));
+            let edge = Edge {
+                src: stored_src.clone(),
+                dst: stored_dst.clone(),
+                kind,
+                confidence: cell_f64(&row[9]) as f32,
+                reason: cell_str(&row[10]),
+                props: call_sites,
+            };
+            Some(StoredTransition {
+                source,
+                target,
+                stored_edge_token: stored_edge_token(&stored_src, &stored_dst, kind),
+                edge,
+                traversed_reverse,
+            })
+        })
+        .collect()
+}
+
+fn stored_transition_order(a: &StoredTransition, b: &StoredTransition) -> Ordering {
+    a.source
+        .as_str()
+        .cmp(b.source.as_str())
+        .then_with(|| a.target.name.cmp(&b.target.name))
+        .then_with(|| a.target.id.as_str().cmp(b.target.id.as_str()))
+        .then_with(|| a.edge.kind.cypher_label().cmp(b.edge.kind.cypher_label()))
+        .then_with(|| a.traversed_reverse.cmp(&b.traversed_reverse))
+        .then_with(|| a.stored_edge_token.cmp(&b.stored_edge_token))
 }
 
 fn parse_call_sites(raw: &str) -> Vec<CallSiteArgs> {

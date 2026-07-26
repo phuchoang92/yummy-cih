@@ -16,7 +16,7 @@ use super::args::RefreshArgs;
 
 /// Per-stage fingerprints written to `.cih/refresh-state.json` after each
 /// successful stage so subsequent `refresh` calls can skip unchanged stages.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 struct RefreshState {
     /// Git HEAD that was current when `analyze` last succeeded.
     #[serde(default)]
@@ -24,6 +24,30 @@ struct RefreshState {
     /// Graph artifacts version that `discover` was last run against.
     #[serde(default)]
     discover_graph_version: Option<String>,
+    /// True when analyze artifacts exist but have not been confirmed as the
+    /// live graph. Legacy state files default to pending because they did not
+    /// carry a publication identity.
+    #[serde(default = "publication_pending_by_default")]
+    analyze_publication_pending: bool,
+    /// True when discover overlays exist but have not been published together
+    /// with their base analyze artifact.
+    #[serde(default = "publication_pending_by_default")]
+    discover_publication_pending: bool,
+}
+
+const fn publication_pending_by_default() -> bool {
+    true
+}
+
+impl Default for RefreshState {
+    fn default() -> Self {
+        Self {
+            analyze_head: None,
+            discover_graph_version: None,
+            analyze_publication_pending: true,
+            discover_publication_pending: true,
+        }
+    }
 }
 
 impl RefreshState {
@@ -92,7 +116,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
     let analyze_needed = if args.no_analyze {
         false
     } else {
-        args.force || !head_matches || !artifacts_exist
+        args.force || state.analyze_publication_pending || !head_matches || !artifacts_exist
     };
 
     let analyze_out = if analyze_needed {
@@ -127,7 +151,9 @@ pub fn run(args: RefreshArgs) -> Result<()> {
         let elapsed = t.elapsed();
         // Invalidate discover fingerprint: new graph means new discover needed.
         state.analyze_head = repo_head.clone();
+        state.analyze_publication_pending = args.db.no_load;
         state.discover_graph_version = None;
+        state.discover_publication_pending = true;
         if let Err(e) = state.save(&cih_dir) {
             tracing::warn!(error = %e, "failed to save refresh state after analyze");
         }
@@ -155,7 +181,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
     let discover_needed = if args.no_discover {
         false
     } else {
-        args.force || !graph_ver_matches || !community_exists
+        args.force || state.discover_publication_pending || !graph_ver_matches || !community_exists
     };
 
     let discover_out = if discover_needed {
@@ -185,6 +211,7 @@ pub fn run(args: RefreshArgs) -> Result<()> {
         )?;
         let elapsed = t.elapsed();
         state.discover_graph_version = current_graph_version.clone();
+        state.discover_publication_pending = args.db.no_load;
         if let Err(e) = state.save(&cih_dir) {
             tracing::warn!(error = %e, "failed to save refresh state after discover");
         }
@@ -303,4 +330,36 @@ fn print_stage(name: &str, out: &StageOutcome) {
 fn short_sha(s: Option<&str>) -> String {
     s.map(|h| h[..h.len().min(8)].to_string())
         .unwrap_or_else(|| "?".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_refresh_state_requires_publication_verification() {
+        let state: RefreshState =
+            serde_json::from_str(r#"{"analyze_head":"abc","discover_graph_version":"graph-v1"}"#)
+                .expect("legacy refresh state should deserialize");
+
+        assert!(state.analyze_publication_pending);
+        assert!(state.discover_publication_pending);
+    }
+
+    #[test]
+    fn verified_refresh_state_round_trips() {
+        let state = RefreshState {
+            analyze_head: Some("abc".to_string()),
+            discover_graph_version: Some("graph-v1".to_string()),
+            analyze_publication_pending: false,
+            discover_publication_pending: false,
+        };
+
+        let encoded = serde_json::to_string(&state).expect("serialize refresh state");
+        let decoded: RefreshState =
+            serde_json::from_str(&encoded).expect("deserialize refresh state");
+
+        assert!(!decoded.analyze_publication_pending);
+        assert!(!decoded.discover_publication_pending);
+    }
 }

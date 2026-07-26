@@ -5,12 +5,18 @@
 //! operational path (`EmbedStore`) that talks to fastembed and pgvector.
 
 mod chunker;
+mod inference;
 mod model;
 mod store;
 mod strip;
 mod text;
 
 pub use chunker::{chunk_text, Chunk};
+pub use inference::{
+    EmbedInferenceConfig, EmbedInferenceError, EmbedInferenceMetricsSnapshot,
+    DEFAULT_EMBED_INFERENCE_MAX_CONCURRENT, DEFAULT_EMBED_INFERENCE_QUEUE_TIMEOUT_MS,
+    DEFAULT_EMBED_INFERENCE_TIMEOUT_MS,
+};
 pub use model::{EmbedModel, EmbedModelKind};
 pub use store::{EmbedStore, EmbedSummary, NodeVector, SemanticHit};
 pub use strip::strip_java_body;

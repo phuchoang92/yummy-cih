@@ -39,10 +39,11 @@ use crate::application::search::SearchService;
 use crate::application::taint::TaintService;
 use crate::application::testing::TestingService;
 use crate::application::wiki_search::{WikiPageService, WikiSearchService};
-use crate::config::{CacheBudgets, Config, RetrievalConfig};
+use crate::config::{store_runtime_options, CacheBudgets, Config, RetrievalConfig};
 use crate::infrastructure::artifact_cross_repo_graph::ArtifactCrossRepoGraphProvider;
 use crate::infrastructure::artifact_repository::ArtifactCache;
 use crate::infrastructure::git_changed_files::GitChangedFilesSource;
+use crate::infrastructure::graph_readiness::GraphStoreReadiness;
 use crate::infrastructure::graph_store_provider::build_store;
 use crate::infrastructure::local_job_scheduler::{IndexScheduler, RegistryIndexTargetResolver};
 use crate::infrastructure::repo_context_provider::DefaultRepoContextProvider;
@@ -54,7 +55,7 @@ use crate::infrastructure::wiki_repository::{
 use crate::ports::artifact_repository::ArtifactRepository;
 use crate::ports::repo_context_provider::RepoContextProvider;
 use crate::transport::http::{browser, health, wiki as wiki_http};
-use crate::transport::mcp::CihServer;
+use crate::transport::mcp::{CihServer, ResponseGuardConfig};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_services(
@@ -66,17 +67,19 @@ pub(crate) fn assemble_services(
     backend: String,
     falkor_url: String,
     store_limits: (usize, Duration),
+    store_runtime: cih_store_factory::StoreRuntimeOptions,
+    search_cache: SearchCache,
     read_file_limits: ReadFileLimits,
     grep_runtime: Arc<GrepRuntime>,
     wiki_state: WikiSearchState,
 ) -> Arc<AppServices> {
-    let search_cache = SearchCache::from_env();
     let search = SearchState::with_cache(
         artifacts_dir.clone(),
         embed_store.clone(),
         search_cache.clone(),
     );
-    let browser_service = GraphBrowserService::new(store.clone(), Arc::new(search.clone()));
+    let browser_service = GraphBrowserService::new(store.clone(), Arc::new(search.clone()))
+        .with_graph_key(graph_key.clone());
     let repo_contexts: Arc<dyn RepoContextProvider> =
         Arc::new(DefaultRepoContextProvider::production(
             graph_key.clone(),
@@ -86,6 +89,7 @@ pub(crate) fn assemble_services(
             backend.clone(),
             falkor_url.clone(),
             store_limits,
+            store_runtime,
             embed_store,
             search_cache.clone(),
         ));
@@ -163,6 +167,21 @@ pub(crate) fn assemble_services(
     })
 }
 
+async fn initialize_optional_semantic<T, F, Fut>(
+    pg_url: Option<&str>,
+    inference: cih_embed::EmbedInferenceConfig,
+    initialize: F,
+) -> Result<Option<T>>
+where
+    F: FnOnce(String, cih_embed::EmbedInferenceConfig) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    match pg_url {
+        Some(pg_url) => initialize(pg_url.to_string(), inference).await.map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Start the CIH MCP server: read config from env, build the graph store,
 /// assemble the axum app (MCP endpoint, graph browser UI, health/ready), and
 /// serve until shutdown.
@@ -174,9 +193,10 @@ pub async fn run() -> Result<()> {
         )
         .init();
 
-    let cfg = Config::from_env();
+    let cfg = Config::try_from_env()?;
     let cache_budgets = CacheBudgets::from_env()?;
     let retrieval = RetrievalConfig::from_env()?;
+    retrieval.validate_operation_deadline(cfg.graph_operation_timeout_ms)?;
     let grep_runtime = Arc::new(
         GrepRuntime::new(GrepRuntimeConfig {
             max_concurrent_requests: retrieval.grep_max_concurrent_requests,
@@ -203,13 +223,25 @@ pub async fn run() -> Result<()> {
         tracing::warn!("CIH_API_TOKEN is not set — server is open to unauthenticated requests");
     }
     let store = build_store(&cfg).await?;
-    let embed_store = if let Some(pg_url) = &cfg.pg_url {
-        let store = EmbedStore::connect(pg_url, EmbedModelKind::MiniLm).await?;
-        store.ensure_schema().await?;
-        Some(Arc::new(store))
-    } else {
-        None
-    };
+    let search_cache = SearchCache::from_config(&retrieval, cache_budgets.search_bytes);
+    if let Some(artifacts_dir) = cfg.artifacts_dir.as_deref() {
+        search_cache.preflight_artifacts(artifacts_dir);
+    }
+    let embed_store = initialize_optional_semantic(
+        cfg.pg_url.as_deref(),
+        retrieval.embed_inference,
+        |pg_url, inference| async move {
+            let store = EmbedStore::connect_with_inference_config(
+                &pg_url,
+                EmbedModelKind::MiniLm,
+                inference,
+            )
+            .await?;
+            store.ensure_schema().await?;
+            Ok(Arc::new(store))
+        },
+    )
+    .await?;
     let graph_key = cfg.graph_key.clone();
     // One shared state: the axum /wiki/search route and the MCP wiki tools use
     // the same mtime-invalidated index cache.
@@ -226,6 +258,8 @@ pub async fn run() -> Result<()> {
             cfg.max_concurrent_queries,
             Duration::from_millis(cfg.query_queue_timeout_ms),
         ),
+        store_runtime_options(&cfg),
+        search_cache,
         ReadFileLimits {
             max_bytes: cfg.read_file_max_bytes,
             max_lines: cfg.read_file_max_lines,
@@ -235,7 +269,18 @@ pub async fn run() -> Result<()> {
     );
     let observability: Arc<dyn crate::ports::observability::ObservabilityPort> =
         Arc::new(crate::infrastructure::tracing_observability::TracingObservability);
-    let cih = CihServer::with_observability(services.clone(), observability.clone());
+    let ready_state = ReadinessService::new(
+        Arc::new(GraphStoreReadiness::new(store)),
+        cfg.artifacts_dir.clone(),
+    );
+    let cih = CihServer::with_observability(services.clone(), observability.clone())
+        .with_graph_readiness(ready_state.clone())
+        .with_operation_timeout(Duration::from_millis(cfg.graph_operation_timeout_ms))
+        .with_response_guard(ResponseGuardConfig::new(
+            cfg.mcp_response_target_bytes,
+            cfg.mcp_response_max_bytes,
+            cfg.mcp_response_guard_mode,
+        ));
     let browser_state =
         browser::BrowserState::new(services.graph.browser.clone(), cfg.artifacts_dir.clone());
     let wiki_search_service = services.docs.wiki_search.clone();
@@ -246,10 +291,15 @@ pub async fn run() -> Result<()> {
         Default::default(),
     );
 
-    let browser_routes = browser::router(browser_state).layer(middleware::from_fn_with_state(
-        observability.clone(),
-        health::observability_middleware,
-    ));
+    let browser_routes = browser::router(browser_state)
+        .layer(middleware::from_fn_with_state(
+            ready_state.clone(),
+            health::graph_readiness_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            observability.clone(),
+            health::observability_middleware,
+        ));
     // MCP tool calls are observed at the RMCP dispatch boundary. Applying the
     // HTTP middleware to `/mcp` as well would double-count them.
     let operations_routes = axum::Router::new()
@@ -289,7 +339,6 @@ pub async fn run() -> Result<()> {
         ))
         .layer(cors);
 
-    let ready_state = ReadinessService::new(store, cfg.artifacts_dir.clone());
     let public = axum::Router::new()
         .route("/health", get(health::health_handler))
         .route("/ready", get(health::ready_handler).with_state(ready_state))
@@ -322,4 +371,49 @@ pub async fn run() -> Result<()> {
         .await?;
     tracing::info!("server shut down cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initialize_optional_semantic;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn semantic_bootstrap_passes_the_validated_inference_config_unchanged() {
+        let expected = cih_embed::EmbedInferenceConfig::new(
+            2,
+            Duration::from_millis(125),
+            Duration::from_millis(750),
+        )
+        .unwrap();
+        let initialized = initialize_optional_semantic(
+            Some("postgres://semantic.test/cih"),
+            expected,
+            |pg_url, inference| async move { Ok::<_, anyhow::Error>((pg_url, inference)) },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(initialized.0, "postgres://semantic.test/cih");
+        assert_eq!(initialized.1, expected);
+    }
+
+    #[tokio::test]
+    async fn semantic_bootstrap_does_not_initialize_without_postgres() {
+        let inference = cih_embed::EmbedInferenceConfig::default();
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_initializer = called.clone();
+        let initialized = initialize_optional_semantic(None, inference, move |_, _| async move {
+            called_by_initializer.store(true, Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap();
+
+        assert!(initialized.is_none());
+        assert!(!called.load(Ordering::SeqCst));
+    }
 }

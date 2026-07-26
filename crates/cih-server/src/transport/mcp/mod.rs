@@ -2,6 +2,7 @@
 
 use rmcp::handler::server::router::tool::ToolRouter;
 
+pub(crate) use response_guard::ResponseGuardConfig;
 pub(crate) use server::CihServer;
 
 pub mod args;
@@ -9,6 +10,7 @@ pub mod args;
 mod dispatch_tests;
 mod error;
 pub(crate) mod resources;
+mod response_guard;
 mod server;
 mod tools;
 

@@ -17,24 +17,34 @@ use rmcp::{
     model::{
         CallToolResult, Implementation, ListResourceTemplatesResult, ListResourcesResult,
         ListToolsResult, PaginatedRequestParam, ProtocolVersion, ReadResourceRequestParam,
-        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+        ReadResourceResult, RequestId, ResourceContents, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     ErrorData as McpError, RoleServer, ServerHandler,
 };
 
 use crate::application::app_services::AppServices;
+use crate::application::browser::ReadinessService;
 use crate::domain::observability::{RequestCompletion, RequestErrorKind, RequestTransport};
 use crate::domain::repository::RepoCatalogSnapshot;
 use crate::infrastructure::tracing_observability::TracingObservability;
 use crate::ports::observability::ObservabilityPort;
+
+use super::response_guard::{
+    operation_deadline_error, GuardedResponse, ResponseGuardConfig, ResponseMeasurement,
+};
 
 #[derive(Clone)]
 pub(crate) struct CihServer {
     services: Arc<AppServices>,
     tool_router: ToolRouter<CihServer>,
     observability: Arc<dyn ObservabilityPort>,
+    graph_readiness: Option<ReadinessService>,
+    operation_timeout: std::time::Duration,
+    response_guard: ResponseGuardConfig,
 }
+
+const DEFAULT_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl CihServer {
     #[allow(dead_code)] // Used by transport dispatch tests; production injects observability.
@@ -43,6 +53,9 @@ impl CihServer {
             services,
             tool_router: crate::transport::mcp::router(),
             observability: Arc::new(TracingObservability),
+            graph_readiness: None,
+            operation_timeout: DEFAULT_OPERATION_TIMEOUT,
+            response_guard: ResponseGuardConfig::default(),
         }
     }
 
@@ -54,7 +67,25 @@ impl CihServer {
             services,
             tool_router: crate::transport::mcp::router(),
             observability,
+            graph_readiness: None,
+            operation_timeout: DEFAULT_OPERATION_TIMEOUT,
+            response_guard: ResponseGuardConfig::default(),
         }
+    }
+
+    pub(crate) fn with_operation_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.operation_timeout = timeout;
+        self
+    }
+
+    pub(crate) fn with_graph_readiness(mut self, readiness: ReadinessService) -> Self {
+        self.graph_readiness = Some(readiness);
+        self
+    }
+
+    pub(crate) fn with_response_guard(mut self, response_guard: ResponseGuardConfig) -> Self {
+        self.response_guard = response_guard;
+        self
     }
 
     fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
@@ -171,16 +202,38 @@ impl ServerHandler for CihServer {
             .and_then(|arguments| arguments.get("repo"))
             .and_then(|value| value.as_str())
             .map(stable_repository_id);
-        let request_id = format!("{:?}", context.id);
+        let rpc_request_id = context.id.clone();
+        let request_id = format!("{rpc_request_id:?}");
         let started = std::time::Instant::now();
+        let requires_graph = graph_admission_required(&capability, request.arguments.as_ref());
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let (result, queue_wait_ms) =
-            crate::ports::blocking_runtime::track_queue_wait(self.tool_router.call(tcc)).await;
-        let response_bytes = result
-            .as_ref()
-            .ok()
-            .and_then(|value| serde_json::to_vec(value).ok())
-            .map(|value| value.len());
+        let routed = crate::ports::blocking_runtime::track_queue_wait(async {
+            if requires_graph {
+                if let Some(readiness) = &self.graph_readiness {
+                    readiness
+                        .admit_graph_read()
+                        .await
+                        .map_err(super::error::app_error_to_mcp)?;
+                }
+            }
+            self.tool_router.call(tcc).await
+        });
+        let (result, queue_wait_ms, queue_wait_known) =
+            match tokio::time::timeout(self.operation_timeout, routed).await {
+                Ok((result, queue_wait_ms)) => (result, queue_wait_ms, true),
+                Err(_) => (
+                    Err(operation_deadline_error(self.operation_timeout)),
+                    // The request-local queue accumulator is owned by the timed
+                    // future and cannot be observed after cancellation. Report
+                    // zero rather than misclassifying the whole operation budget
+                    // as queue wait; total duration and timeout error remain exact.
+                    0,
+                    false,
+                ),
+            };
+        let guarded = self.guard_response(&capability, &rpc_request_id, result);
+        let result = guarded.result;
+        let measurement = guarded.measurement;
         let (result_count, completeness) = result
             .as_ref()
             .ok()
@@ -194,9 +247,13 @@ impl ServerHandler for CihServer {
                 capability,
                 repository_id,
                 duration_ms: started.elapsed().as_millis() as u64,
-                queue_wait_ms: Some(queue_wait_ms),
+                queue_wait_ms: queue_wait_known.then_some(queue_wait_ms),
                 result_count,
-                response_bytes,
+                response_bytes: measurement.response_bytes,
+                attempted_response_bytes: measurement.attempted_response_bytes,
+                response_target_exceeded: measurement.target_exceeded,
+                response_max_exceeded: measurement.max_exceeded,
+                response_guard_enforced: measurement.enforced,
                 completeness,
                 error_kind: result.as_ref().err().map(classify_mcp_error),
             });
@@ -210,9 +267,12 @@ impl ServerHandler for CihServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParam>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+        let started = std::time::Instant::now();
+        let result = Ok(ListToolsResult::with_all_items(self.tool_router.list_all()));
+        let result_count = result.as_ref().ok().map(|value| value.tools.len());
+        self.complete_protocol_response("tools/list", &context.id, started, result, result_count, 0)
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -238,15 +298,15 @@ impl ServerHandler for CihServer {
     ) -> Result<ListResourcesResult, McpError> {
         let started = std::time::Instant::now();
         let result = super::resources::list_resources(&self.catalog_snapshot(), request);
-        self.record_protocol_completion(
+        let result_count = result.as_ref().ok().map(|value| value.resources.len());
+        self.complete_protocol_response(
             "resources/list",
-            format!("{:?}", context.id),
+            &context.id,
             started,
-            &result,
-            result.as_ref().ok().map(|value| value.resources.len()),
+            result,
+            result_count,
             0,
-        );
-        result
+        )
     }
 
     async fn list_resource_templates(
@@ -256,18 +316,18 @@ impl ServerHandler for CihServer {
     ) -> Result<ListResourceTemplatesResult, McpError> {
         let started = std::time::Instant::now();
         let result = super::resources::list_resource_templates(request);
-        self.record_protocol_completion(
+        let result_count = result
+            .as_ref()
+            .ok()
+            .map(|value| value.resource_templates.len());
+        self.complete_protocol_response(
             "resources/templates/list",
-            format!("{:?}", context.id),
+            &context.id,
             started,
-            &result,
-            result
-                .as_ref()
-                .ok()
-                .map(|value| value.resource_templates.len()),
+            result,
+            result_count,
             0,
-        );
-        result
+        )
     }
 
     async fn read_resource(
@@ -306,15 +366,44 @@ impl ServerHandler for CihServer {
             }
         })
         .await;
-        self.record_protocol_completion(
+        let result_count = result.as_ref().ok().map(|value| value.contents.len());
+        self.complete_protocol_response(
             "resources/read",
-            format!("{:?}", context.id),
+            &context.id,
             started,
-            &result,
-            result.as_ref().ok().map(|value| value.contents.len()),
+            result,
+            result_count,
             queue_wait_ms,
-        );
-        result
+        )
+    }
+}
+
+fn graph_admission_required(
+    capability: &str,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    match capability {
+        "architecture_overview"
+        | "feature_map"
+        | "context"
+        | "impact"
+        | "communities"
+        | "route_map"
+        | "detect_changes"
+        | "trace_flow"
+        | "reaches"
+        | "complexity_hotspots"
+        | "find_duplicates"
+        | "test_coverage"
+        | "regression_scope"
+        | "untested_paths" => true,
+        // Hybrid search remains available during restore. Only its optional
+        // graph expansion needs backend admission.
+        "query" => arguments
+            .and_then(|arguments| arguments.get("expand"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -327,6 +416,28 @@ fn wiki_resource_target(uri: &str) -> Option<(String, String)> {
 }
 
 fn classify_mcp_error(error: &McpError) -> RequestErrorKind {
+    let code = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(serde_json::Value::as_str);
+    match code {
+        Some("RESULT_TOO_LARGE") => return RequestErrorKind::ResponseLimit,
+        Some("OPERATION_DEADLINE_EXCEEDED" | "BACKEND_TIMEOUT") => {
+            return RequestErrorKind::Timeout;
+        }
+        Some("BACKEND_OVERLOADED") => return RequestErrorKind::Overload,
+        Some(
+            "BACKEND_LOADING"
+            | "BACKEND_UNAVAILABLE"
+            | "INDEX_UNAVAILABLE"
+            | "BACKEND_UNIMPLEMENTED",
+        ) => return RequestErrorKind::Dependency,
+        _ => {}
+    }
+    // Compatibility fallback for older application errors that predate typed
+    // MCP error data. New graph/deadline/response paths are classified above
+    // without relying on backend message wording.
     let message = error.message.to_ascii_lowercase();
     if message.contains("saturated") || message.contains("queue full") {
         RequestErrorKind::Overload
@@ -342,32 +453,72 @@ fn classify_mcp_error(error: &McpError) -> RequestErrorKind {
 }
 
 impl CihServer {
-    fn record_protocol_completion<T: serde::Serialize>(
+    fn guard_response<T: serde::Serialize>(
         &self,
         capability: &str,
-        request_id: String,
+        request_id: &RequestId,
+        result: Result<T, McpError>,
+    ) -> GuardedResponse<T> {
+        let guarded = self.response_guard.guard(request_id, result);
+        self.log_response_measurement(capability, guarded.measurement);
+        guarded
+    }
+
+    fn log_response_measurement(&self, capability: &str, measurement: ResponseMeasurement) {
+        if self.response_guard.mode == crate::config::McpResponseGuardMode::Measure
+            || !measurement.target_exceeded
+        {
+            return;
+        }
+        let observed_bytes = measurement
+            .attempted_response_bytes
+            .or(measurement.response_bytes);
+        tracing::warn!(
+            capability,
+            response_bytes = observed_bytes,
+            response_target_bytes = self.response_guard.target_bytes,
+            response_max_bytes = self.response_guard.max_bytes,
+            response_guard_mode = self.response_guard.mode.as_str(),
+            response_max_exceeded = measurement.max_exceeded,
+            response_guard_enforced = measurement.enforced,
+            "MCP logical JSON-RPC response exceeded its configured byte target"
+        );
+    }
+
+    fn complete_protocol_response<T: serde::Serialize>(
+        &self,
+        capability: &str,
+        request_id: &RequestId,
         started: std::time::Instant,
-        result: &Result<T, McpError>,
+        result: Result<T, McpError>,
         result_count: Option<usize>,
         queue_wait_ms: u64,
-    ) {
+    ) -> Result<T, McpError> {
+        let guarded = self.guard_response(capability, request_id, result);
+        let result = guarded.result;
+        let measurement = guarded.measurement;
         self.observability
             .record_request_completion(RequestCompletion {
-                request_id,
+                request_id: format!("{request_id:?}"),
                 transport: RequestTransport::Mcp,
                 capability: capability.to_string(),
                 repository_id: None,
                 duration_ms: started.elapsed().as_millis() as u64,
                 queue_wait_ms: Some(queue_wait_ms),
-                result_count,
-                response_bytes: result
-                    .as_ref()
-                    .ok()
-                    .and_then(|value| serde_json::to_vec(value).ok())
-                    .map(|bytes| bytes.len()),
+                result_count: if measurement.enforced {
+                    None
+                } else {
+                    result_count
+                },
+                response_bytes: measurement.response_bytes,
+                attempted_response_bytes: measurement.attempted_response_bytes,
+                response_target_exceeded: measurement.target_exceeded,
+                response_max_exceeded: measurement.max_exceeded,
+                response_guard_enforced: measurement.enforced,
                 completeness: None,
                 error_kind: result.as_ref().err().map(classify_mcp_error),
             });
+        result
     }
 }
 
@@ -408,7 +559,39 @@ fn result_metadata(value: &serde_json::Value) -> (Option<usize>, Option<String>)
 }
 #[cfg(test)]
 mod tests {
-    use super::{classify_mcp_error, result_metadata, stable_repository_id};
+    use super::{
+        classify_mcp_error, graph_admission_required, result_metadata, stable_repository_id,
+    };
+
+    #[test]
+    fn graph_admission_preserves_non_graph_capabilities_during_restore() {
+        for capability in [
+            "context",
+            "trace_flow",
+            "architecture_overview",
+            "test_coverage",
+            "feature_map",
+        ] {
+            assert!(graph_admission_required(capability, None), "{capability}");
+        }
+        for capability in [
+            "list_repos",
+            "status",
+            "read_file",
+            "grep_files",
+            "search_code",
+            "search_wiki",
+            "get_wiki_page",
+            "index_status",
+        ] {
+            assert!(!graph_admission_required(capability, None), "{capability}");
+        }
+
+        let expanded = serde_json::json!({"q": "auth", "expand": true});
+        let lexical = serde_json::json!({"q": "auth", "expand": false});
+        assert!(graph_admission_required("query", expanded.as_object()));
+        assert!(!graph_admission_required("query", lexical.as_object()));
+    }
 
     #[test]
     fn completion_metadata_is_bounded_and_detects_partial_results() {
@@ -442,6 +625,27 @@ mod tests {
             classify_mcp_error(&rmcp::ErrorData::internal_error("load timed out", None)),
             crate::domain::observability::RequestErrorKind::Timeout
         );
+        assert_eq!(
+            classify_mcp_error(&rmcp::ErrorData::internal_error(
+                "response too large",
+                Some(serde_json::json!({"code": "RESULT_TOO_LARGE"})),
+            )),
+            crate::domain::observability::RequestErrorKind::ResponseLimit
+        );
+        assert_eq!(
+            classify_mcp_error(&rmcp::ErrorData::internal_error(
+                "wording is deliberately irrelevant",
+                Some(serde_json::json!({"code": "BACKEND_LOADING"})),
+            )),
+            crate::domain::observability::RequestErrorKind::Dependency
+        );
+        assert_eq!(
+            classify_mcp_error(&rmcp::ErrorData::internal_error(
+                "wording is deliberately irrelevant",
+                Some(serde_json::json!({"code": "OPERATION_DEADLINE_EXCEEDED"})),
+            )),
+            crate::domain::observability::RequestErrorKind::Timeout
+        );
     }
 
     #[test]
@@ -451,10 +655,11 @@ mod tests {
         let router = crate::transport::mcp::router();
         assert_eq!(
             router.list_all().len(),
-            32,
+            33,
             "tool count changed after the split — a tool was dropped or duplicated"
         );
         for tool in [
+            "list_repos_page",
             "read_file",
             "reaches",
             "grep_files",

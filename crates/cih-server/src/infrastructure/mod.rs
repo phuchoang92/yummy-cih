@@ -7,6 +7,7 @@ pub(crate) mod cache;
 pub(crate) mod engine_process_runner;
 pub(crate) mod file_search_index_store;
 pub(crate) mod git_changed_files;
+pub(crate) mod graph_readiness;
 pub(crate) mod graph_store_provider;
 pub(crate) mod index_jobs;
 pub(crate) mod jsonl_page_index;

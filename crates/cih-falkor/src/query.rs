@@ -3,32 +3,28 @@
 //! load/publish lifecycle. Cypher is built with the `serialize` helpers; the
 //! `FalkorStore` connection/exec primitives live in `lib.rs`.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
 use cih_graph_store::{
-    risk_from_fanout, CallSiteArgs, CommunityEdge, CommunityInfo, DbEffect, Direction,
-    ExecutionTransition, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore,
-    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, InterceptingAdvice,
-    Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path, Result, RouteInfo,
-    SimilarMethod, Subgraph, SymbolContext, EXECUTION_BATCH_SIZE,
+    stored_edge_token, BackendReadiness, CallSiteArgs, CommunityEdge, CommunityInfo, ContextFilter,
+    ContextPage, ContextSection, DbEffect, Direction, ExecutionTransition, GraphOverview,
+    GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError, GraphSummary, HotspotNode,
+    InterceptingAdvice, Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path,
+    Result, RouteInfo, SimilarMethod, StoredTransition, SymbolContext, TransitionBatch,
+    TransitionQuery, EXECUTION_BATCH_SIZE,
 };
 
 use crate::neighbor_nodes;
 use crate::serialize::*;
-use crate::FalkorStore;
+use crate::{FalkorStore, WRITE_LOAD_WAIT_SETTING};
 
 #[async_trait]
 impl GraphStore for FalkorStore {
     async fn ensure_schema(&self) -> Result<()> {
-        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
-        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
-        // Short-name symbol resolution (`candidates_by_name`) filters on n.name on
-        // nearly every context/impact/trace_flow call; without this index it is a
-        // full label scan over all Symbol nodes.
-        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.name)").await;
-        Ok(())
+        self.ensure_required_symbol_indexes().await
     }
 
     async fn bulk_load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
@@ -46,7 +42,8 @@ impl GraphStore for FalkorStore {
     ) -> Result<LoadStats> {
         // Wait out a `BusyLoadingError` window before writing, so a FalkorDB that
         // is still loading a large persisted dataset doesn't cause a partial write.
-        self.wait_until_ready(Self::load_wait_budget()).await?;
+        self.wait_until_ready(Self::load_wait_budget(), WRITE_LOAD_WAIT_SETTING)
+            .await?;
         // A fresh (unused) graph key takes the native `GRAPH.BULK` fast path,
         // which streams the artifacts (no `Vec` read). A populated one (e.g. the
         // community set loaded after analyze) falls back to the Cypher upsert,
@@ -106,6 +103,10 @@ impl GraphStore for FalkorStore {
         }
     }
 
+    async fn backend_readiness(&self) -> Result<BackendReadiness> {
+        self.probe_backend_readiness().await
+    }
+
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
         let columns = node_columns("n");
         let q = format!(
@@ -116,6 +117,68 @@ impl GraphStore for FalkorStore {
         );
         let rows = self.rows(&q).await?;
         Ok(rows.first().map(|r| node_from_row(r)))
+    }
+
+    async fn batched_transitions(
+        &self,
+        sources: &[NodeId],
+        query: &TransitionQuery,
+    ) -> Result<TransitionBatch> {
+        query.validate(sources.len())?;
+        if sources.is_empty() {
+            return Ok(TransitionBatch {
+                transitions: Vec::new(),
+                next_cursor: None,
+                backend_limited: false,
+            });
+        }
+        let list = sources
+            .iter()
+            .map(|id| cstr(id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rel = rel_filter(&query.edge_kinds);
+        let columns = node_columns("t");
+        let probe_limit = query.page_limit + 1;
+        let mut transitions = Vec::new();
+        if matches!(query.direction, Direction::Downstream | Direction::Both) {
+            let cursor = transition_cursor_predicate(query.after.as_ref(), false, "type(r)")
+                .map_or_else(String::new, |predicate| format!("WHERE {predicate} "));
+            let q = format!(
+                "UNWIND [{list}] AS sid \
+                 MATCH (s:Symbol {{id:sid}})-[r{rel}]->(t:Symbol) \
+                 {cursor}RETURN s.id, {columns}, type(r), \
+                        coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
+                        coalesce(r.callSites, '') \
+                 ORDER BY s.id, coalesce(t.name, ''), t.id, type(r) LIMIT {probe_limit}"
+            );
+            transitions.extend(parse_stored_rows(self.rows(&q).await?, false));
+        }
+        if matches!(query.direction, Direction::Upstream | Direction::Both) {
+            let cursor = transition_cursor_predicate(query.after.as_ref(), true, "type(r)")
+                .map_or_else(String::new, |predicate| format!("WHERE {predicate} "));
+            let q = format!(
+                "UNWIND [{list}] AS sid \
+                 MATCH (s:Symbol {{id:sid}})<-[r{rel}]-(t:Symbol) \
+                 {cursor}RETURN s.id, {columns}, type(r), \
+                        coalesce(r.confidence, 1.0), coalesce(r.reason, ''), \
+                        coalesce(r.callSites, '') \
+                 ORDER BY s.id, coalesce(t.name, ''), t.id, type(r) LIMIT {probe_limit}"
+            );
+            transitions.extend(parse_stored_rows(self.rows(&q).await?, true));
+        }
+        transitions.sort_by(stored_transition_order);
+        transitions.dedup_by(|a, b| a.cursor_key() == b.cursor_key());
+        let backend_limited = transitions.len() > query.page_limit;
+        transitions.truncate(query.page_limit);
+        let next_cursor = backend_limited
+            .then(|| transitions.last().map(StoredTransition::cursor_key))
+            .flatten();
+        Ok(TransitionBatch {
+            transitions,
+            next_cursor,
+            backend_limited,
+        })
     }
 
     async fn execution_transitions(
@@ -233,52 +296,6 @@ impl GraphStore for FalkorStore {
             .collect())
     }
 
-    async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact> {
-        let d = max_depth.clamp(1, 20);
-        // Var-length bounds can't be parameterized; d is a clamped integer (safe).
-        let arrow = match dir {
-            Direction::Upstream => format!("<-[:CALLS*1..{d}]-"),
-            Direction::Downstream => format!("-[:CALLS*1..{d}]->"),
-            Direction::Both => format!("-[:CALLS*1..{d}]-"),
-        };
-        // Two-step aggregation: order paths by length per node, then take the first
-        // (shortest) parent and the minimum depth. This gives accurate parent tracking
-        // for D3 diagram rendering without requiring a separate query.
-        let q = format!(
-            "CYPHER id={id} \
-             MATCH p=(n:Symbol {{id:$id}}){arrow}(m:Symbol) \
-             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode \
-             ORDER BY m.id, len \
-             WITH m, collect(pnode)[0] AS parent, min(len) AS depth \
-             RETURN m.id, depth, parent.id, m.name, m.kind \
-             LIMIT 200",
-            id = cstr(id.as_str())
-        );
-        let rows = self.rows(&q).await?;
-        let affected: Vec<ImpactNode> = rows
-            .into_iter()
-            .filter(|r| !r.is_empty())
-            .map(|r| ImpactNode {
-                id: NodeId::new(r[0].clone()),
-                depth: r.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
-                parent_id: r
-                    .get(2)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| NodeId::new(s.clone())),
-                name: r.get(3).cloned().unwrap_or_default(),
-                kind: r.get(4).cloned().unwrap_or_default(),
-                via: "CALLS".to_string(),
-            })
-            .collect();
-        let risk = risk_from_fanout(affected.len()).to_string();
-        Ok(Impact {
-            root: id.clone(),
-            direction: dir,
-            affected,
-            risk,
-        })
-    }
-
     async fn call_chain(&self, from: &NodeId, to: &NodeId, max_depth: u32) -> Result<Vec<Path>> {
         let d = max_depth.clamp(1, 12);
         let q = format!(
@@ -301,29 +318,6 @@ impl GraphStore for FalkorStore {
                     .collect(),
             })
             .collect())
-    }
-
-    async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph> {
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
-        let r = radius.clamp(1, 4);
-        for seed in seeds {
-            if let Some(n) = self.get_node(seed).await? {
-                nodes.push(n);
-            }
-            let columns = node_columns("m");
-            let q = format!(
-                "CYPHER id={id} \
-                 MATCH (n:Symbol {{id:$id}})-[*1..{r}]-(m:Symbol) \
-                 RETURN DISTINCT {columns} LIMIT 200",
-                id = cstr(seed.as_str())
-            );
-            for row in self.rows(&q).await? {
-                nodes.push(node_from_row(&row));
-            }
-            edges.extend(self.neighbors(seed, Direction::Both, &[]).await?);
-        }
-        Ok(Subgraph { nodes, edges })
     }
 
     async fn graph_summary(&self) -> Result<GraphSummary> {
@@ -544,28 +538,67 @@ impl GraphStore for FalkorStore {
     }
 
     async fn context(&self, id: &NodeId) -> Result<SymbolContext> {
+        let page = self.context_page(id, &ContextFilter::default()).await?;
+        if page.callers.has_more || page.callees.has_more || page.processes.has_more {
+            return Err(GraphStoreError::InvalidInput(
+                "context exceeds the exact legacy 100-item section cap; use context_page"
+                    .to_string(),
+            ));
+        }
+        Ok(SymbolContext {
+            node: page.node,
+            callers: page.callers.items,
+            callees: page.callees.items,
+            processes: page.processes.items,
+            community: page.community,
+        })
+    }
+
+    async fn context_page(&self, id: &NodeId, filter: &ContextFilter) -> Result<ContextPage> {
+        filter.validate()?;
         let node = self
             .get_node(id)
             .await?
             .ok_or_else(|| GraphStoreError::NotFound(id.to_string()))?;
+        let (process_params, process_predicate) = filter.process_after.as_ref().map_or_else(
+            || (String::new(), String::new()),
+            |after| {
+                (
+                    format!(
+                        " after_name={} after_id={}",
+                        cstr(&after.name),
+                        cstr(&after.id)
+                    ),
+                    "AND (p.name > $after_name OR (p.name = $after_name AND p.id > $after_id)) "
+                        .to_string(),
+                )
+            },
+        );
+        let process_probe = filter.process_limit + 1;
         let proc_query = format!(
-            "CYPHER id={id} \
+            "CYPHER id={id}{process_params} \
              MATCH (s:Symbol {{id:$id}})-[:STEP_IN_PROCESS]->(p:Symbol) \
-             WHERE p.kind = 'Process' \
-             RETURN p.id ORDER BY p.name",
+             WHERE p.kind = 'Process' {process_predicate}\
+             RETURN DISTINCT p.name, p.id \
+             ORDER BY p.name, p.id LIMIT {process_probe}",
             id = cstr(id.as_str())
         );
         // callers / callees / processes / community are independent of one another;
         // fire them concurrently over the multiplexed connection instead of paying
         // four sequential round-trips.
         let processes_fut = async {
-            Ok::<Vec<String>, GraphStoreError>(
-                self.rows(&proc_query)
-                    .await?
-                    .into_iter()
-                    .filter_map(|row| row.first().cloned())
-                    .collect(),
-            )
+            let processes = self
+                .rows(&proc_query)
+                .await?
+                .into_iter()
+                .filter(|row| row.len() >= 2)
+                .map(|row| (row[0].clone(), row[1].clone()))
+                .collect();
+            Ok::<ContextSection<String>, GraphStoreError>(ContextSection::from_process_probe(
+                processes,
+                filter.process_limit,
+                filter.process_after.as_ref(),
+            ))
         };
         let community_fut = async {
             Ok::<Option<CommunityInfo>, GraphStoreError>(
@@ -576,12 +609,24 @@ impl GraphStore for FalkorStore {
             )
         };
         let (callers, callees, processes, community) = tokio::try_join!(
-            neighbor_nodes(self, id, Direction::Upstream),
-            neighbor_nodes(self, id, Direction::Downstream),
+            neighbor_nodes(
+                self,
+                id,
+                Direction::Upstream,
+                filter.caller_limit,
+                filter.caller_after.as_ref(),
+            ),
+            neighbor_nodes(
+                self,
+                id,
+                Direction::Downstream,
+                filter.callee_limit,
+                filter.callee_after.as_ref(),
+            ),
             processes_fut,
             community_fut,
         )?;
-        Ok(SymbolContext {
+        Ok(ContextPage {
             node,
             callers,
             callees,
@@ -987,6 +1032,79 @@ fn parse_execution_rows(
             })
         })
         .collect()
+}
+
+fn transition_cursor_predicate(
+    after: Option<&cih_graph_store::TransitionCursorKey>,
+    traversed_reverse: bool,
+    edge_kind_expression: &str,
+) -> Option<String> {
+    let after = after?;
+    let source = cstr(after.source_id.as_str());
+    let target_name = cstr(&after.target_name);
+    let target_id = cstr(after.target_id.as_str());
+    let edge_kind = cstr(&after.edge_kind);
+    let reverse = usize::from(traversed_reverse);
+    let after_reverse = usize::from(after.traversed_reverse);
+    Some(format!(
+        "s.id > {source} OR (s.id = {source} AND (\
+         coalesce(t.name, '') > {target_name} OR \
+         (coalesce(t.name, '') = {target_name} AND (\
+          t.id > {target_id} OR (t.id = {target_id} AND (\
+           {edge_kind_expression} > {edge_kind} OR \
+           ({edge_kind_expression} = {edge_kind} AND {reverse} > {after_reverse})\
+          ))\
+         ))\
+        ))"
+    ))
+}
+
+fn parse_stored_rows(rows: Vec<Vec<String>>, traversed_reverse: bool) -> Vec<StoredTransition> {
+    rows.into_iter()
+        .filter_map(|row| {
+            if row.len() < 12 {
+                return None;
+            }
+            let source = NodeId::new(row[0].clone());
+            let target = node_from_row(&row[1..8]);
+            let kind = edge_from_label(&row[8]);
+            let (stored_src, stored_dst) = if traversed_reverse {
+                (target.id.clone(), source.clone())
+            } else {
+                (source.clone(), target.id.clone())
+            };
+            let call_sites = serde_json::from_str::<serde_json::Value>(&row[11])
+                .ok()
+                .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+                .map(|value| serde_json::json!({"call_sites": value}));
+            let edge = Edge {
+                src: stored_src.clone(),
+                dst: stored_dst.clone(),
+                kind,
+                confidence: row[9].parse().unwrap_or(1.0),
+                reason: row[10].clone(),
+                props: call_sites,
+            };
+            Some(StoredTransition {
+                source,
+                target,
+                stored_edge_token: stored_edge_token(&stored_src, &stored_dst, kind),
+                edge,
+                traversed_reverse,
+            })
+        })
+        .collect()
+}
+
+fn stored_transition_order(a: &StoredTransition, b: &StoredTransition) -> Ordering {
+    a.source
+        .as_str()
+        .cmp(b.source.as_str())
+        .then_with(|| a.target.name.cmp(&b.target.name))
+        .then_with(|| a.target.id.as_str().cmp(b.target.id.as_str()))
+        .then_with(|| a.edge.kind.cypher_label().cmp(b.edge.kind.cypher_label()))
+        .then_with(|| a.traversed_reverse.cmp(&b.traversed_reverse))
+        .then_with(|| a.stored_edge_token.cmp(&b.stored_edge_token))
 }
 
 fn parse_call_sites(raw: &str) -> Vec<CallSiteArgs> {

@@ -1422,10 +1422,15 @@ mod single_flight_tests {
         )
         .unwrap();
         let repo = ResolvedRepo::from_entry(RegistryEntry {
+            repository_id: None,
             name: "demo".into(),
             path: temp.path().display().to_string(),
             graph_key: "demo".into(),
             artifacts_dir: String::new(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: String::new(),
             last_git_head: None,

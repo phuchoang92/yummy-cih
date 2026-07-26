@@ -573,7 +573,9 @@ name = "cih-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "petgraph",
+ "rand 0.9.4",
  "rayon",
  "rustc-hash",
  "serde",
@@ -808,6 +810,7 @@ dependencies = [
  "constant_time_eq",
  "globset",
  "ignore",
+ "rand 0.9.4",
  "rayon",
  "regex",
  "rmcp",

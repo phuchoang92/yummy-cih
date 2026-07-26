@@ -12,9 +12,9 @@ use anyhow::{Context, Result};
 use cih_core::{GraphArtifacts, Node, NodeId};
 use cih_taint::{find_taint_paths, TaintPath};
 
-use crate::db::{load_to_store, LoadOutcome};
 use crate::versioning::latest_graph_artifacts;
-use crate::DEFAULT_GRAPH_KEY;
+
+const PUBLICATION_PENDING: &str = "publication_pending";
 
 pub struct TaintFlags {
     pub backend: Option<String>,
@@ -261,60 +261,32 @@ pub fn run_taint(repo: PathBuf, flags: TaintFlags) -> Result<()> {
     ));
 
     // ── Load into graph store ────────────────────────────────────────────────────
-    let load = if flags.no_load {
-        tracing::info!("Skipping graph load (--no-load)");
-        LoadOutcome::Skipped
+    // Taint output is an edge-only overlay. Sending it through the replacement
+    // loader would replace the complete live graph with an artifact containing
+    // no nodes. Keep the database flags for CLI compatibility, but retain the
+    // overlay on disk until base+overlay composition is implemented.
+    if flags.no_load {
+        tracing::info!(
+            publication_status = PUBLICATION_PENDING,
+            "taint overlay retained on disk (--no-load)"
+        );
     } else {
-        let be = flags.backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
-        let resolved_url = flags
-            .falkor_url
-            .clone()
-            .unwrap_or_else(|| crate::default_db_url(be));
-        let url = resolved_url.as_str();
-        let key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        ui.spin("Loading into graph store");
-        match load_to_store(be, url, key, &taint_artifacts) {
-            Ok(stats) => {
-                tracing::info!(
-                    edges = stats.edges,
-                    url,
-                    graph = key,
-                    "TaintFlow edges loaded into graph store"
-                );
-                ui.finish_with(format!(
-                    "{} edges loaded",
-                    crate::ui::fmt_count(stats.edges as usize)
-                ));
-                LoadOutcome::Loaded(stats)
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "graph load failed — taint artifacts are on disk");
-                ui.finish_with(format!("graph load failed: {err}"));
-                LoadOutcome::Failed(format!("{err:#}"))
-            }
-        }
-    };
+        tracing::warn!(
+            publication_status = PUBLICATION_PENDING,
+            "taint graph publication is disabled because the artifact is an edge-only overlay; artifacts remain on disk"
+        );
+    }
 
     // ── Report ────────────────────────────────────────────────────────────────
     if flags.json {
-        print_json_report(&paths, &load, &taint_artifacts)?;
+        print_json_report(&paths, &taint_artifacts)?;
     } else {
-        print_human_report(&paths, &load, &taint_dir, &cfg_stats, &pdg_stats);
-    }
-
-    if matches!(load, LoadOutcome::Failed(_)) {
-        std::process::exit(3);
+        print_human_report(&paths, &taint_dir, &cfg_stats, &pdg_stats);
     }
     Ok(())
 }
 
-fn print_human_report(
-    paths: &[TaintPath],
-    load: &LoadOutcome,
-    taint_dir: &Path,
-    cfg: &CfgStats,
-    pdg: &PdgStats,
-) {
+fn print_human_report(paths: &[TaintPath], taint_dir: &Path, cfg: &CfgStats, pdg: &PdgStats) {
     crate::ui::print_header("Taint", "Phase 0 + Phase 1 + Phase 2 + Phase 3", None);
     crate::ui::print_row("Paths", &crate::ui::fmt_count(paths.len()));
 
@@ -370,13 +342,10 @@ fn print_human_report(
     }
     crate::ui::print_row("Artifacts", &taint_dir.display().to_string());
 
-    let falkor_str = match load {
-        LoadOutcome::Loaded(s) => format!("{} edges", crate::ui::fmt_count(s.edges as usize)),
-        LoadOutcome::Skipped => "\x1b[2mskipped (--no-load)\x1b[0m".to_string(),
-        LoadOutcome::Reused => "\x1b[2mreused\x1b[0m".to_string(),
-        LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
-    };
-    crate::ui::print_row("Graph DB", &falkor_str);
+    crate::ui::print_row(
+        "Graph DB",
+        "\x1b[33mpublication pending\x1b[0m  \x1b[2m(edge-only overlay retained on disk)\x1b[0m",
+    );
     eprintln!();
 
     // Print top 20 paths.
@@ -413,26 +382,32 @@ fn print_human_report(
     println!("  Use --no-intra-proc / --no-cfg / --no-pdg to skip phases, or --json for machine output.\x1b[0m");
 }
 
-fn print_json_report(
-    paths: &[TaintPath],
-    _load: &LoadOutcome,
+#[derive(serde::Serialize)]
+struct TaintJsonReport<'a> {
+    path_count: usize,
+    artifacts_path: String,
+    publication_status: &'static str,
+    paths: &'a [TaintPath],
+}
+
+fn json_report<'a>(
+    paths: &'a [TaintPath],
     taint_artifacts: &GraphArtifacts,
-) -> Result<()> {
-    #[derive(serde::Serialize)]
-    struct Report<'a> {
-        path_count: usize,
-        artifacts_path: String,
-        paths: &'a [TaintPath],
-    }
-    let report = Report {
+) -> TaintJsonReport<'a> {
+    TaintJsonReport {
         path_count: paths.len(),
         artifacts_path: taint_artifacts
             .edges_path
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
+        publication_status: PUBLICATION_PENDING,
         paths,
-    };
+    }
+}
+
+fn print_json_report(paths: &[TaintPath], taint_artifacts: &GraphArtifacts) -> Result<()> {
+    let report = json_report(paths, taint_artifacts);
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -539,5 +514,20 @@ mod tests {
         apply_pdg_refinements(&mut paths, &[0.7], &[r], &mut stats);
         assert_eq!(stats.conditional_sinks, 1);
         assert!((paths[0].confidence - 0.42).abs() < 1e-6);
+    }
+
+    #[test]
+    fn taint_json_report_marks_overlay_publication_pending() {
+        let paths = vec![path(0.7)];
+        let artifacts = GraphArtifacts {
+            nodes_path: PathBuf::from("/tmp/taint/nodes.jsonl"),
+            edges_path: PathBuf::from("/tmp/taint/edges.jsonl"),
+            version: cih_core::VersionId::new("base-v1"),
+        };
+
+        let report = json_report(&paths, &artifacts);
+        assert_eq!(report.publication_status, "publication_pending");
+        assert_eq!(report.path_count, 1);
+        assert_eq!(report.artifacts_path, "/tmp/taint");
     }
 }

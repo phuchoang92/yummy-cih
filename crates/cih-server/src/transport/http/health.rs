@@ -60,6 +60,10 @@ pub async fn observability_middleware(
         queue_wait_ms: Some(queue_wait_ms),
         result_count: None,
         response_bytes,
+        attempted_response_bytes: None,
+        response_target_exceeded: false,
+        response_max_exceeded: false,
+        response_guard_enforced: false,
         completeness: None,
         error_kind,
     });
@@ -116,21 +120,45 @@ pub async fn ready_handler(State(service): State<ReadinessService>) -> impl Into
     readiness_response(report)
 }
 
+pub async fn graph_readiness_middleware(
+    State(service): State<ReadinessService>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.uri().path().starts_with("/api/graph/") {
+        let report = service.check().await;
+        if report.backend_issue().is_some() {
+            return readiness_response(report);
+        }
+    }
+    next.run(request).await
+}
+
 pub async fn operational_metrics_handler(
     State(service): State<OperationalMetricsService>,
 ) -> impl IntoResponse {
     Json(service.snapshot().await)
 }
 
-fn readiness_response(report: crate::application::browser::ReadinessReport) -> Response {
+fn readiness_response(report: crate::domain::readiness::ReadinessReport) -> Response {
     if report.is_ready() {
-        (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "state": report.state,
+                "issues": report.issues,
+            })),
+        )
+            .into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
                 "status": "degraded",
-                "issues": report.issues
+                "state": report.state,
+                "issues": report.issues,
+                "retry_after_ms": report.retry_after_ms,
             })),
         )
             .into_response()
@@ -167,16 +195,22 @@ pub async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::browser::ReadinessReport;
+    use crate::domain::readiness::{ReadinessIssue, ReadinessReport, ReadinessState};
 
     #[test]
     fn readiness_report_controls_http_status() {
-        let ready = readiness_response(ReadinessReport { issues: Vec::new() });
+        let ready = readiness_response(ReadinessReport::new(ReadinessState::Ready, Vec::new()));
         assert_eq!(ready.status(), StatusCode::OK);
 
-        let degraded = readiness_response(ReadinessReport {
-            issues: vec!["graph store unreachable"],
-        });
+        let degraded = readiness_response(ReadinessReport::new(
+            ReadinessState::BackendLoading,
+            vec![ReadinessIssue {
+                code: "BACKEND_UNAVAILABLE",
+                message: "graph store unreachable".to_string(),
+                retryable: true,
+                retry_after_ms: Some(1_000),
+            }],
+        ));
         assert_eq!(degraded.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

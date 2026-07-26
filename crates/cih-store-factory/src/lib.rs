@@ -20,6 +20,27 @@ pub struct StoreOptions {
     pub query_limit: Option<(usize, Duration)>,
 }
 
+/// Read-query deadlines kept separate from the legacy construction options so
+/// existing `StoreOptions` struct literals remain source compatible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadTimeoutOptions {
+    /// Backend-side execution deadline (FalkorDB `GRAPH.QUERY TIMEOUT`).
+    pub backend: Duration,
+    /// Driver-side deadline; must be longer than `backend`.
+    pub driver: Duration,
+}
+
+/// Additive adapter runtime tuning. Unsupported adapters ignore an option
+/// rather than making a backend switch fail at construction time.
+#[derive(Clone, Debug, Default)]
+pub struct StoreRuntimeOptions {
+    pub read_timeouts: Option<ReadTimeoutOptions>,
+    /// Optional compatibility wait after a backend reports dataset loading.
+    /// Servers with a readiness monitor normally set this to zero so requests
+    /// receive typed retry guidance promptly.
+    pub read_loading_wait: Option<Duration>,
+}
+
 /// Default DB url for a backend when no explicit url/env is given. THE single
 /// source of truth — engine and server both delegate here (they previously
 /// disagreed: server said 6379, engine and the docs said 6380; FalkorDB runs
@@ -54,6 +75,25 @@ pub fn connect_store(
     graph_key: &str,
     opts: &StoreOptions,
 ) -> anyhow::Result<Arc<dyn GraphStore>> {
+    connect_store_with_runtime(
+        backend,
+        url,
+        graph_key,
+        opts,
+        &StoreRuntimeOptions::default(),
+    )
+}
+
+/// Connect a store with optional runtime deadlines. This is additive to
+/// [`connect_store`] so existing engine/server callers retain their behavior
+/// until they explicitly inject bounded read settings.
+pub fn connect_store_with_runtime(
+    backend: &str,
+    url: &str,
+    graph_key: &str,
+    opts: &StoreOptions,
+    runtime: &StoreRuntimeOptions,
+) -> anyhow::Result<Arc<dyn GraphStore>> {
     match backend {
         #[cfg(feature = "falkor")]
         "falkor" => {
@@ -61,6 +101,14 @@ pub fn connect_store(
                 .map_err(|e| anyhow::anyhow!("FalkorDB connect: {e}"))?;
             if let Some((max_concurrent, acquire_timeout)) = opts.query_limit {
                 store = store.with_query_limit(max_concurrent, acquire_timeout);
+            }
+            if let Some(timeouts) = runtime.read_timeouts {
+                store = store
+                    .with_read_timeouts(timeouts.backend, timeouts.driver)
+                    .map_err(|e| anyhow::anyhow!("FalkorDB read timeouts: {e}"))?;
+            }
+            if let Some(wait) = runtime.read_loading_wait {
+                store = store.with_read_load_wait(wait);
             }
             Ok(Arc::new(store))
         }
@@ -115,6 +163,56 @@ mod tests {
             },
         )
         .expect("lazy construction");
+    }
+
+    #[cfg(feature = "falkor")]
+    #[test]
+    fn falkor_read_timeouts_are_validated_without_a_live_db() {
+        let opts = StoreOptions::default();
+        let valid = StoreRuntimeOptions {
+            read_timeouts: Some(ReadTimeoutOptions {
+                backend: Duration::from_secs(2),
+                driver: Duration::from_secs(3),
+            }),
+            ..StoreRuntimeOptions::default()
+        };
+        connect_store_with_runtime(
+            "falkor",
+            "redis://127.0.0.1:6380",
+            "factory_test",
+            &opts,
+            &valid,
+        )
+        .expect("valid read deadlines construct lazily");
+
+        for invalid in [
+            ReadTimeoutOptions {
+                backend: Duration::ZERO,
+                driver: Duration::from_secs(1),
+            },
+            ReadTimeoutOptions {
+                backend: Duration::from_secs(2),
+                driver: Duration::from_secs(2),
+            },
+        ] {
+            let result = connect_store_with_runtime(
+                "falkor",
+                "redis://127.0.0.1:6380",
+                "factory_test",
+                &opts,
+                &StoreRuntimeOptions {
+                    read_timeouts: Some(invalid),
+                    ..StoreRuntimeOptions::default()
+                },
+            );
+            let Err(error) = result else {
+                panic!("invalid read deadlines must fail before dialing");
+            };
+            assert!(
+                error.to_string().contains("timeout"),
+                "error names invalid timeout: {error}"
+            );
+        }
     }
 
     #[test]

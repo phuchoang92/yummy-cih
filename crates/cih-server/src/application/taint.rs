@@ -453,10 +453,15 @@ mod tests {
         let dir = std::env::temp_dir().join("cih-server-taint-test-missing-nothing-here");
         let cache = ArtifactCache::new();
         let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            repository_id: None,
             name: "missing".into(),
             path: dir.display().to_string(),
             graph_key: "missing".into(),
             artifacts_dir: dir.display().to_string(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: String::new(),
             last_git_head: None,
@@ -504,10 +509,15 @@ mod tests {
     async fn service_returns_typed_output() {
         let dir = fixture_dir("service");
         let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            repository_id: None,
             name: "fixture".into(),
             path: dir.display().to_string(),
             graph_key: "fixture".into(),
             artifacts_dir: dir.display().to_string(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: String::new(),
             last_git_head: None,

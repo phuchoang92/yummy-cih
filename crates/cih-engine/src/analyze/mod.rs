@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{GraphArtifacts, JarInfo, Node, NodeKind, VersionId};
+use cih_core::{
+    graph_content_version, GraphArtifacts, JarInfo, Node, NodeKind, RegistryGraphReport, VersionId,
+};
 use cih_search::{
     inspect_search_index, persist_search_index, search_index_path, search_schema_fingerprint,
     SearchIndex, SearchIndexInspection, SearchIndexSource, SEARCH_INDEX_FORMAT_VERSION,
@@ -88,13 +90,15 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         },
     )?;
 
-    let load = if emit.reused_artifacts {
-        tracing::info!("No source changes detected; reusing existing artifacts and live graph");
-        LoadOutcome::Reused
-    } else if flags.no_load {
+    let load = if flags.no_load {
         tracing::info!("Skipping graph load (--no-load)");
         LoadOutcome::Skipped
     } else {
+        if emit.reused_artifacts {
+            tracing::info!(
+                "No source changes detected; republishing existing artifacts to verify the live graph"
+            );
+        }
         let backend = flags.backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
         let resolved_url = flags
             .falkor_url
@@ -132,8 +136,11 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         emit.print_styled(&load);
     }
 
-    let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-    crate::registry::persist_analyze(&emit, graph_key);
+    if matches!(load, LoadOutcome::Loaded(_)) {
+        let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        crate::registry::persist_analyze(&emit, graph_key)?;
+        prune_published_analyze_artifacts(&emit);
+    }
 
     if matches!(load, LoadOutcome::Failed(_)) {
         process::exit(3);
@@ -216,6 +223,12 @@ pub fn run_resolve(
         println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
     } else {
         emit.print_styled(&load);
+    }
+
+    if matches!(load, LoadOutcome::Loaded(_)) {
+        let graph_key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        crate::registry::persist_analyze(&emit, graph_key)?;
+        prune_published_analyze_artifacts(&emit);
     }
 
     if matches!(load, LoadOutcome::Failed(_)) {
@@ -451,6 +464,7 @@ pub fn analyze_from_scope_with_options(
             syntactic_callables: 0,
             callable_node_count: 0,
             route_node_count: 0,
+            published_graph_report: None,
         });
     }
 
@@ -581,6 +595,19 @@ pub fn analyze_from_scope_with_options(
     }
 
     let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
+    let published_graph_report = RegistryGraphReport::try_build(
+        graph_content_version(&version, &[]),
+        &[&all_nodes],
+        &[&edges],
+    )
+    .map(Some)
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            error,
+            "graph reporting metadata omitted because artifact uniqueness was not proven"
+        );
+        None
+    });
 
     let parsed_dir = cih_dir.join("parsed").join(&version);
     let parse_artifacts = cih_parse::write_parsed_files(&parsed_dir, &parse_output.parsed_files)?;
@@ -628,8 +655,6 @@ pub fn analyze_from_scope_with_options(
     drop(parse_output.parsed_files);
     drop(parse_output.skipped);
 
-    prune_other_versions(&cih_dir.join("parsed"), &version)?;
-    prune_other_versions(&cih_dir.join("artifacts"), &version)?;
     crate::file_cache::FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
     // Persist the config fingerprint alongside the file hashes so the next run's no-op gate can
     // detect a config-only change (e.g. a new --cxf-base-path or edited cih.patterns.toml).
@@ -679,7 +704,33 @@ pub fn analyze_from_scope_with_options(
         syntactic_callables,
         callable_node_count,
         route_node_count,
+        published_graph_report,
     })
+}
+
+/// Remove superseded analyze artifacts only after the corresponding graph has
+/// been published successfully. Cleanup is best-effort: a published graph must
+/// not be reported as failed merely because an old artifact directory could not
+/// be removed.
+fn prune_published_analyze_artifacts(emit: &EmitOutcome) {
+    let Some(cih_dir) = emit.artifacts_dir.parent().and_then(Path::parent) else {
+        tracing::warn!(
+            artifacts = %emit.artifacts_dir.display(),
+            "cannot determine .cih directory for post-publication cleanup"
+        );
+        return;
+    };
+
+    for root in [cih_dir.join("parsed"), cih_dir.join("artifacts")] {
+        if let Err(error) = prune_other_versions(&root, &emit.version) {
+            tracing::warn!(
+                path = %root.display(),
+                version = %emit.version,
+                error = %error,
+                "failed to prune superseded artifacts after graph publication"
+            );
+        }
+    }
 }
 
 fn search_sidecar_enabled() -> bool {
@@ -920,6 +971,10 @@ pub struct EmitOutcome {
     /// `Route` nodes in the emitted graph — analyze owns the registry route
     /// stat now (discover may later overwrite it with its richer count).
     pub route_node_count: usize,
+    /// Exact count/kind/hub projection bound to the base-only graph content.
+    /// `None` for legacy no-op reuse or when artifact uniqueness cannot be
+    /// proven; registry persistence may carry a matching prior report forward.
+    pub published_graph_report: Option<RegistryGraphReport>,
 }
 
 /// Extraction coverage: emitted callable nodes ÷ callables the AST contains.

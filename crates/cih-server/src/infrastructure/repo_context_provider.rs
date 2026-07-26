@@ -64,6 +64,7 @@ struct LocalRepoInfrastructure {
     backend: String,
     falkor_url: String,
     store_limits: (usize, Duration),
+    store_runtime: cih_store_factory::StoreRuntimeOptions,
     embed_store: Option<Arc<EmbedStore>>,
     search_cache: SearchCache,
 }
@@ -71,27 +72,20 @@ struct LocalRepoInfrastructure {
 #[async_trait]
 impl RepoInfrastructure for LocalRepoInfrastructure {
     async fn connect_graph(&self, graph_key: &str) -> Result<Arc<dyn GraphStore>, AppError> {
-        let store = cih_store_factory::connect_store(
+        let store = cih_store_factory::connect_store_with_runtime(
             &self.backend,
             &self.falkor_url,
             graph_key,
             &cih_store_factory::StoreOptions {
                 query_limit: Some(self.store_limits),
             },
+            &self.store_runtime,
         )
         .map_err(|error| AppError::Unavailable {
             dependency: "graph store",
             message: format!("graph '{graph_key}': {error}"),
             retryable: true,
         })?;
-        store
-            .ensure_schema()
-            .await
-            .map_err(|error| AppError::Unavailable {
-                dependency: "graph schema",
-                message: format!("graph '{graph_key}': {error}"),
-                retryable: true,
-            })?;
         Ok(store)
     }
 
@@ -122,6 +116,7 @@ impl DefaultRepoContextProvider {
         backend: String,
         falkor_url: String,
         store_limits: (usize, Duration),
+        store_runtime: cih_store_factory::StoreRuntimeOptions,
         embed_store: Option<Arc<EmbedStore>>,
         search_cache: SearchCache,
     ) -> Self {
@@ -136,6 +131,7 @@ impl DefaultRepoContextProvider {
                 backend,
                 falkor_url,
                 store_limits,
+                store_runtime,
                 embed_store,
                 search_cache,
             }),
@@ -339,10 +335,15 @@ mod tests {
         artifacts: &Path,
     ) -> cih_core::RegistryEntry {
         cih_core::RegistryEntry {
+            repository_id: None,
             name: name.into(),
             path: repo.display().to_string(),
             graph_key: graph_key.into(),
             artifacts_dir: artifacts.display().to_string(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: String::new(),
             last_git_head: None,

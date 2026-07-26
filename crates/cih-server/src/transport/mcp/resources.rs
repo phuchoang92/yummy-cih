@@ -700,10 +700,15 @@ mod tests {
 
     fn entry_with_dir(dir: &std::path::Path) -> cih_core::RegistryEntry {
         cih_core::RegistryEntry {
+            repository_id: None,
             name: "r".into(),
             path: String::new(),
             graph_key: "r".into(),
             artifacts_dir: String::new(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: Some(dir.display().to_string()),
             indexed_at: String::new(),
             last_git_head: None,

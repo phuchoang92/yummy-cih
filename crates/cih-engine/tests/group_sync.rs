@@ -72,10 +72,15 @@ fn write_repo_artifacts(dir: &Path, provider: bool) {
 
 fn registry_entry(name: &str, artifacts_dir: &Path, indexed_at: &str) -> RegistryEntry {
     RegistryEntry {
+        repository_id: None,
         name: name.into(),
         path: format!("/repos/{name}"),
         graph_key: name.into(),
         artifacts_dir: artifacts_dir.display().to_string(),
+        latest_artifact_version: None,
+        published_artifact_version: None,
+        published_graph_content_version: None,
+        published_epoch: None,
         community_artifacts_dir: None,
         indexed_at: indexed_at.into(),
         last_git_head: Some(format!("{name}-head")),

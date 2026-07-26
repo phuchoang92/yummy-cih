@@ -5,14 +5,16 @@
 //! reconstruction, and resource budgets so both graph backends behave alike.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use cih_core::{Node, NodeId, NodeKind};
+use cih_core::{Edge, EdgeKind, Node, NodeId, NodeKind};
 
 use crate::{
-    ExecutionTransition, FlowEdge, FlowFilter, FlowHop, FlowNode, FlowPage, GraphStore,
-    GraphStoreError, InterceptingAdvice, Interception, PathAccess, PathEdge, PathFilter, PathInfo,
-    PathPage, Result, TraversalStats, EXECUTION_BATCH_SIZE, FLOW_VISIBLE_WINDOW,
+    risk_from_fanout, Direction, ExecutionTransition, FlowEdge, FlowFilter, FlowHop, FlowNode,
+    FlowPage, GraphStore, GraphStoreError, Impact, ImpactFilter, ImpactNode, ImpactPage,
+    InterceptingAdvice, Interception, PathAccess, PathEdge, PathFilter, PathInfo, PathPage, Result,
+    StoredTransition, SubgraphFilter, SubgraphNode, SubgraphPage, TransitionBatch, TransitionQuery,
+    TraversalReason, TraversalStats, TraversalStatus, EXECUTION_BATCH_SIZE, FLOW_VISIBLE_WINDOW,
     TRAVERSAL_EDGE_BUDGET, TRAVERSAL_NODE_BUDGET,
 };
 
@@ -81,6 +83,433 @@ struct ReachedNode {
 struct Predecessor {
     source: NodeId,
     edge: PathEdge,
+}
+
+/// Narrow port for the stored-orientation kernel. Keeping it separate from
+/// logical execution traversal prevents route/listener reversal from leaking
+/// into impact and browser subgraphs.
+#[async_trait::async_trait]
+trait StoredTraversalSource: Send + Sync {
+    async fn stored_get_node(&self, id: &NodeId) -> Result<Option<Node>>;
+    async fn batched_transitions(
+        &self,
+        sources: &[NodeId],
+        query: &TransitionQuery,
+    ) -> Result<TransitionBatch>;
+}
+
+#[async_trait::async_trait]
+impl<S: GraphStore + ?Sized> StoredTraversalSource for S {
+    async fn stored_get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        GraphStore::get_node(self, id).await
+    }
+
+    async fn batched_transitions(
+        &self,
+        sources: &[NodeId],
+        query: &TransitionQuery,
+    ) -> Result<TransitionBatch> {
+        GraphStore::batched_transitions(self, sources, query).await
+    }
+}
+
+#[derive(Default)]
+struct LayerExpansion {
+    transitions: Vec<StoredTransition>,
+    reasons: Vec<TraversalReason>,
+    examined_edges: usize,
+}
+
+pub(crate) async fn impact<S: GraphStore + ?Sized>(
+    store: &S,
+    root_id: &NodeId,
+    filter: &ImpactFilter,
+) -> Result<ImpactPage> {
+    impact_with_source(store, root_id, filter).await
+}
+
+async fn impact_with_source<S: StoredTraversalSource + ?Sized>(
+    store: &S,
+    root_id: &NodeId,
+    filter: &ImpactFilter,
+) -> Result<ImpactPage> {
+    filter.validate()?;
+    let root = store
+        .stored_get_node(root_id)
+        .await?
+        .ok_or_else(|| GraphStoreError::NotFound(root_id.to_string()))?;
+    let mut nodes = HashMap::<NodeId, Node>::new();
+    nodes.insert(root_id.clone(), root);
+    let mut depths = HashMap::<NodeId, u32>::new();
+    depths.insert(root_id.clone(), 0);
+    let mut parents = HashMap::<NodeId, NodeId>::new();
+    let mut frontier = vec![root_id.clone()];
+    let mut traversal = TraversalStats {
+        visited_nodes: 1,
+        ..TraversalStats::default()
+    };
+    let mut reasons = Vec::new();
+
+    for depth in 1..=filter.max_depth {
+        if frontier.is_empty() || !reasons.is_empty() {
+            break;
+        }
+        frontier.sort_by(|a, b| node_id_cmp(a, b, &nodes));
+        let remaining_edges = filter.edge_budget.saturating_sub(traversal.expanded_edges);
+        let mut layer = expand_stored_layer(
+            store,
+            &frontier,
+            filter.direction,
+            &[EdgeKind::Calls],
+            filter.transition_page_limit,
+            remaining_edges,
+        )
+        .await?;
+        traversal.expanded_edges = traversal
+            .expanded_edges
+            .saturating_add(layer.examined_edges);
+        layer.transitions.sort_by(|a, b| {
+            a.target
+                .name
+                .cmp(&b.target.name)
+                .then_with(|| a.target.id.as_str().cmp(b.target.id.as_str()))
+                .then_with(|| node_id_cmp(&a.source, &b.source, &nodes))
+                .then_with(|| stored_transition_cmp(a, b))
+        });
+
+        let mut next = Vec::new();
+        let mut node_budget_hit = false;
+        for transition in layer.transitions {
+            let target_id = transition.target.id.clone();
+            if depths.contains_key(&target_id) {
+                continue;
+            }
+            if nodes.len() >= filter.node_budget {
+                node_budget_hit = true;
+                continue;
+            }
+            parents.insert(target_id.clone(), transition.source);
+            depths.insert(target_id.clone(), depth);
+            nodes.insert(target_id.clone(), transition.target);
+            next.push(target_id);
+        }
+        if node_budget_hit {
+            push_reason(&mut reasons, TraversalReason::NodeBudget);
+        }
+        for reason in layer.reasons {
+            push_reason(&mut reasons, reason);
+        }
+        traversal.visited_nodes = nodes.len();
+        frontier = next;
+    }
+
+    let mut affected: Vec<ImpactNode> = nodes
+        .into_values()
+        .filter_map(|node| {
+            let depth = depths.get(&node.id).copied()?;
+            (depth > 0).then(|| ImpactNode {
+                parent_id: parents.get(&node.id).cloned(),
+                id: node.id,
+                depth,
+                via: EdgeKind::Calls.cypher_label().to_string(),
+                name: node.name,
+                kind: node.kind.label().to_string(),
+            })
+        })
+        .collect();
+    affected.sort_by(|a, b| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+    let evaluated_affected = affected.len();
+    let result_limited = affected.len() > filter.result_limit;
+    if result_limited {
+        affected.truncate(filter.result_limit);
+    }
+    let risk_exact = reasons.is_empty();
+    let status = if !risk_exact {
+        TraversalStatus::Inconclusive
+    } else if result_limited {
+        push_reason(&mut reasons, TraversalReason::ResultLimit);
+        TraversalStatus::Truncated
+    } else {
+        TraversalStatus::Complete
+    };
+    traversal.truncated = status != TraversalStatus::Complete;
+    let impact = Impact {
+        root: root_id.clone(),
+        direction: filter.direction,
+        risk: risk_from_fanout(evaluated_affected).to_string(),
+        affected,
+        has_more: status != TraversalStatus::Complete,
+        backend_limit: filter.result_limit,
+        traversal,
+        risk_exact,
+        risk_lower_bound: !risk_exact,
+    };
+    Ok(ImpactPage {
+        impact,
+        status,
+        reasons,
+        evaluated_affected,
+    })
+}
+
+pub(crate) async fn subgraph<S: GraphStore + ?Sized>(
+    store: &S,
+    seeds: &[NodeId],
+    filter: &SubgraphFilter,
+) -> Result<SubgraphPage> {
+    subgraph_with_source(store, seeds, filter).await
+}
+
+async fn subgraph_with_source<S: StoredTraversalSource + ?Sized>(
+    store: &S,
+    seeds: &[NodeId],
+    filter: &SubgraphFilter,
+) -> Result<SubgraphPage> {
+    filter.validate()?;
+    let mut roots = seeds.to_vec();
+    roots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    roots.dedup();
+    if roots.len() > filter.node_limit {
+        return Err(GraphStoreError::InvalidInput(format!(
+            "{} distinct subgraph roots exceed node_limit {}",
+            roots.len(),
+            filter.node_limit
+        )));
+    }
+
+    let root_set: HashSet<NodeId> = roots.iter().cloned().collect();
+    let mut nodes = HashMap::<NodeId, Node>::new();
+    let mut depths = HashMap::<NodeId, u32>::new();
+    for root_id in &roots {
+        let node = store
+            .stored_get_node(root_id)
+            .await?
+            .ok_or_else(|| GraphStoreError::NotFound(root_id.to_string()))?;
+        depths.insert(root_id.clone(), 0);
+        nodes.insert(root_id.clone(), node);
+    }
+    let mut traversal = TraversalStats {
+        visited_nodes: nodes.len(),
+        ..TraversalStats::default()
+    };
+    let mut frontier = roots.clone();
+    let mut selected_edges = HashMap::<(NodeId, NodeId, EdgeKind), Edge>::new();
+    let mut reasons = Vec::new();
+
+    for depth in 1..=filter.radius {
+        if frontier.is_empty() || !reasons.is_empty() {
+            break;
+        }
+        frontier.sort_by(|a, b| node_id_cmp(a, b, &nodes));
+        let remaining_edges = filter.edge_limit.saturating_sub(traversal.expanded_edges);
+        let mut layer = expand_stored_layer(
+            store,
+            &frontier,
+            Direction::Both,
+            &[],
+            filter.transition_page_limit,
+            remaining_edges,
+        )
+        .await?;
+        traversal.expanded_edges = traversal
+            .expanded_edges
+            .saturating_add(layer.examined_edges);
+        layer.transitions.sort_by(stored_transition_cmp);
+        let mut next = Vec::new();
+        let mut node_budget_hit = false;
+        for transition in layer.transitions {
+            merge_stored_edge(&mut selected_edges, transition.edge);
+            let target_id = transition.target.id.clone();
+            if depths.contains_key(&target_id) {
+                continue;
+            }
+            if nodes.len() >= filter.node_limit {
+                node_budget_hit = true;
+                continue;
+            }
+            depths.insert(target_id.clone(), depth);
+            nodes.insert(target_id.clone(), transition.target);
+            next.push(target_id);
+        }
+        if node_budget_hit {
+            push_reason(&mut reasons, TraversalReason::NodeBudget);
+        }
+        for reason in layer.reasons.drain(..) {
+            push_reason(&mut reasons, reason);
+        }
+        traversal.visited_nodes = nodes.len();
+        frontier = next;
+    }
+
+    let selected_ids: HashSet<NodeId> = nodes.keys().cloned().collect();
+    let mut edges: Vec<Edge> = selected_edges
+        .into_values()
+        .filter(|edge| selected_ids.contains(&edge.src) && selected_ids.contains(&edge.dst))
+        .collect();
+    edges.sort_by(|a, b| {
+        a.src
+            .as_str()
+            .cmp(b.src.as_str())
+            .then_with(|| a.dst.as_str().cmp(b.dst.as_str()))
+            .then_with(|| a.kind.cypher_label().cmp(b.kind.cypher_label()))
+    });
+    if edges.len() > filter.edge_limit {
+        edges.truncate(filter.edge_limit);
+        push_reason(&mut reasons, TraversalReason::EdgeBudget);
+    }
+    let mut page_nodes: Vec<SubgraphNode> = nodes
+        .into_values()
+        .map(|node| SubgraphNode {
+            depth: depths.get(&node.id).copied().unwrap_or(0),
+            root: root_set.contains(&node.id),
+            node,
+        })
+        .collect();
+    page_nodes.sort_by(|a, b| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.node.name.cmp(&b.node.name))
+            .then_with(|| a.node.id.as_str().cmp(b.node.id.as_str()))
+    });
+    let status = if reasons.is_empty() {
+        TraversalStatus::Complete
+    } else {
+        // Every reason emitted by the subgraph kernel is a work/backend
+        // budget. Once one is hit, the requested radius has not been fully
+        // evaluated, so the honest outcome is inconclusive rather than a
+        // complete evaluation with a merely shortened presentation page.
+        TraversalStatus::Inconclusive
+    };
+    traversal.truncated = status != TraversalStatus::Complete;
+    Ok(SubgraphPage {
+        roots,
+        nodes: page_nodes,
+        edges,
+        status,
+        has_more: status != TraversalStatus::Complete,
+        reasons,
+        traversal,
+    })
+}
+
+async fn expand_stored_layer<S: StoredTraversalSource + ?Sized>(
+    store: &S,
+    frontier: &[NodeId],
+    direction: Direction,
+    edge_kinds: &[EdgeKind],
+    page_limit: usize,
+    edge_budget: usize,
+) -> Result<LayerExpansion> {
+    let mut expansion = LayerExpansion::default();
+    if edge_budget == 0 && !frontier.is_empty() {
+        expansion.reasons.push(TraversalReason::EdgeBudget);
+        return Ok(expansion);
+    }
+
+    for sources in frontier.chunks(EXECUTION_BATCH_SIZE) {
+        let mut after = None;
+        loop {
+            let remaining = edge_budget.saturating_sub(expansion.transitions.len());
+            if remaining == 0 {
+                push_reason(&mut expansion.reasons, TraversalReason::EdgeBudget);
+                break;
+            }
+            let query = TransitionQuery {
+                direction,
+                edge_kinds: edge_kinds.to_vec(),
+                page_limit: page_limit.min(remaining),
+                after: after.clone(),
+            };
+            let batch = store.batched_transitions(sources, &query).await?;
+            if batch.transitions.len() > query.page_limit {
+                push_reason(&mut expansion.reasons, TraversalReason::BackendLimit);
+                break;
+            }
+            expansion.examined_edges = expansion
+                .examined_edges
+                .saturating_add(batch.transitions.len());
+            expansion.transitions.extend(batch.transitions);
+            match (batch.backend_limited, batch.next_cursor) {
+                (false, None) => break,
+                (true, Some(next)) => {
+                    if after.as_ref() == Some(&next) {
+                        push_reason(&mut expansion.reasons, TraversalReason::BackendLimit);
+                        break;
+                    }
+                    after = Some(next);
+                    if expansion.transitions.len() >= edge_budget {
+                        push_reason(&mut expansion.reasons, TraversalReason::EdgeBudget);
+                        break;
+                    }
+                }
+                _ => {
+                    push_reason(&mut expansion.reasons, TraversalReason::BackendLimit);
+                    break;
+                }
+            }
+        }
+        if !expansion.reasons.is_empty() {
+            break;
+        }
+    }
+    expansion.transitions.sort_by(stored_transition_cmp);
+    expansion.transitions.dedup_by(|a, b| {
+        a.source == b.source
+            && a.target.id == b.target.id
+            && a.edge.src == b.edge.src
+            && a.edge.dst == b.edge.dst
+            && a.edge.kind == b.edge.kind
+            && a.traversed_reverse == b.traversed_reverse
+    });
+    Ok(expansion)
+}
+
+fn stored_transition_cmp(a: &StoredTransition, b: &StoredTransition) -> Ordering {
+    a.source
+        .as_str()
+        .cmp(b.source.as_str())
+        .then_with(|| a.target.name.cmp(&b.target.name))
+        .then_with(|| a.target.id.as_str().cmp(b.target.id.as_str()))
+        .then_with(|| a.edge.kind.cypher_label().cmp(b.edge.kind.cypher_label()))
+        .then_with(|| a.traversed_reverse.cmp(&b.traversed_reverse))
+        .then_with(|| a.stored_edge_token.cmp(&b.stored_edge_token))
+}
+
+fn merge_stored_edge(edges: &mut HashMap<(NodeId, NodeId, EdgeKind), Edge>, candidate: Edge) {
+    let key = (candidate.src.clone(), candidate.dst.clone(), candidate.kind);
+    match edges.get_mut(&key) {
+        Some(current) => {
+            if candidate.confidence > current.confidence {
+                current.confidence = candidate.confidence;
+            }
+            if current.reason.is_empty()
+                || (!candidate.reason.is_empty() && candidate.reason < current.reason)
+            {
+                current.reason = candidate.reason;
+            }
+            let current_props = current.props.as_ref().map(ToString::to_string);
+            let candidate_props = candidate.props.as_ref().map(ToString::to_string);
+            if candidate_props.is_some()
+                && (current_props.is_none() || candidate_props < current_props)
+            {
+                current.props = candidate.props;
+            }
+        }
+        None => {
+            edges.insert(key, candidate);
+        }
+    }
+}
+
+fn push_reason(reasons: &mut Vec<TraversalReason>, reason: TraversalReason) {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
 }
 
 pub(crate) async fn flow_downstream<S: GraphStore + ?Sized>(

@@ -15,6 +15,10 @@ impl ObservabilityPort for TracingObservability {
             queue_wait_ms = event.queue_wait_ms,
             result_count = event.result_count,
             response_bytes = event.response_bytes,
+            attempted_response_bytes = event.attempted_response_bytes,
+            response_target_exceeded = event.response_target_exceeded,
+            response_max_exceeded = event.response_max_exceeded,
+            response_guard_enforced = event.response_guard_enforced,
             completeness = event.completeness.as_deref().unwrap_or("unknown"),
             error_kind = ?event.error_kind,
             "request_completed"

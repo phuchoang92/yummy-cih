@@ -16,6 +16,7 @@ pub(crate) enum RequestErrorKind {
     Timeout,
     Overload,
     Dependency,
+    ResponseLimit,
     Internal,
 }
 
@@ -28,7 +29,13 @@ pub(crate) struct RequestCompletion {
     pub(crate) duration_ms: u64,
     pub(crate) queue_wait_ms: Option<u64>,
     pub(crate) result_count: Option<usize>,
+    /// Exact bytes in the logical response envelope that is emitted.
     pub(crate) response_bytes: Option<usize>,
+    /// Exact bytes in an oversized envelope replaced by the response guard.
+    pub(crate) attempted_response_bytes: Option<usize>,
+    pub(crate) response_target_exceeded: bool,
+    pub(crate) response_max_exceeded: bool,
+    pub(crate) response_guard_enforced: bool,
     pub(crate) completeness: Option<String>,
     pub(crate) error_kind: Option<RequestErrorKind>,
 }

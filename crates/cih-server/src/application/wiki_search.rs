@@ -256,10 +256,15 @@ mod tests {
     #[tokio::test]
     async fn service_resolves_repo_and_calls_repository_port() {
         let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            repository_id: None,
             name: "demo".into(),
             path: "/repos/demo".into(),
             graph_key: "demo".into(),
             artifacts_dir: String::new(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: String::new(),
             last_git_head: None,

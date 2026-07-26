@@ -29,6 +29,26 @@ pub(crate) fn app_error_to_mcp(error: AppError) -> McpError {
                 None,
             )
         }
+        AppError::GraphUnavailable {
+            code,
+            message,
+            retryable,
+            retry_after_ms,
+        } => {
+            tracing::error!(code, error = %message, retryable, retry_after_ms, "graph dependency unavailable");
+            McpError::internal_error(
+                format!(
+                    "graph store unavailable ({code}){}",
+                    if retryable { "; retry shortly" } else { "" }
+                ),
+                Some(serde_json::json!({
+                    "dependency": "graph_store",
+                    "code": code,
+                    "retryable": retryable,
+                    "retry_after_ms": retry_after_ms,
+                })),
+            )
+        }
     }
 }
 

@@ -20,6 +20,7 @@ use rmcp::{ClientHandler, ServiceExt};
 use super::CihServer;
 use crate::application::files::{GrepRuntime, ReadFileLimits};
 use crate::bootstrap::assemble_services;
+use crate::infrastructure::search_provider::SearchCache;
 use crate::infrastructure::wiki_repository::WikiSearchState;
 
 #[derive(Clone, Default)]
@@ -52,6 +53,8 @@ async fn serve_test_server() -> TestClient {
         "falkor".into(),
         "redis://127.0.0.1:6380".into(),
         (4, Duration::from_secs(5)),
+        cih_store_factory::StoreRuntimeOptions::default(),
+        SearchCache::new(4, 16 * 1024 * 1024),
         ReadFileLimits {
             max_bytes: 1 << 20,
             max_lines: 2000,
@@ -89,6 +92,7 @@ async fn tools_list_returns_full_surface_with_schemas() {
     let names: std::collections::HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     for expected in [
         "list_repos",
+        "list_repos_page",
         "search_code",
         "read_file",
         "search_wiki",
@@ -101,7 +105,7 @@ async fn tools_list_returns_full_surface_with_schemas() {
     }
     assert_eq!(
         tools.len(),
-        32,
+        33,
         "tool count drifted from the registered surface"
     );
 
@@ -171,6 +175,32 @@ async fn dispatch_trace_flow_rejects_windows_beyond_shared_cap() {
     assert!(
         res.is_err(),
         "offset + max_nodes beyond 5,000 must fail before graph resolution"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_context_rejects_oversize_independent_pages() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "context".into(),
+            arguments: Some(
+                serde_json::json!({
+                    "name": "Method:test.Context#root/0",
+                    "caller_limit": 501,
+                    "callee_limit": 1,
+                    "process_limit": 1,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "each context section must reject a page above the 500-item cap"
     );
     client.cancel().await.ok();
 }

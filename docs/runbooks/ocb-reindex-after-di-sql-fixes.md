@@ -62,6 +62,10 @@ share the single schema bump, so the laptop workflow from
   target stays in the repository; directory symlink prefixes are never walked.
   Default grep concurrency is now 2
   (`CIH_GREP_MAX_CONCURRENT_REQUESTS`).
-- **Reads tolerate FalkorDB dataset loads**: after a container restart, reads
-  wait out `BusyLoadingError` up to `CIH_FALKOR_READ_LOAD_WAIT_SECS` (20s)
-  instead of failing immediately with "graph store unavailable".
+- **Dataset restore is an explicit readiness state**: the server starts its
+  HTTP listener without running graph DDL, `/health` stays live, and `/ready`
+  reports a typed loading/degraded issue. Interactive server reads return
+  `BACKEND_LOADING` with retry guidance promptly instead of every caller
+  sleeping for 20 seconds. CLI/load callers retain the longer compatibility
+  wait controlled by `CIH_FALKOR_READ_LOAD_WAIT_SECS` and
+  `CIH_FALKOR_LOAD_WAIT_SECS`.

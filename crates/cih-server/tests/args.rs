@@ -1,8 +1,8 @@
 use cih_graph_store::Direction;
 use cih_server::args::{
-    DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs, ImpactFormat,
-    ReachesArgs, RegressionScopeArgs, RouteMapArgs, RouteMapFormat, TraceFlowArgs, TraceFlowFormat,
-    UntestedPathsArgs,
+    ContextArgs, DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs,
+    ImpactFormat, ReachesArgs, RegressionScopeArgs, RouteMapArgs, RouteMapFormat, TraceFlowArgs,
+    TraceFlowFormat, UntestedPathsArgs,
 };
 
 #[test]
@@ -86,6 +86,28 @@ fn impact_args_accepts_format_diagram() {
         serde_json::from_str(r#"{"name":"OrderService","format":"diagram"}"#).unwrap();
     assert_eq!(args.name, "OrderService");
     assert_eq!(args.format, ImpactFormat::Diagram);
+}
+
+#[test]
+fn context_args_keep_independent_page_state() {
+    let defaults: ContextArgs = serde_json::from_str(r#"{"name":"OrderService"}"#).unwrap();
+    assert_eq!(defaults.caller_limit, 0);
+    assert_eq!(defaults.callee_limit, 0);
+    assert_eq!(defaults.process_limit, 0);
+    assert!(defaults.caller_cursor.is_none());
+
+    let paged: ContextArgs = serde_json::from_str(
+        r#"{"name":"OrderService","caller_limit":50,"callee_limit":25,
+            "process_limit":10,"caller_cursor":"caller-page",
+            "callee_cursor":"callee-page","process_cursor":"process-page"}"#,
+    )
+    .unwrap();
+    assert_eq!(paged.caller_limit, 50);
+    assert_eq!(paged.callee_limit, 25);
+    assert_eq!(paged.process_limit, 10);
+    assert_eq!(paged.caller_cursor.as_deref(), Some("caller-page"));
+    assert_eq!(paged.callee_cursor.as_deref(), Some("callee-page"));
+    assert_eq!(paged.process_cursor.as_deref(), Some("process-page"));
 }
 
 #[test]

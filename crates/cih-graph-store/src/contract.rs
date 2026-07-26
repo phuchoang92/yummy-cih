@@ -25,7 +25,11 @@ use cih_core::{
     Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range, VersionId,
 };
 
-use crate::{Direction, FlowFilter, GraphStore, LoadObserver, PathAccess, PathFilter};
+use crate::{
+    ContextFilter, Direction, FlowFilter, GraphStore, ImpactFilter, LoadObserver, PathAccess,
+    PathFilter, SubgraphFilter, TransitionQuery, TraversalReason, TraversalStatus,
+    IMPACT_RESULT_LIMIT,
+};
 
 type MkResult = anyhow::Result<Arc<dyn GraphStore>>;
 
@@ -323,6 +327,14 @@ where
     let r = reads_case(mk, key.clone()).await;
     finish(mk, &[key], "reads", r).await?;
 
+    let key = format!("{ns}_bounded");
+    let r = bounded_high_degree_case(mk, key.clone()).await;
+    finish(mk, &[key], "bounded high degree", r).await?;
+
+    let key = format!("{ns}_kernel");
+    let r = bounded_kernel_case(mk, key.clone()).await;
+    finish(mk, &[key], "bounded graph kernel", r).await?;
+
     let key = format!("{ns}_flow");
     let r = flow_case(mk, key.clone()).await;
     finish(mk, &[key], "flow", r).await?;
@@ -339,6 +351,342 @@ where
     let r = observed_case(mk, key.clone()).await;
     finish(mk, &[key], "observed", r).await?;
 
+    Ok(())
+}
+
+/// A high-degree root proves that adapters use deterministic `limit + 1`
+/// probes instead of silently calling their hard cap complete.
+async fn bounded_high_degree_case(
+    mk: &dyn Fn(&str) -> MkResult,
+    key: String,
+) -> anyhow::Result<()> {
+    const ROOT_ID: &str = "Method:com.acme.HighDegree#root/0";
+    const EXTRA_CALLERS: usize = 5;
+    let caller_count = IMPACT_RESULT_LIMIT + EXTRA_CALLERS;
+    let mut nodes = vec![node(ROOT_ID, NodeKind::Method, "root", "HighDegree.java")];
+    let mut edges = Vec::with_capacity(caller_count);
+    // Deliberately reverse insertion order; query order, not load order, must
+    // define both context pages and the impact containment prefix.
+    for index in (0..caller_count).rev() {
+        let id = format!("Method:com.acme.HighDegree#caller{index:03}/0");
+        let name = format!("caller{index:03}");
+        nodes.push(node(&id, NodeKind::Method, &name, "HighDegree.java"));
+        edges.push(edge(&id, ROOT_ID, EdgeKind::Calls));
+    }
+
+    let artifacts = GraphArtifacts::write(
+        &artifacts_dir_for(&key),
+        VersionId::new("bounded-v1"),
+        &nodes,
+        &edges,
+    )?;
+    let store = mk(&key)?;
+    let _ = store.drop_graph().await;
+    let stats = store.bulk_load(&artifacts).await?;
+    check!(
+        stats.nodes == nodes.len() as u64 && stats.edges == edges.len() as u64,
+        "high-degree fixture load stats: {stats:?}"
+    );
+    store.ensure_schema().await?;
+
+    let root = NodeId::new(ROOT_ID);
+    let first = store.context_page(&root, &ContextFilter::default()).await?;
+    check!(
+        first.callers.items.len() == 100 && first.callers.has_more,
+        "first high-degree caller page must expose continuation: {:?}",
+        first.callers
+    );
+    let first_ids: Vec<&str> = first
+        .callers
+        .items
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    check!(
+        first_ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "caller page order is stable by name/id: {first_ids:?}"
+    );
+    let second = store
+        .context_page(
+            &root,
+            &ContextFilter {
+                caller_after: first.callers.next.clone(),
+                ..ContextFilter::default()
+            },
+        )
+        .await?;
+    check!(
+        second.callers.items.len() == 100 && second.callers.has_more,
+        "second caller page remains bounded and truthfully incomplete: {:?}",
+        second.callers
+    );
+    let first_set: HashSet<&str> = first_ids.into_iter().collect();
+    check!(
+        second
+            .callers
+            .items
+            .iter()
+            .all(|node| !first_set.contains(node.id.as_str())),
+        "caller pages do not duplicate boundary rows"
+    );
+
+    match store.context(&root).await {
+        Err(crate::GraphStoreError::InvalidInput(message)) => check!(
+            message.contains("legacy 100-item"),
+            "legacy context error points to the exact cap: {message}"
+        ),
+        Ok(context) => anyhow::bail!(
+            "legacy context silently returned a bounded prefix of {} callers",
+            context.callers.len()
+        ),
+        Err(error) => return Err(error.into()),
+    }
+
+    let impact = store.impact(&root, Direction::Upstream, 1).await?;
+    check!(
+        impact.affected.len() == IMPACT_RESULT_LIMIT
+            && impact.has_more
+            && impact.backend_limit == IMPACT_RESULT_LIMIT
+            && impact.traversal.truncated
+            && impact.risk_exact
+            && !impact.risk_lower_bound
+            && impact.traversal.visited_nodes == caller_count + 1
+            && impact.traversal.expanded_edges == caller_count,
+        "result-capped impact still evaluates exact fan-out: {impact:?}"
+    );
+    check!(
+        impact
+            .affected
+            .windows(2)
+            .all(|pair| (&pair[0].name, pair[0].id.as_str())
+                < (&pair[1].name, pair[1].id.as_str())),
+        "impact prefix order is deterministic"
+    );
+
+    store.drop_graph().await?;
+    Ok(())
+}
+
+/// Cycles, equal-depth diamond parents, keyset paging, and overlapping
+/// subgraph roots exercise the shared kernel identically on every backend.
+async fn bounded_kernel_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result<()> {
+    const ROOT: &str = "Method:kernel.Root#run/0";
+    const ALPHA: &str = "Method:kernel.Alpha#run/0";
+    const BETA: &str = "Method:kernel.Beta#run/0";
+    const COMMON: &str = "Method:kernel.Common#run/0";
+    const TAIL: &str = "Method:kernel.Tail#run/0";
+    const FAN: &str = "Method:kernel.Fan#run/0";
+
+    let mut nodes = vec![
+        node(ROOT, NodeKind::Method, "root", "Kernel.java"),
+        node(ALPHA, NodeKind::Method, "alpha", "Kernel.java"),
+        node(BETA, NodeKind::Method, "beta", "Kernel.java"),
+        node(COMMON, NodeKind::Method, "common", "Kernel.java"),
+        node(TAIL, NodeKind::Method, "tail", "Kernel.java"),
+        node(FAN, NodeKind::Method, "fan", "Kernel.java"),
+    ];
+    let mut edges = vec![
+        edge(ROOT, ALPHA, EdgeKind::Calls),
+        edge(ROOT, BETA, EdgeKind::Calls),
+        edge(ALPHA, COMMON, EdgeKind::Calls),
+        edge(BETA, COMMON, EdgeKind::Calls),
+        edge(COMMON, ROOT, EdgeKind::Calls),
+        edge(COMMON, TAIL, EdgeKind::Calls),
+    ];
+    for index in (0..7).rev() {
+        let id = format!("Method:kernel.FanTarget{index}#run/0");
+        nodes.push(node(
+            &id,
+            NodeKind::Method,
+            &format!("fan-{index}"),
+            "Kernel.java",
+        ));
+        edges.push(edge(FAN, &id, EdgeKind::Calls));
+    }
+
+    let artifacts = GraphArtifacts::write(
+        &artifacts_dir_for(&key),
+        VersionId::new("kernel-v1"),
+        &nodes,
+        &edges,
+    )?;
+    let store = mk(&key)?;
+    let _ = store.drop_graph().await;
+    store.bulk_load(&artifacts).await?;
+    store.ensure_schema().await?;
+
+    let mut after = None;
+    let mut paged_targets = Vec::new();
+    loop {
+        let batch = store
+            .batched_transitions(
+                &[NodeId::new(FAN)],
+                &TransitionQuery {
+                    direction: Direction::Downstream,
+                    edge_kinds: vec![EdgeKind::Calls],
+                    page_limit: 3,
+                    after,
+                },
+            )
+            .await?;
+        for transition in &batch.transitions {
+            check!(
+                transition.source.as_str() == FAN
+                    && transition.edge.src.as_str() == FAN
+                    && transition.edge.dst == transition.target.id
+                    && !transition.traversed_reverse,
+                "stored transition orientation and source are preserved: {transition:?}"
+            );
+            paged_targets.push(transition.target.id.clone());
+        }
+        match batch.next_cursor {
+            Some(next) => {
+                check!(
+                    batch.backend_limited,
+                    "continuation requires backend_limited"
+                );
+                after = Some(next);
+            }
+            None => {
+                check!(
+                    !batch.backend_limited,
+                    "exhausted page is not backend-limited"
+                );
+                break;
+            }
+        }
+    }
+    let unique_targets: HashSet<&str> = paged_targets.iter().map(NodeId::as_str).collect();
+    check!(
+        paged_targets.len() == 7 && unique_targets.len() == 7,
+        "keyset pages cover all high-fan transitions once: {paged_targets:?}"
+    );
+
+    let impact = store
+        .impact_bounded(
+            &NodeId::new(ROOT),
+            &ImpactFilter {
+                direction: Direction::Downstream,
+                max_depth: 4,
+                result_limit: 20,
+                node_budget: 20,
+                edge_budget: 30,
+                transition_page_limit: 2,
+            },
+        )
+        .await?;
+    check!(
+        impact.status == TraversalStatus::Complete
+            && impact.impact.risk_exact
+            && !impact.impact.traversal.truncated,
+        "cycle/diamond impact completes: {impact:?}"
+    );
+    let common = impact
+        .impact
+        .affected
+        .iter()
+        .find(|node| node.id.as_str() == COMMON)
+        .context("diamond common node")?;
+    check!(
+        common.depth == 2 && common.parent_id.as_ref().map(NodeId::as_str) == Some(ALPHA),
+        "diamond selects the stable alpha parent: {common:?}"
+    );
+    check!(
+        impact
+            .impact
+            .affected
+            .iter()
+            .all(|node| node.id.as_str() != ROOT),
+        "cycle never re-admits the root"
+    );
+
+    let budgeted = store
+        .impact_bounded(
+            &NodeId::new(ROOT),
+            &ImpactFilter {
+                direction: Direction::Downstream,
+                max_depth: 4,
+                result_limit: 20,
+                node_budget: 20,
+                edge_budget: 2,
+                transition_page_limit: 2,
+            },
+        )
+        .await?;
+    check!(
+        budgeted.status == TraversalStatus::Inconclusive
+            && budgeted.reasons.contains(&TraversalReason::EdgeBudget)
+            && !budgeted.impact.risk_exact
+            && budgeted.impact.risk_lower_bound,
+        "edge budget is an explicit inconclusive lower bound: {budgeted:?}"
+    );
+
+    let subgraph = store
+        .subgraph_bounded(
+            &[NodeId::new(ALPHA), NodeId::new(BETA), NodeId::new(ALPHA)],
+            &SubgraphFilter {
+                radius: 2,
+                node_limit: 20,
+                edge_limit: 30,
+                transition_page_limit: 2,
+            },
+        )
+        .await?;
+    let node_ids: HashSet<&str> = subgraph
+        .nodes
+        .iter()
+        .map(|item| item.node.id.as_str())
+        .collect();
+    let edge_keys: HashSet<(&str, &str, EdgeKind)> = subgraph
+        .edges
+        .iter()
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str(), edge.kind))
+        .collect();
+    check!(
+        subgraph.status == TraversalStatus::Complete
+            && subgraph.roots.len() == 2
+            && node_ids.len() == subgraph.nodes.len()
+            && edge_keys.len() == subgraph.edges.len(),
+        "overlapping seeds deduplicate nodes and stored edges: {subgraph:?}"
+    );
+    check!(
+        subgraph.edges.iter().all(
+            |edge| node_ids.contains(edge.src.as_str()) && node_ids.contains(edge.dst.as_str())
+        ),
+        "subgraph edge endpoints are closed"
+    );
+    check!(
+        subgraph
+            .nodes
+            .iter()
+            .find(|item| item.node.id.as_str() == TAIL)
+            .is_some_and(|item| item.depth == 2),
+        "multi-root walk keeps the minimum node depth"
+    );
+
+    let limited = store
+        .subgraph_bounded(
+            &[NodeId::new(ALPHA), NodeId::new(BETA)],
+            &SubgraphFilter {
+                radius: 2,
+                node_limit: 3,
+                edge_limit: 30,
+                transition_page_limit: 2,
+            },
+        )
+        .await?;
+    check!(
+        limited.status == TraversalStatus::Inconclusive
+            && limited.reasons.contains(&TraversalReason::NodeBudget)
+            && limited.nodes.iter().filter(|item| item.root).count() == 2
+            && limited.edges.iter().all(|edge| {
+                limited.nodes.iter().any(|item| item.node.id == edge.src)
+                    && limited.nodes.iter().any(|item| item.node.id == edge.dst)
+            }),
+        "node-bounded subgraph is inconclusive while retaining roots and endpoint closure: {limited:?}"
+    );
+
+    store.drop_graph().await?;
     Ok(())
 }
 
@@ -430,6 +778,14 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
 
     // -- impact: depths AND parents, all three directions --------------------
     let up = store.impact(&callee_id, Direction::Upstream, 4).await?;
+    check!(
+        !up.has_more
+            && up.backend_limit == IMPACT_RESULT_LIMIT
+            && up.risk_exact
+            && !up.risk_lower_bound
+            && !up.traversal.truncated,
+        "small impact is exact and reports its containment metadata: {up:?}"
+    );
     let by_id = |imp: &crate::Impact, id: &str| {
         imp.affected
             .iter()
@@ -502,6 +858,54 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         ctx.community.as_ref().map(|c| c.id.as_str()) == Some(COMM_A_ID),
         "context community is commA: {:?}",
         ctx.community
+    );
+
+    let first_page = store
+        .context_page(
+            &NodeId::new(CALLER_ID),
+            &ContextFilter {
+                caller_limit: 1,
+                callee_limit: 1,
+                process_limit: 1,
+                ..ContextFilter::default()
+            },
+        )
+        .await?;
+    check!(
+        first_page.callers.items.len() == 1 && first_page.callers.has_more,
+        "callers use their own limit+1 page: {:?}",
+        first_page.callers
+    );
+    check!(
+        first_page.callees.items.len() == 1 && first_page.callees.has_more,
+        "callees use their own limit+1 page: {:?}",
+        first_page.callees
+    );
+    check!(
+        first_page.processes.items == [PROCESS_ID] && !first_page.processes.has_more,
+        "process membership has an independent complete page: {:?}",
+        first_page.processes
+    );
+    let second_page = store
+        .context_page(
+            &NodeId::new(CALLER_ID),
+            &ContextFilter {
+                caller_limit: 1,
+                callee_limit: 1,
+                process_limit: 1,
+                caller_after: first_page.callers.next.clone(),
+                callee_after: first_page.callees.next.clone(),
+                process_after: None,
+            },
+        )
+        .await?;
+    check!(
+        first_page.callers.items[0].id != second_page.callers.items[0].id,
+        "caller continuation does not duplicate the boundary item"
+    );
+    check!(
+        first_page.callees.items[0].id != second_page.callees.items[0].id,
+        "callee continuation does not duplicate the boundary item"
     );
 
     // -- routes -------------------------------------------------------------

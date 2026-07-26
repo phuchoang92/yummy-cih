@@ -89,6 +89,18 @@ fn app_error_response(error: AppError) -> Response {
                 ),
             )
         }
+        AppError::GraphUnavailable {
+            code,
+            message,
+            retryable,
+            retry_after_ms,
+        } => {
+            tracing::error!(code, error = %message, retryable, retry_after_ms, "wiki graph dependency unavailable");
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("graph store unavailable ({code})"),
+            )
+        }
     }
 }
 

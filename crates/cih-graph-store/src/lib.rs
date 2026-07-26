@@ -20,12 +20,81 @@ pub const TRAVERSAL_NODE_BUDGET: usize = 10_000;
 pub const TRAVERSAL_EDGE_BUDGET: usize = 50_000;
 /// Largest offset + page-size window accepted by `trace_flow`.
 pub const FLOW_VISIBLE_WINDOW: usize = 5_000;
+/// Compatibility/default page size for each independent context section.
+pub const CONTEXT_DEFAULT_LIMIT: usize = 100;
+/// Hard cap for callers, callees, and processes in one context page.
+pub const CONTEXT_MAX_LIMIT: usize = 500;
+/// Temporary deterministic containment cap for backend-recursive impact reads.
+pub const IMPACT_RESULT_LIMIT: usize = 200;
+/// Largest page requested from a backend one-hop transition query. The
+/// adapters probe with one extra row, keeping the request below FalkorDB's
+/// verified 10,000-row result cap.
+pub const TRANSITION_PAGE_MAX: usize = 8_000;
+/// Compatibility node bound for the legacy `subgraph` read.
+pub const SUBGRAPH_NODE_LIMIT: usize = 200;
+/// Compatibility edge bound for the legacy `subgraph` read.
+pub const SUBGRAPH_EDGE_LIMIT: usize = 1_000;
 
 #[cfg(feature = "test-support")]
 pub mod contract;
 
+/// Machine-readable retry guidance carried by operational graph-store errors.
+///
+/// `retry_after_ms` is advisory. Callers should still apply their own retry
+/// budget and jitter rather than retrying forever.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryMetadata {
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl RetryMetadata {
+    pub const fn retryable(retry_after_ms: Option<u64>) -> Self {
+        Self {
+            retryable: true,
+            retry_after_ms,
+        }
+    }
+
+    pub const fn non_retryable() -> Self {
+        Self {
+            retryable: false,
+            retry_after_ms: None,
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum GraphStoreError {
+    #[error("graph backend is loading: {message}")]
+    Loading {
+        message: String,
+        retry: RetryMetadata,
+    },
+    #[error("graph backend is overloaded: {message}")]
+    Overloaded {
+        message: String,
+        retry: RetryMetadata,
+    },
+    #[error("graph query exceeded its {timeout_ms}ms execution deadline: {message}")]
+    ExecutionTimeout {
+        message: String,
+        timeout_ms: u64,
+        retry: RetryMetadata,
+    },
+    #[error("graph backend is unavailable: {message}")]
+    Unavailable {
+        message: String,
+        retry: RetryMetadata,
+    },
+    #[error("graph index operation failed: {message}")]
+    Index {
+        message: String,
+        retry: RetryMetadata,
+    },
+    /// Compatibility escape hatch for adapters that have not classified an
+    /// operational backend failure yet.
     #[error("graph backend error: {0}")]
     Backend(String),
     #[error("node not found: {0}")]
@@ -38,7 +107,112 @@ pub enum GraphStoreError {
     Other(#[from] anyhow::Error),
 }
 
+impl GraphStoreError {
+    /// Retry metadata for classified operational errors. Domain/input errors
+    /// and the legacy unclassified [`Self::Backend`] variant return `None`.
+    pub const fn retry_metadata(&self) -> Option<RetryMetadata> {
+        match self {
+            Self::Loading { retry, .. }
+            | Self::Overloaded { retry, .. }
+            | Self::ExecutionTimeout { retry, .. }
+            | Self::Unavailable { retry, .. }
+            | Self::Index { retry, .. } => Some(*retry),
+            Self::Backend(_)
+            | Self::NotFound(_)
+            | Self::Unimplemented(_)
+            | Self::InvalidInput(_)
+            | Self::Other(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::{BackendReadiness, BackendReadinessState, GraphStoreError, RetryMetadata};
+
+    #[test]
+    fn backend_readiness_constructors_preserve_restore_guidance() {
+        assert_eq!(
+            BackendReadiness::ready().state,
+            BackendReadinessState::Ready
+        );
+
+        let loading = BackendReadiness::loading("restore in progress", 1_000);
+        assert_eq!(loading.state, BackendReadinessState::Loading);
+        assert_eq!(loading.detail.as_deref(), Some("restore in progress"));
+        assert_eq!(loading.retry_after_ms, Some(1_000));
+    }
+
+    #[test]
+    fn classified_operational_errors_expose_retry_metadata() {
+        let retry = RetryMetadata::retryable(Some(250));
+        let error = GraphStoreError::Loading {
+            message: "dataset restore".into(),
+            retry,
+        };
+        assert_eq!(error.retry_metadata(), Some(retry));
+
+        let terminal = GraphStoreError::ExecutionTimeout {
+            message: "bounded query".into(),
+            timeout_ms: 500,
+            retry: RetryMetadata::non_retryable(),
+        };
+        assert_eq!(
+            terminal.retry_metadata(),
+            Some(RetryMetadata::non_retryable())
+        );
+    }
+
+    #[test]
+    fn legacy_backend_error_remains_available_but_unclassified() {
+        let error = GraphStoreError::Backend("adapter detail".into());
+        assert_eq!(error.to_string(), "graph backend error: adapter detail");
+        assert_eq!(error.retry_metadata(), None);
+    }
+}
+
 pub type Result<T> = std::result::Result<T, GraphStoreError>;
+
+/// Backend-level serving state, independent of any repository publication.
+///
+/// Remote adapters should override [`GraphStore::backend_readiness`] with a
+/// bounded, read-only metadata command. Embedded adapters may use the default
+/// ready state because successful construction already proves that the local
+/// backend is available.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendReadinessState {
+    Ready,
+    Loading,
+}
+
+/// Result of a non-mutating backend readiness probe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendReadiness {
+    pub state: BackendReadinessState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl BackendReadiness {
+    pub const fn ready() -> Self {
+        Self {
+            state: BackendReadinessState::Ready,
+            detail: None,
+            retry_after_ms: None,
+        }
+    }
+
+    pub fn loading(detail: impl Into<String>, retry_after_ms: u64) -> Self {
+        Self {
+            state: BackendReadinessState::Loading,
+            detail: Some(detail.into()),
+            retry_after_ms: Some(retry_after_ms),
+        }
+    }
+}
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -79,6 +253,106 @@ pub struct Impact {
     pub affected: Vec<ImpactNode>,
     /// none | low | medium | high | critical (derived from fan-out).
     pub risk: String,
+    /// True when another affected node was observed by the `limit + 1` probe.
+    #[serde(default)]
+    pub has_more: bool,
+    /// Maximum affected nodes returned by this compatibility query.
+    #[serde(default)]
+    pub backend_limit: usize,
+    /// Observable traversal accounting. Recursive backend queries cannot expose
+    /// expanded-edge counts yet, so that field remains zero until shared BFS.
+    #[serde(default)]
+    pub traversal: TraversalStats,
+    /// Whether `risk` was calculated from the complete requested depth scope.
+    #[serde(default)]
+    pub risk_exact: bool,
+    /// Explicit compatibility signal that `risk` is only a lower bound.
+    #[serde(default)]
+    pub risk_lower_bound: bool,
+}
+
+/// Outcome of a bounded graph walk. `Truncated` means the requested result
+/// page was bounded after the full scope was evaluated. `Inconclusive` means
+/// a work/backend budget prevented evaluation of the complete scope.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraversalStatus {
+    #[default]
+    Complete,
+    Truncated,
+    Inconclusive,
+}
+
+/// Machine-readable reason a bounded traversal did not return a complete
+/// result set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraversalReason {
+    ResultLimit,
+    NodeBudget,
+    EdgeBudget,
+    BackendLimit,
+}
+
+/// Bounds for the shared CALLS impact BFS.
+#[derive(Clone, Debug)]
+pub struct ImpactFilter {
+    pub direction: Direction,
+    pub max_depth: u32,
+    pub result_limit: usize,
+    pub node_budget: usize,
+    pub edge_budget: usize,
+    pub transition_page_limit: usize,
+}
+
+impl ImpactFilter {
+    /// Compatibility bounds used by the legacy [`GraphStore::impact`] method.
+    pub fn compatibility(direction: Direction, max_depth: u32) -> Self {
+        Self {
+            direction,
+            max_depth: max_depth.clamp(1, 20),
+            result_limit: IMPACT_RESULT_LIMIT,
+            node_budget: TRAVERSAL_NODE_BUDGET,
+            edge_budget: TRAVERSAL_EDGE_BUDGET,
+            transition_page_limit: TRANSITION_PAGE_MAX,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=20).contains(&self.max_depth) {
+            return Err(GraphStoreError::InvalidInput(
+                "impact max_depth must be in 1..=20".to_string(),
+            ));
+        }
+        if self.result_limit == 0 || self.result_limit > TRAVERSAL_NODE_BUDGET {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "impact result_limit must be in 1..={TRAVERSAL_NODE_BUDGET}"
+            )));
+        }
+        if self.node_budget == 0 || self.node_budget > TRAVERSAL_NODE_BUDGET {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "impact node_budget must be in 1..={TRAVERSAL_NODE_BUDGET}"
+            )));
+        }
+        if self.edge_budget == 0 || self.edge_budget > TRAVERSAL_EDGE_BUDGET {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "impact edge_budget must be in 1..={TRAVERSAL_EDGE_BUDGET}"
+            )));
+        }
+        validate_transition_page_limit(self.transition_page_limit)
+    }
+}
+
+/// Truthful metadata around the legacy impact payload.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImpactPage {
+    pub impact: Impact,
+    pub status: TraversalStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<TraversalReason>,
+    /// Number of affected nodes observed before result-page truncation. This
+    /// is an exact total only when `impact.risk_exact` is true.
+    pub evaluated_affected: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +426,66 @@ pub struct Subgraph {
     pub edges: Vec<Edge>,
 }
 
+/// One node selected by the shared multi-root stored-orientation walk.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubgraphNode {
+    pub node: Node,
+    pub depth: u32,
+    pub root: bool,
+}
+
+/// Bounds for [`GraphStore::subgraph_bounded`].
+#[derive(Clone, Debug)]
+pub struct SubgraphFilter {
+    pub radius: u32,
+    pub node_limit: usize,
+    pub edge_limit: usize,
+    pub transition_page_limit: usize,
+}
+
+impl SubgraphFilter {
+    pub fn compatibility(radius: u32) -> Self {
+        Self {
+            radius: radius.clamp(1, 4),
+            node_limit: SUBGRAPH_NODE_LIMIT,
+            edge_limit: SUBGRAPH_EDGE_LIMIT,
+            transition_page_limit: TRANSITION_PAGE_MAX,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.radius > 20 {
+            return Err(GraphStoreError::InvalidInput(
+                "subgraph radius must be in 0..=20".to_string(),
+            ));
+        }
+        if self.node_limit == 0 || self.node_limit > TRAVERSAL_NODE_BUDGET {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "subgraph node_limit must be in 1..={TRAVERSAL_NODE_BUDGET}"
+            )));
+        }
+        if self.edge_limit == 0 || self.edge_limit > TRAVERSAL_EDGE_BUDGET {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "subgraph edge_limit must be in 1..={TRAVERSAL_EDGE_BUDGET}"
+            )));
+        }
+        validate_transition_page_limit(self.transition_page_limit)
+    }
+}
+
+/// Result of one bounded multi-root stored-orientation expansion.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubgraphPage {
+    pub roots: Vec<NodeId>,
+    pub nodes: Vec<SubgraphNode>,
+    pub edges: Vec<Edge>,
+    pub status: TraversalStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<TraversalReason>,
+    pub has_more: bool,
+    pub traversal: TraversalStats,
+}
+
 /// A bounded, read-only projection used by whole-repository graph explorers.
 ///
 /// `degree` is the undirected degree in the complete stored graph, not only in
@@ -187,6 +521,147 @@ pub struct SymbolContext {
     pub processes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub community: Option<CommunityInfo>,
+}
+
+/// Stable key used by graph adapters to continue one independently paged
+/// context section. Transports should wrap this in an opaque operation-specific
+/// cursor rather than exposing the fields as a public wire contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCursorKey {
+    pub name: String,
+    pub id: String,
+}
+
+/// Independent bounds and continuation state for callers, callees, and
+/// processes. Each limit must be in `1..=CONTEXT_MAX_LIMIT`.
+#[derive(Clone, Debug)]
+pub struct ContextFilter {
+    pub caller_limit: usize,
+    pub callee_limit: usize,
+    pub process_limit: usize,
+    pub caller_after: Option<ContextCursorKey>,
+    pub callee_after: Option<ContextCursorKey>,
+    pub process_after: Option<ContextCursorKey>,
+}
+
+impl Default for ContextFilter {
+    fn default() -> Self {
+        Self {
+            caller_limit: CONTEXT_DEFAULT_LIMIT,
+            callee_limit: CONTEXT_DEFAULT_LIMIT,
+            process_limit: CONTEXT_DEFAULT_LIMIT,
+            caller_after: None,
+            callee_after: None,
+            process_after: None,
+        }
+    }
+}
+
+impl ContextFilter {
+    pub fn validate(&self) -> Result<()> {
+        for (section, limit) in [
+            ("caller", self.caller_limit),
+            ("callee", self.callee_limit),
+            ("process", self.process_limit),
+        ] {
+            if !(1..=CONTEXT_MAX_LIMIT).contains(&limit) {
+                return Err(GraphStoreError::InvalidInput(format!(
+                    "{section} context limit {limit} is outside 1..={CONTEXT_MAX_LIMIT}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One independently bounded section of a context result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContextSection<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<ContextCursorKey>,
+}
+
+/// Bounded 360-degree symbol context. Each section advances with its own key so
+/// a high-degree caller set cannot consume the callee or process budget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContextPage {
+    pub node: Node,
+    pub callers: ContextSection<Node>,
+    pub callees: ContextSection<Node>,
+    pub processes: ContextSection<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community: Option<CommunityInfo>,
+}
+
+impl ContextSection<Node> {
+    /// Build a page from an already stable or unsorted `limit + 1` node probe.
+    pub fn from_node_probe(
+        mut nodes: Vec<Node>,
+        limit: usize,
+        after: Option<&ContextCursorKey>,
+    ) -> Self {
+        nodes.sort_by(|left, right| {
+            (&left.name, left.id.as_str()).cmp(&(&right.name, right.id.as_str()))
+        });
+        nodes.dedup_by(|left, right| left.id == right.id);
+        if let Some(after) = after {
+            nodes.retain(|node| {
+                (node.name.as_str(), node.id.as_str()) > (after.name.as_str(), after.id.as_str())
+            });
+        }
+        let has_more = nodes.len() > limit;
+        nodes.truncate(limit);
+        let next = has_more.then(|| {
+            let node = nodes
+                .last()
+                .expect("a positive context limit has a last item");
+            ContextCursorKey {
+                name: node.name.clone(),
+                id: node.id.to_string(),
+            }
+        });
+        Self {
+            items: nodes,
+            has_more,
+            next,
+        }
+    }
+}
+
+impl ContextSection<String> {
+    /// Build a process-id page while retaining the process name in the cursor
+    /// tie-break key. The returned legacy items remain canonical process IDs.
+    pub fn from_process_probe(
+        mut processes: Vec<(String, String)>,
+        limit: usize,
+        after: Option<&ContextCursorKey>,
+    ) -> Self {
+        processes.sort();
+        processes.dedup_by(|left, right| left.1 == right.1);
+        if let Some(after) = after {
+            processes.retain(|(name, id)| {
+                (name.as_str(), id.as_str()) > (after.name.as_str(), after.id.as_str())
+            });
+        }
+        let has_more = processes.len() > limit;
+        processes.truncate(limit);
+        let next = has_more.then(|| {
+            let (name, id) = processes
+                .last()
+                .expect("a positive context limit has a last item");
+            ContextCursorKey {
+                name: name.clone(),
+                id: id.clone(),
+            }
+        });
+        Self {
+            items: processes.into_iter().map(|(_, id)| id).collect(),
+            has_more,
+            next,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -350,6 +825,74 @@ pub struct CallSiteArgs {
     pub args: Vec<String>,
 }
 
+/// Stable key for continuing a batched stored-orientation one-hop query.
+/// Transports should wrap it in an authenticated, operation-bound cursor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionCursorKey {
+    pub source_id: NodeId,
+    pub target_name: String,
+    pub target_id: NodeId,
+    pub edge_kind: String,
+    pub traversed_reverse: bool,
+    pub stored_edge_token: String,
+}
+
+/// Bounds and selection for a stored-orientation transition page.
+#[derive(Clone, Debug)]
+pub struct TransitionQuery {
+    pub direction: Direction,
+    /// Empty selects every stored relationship kind.
+    pub edge_kinds: Vec<EdgeKind>,
+    pub page_limit: usize,
+    pub after: Option<TransitionCursorKey>,
+}
+
+impl TransitionQuery {
+    pub fn validate(&self, source_count: usize) -> Result<()> {
+        if source_count > EXECUTION_BATCH_SIZE {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "stored transition batch {source_count} exceeds {EXECUTION_BATCH_SIZE}"
+            )));
+        }
+        validate_transition_page_limit(self.page_limit)
+    }
+}
+
+/// A one-hop transition relative to one requested source while retaining the
+/// relationship's stored source/destination orientation in `edge`.
+#[derive(Clone, Debug)]
+pub struct StoredTransition {
+    pub source: NodeId,
+    pub target: Node,
+    pub edge: Edge,
+    pub traversed_reverse: bool,
+    pub stored_edge_token: String,
+}
+
+impl StoredTransition {
+    pub fn cursor_key(&self) -> TransitionCursorKey {
+        TransitionCursorKey {
+            source_id: self.source.clone(),
+            target_name: self.target.name.clone(),
+            target_id: self.target.id.clone(),
+            edge_kind: self.edge.kind.cypher_label().to_string(),
+            traversed_reverse: self.traversed_reverse,
+            stored_edge_token: self.stored_edge_token.clone(),
+        }
+    }
+}
+
+/// One deterministic adapter page. `backend_limited` is true only when the
+/// `limit + 1` probe observed another row; in that case `next_cursor` must be
+/// present. A backend that cannot provide a continuation reports
+/// `backend_limited=true` with no cursor, making the shared walk inconclusive.
+#[derive(Clone, Debug)]
+pub struct TransitionBatch {
+    pub transitions: Vec<StoredTransition>,
+    pub next_cursor: Option<TransitionCursorKey>,
+    pub backend_limited: bool,
+}
+
 /// One logical execution transition returned by a backend's batched one-hop
 /// primitive. The target carries enough metadata for the shared BFS to avoid a
 /// per-node lookup.
@@ -422,6 +965,27 @@ pub struct GraphSummary {
     pub total_edges: u64,
 }
 
+fn validate_transition_page_limit(limit: usize) -> Result<()> {
+    if !(1..=TRANSITION_PAGE_MAX).contains(&limit) {
+        return Err(GraphStoreError::InvalidInput(format!(
+            "transition page_limit {limit} is outside 1..={TRANSITION_PAGE_MAX}"
+        )));
+    }
+    Ok(())
+}
+
+/// Deterministic identity for a reduced stored relationship. Loaders currently
+/// merge each `(source, target, kind)` key, so this canonical token is stable
+/// across both adapters and across pages without exposing backend internal IDs.
+pub fn stored_edge_token(src: &NodeId, dst: &NodeId, kind: EdgeKind) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        src.as_str(),
+        dst.as_str(),
+        kind.cypher_label()
+    )
+}
+
 /// The pluggable storage port. MCP tools map 1:1 onto the read methods.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
@@ -450,13 +1014,59 @@ pub trait GraphStore: Send + Sync {
         self.bulk_load(artifacts).await
     }
 
+    /// Probe backend connectivity/restore state without graph DDL or a graph
+    /// data query. Remote adapters must override this method; the default is
+    /// appropriate only for embedded stores whose constructor opens the local
+    /// database before returning.
+    async fn backend_readiness(&self) -> Result<BackendReadiness> {
+        Ok(BackendReadiness::ready())
+    }
+
     // ---- reads (domain queries) ----
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
     async fn neighbors(&self, id: &NodeId, dir: Direction, kinds: &[EdgeKind])
         -> Result<Vec<Edge>>;
-    async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact>;
+    /// Return one deterministic, keyset-paged batch of stored-orientation
+    /// relationships for at most 256 source nodes.
+    async fn batched_transitions(
+        &self,
+        _sources: &[NodeId],
+        _query: &TransitionQuery,
+    ) -> Result<TransitionBatch> {
+        Err(GraphStoreError::Unimplemented("batched_transitions"))
+    }
+    /// Shared, backend-neutral bounded CALLS impact traversal.
+    async fn impact_bounded(&self, id: &NodeId, filter: &ImpactFilter) -> Result<ImpactPage> {
+        traversal::impact(self, id, filter).await
+    }
+    /// Compatibility wrapper retaining the original payload and fixed 200-node
+    /// result page. Completeness remains visible through the legacy metadata.
+    async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact> {
+        Ok(self
+            .impact_bounded(id, &ImpactFilter::compatibility(dir, max_depth))
+            .await?
+            .impact)
+    }
     async fn call_chain(&self, from: &NodeId, to: &NodeId, max_depth: u32) -> Result<Vec<Path>>;
-    async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph>;
+    /// Shared multi-root, stored-orientation expansion with explicit bounds.
+    async fn subgraph_bounded(
+        &self,
+        seeds: &[NodeId],
+        filter: &SubgraphFilter,
+    ) -> Result<SubgraphPage> {
+        traversal::subgraph(self, seeds, filter).await
+    }
+    /// Compatibility wrapper retaining the original `Subgraph` payload while
+    /// enforcing deterministic node and edge bounds.
+    async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph> {
+        let page = self
+            .subgraph_bounded(seeds, &SubgraphFilter::compatibility(radius))
+            .await?;
+        Ok(Subgraph {
+            nodes: page.nodes.into_iter().map(|item| item.node).collect(),
+            edges: page.edges,
+        })
+    }
     /// Return per-kind node counts and total graph size. Fast — no degree scan.
     async fn graph_summary(&self) -> Result<GraphSummary>;
     /// Return a deterministic, bounded whole-graph projection for interactive
@@ -469,6 +1079,38 @@ pub trait GraphStore: Send + Sync {
         kinds: Option<&[String]>,
     ) -> Result<GraphOverview>;
     async fn context(&self, id: &NodeId) -> Result<SymbolContext>;
+    /// Return independently paged callers, callees, and process membership.
+    ///
+    /// The default keeps lightweight test and third-party stores source
+    /// compatible by paging their exact legacy context in memory. Production
+    /// adapters override it so the bounds are enforced by the backend query.
+    async fn context_page(&self, id: &NodeId, filter: &ContextFilter) -> Result<ContextPage> {
+        filter.validate()?;
+        let context = self.context(id).await?;
+        Ok(ContextPage {
+            node: context.node,
+            callers: ContextSection::from_node_probe(
+                context.callers,
+                filter.caller_limit,
+                filter.caller_after.as_ref(),
+            ),
+            callees: ContextSection::from_node_probe(
+                context.callees,
+                filter.callee_limit,
+                filter.callee_after.as_ref(),
+            ),
+            processes: ContextSection::from_process_probe(
+                context
+                    .processes
+                    .into_iter()
+                    .map(|id| (id.clone(), id))
+                    .collect(),
+                filter.process_limit,
+                filter.process_after.as_ref(),
+            ),
+            community: context.community,
+        })
+    }
     async fn communities(&self) -> Result<Vec<CommunityInfo>>;
     async fn route_map(&self, prefix: Option<&str>, limit: usize) -> Result<Vec<RouteInfo>>;
 

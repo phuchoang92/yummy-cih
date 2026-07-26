@@ -546,6 +546,13 @@ companion-object/`object` `val`s with literal initializers):
   dispatch boundary. HTTP application routes use the equivalent Axum
   middleware. Repository labels are deterministic hashes; arbitrary repository
   names are not metric labels.
+- MCP response measurement serializes the complete uncompressed logical
+  JSON-RPC envelope into an allocation-free counting sink. It includes the
+  request id and both compatibility `content` and `structuredContent`. Completion
+  events report emitted bytes, exact rejected-attempt bytes, target/max
+  crossings, and enforcement. The default guard mode is `warn`; explicit
+  `enforce` replaces an over-ceiling envelope with typed `RESULT_TOO_LARGE`
+  metadata and never truncates either representation.
 - `/operations/metrics` is authenticated with the other protected routes and
   reports blocking-lane `active`/`queued`/`rejected`/timeout/panic counters plus
   index-queue `queued`/`running`/`rejected` counters.
@@ -561,6 +568,15 @@ companion-object/`object` `val`s with literal initializers):
   source-identity-bound `search-index.bin` files (format **2**). A missing,
   older-format, stale, or corrupt sidecar is rebuilt from canonical JSONL and
   atomically repaired; repair failure falls back to the in-memory index.
+- Successful analyze/discover publication stores an optional exact graph report
+  in the atomic registry snapshot. It is accepted only when its schema and full
+  graph-content version match the published artifact/content/epoch fields. The
+  report contains reduced node/edge totals, per-kind counts, and 256 stable
+  symbol hubs computed from the graph already resident in the pipeline.
+  `graph_summary` and the default architecture symbol pool use it without live
+  count/degree scans. Legacy, mismatched, duplicate-key, or dangling artifact
+  compositions keep the live-query fallback and never treat artifact line
+  counts as semantic graph truth.
 - `architecture_overview` composes graph sections independently. A summary
   failure marks only `stats` unavailable; modules, routes, entrypoints,
   hotspots, and wiki metadata keep their own availability. Route totals use a
@@ -616,6 +632,34 @@ storage through `Arc<dyn GraphStore>`. A new backend is:
 4. **Nothing else.** Backend selection is `--backend` / `CIH_GRAPH_BACKEND`
    (default `falkor`); the URL flag stays `--falkor-url` / `FALKOR_URL` until
    the packaging pass renames it with aliases.
+
+### Backend readiness
+
+Process liveness and dependency readiness are intentionally separate.
+`GET /health` never touches the graph. `GET /ready` consults one cached,
+single-flight backend monitor with a one-second probe deadline and cache
+interval, then returns `READY`, `BACKEND_LOADING`, or `DEGRADED` with bounded
+issue codes and retry guidance. Concurrent readiness calls share the same
+probe. MCP graph capabilities and the graph-browser data API consult that exact
+cached snapshot before dispatch, so restore-time concurrency does not become a
+graph-query stampede. File access, repository/catalog status, wiki access,
+index-job status, and lexical/non-expanded search remain independently
+available.
+
+The Falkor adapter implements `GraphStore::backend_readiness` with read-only
+`INFO persistence`; `loading:1` is a normal restore state, not a generic graph
+failure. This metadata command uses neither `GRAPH.QUERY` nor the configured
+graph key, so it cannot create an empty graph and cannot execute schema DDL.
+Embedded stores use the trait's construction-implies-ready default. Repository
+publication, index, and sidecar readiness remain separate follow-on checks.
+
+Compose uses the same `loading:0` condition instead of `PING`, keeping dependent
+services stopped while an AOF/RDB restore is still in progress. Index creation
+belongs to analysis/publication or explicit repair; it is never a health or
+readiness side effect. Falkor schema and both load paths share one required
+index set for `Symbol.id`, `Symbol.kind`, `Symbol.name`, and `Symbol.file`.
+Only a verified already-exists response is idempotent; restore/loading and all
+unexpected DDL failures invalidate staging instead of being discarded.
 
 ### Backend: `ladybug` (embedded, opt-in)
 

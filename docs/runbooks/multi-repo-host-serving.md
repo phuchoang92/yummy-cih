@@ -63,9 +63,37 @@ All env-driven (`crates/cih-server/src/config.rs`):
 | `CIH_BIND` | `127.0.0.1:<port>` — loopback ⇒ no auth token required |
 | `CIH_GRAPH_KEY` | the **primary** repo's graph key (deep tools use it when `repo` is empty) |
 | `CIH_GROUP` | the home group name — scopes `list_repos` to its members |
+| `CIH_CURSOR_SIGNING_KEY` | exactly 64 hexadecimal characters; use one shared secret across replicas so authenticated pagination cursors survive restarts and load balancing. If omitted, the server creates a secure process-local key and existing cursors expire on restart |
 | `CIH_ARTIFACTS_DIR` | the **primary** repo's **unversioned** `<repo>/.cih/artifacts` parent (BM25 resolves the latest versioned subdir) |
 | `FALKOR_URL` | `redis://127.0.0.1:6380` |
 | `CIH_PG_URL` | `postgres://<user>:<pass>@127.0.0.1:5433/<db>` — optional; enables semantic `query`. BM25 `search_code` works without it |
+
+Interactive graph reads use one validated timeout hierarchy:
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `CIH_QUERY_QUEUE_TIMEOUT_MS` | 5000 | wait for graph admission before shedding |
+| `CIH_GRAPH_QUERY_TIMEOUT_MS` | 10000 | FalkorDB-side `GRAPH.QUERY` execution cap |
+| `CIH_GRAPH_DRIVER_TIMEOUT_MS` | 12000 | Redis driver cap; must exceed the backend cap |
+| `CIH_GRAPH_OPERATION_TIMEOUT_MS` | 15000 | complete MCP operation cap; must exceed the driver cap |
+
+MCP response size is a separate, validated envelope policy:
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `CIH_MCP_RESPONSE_TARGET_BYTES` | 262144 | ordinary-response target for the full uncompressed JSON-RPC envelope |
+| `CIH_MCP_RESPONSE_MAX_BYTES` | 1048576 | safety ceiling; must be at least 1024 and no smaller than the target |
+| `CIH_MCP_RESPONSE_GUARD_MODE` | `warn` | `measure`, `warn`, or explicit `enforce` |
+
+`warn` is compatibility-safe: it measures the request id, protocol envelope,
+legacy `content`, and additive `structuredContent` without changing the result.
+After all affected operations have paging or logical bounds, set `enforce` to
+return a bounded typed `RESULT_TOO_LARGE` error above the ceiling. Enforcement
+does not truncate a success or omit either compatibility representation.
+
+On timeout or client cancellation, the Falkor and embedding supervisors retain
+their permits until the underlying work actually finishes (or reaches its
+bounded cleanup grace), so abandoned work cannot create an admission stampede.
 
 ### Memory budgets (validated at startup)
 
@@ -75,10 +103,10 @@ worth setting these deliberately on a multi-repo host.
 
 | Env | Default | Bounds |
 |-----|---------|--------|
-| `CIH_CACHE_MAX_BYTES` | 1040 MiB | total; must be ≥ the sum of the four below |
+| `CIH_CACHE_MAX_BYTES` | 1536 MiB | total; must be ≥ the sum of the four below |
 | `CIH_ARTIFACT_CACHE_MAX_BYTES` | 512 MiB | parsed `nodes.jsonl`/`edges.jsonl` snapshots |
 | `CIH_WIKI_CACHE_MAX_BYTES` | 256 MiB | wiki indexes, resident renderers, live search |
-| `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | aggregate retained BM25 indexes across all repositories |
+| `CIH_SEARCH_CACHE_MAX_BYTES` | 512 MiB | aggregate retained BM25 indexes across all repositories |
 | `CIH_SEARCH_CACHE_MAX_ENTRIES` | 32 | repository/version index safety cap |
 | `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES` | 16 MiB | JSONL resource paging indexes |
 | `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | 32 | retained repo versions (LRU beyond this) |
@@ -129,14 +157,25 @@ an atomic repair; concurrent callers for the same version share that result.
 | `CIH_SEARCH_COLD_MAX_CONCURRENT` | 1 | simultaneous decode/build count |
 | `CIH_SEARCH_COLD_MAX_BYTES` | 512 MiB | aggregate cold transient reservation |
 | `CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS` | 5 | cold count/byte admission timeout |
+| `CIH_EMBED_INFERENCE_MAX_CONCURRENT` | 1 | semantic model calls admitted process-wide |
+| `CIH_EMBED_INFERENCE_QUEUE_TIMEOUT_MS` | 250 | wait for the semantic inference lane before shedding |
+| `CIH_EMBED_INFERENCE_TIMEOUT_MS` | 1000 | interactive query-inference deadline |
 | `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 2 | repository scans admitted at once |
 | `CIH_GREP_THREADS` | min(4, CPUs) | process-wide dedicated grep workers |
 | `CIH_GREP_QUEUE_TIMEOUT_SECS` | 2 | wait before `grep capacity saturated` |
-| `CIH_GREP_DEADLINE_SECS` | 80 | cooperative partial-result deadline |
+| `CIH_GREP_DEADLINE_SECS` | 10 | cooperative partial-result deadline; queue plus scan must fit inside the MCP operation deadline |
 | `CIH_WIKI_LIVE_MAX_NODES` | 100000 | require generated wiki above this graph size |
 
 Startup rejects zero/invalid values and rejects a grep queue plus scan deadline
 that does not leave five seconds before `CIH_BLOCKING_TIMEOUT_SECS`.
+
+The embedding lane is separate from BM25 scoring and graph reads. Fastembed
+inference cannot be cancelled after it starts, so the lane permit and active
+accounting remain owned by the blocking call after an MCP timeout or client
+disconnect. Keep concurrency at 1 unless measurements prove the selected model
+can execute calls in parallel; increasing it while the model mutex serializes
+work only consumes more blocking threads. Bulk `cih embed` batches share the
+admission setting but do not use the interactive timeout.
 
 Operational state is available at authenticated `GET /operations/metrics`.
 Use it to distinguish slow execution from admission pressure: blocking
@@ -144,16 +183,23 @@ Use it to distinguish slow execution from admission pressure: blocking
 index `queued`/`running`/`rejected` describes analysis-job pressure. Request
 completion logs use the `request_completed` event and include duration, queue
 wait, response bytes, result count when available, completeness, and a bounded
-error class.
+error class. MCP events count the exact logical JSON-RPC envelope; HTTP events
+retain their content-length measurement. MCP events also expose
+`attempted_response_bytes`, `response_target_exceeded`,
+`response_max_exceeded`, and `response_guard_enforced`. For an enforced result,
+`response_bytes` is the bounded error envelope and `attempted_response_bytes`
+is the exact rejected success envelope.
 
 The `retrieval` object adds search cache hits/misses/retained bytes/evictions,
 current and process-high-water scorer concurrency/scratch, queue pressure, cold
-reserved bytes, sidecar load/fallback/repair counters, wiki manifest/live-build
-counters, and grep
-active/queued/rejected/partial/file totals. A growing `fallback_builds` count
-with no `repair_succeeded` indicates stale artifacts or a read-only artifact
-mount. A growing grep `rejected` count means callers should narrow their glob or
-retry after the current scan drains.
+reserved bytes, sidecar load/fallback/repair counters, semantic
+attempted/succeeded/failed/timeout/rejection/elapsed counters, wiki
+manifest/live-build counters, and grep active/queued/rejected/partial/file
+totals. A growing `fallback_builds` count with no `repair_succeeded` indicates
+stale artifacts or a read-only artifact mount. A growing semantic `rejected`
+count means the inference lane remains occupied; a growing grep `rejected`
+count means callers should narrow their glob or retry after the current scan
+drains.
 
 The scheduled `.github/workflows/cih-server-soak.yml` workflow runs both the
 ten-service and fifty-registry-entry matrices. For a local smoke run:
@@ -232,8 +278,19 @@ Then pass `repo` to target a service:
 
 ## Smoke test (no MCP client needed)
 
-`GET /health` and `/ready` return 200. For tool calls, speak MCP Streamable HTTP
-directly (initialize → `notifications/initialized` → `tools/list` → `tools/call`;
+`GET /health` returns 200 as soon as the process is listening. `/ready` returns
+200 only with `state: "READY"`; while FalkorDB restores persisted data it
+returns 503 with `state: "BACKEND_LOADING"`, an issue code, and
+`retry_after_ms`. Compose uses `INFO persistence`/`loading:0` rather than
+`PING`, so a reachable-but-restoring Redis process does not release dependent
+services. Readiness checks are cached/single-flighted for one second, use a
+one-second deadline, and never create indexes or execute other DDL. Graph-only
+MCP tools and `/api/graph/*` fail promptly from the same cached snapshot during
+restore; `list_repos`, status, file/grep, wiki, indexing status, `search_code`,
+and `query(expand=false)` remain available.
+
+For tool calls, speak MCP Streamable HTTP directly (initialize →
+`notifications/initialized` → `tools/list` → `tools/call`;
 each POST is one JSON-RPC message, `--data-raw`, `Accept: application/json,
 text/event-stream`, echo the `Mcp-Session-Id` response header on follow-ups).
 

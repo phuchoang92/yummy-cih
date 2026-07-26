@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind, RepoMap, VersionId};
+use cih_core::{
+    graph_content_version, ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind,
+    RegistryGraphReport, RepoMap, VersionId,
+};
 use cih_grouping::{
     apply_overrides, feature_artifact_dir, find_feature_artifact_dir, prune_feature_artifacts,
     read_feature_artifact, write_feature_artifacts, FeatureOverrides, FeatureStrategy,
@@ -131,7 +134,10 @@ pub fn run_discover(
         emit.print_styled(&load);
     }
 
-    crate::registry::persist_discover(&repo, &emit);
+    if matches!(load, LoadOutcome::Loaded(_)) {
+        crate::registry::persist_discover(&repo, &emit)?;
+        prune_published_discover_artifacts(&repo, &emit);
+    }
 
     if matches!(load, LoadOutcome::Failed(_)) {
         process::exit(3);
@@ -353,8 +359,6 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
             artifacts_dir.display()
         )
     })?;
-    prune_other_versions(&repo.join(".cih").join("artifacts-community"), &version)?;
-
     tracing::info!(
         version = %version,
         path = %artifacts_dir.display(),
@@ -442,10 +446,6 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
             feat_dir.display()
         )
     })?;
-    prune_feature_artifacts(
-        &repo.join(".cih").join("artifacts-features"),
-        source.version.as_str(),
-    )?;
     tracing::info!(
         features = feature_count,
         entries = merged_entries.len(),
@@ -454,6 +454,19 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     ui.finish_with(format!("{} features", crate::ui::fmt_count(feature_count)));
 
     let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
+    let published_graph_report = RegistryGraphReport::try_build(
+        graph_content_version(source.version.as_str(), &[("community", version.as_str())]),
+        &[&nodes, &output_nodes],
+        &[&edges, &output_edges],
+    )
+    .map(Some)
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            error,
+            "graph reporting metadata omitted because composed artifact uniqueness was not proven"
+        );
+        None
+    });
 
     Ok(DiscoverOutcome {
         source_artifacts: source,
@@ -480,7 +493,35 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         node_count: output_nodes.len(),
         edge_count: output_edges.len(),
         feature_count,
+        published_graph_report,
     })
+}
+
+/// Retire superseded discover artifacts only after their base+overlay graph has
+/// been published. Cleanup failures are warnings because publication already
+/// succeeded and older immutable artifacts are safe to retain.
+fn prune_published_discover_artifacts(repo: &Path, emit: &DiscoverOutcome) {
+    let community_root = repo.join(".cih").join("artifacts-community");
+    if let Err(error) = prune_other_versions(&community_root, &emit.version) {
+        tracing::warn!(
+            path = %community_root.display(),
+            version = %emit.version,
+            error = %error,
+            "failed to prune superseded community artifacts after graph publication"
+        );
+    }
+
+    let feature_root = repo.join(".cih").join("artifacts-features");
+    if let Err(error) =
+        prune_feature_artifacts(&feature_root, emit.source_artifacts.version.as_str())
+    {
+        tracing::warn!(
+            path = %feature_root.display(),
+            source_version = %emit.source_artifacts.version,
+            error = %error,
+            "failed to prune superseded feature artifacts after graph publication"
+        );
+    }
 }
 
 /// A node eligible for embed feature clustering: first-party (not from a jar / not `external`) and
@@ -749,6 +790,8 @@ pub struct DiscoverOutcome {
     pub node_count: usize,
     pub edge_count: usize,
     pub feature_count: usize,
+    /// Exact count/kind/hub projection for the published base+community graph.
+    pub published_graph_report: Option<RegistryGraphReport>,
 }
 
 impl DiscoverOutcome {

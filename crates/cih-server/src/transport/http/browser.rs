@@ -19,6 +19,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 use crate::application::browser::{BrowserSearchResult, GraphBrowserService};
+use crate::application::search::ExpansionLimits;
 use crate::domain::error::AppError;
 use crate::layout;
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking, run_blocking_heavy};
@@ -87,6 +88,12 @@ struct SearchParams {
     limit: Option<usize>,
     /// Include one-hop graph around top hits. Defaults to true for the browser.
     expand: Option<bool>,
+    /// Aggregate expanded-result node cap (default 500, hard maximum 5000).
+    max_nodes: Option<usize>,
+    /// Aggregate expanded-result edge cap (default 1000, hard maximum 10000).
+    max_edges: Option<usize>,
+    /// Logical JSON response cap (default 256 KiB, hard maximum 1 MiB).
+    max_response_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,7 +181,16 @@ async fn graph_search(
     let limit = search::query_limit(params.limit.unwrap_or(0));
     let result = state
         .queries
-        .search(&params.q, limit, params.expand.unwrap_or(true))
+        .search(
+            &params.q,
+            limit,
+            params.expand.unwrap_or(true),
+            ExpansionLimits::from_wire(
+                params.max_nodes.unwrap_or(0),
+                params.max_edges.unwrap_or(0),
+                params.max_response_bytes.unwrap_or(0),
+            ),
+        )
         .await
         .map_err(BrowserError::from_app)?;
     Ok(Json(result))
@@ -529,6 +545,13 @@ impl BrowserError {
         }
     }
 
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
+
     fn from_app(error: AppError) -> Self {
         match error {
             AppError::InvalidInput { field, message } => {
@@ -539,6 +562,9 @@ impl BrowserError {
                 message: format!("{entity} not found: {key}"),
             },
             AppError::Unavailable { message, .. } => Self::internal(message),
+            AppError::GraphUnavailable { code, message, .. } => {
+                Self::unavailable(format!("{code}: {message}"))
+            }
         }
     }
 }
@@ -625,6 +651,9 @@ mod tests {
                 q: " ".into(),
                 limit: None,
                 expand: None,
+                max_nodes: None,
+                max_edges: None,
+                max_response_bytes: None,
             }),
         )
         .await

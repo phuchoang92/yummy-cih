@@ -23,6 +23,8 @@ use crate::viz::{render_community_diagram, render_d3_impact, render_mermaid_flow
 impl CihServer {
     #[tool(
         description = "360° context for a symbol: its node, callers, callees, and processes. \
+        Callers, callees, and processes are independently paged (default 100, maximum 500); \
+        follow each section's own next_cursor. \
         Pass a full NodeId (e.g. `Class:com.acme.OrderService`) or a short name; \
         short names return {\"status\":\"ambiguous\",\"candidates\":[...]} when multiple match."
     )]
@@ -35,6 +37,12 @@ impl CihServer {
             .context(ContextCommand {
                 repo: args.repo,
                 name: args.name,
+                caller_limit: args.caller_limit,
+                callee_limit: args.callee_limit,
+                process_limit: args.process_limit,
+                caller_cursor: args.caller_cursor,
+                callee_cursor: args.callee_cursor,
+                process_cursor: args.process_cursor,
             })
             .await
             .map_err(app_error_to_mcp)?;

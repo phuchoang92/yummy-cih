@@ -2,15 +2,19 @@
 
 use cih_core::{Node, NodeId, NodeKind};
 use cih_graph_store::{
-    CommunityEdge, CommunityInfo, DbEffect, Direction, FlowFilter, FlowHop, GraphStoreError,
-    HotspotNode, Impact, PathAccess, PathFilter, RouteInfo, SimilarMethod, SymbolContext,
-    TraversalStats, FLOW_VISIBLE_WINDOW,
+    CommunityEdge, CommunityInfo, ContextCursorKey, ContextFilter, ContextPage, ContextSection,
+    DbEffect, Direction, FlowFilter, FlowHop, GraphStoreError, HotspotNode, Impact, PathAccess,
+    PathFilter, RouteInfo, SimilarMethod, TraversalStats, CONTEXT_DEFAULT_LIMIT, CONTEXT_MAX_LIMIT,
+    FLOW_VISIBLE_WINDOW,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::application::app_services::RepoContextService;
 use crate::application::change_detection::{
     ChangeDetectionService, DetectChangesCommand, DetectChangesOutput,
+};
+use crate::application::cursor::{
+    canonical_filter_hash, unix_now, CursorCodec, RepositoryCursorBinding, DEFAULT_CURSOR_TTL_SECS,
 };
 use crate::domain::completeness::ResultBounds;
 use crate::domain::error::AppError;
@@ -33,18 +37,73 @@ impl GraphQueryService {
     pub(crate) async fn context(
         &self,
         command: ContextCommand,
-    ) -> Result<SymbolQueryOutput<SymbolContext>, AppError> {
+    ) -> Result<SymbolQueryOutput<ContextOutput>, AppError> {
+        let caller_limit = context_limit("caller_limit", command.caller_limit)?;
+        let callee_limit = context_limit("callee_limit", command.callee_limit)?;
+        let process_limit = context_limit("process_limit", command.process_limit)?;
         let repo = self
             .repos
             .resolve(RepoSelector::from_wire(&command.repo))
             .await?;
+        let cursor_codec = CursorCodec::global()?;
+        let cursor_now = unix_now();
+        let repository = RepositoryCursorBinding::from_entry(&repo.repo.registry_entry);
         match resolve_symbol(&repo.store, &command.name).await? {
-            SymbolResolution::Id(id) => repo
-                .store
-                .context(&id)
-                .await
-                .map(SymbolQueryOutput::Resolved)
-                .map_err(graph_error),
+            SymbolResolution::Id(id) => {
+                let filter = ContextFilter {
+                    caller_limit,
+                    callee_limit,
+                    process_limit,
+                    caller_after: decode_context_cursor(
+                        command.caller_cursor.as_deref(),
+                        "callers",
+                        &id,
+                        caller_limit,
+                        &repository,
+                        cursor_codec,
+                        cursor_now,
+                    )?,
+                    callee_after: decode_context_cursor(
+                        command.callee_cursor.as_deref(),
+                        "callees",
+                        &id,
+                        callee_limit,
+                        &repository,
+                        cursor_codec,
+                        cursor_now,
+                    )?,
+                    process_after: decode_context_cursor(
+                        command.process_cursor.as_deref(),
+                        "processes",
+                        &id,
+                        process_limit,
+                        &repository,
+                        cursor_codec,
+                        cursor_now,
+                    )?,
+                };
+                let page = repo
+                    .store
+                    .context_page(&id, &filter)
+                    .await
+                    .map_err(graph_error)?;
+                Ok(SymbolQueryOutput::Resolved(ContextOutput::from_page(
+                    page,
+                    ContextPageShape {
+                        caller_limit,
+                        callee_limit,
+                        process_limit,
+                        caller_offset: filter.caller_after.is_some(),
+                        callee_offset: filter.callee_after.is_some(),
+                        process_offset: filter.process_after.is_some(),
+                    },
+                    ContextCursorScope {
+                        repository: &repository,
+                        codec: cursor_codec,
+                        now: cursor_now,
+                    },
+                )?))
+            }
             SymbolResolution::Ambiguous(nodes) => Ok(SymbolQueryOutput::Ambiguous(
                 AmbiguousResult::from_nodes(nodes),
             )),
@@ -66,8 +125,9 @@ impl GraphQueryService {
                 .impact(&id, command.direction, command.max_depth)
                 .await
                 .map(|impact| {
+                    let completeness = impact_bounds(&impact);
                     SymbolQueryOutput::Resolved(ImpactOutput {
-                        completeness: ResultBounds::requested_scope(impact.affected.len()),
+                        completeness,
                         impact,
                     })
                 })
@@ -363,6 +423,12 @@ impl GraphQueryService {
 pub(crate) struct ContextCommand {
     pub(crate) repo: String,
     pub(crate) name: String,
+    pub(crate) caller_limit: usize,
+    pub(crate) callee_limit: usize,
+    pub(crate) process_limit: usize,
+    pub(crate) caller_cursor: Option<String>,
+    pub(crate) callee_cursor: Option<String>,
+    pub(crate) process_cursor: Option<String>,
 }
 
 pub(crate) struct ImpactCommand {
@@ -488,6 +554,258 @@ impl AmbiguousResult {
     }
 }
 
+const CONTEXT_CURSOR_OPERATION: &str = "context";
+const CONTEXT_CURSOR_FILTER: &[u8] = b"context-section-filter-v1:none";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ContextCursorPayload {
+    section: String,
+    symbol: String,
+    limit: usize,
+    filter_hash: String,
+    repository: RepositoryCursorBinding,
+    key: ContextCursorKey,
+}
+
+#[derive(Clone, Copy)]
+struct ContextPageShape {
+    caller_limit: usize,
+    callee_limit: usize,
+    process_limit: usize,
+    caller_offset: bool,
+    callee_offset: bool,
+    process_offset: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ContextCursorScope<'a> {
+    repository: &'a RepositoryCursorBinding,
+    codec: &'a CursorCodec,
+    now: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ContextSectionSpec<'a> {
+    name: &'a str,
+    limit: usize,
+    page_offset: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextSectionOutput {
+    pub(crate) returned: usize,
+    pub(crate) limit: usize,
+    pub(crate) page_offset: bool,
+    pub(crate) complete: bool,
+    pub(crate) has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextOutput {
+    pub(crate) node: Node,
+    /// Legacy-compatible arrays remain at their original locations.
+    pub(crate) callers: Vec<Node>,
+    pub(crate) callees: Vec<Node>,
+    pub(crate) processes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) community: Option<CommunityInfo>,
+    pub(crate) callers_page: ContextSectionOutput,
+    pub(crate) callees_page: ContextSectionOutput,
+    pub(crate) processes_page: ContextSectionOutput,
+}
+
+impl ContextOutput {
+    fn from_page(
+        page: ContextPage,
+        shape: ContextPageShape,
+        cursor_scope: ContextCursorScope<'_>,
+    ) -> Result<Self, AppError> {
+        let symbol = page.node.id.clone();
+        let callers_page = context_section_output(
+            ContextSectionSpec {
+                name: "callers",
+                limit: shape.caller_limit,
+                page_offset: shape.caller_offset,
+            },
+            &symbol,
+            &page.callers,
+            cursor_scope,
+        )?;
+        let callees_page = context_section_output(
+            ContextSectionSpec {
+                name: "callees",
+                limit: shape.callee_limit,
+                page_offset: shape.callee_offset,
+            },
+            &symbol,
+            &page.callees,
+            cursor_scope,
+        )?;
+        let processes_page = context_section_output(
+            ContextSectionSpec {
+                name: "processes",
+                limit: shape.process_limit,
+                page_offset: shape.process_offset,
+            },
+            &symbol,
+            &page.processes,
+            cursor_scope,
+        )?;
+        Ok(Self {
+            node: page.node,
+            callers: page.callers.items,
+            callees: page.callees.items,
+            processes: page.processes.items,
+            community: page.community,
+            callers_page,
+            callees_page,
+            processes_page,
+        })
+    }
+}
+
+fn context_section_output<T>(
+    spec: ContextSectionSpec<'_>,
+    symbol: &NodeId,
+    section: &ContextSection<T>,
+    cursor_scope: ContextCursorScope<'_>,
+) -> Result<ContextSectionOutput, AppError> {
+    let next_cursor = section
+        .next
+        .as_ref()
+        .map(|key| {
+            encode_context_cursor(
+                spec.name,
+                symbol,
+                spec.limit,
+                cursor_scope.repository,
+                key,
+                cursor_scope.codec,
+                cursor_scope.now,
+            )
+        })
+        .transpose()?;
+    Ok(ContextSectionOutput {
+        returned: section.items.len(),
+        limit: spec.limit,
+        page_offset: spec.page_offset,
+        complete: !spec.page_offset && !section.has_more,
+        has_more: section.has_more,
+        next_cursor,
+    })
+}
+
+fn context_limit(field: &'static str, requested: usize) -> Result<usize, AppError> {
+    let limit = if requested == 0 {
+        CONTEXT_DEFAULT_LIMIT
+    } else {
+        requested
+    };
+    if limit > CONTEXT_MAX_LIMIT {
+        return Err(AppError::InvalidInput {
+            field,
+            message: format!("must be at most {CONTEXT_MAX_LIMIT}"),
+        });
+    }
+    Ok(limit)
+}
+
+fn encode_context_cursor(
+    section: &str,
+    symbol: &NodeId,
+    limit: usize,
+    repository: &RepositoryCursorBinding,
+    key: &ContextCursorKey,
+    cursor_codec: &CursorCodec,
+    now: u64,
+) -> Result<String, AppError> {
+    cursor_codec
+        .encode_at(
+            CONTEXT_CURSOR_OPERATION,
+            DEFAULT_CURSOR_TTL_SECS,
+            &ContextCursorPayload {
+                section: section.to_string(),
+                symbol: symbol.to_string(),
+                limit,
+                filter_hash: context_filter_hash(),
+                repository: repository.clone(),
+                key: key.clone(),
+            },
+            now,
+        )
+        .map_err(|error| error.into_app_error("context_cursor"))
+}
+
+fn decode_context_cursor(
+    raw: Option<&str>,
+    expected_section: &str,
+    expected_symbol: &NodeId,
+    expected_limit: usize,
+    expected_repository: &RepositoryCursorBinding,
+    cursor_codec: &CursorCodec,
+    now: u64,
+) -> Result<Option<ContextCursorKey>, AppError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let cursor: ContextCursorPayload = cursor_codec
+        .decode_at(raw, CONTEXT_CURSOR_OPERATION, now)
+        .map_err(|error| error.into_app_error("context_cursor"))?;
+    if cursor.section != expected_section {
+        return Err(context_cursor_error(
+            "wrong_section",
+            format!("cursor is not valid for the {expected_section} context section"),
+        ));
+    }
+    if cursor.symbol != expected_symbol.as_str() {
+        return Err(context_cursor_error(
+            "wrong_symbol",
+            "cursor belongs to a different resolved symbol; restart from the first page",
+        ));
+    }
+    if cursor.repository.identity != expected_repository.identity {
+        return Err(context_cursor_error(
+            "wrong_repository",
+            "cursor belongs to a different repository; restart from the first page",
+        ));
+    }
+    if cursor.repository.published_epoch != expected_repository.published_epoch
+        || cursor.repository.published_graph_content_version
+            != expected_repository.published_graph_content_version
+    {
+        return Err(context_cursor_error(
+            "generation_changed",
+            "repository graph generation changed between pages; restart from the first page",
+        ));
+    }
+    if cursor.limit != expected_limit {
+        return Err(context_cursor_error(
+            "wrong_page_bounds",
+            "cursor limit differs from this section request; reuse the original limit",
+        ));
+    }
+    if cursor.filter_hash != context_filter_hash() {
+        return Err(context_cursor_error(
+            "wrong_filter",
+            "cursor filter differs from this section request; restart from the first page",
+        ));
+    }
+    Ok(Some(cursor.key))
+}
+
+fn context_filter_hash() -> String {
+    canonical_filter_hash(CONTEXT_CURSOR_FILTER)
+}
+
+fn context_cursor_error(code: &'static str, message: impl Into<String>) -> AppError {
+    AppError::InvalidInput {
+        field: "context_cursor",
+        message: format!("{code}: {}", message.into()),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct CommunitiesOutput {
     pub(crate) communities: Vec<CommunityInfo>,
@@ -605,20 +923,18 @@ fn symbol_not_found(name: String) -> AppError {
 }
 
 fn graph_error(error: GraphStoreError) -> AppError {
-    match error {
-        GraphStoreError::NotFound(key) => AppError::NotFound {
-            entity: "node",
-            key,
-        },
-        GraphStoreError::InvalidInput(message) => AppError::InvalidInput {
-            field: "graph query",
-            message,
-        },
-        other => AppError::Unavailable {
-            dependency: "graph store",
-            message: other.to_string(),
-            retryable: true,
-        },
+    AppError::from_graph_store(error, "node")
+}
+
+fn impact_bounds(impact: &Impact) -> ResultBounds {
+    if impact.has_more {
+        ResultBounds::backend_limited(impact.affected.len(), impact.backend_limit)
+    } else {
+        ResultBounds::exact_limit(
+            impact.affected.len(),
+            impact.affected.len(),
+            Some(impact.backend_limit),
+        )
     }
 }
 
@@ -643,8 +959,8 @@ mod tests {
     };
     use cih_graph_store::{
         CommunityEdge, CommunityInfo, Direction, FlowNode, FlowPage, GraphOverview, GraphStore,
-        GraphSummary, HotspotNode, Impact, LoadStats, Path as GraphPath, Result as StoreResult,
-        RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+        GraphSummary, HotspotNode, Impact, ImpactNode, LoadStats, Path as GraphPath,
+        Result as StoreResult, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
     };
     use cih_search::SearchHit;
 
@@ -893,10 +1209,15 @@ mod tests {
 
     fn trace_service(root: Node) -> GraphQueryService {
         let entry = RegistryEntry {
+            repository_id: None,
             name: "trace-test".to_string(),
             path: "/tmp/trace-test".to_string(),
             graph_key: "trace-test".to_string(),
             artifacts_dir: String::new(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: "2026-01-01T00:00:00Z".to_string(),
             last_git_head: None,
@@ -928,6 +1249,249 @@ mod tests {
         assert_eq!(reaches_status(false, true), ReachesStatus::Inconclusive);
         assert_eq!(reaches_status(false, false), ReachesStatus::NotReachable);
         assert_eq!(reaches_status(true, true), ReachesStatus::Reachable);
+    }
+
+    #[test]
+    fn context_cursors_are_section_and_symbol_bound() {
+        let codec = CursorCodec::for_test([0x42; 32], "context-test-v1");
+        let repository = context_repository_binding("a", "epoch-1", "graph-1");
+        let symbol = NodeId::new("Method:test.Context#root/0");
+        let key = ContextCursorKey {
+            name: "caller".to_string(),
+            id: "Method:test.Context#caller/0".to_string(),
+        };
+        let encoded = encode_context_cursor("callers", &symbol, 25, &repository, &key, &codec, 100)
+            .expect("cursor should encode");
+        assert_eq!(
+            decode_context_cursor(
+                Some(&encoded),
+                "callers",
+                &symbol,
+                25,
+                &repository,
+                &codec,
+                101,
+            )
+            .unwrap(),
+            Some(key)
+        );
+        let wrong_section = decode_context_cursor(
+            Some(&encoded),
+            "callees",
+            &symbol,
+            25,
+            &repository,
+            &codec,
+            101,
+        )
+        .unwrap_err();
+        assert!(wrong_section.to_string().contains("wrong_section"));
+        assert!(decode_context_cursor(
+            Some(&encoded),
+            "callers",
+            &NodeId::new("Method:test.Other#root/0"),
+            25,
+            &repository,
+            &codec,
+            101,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("wrong_symbol"));
+        assert!(decode_context_cursor(
+            Some("v1.not-hex"),
+            "callers",
+            &symbol,
+            25,
+            &repository,
+            &codec,
+            101,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("malformed_cursor"));
+    }
+
+    fn context_repository_binding(
+        id_digit: &str,
+        epoch: &str,
+        graph_version: &str,
+    ) -> RepositoryCursorBinding {
+        RepositoryCursorBinding {
+            identity: format!("repository-id:{}", id_digit.repeat(64)),
+            published_epoch: Some(epoch.to_string()),
+            published_graph_content_version: Some(graph_version.to_string()),
+        }
+    }
+
+    #[test]
+    fn context_cursors_reject_tampering_expiry_and_request_drift() {
+        let codec = CursorCodec::for_test([0x24; 32], "context-test-v1");
+        let repository = context_repository_binding("a", "epoch-1", "graph-1");
+        let symbol = NodeId::new("Method:test.Context#root/0");
+        let key = ContextCursorKey {
+            name: "caller".to_string(),
+            id: "Method:test.Context#caller/0".to_string(),
+        };
+        let encoded =
+            encode_context_cursor("callers", &symbol, 25, &repository, &key, &codec, 100).unwrap();
+
+        let mut tampered = encoded.clone().into_bytes();
+        let last = tampered.last_mut().unwrap();
+        *last = if *last == b'0' { b'1' } else { b'0' };
+        let tampered = String::from_utf8(tampered).unwrap();
+        let tampered_error = decode_context_cursor(
+            Some(&tampered),
+            "callers",
+            &symbol,
+            25,
+            &repository,
+            &codec,
+            101,
+        )
+        .unwrap_err();
+        assert!(tampered_error.to_string().contains("cursor_tampered"));
+
+        let expired_error = decode_context_cursor(
+            Some(&encoded),
+            "callers",
+            &symbol,
+            25,
+            &repository,
+            &codec,
+            100 + DEFAULT_CURSOR_TTL_SECS + 1,
+        )
+        .unwrap_err();
+        assert!(expired_error.to_string().contains("cursor_expired"));
+
+        let wrong_limit = decode_context_cursor(
+            Some(&encoded),
+            "callers",
+            &symbol,
+            50,
+            &repository,
+            &codec,
+            101,
+        )
+        .unwrap_err();
+        assert!(wrong_limit.to_string().contains("wrong_page_bounds"));
+
+        let other_repository = context_repository_binding("b", "epoch-1", "graph-1");
+        let wrong_repository = decode_context_cursor(
+            Some(&encoded),
+            "callers",
+            &symbol,
+            25,
+            &other_repository,
+            &codec,
+            101,
+        )
+        .unwrap_err();
+        assert!(wrong_repository.to_string().contains("wrong_repository"));
+
+        let changed_generation = context_repository_binding("a", "epoch-2", "graph-2");
+        let generation_error = decode_context_cursor(
+            Some(&encoded),
+            "callers",
+            &symbol,
+            25,
+            &changed_generation,
+            &codec,
+            101,
+        )
+        .unwrap_err();
+        assert!(generation_error.to_string().contains("generation_changed"));
+
+        let wrong_filter = codec
+            .encode_at(
+                CONTEXT_CURSOR_OPERATION,
+                DEFAULT_CURSOR_TTL_SECS,
+                &ContextCursorPayload {
+                    section: "callers".to_string(),
+                    symbol: symbol.to_string(),
+                    limit: 25,
+                    filter_hash: "different-filter".to_string(),
+                    repository: repository.clone(),
+                    key: key.clone(),
+                },
+                100,
+            )
+            .unwrap();
+        let filter_error = decode_context_cursor(
+            Some(&wrong_filter),
+            "callers",
+            &symbol,
+            25,
+            &repository,
+            &codec,
+            101,
+        )
+        .unwrap_err();
+        assert!(filter_error.to_string().contains("wrong_filter"));
+
+        let wrong_operation = codec
+            .encode_at(
+                "list_repos_page",
+                DEFAULT_CURSOR_TTL_SECS,
+                &ContextCursorPayload {
+                    section: "callers".to_string(),
+                    symbol: symbol.to_string(),
+                    limit: 25,
+                    filter_hash: context_filter_hash(),
+                    repository: repository.clone(),
+                    key,
+                },
+                100,
+            )
+            .unwrap();
+        let operation_error = decode_context_cursor(
+            Some(&wrong_operation),
+            "callers",
+            &symbol,
+            25,
+            &repository,
+            &codec,
+            101,
+        )
+        .unwrap_err();
+        assert!(operation_error.to_string().contains("wrong_operation"));
+    }
+
+    #[test]
+    fn context_limits_default_and_reject_oversize_pages() {
+        assert_eq!(context_limit("caller_limit", 0).unwrap(), 100);
+        assert_eq!(context_limit("caller_limit", 500).unwrap(), 500);
+        assert!(context_limit("caller_limit", 501).is_err());
+    }
+
+    #[test]
+    fn capped_impact_is_never_reported_as_complete() {
+        let impact = Impact {
+            root: NodeId::new("Method:test.Impact#root/0"),
+            direction: Direction::Upstream,
+            affected: vec![ImpactNode {
+                id: NodeId::new("Method:test.Impact#caller/0"),
+                depth: 1,
+                via: "CALLS".to_string(),
+                name: "caller".to_string(),
+                kind: "Method".to_string(),
+                parent_id: None,
+            }],
+            risk: "low".to_string(),
+            has_more: true,
+            backend_limit: 200,
+            traversal: TraversalStats {
+                visited_nodes: 2,
+                expanded_edges: 0,
+                truncated: true,
+            },
+            risk_exact: false,
+            risk_lower_bound: true,
+        };
+        let bounds = impact_bounds(&impact);
+        assert!(!bounds.complete);
+        assert_eq!(bounds.total_known, None);
+        assert_eq!(bounds.reasons, vec!["backend_limit"]);
     }
 
     #[tokio::test]

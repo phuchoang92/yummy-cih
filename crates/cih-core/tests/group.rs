@@ -90,10 +90,15 @@ fn registry_with(entries: Vec<RegistryEntry>) -> Registry {
 
 fn entry(name: &str, indexed_at: &str, head: Option<&str>) -> RegistryEntry {
     RegistryEntry {
+        repository_id: None,
         name: name.into(),
         path: format!("/repos/{name}"),
         graph_key: name.into(),
         artifacts_dir: format!("/repos/{name}/.cih/artifacts"),
+        latest_artifact_version: None,
+        published_artifact_version: None,
+        published_graph_content_version: None,
+        published_epoch: None,
         community_artifacts_dir: None,
         indexed_at: indexed_at.into(),
         last_git_head: head.map(str::to_string),

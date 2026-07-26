@@ -1,8 +1,8 @@
-//! Typed `architecture_overview` application service composed live over existing
-//! `GraphStore` port methods plus labeled artifact reads (entrypoints sidecar,
-//! wiki index, registry). No new port methods, no precomputed artifact: the motivating bug was
-//! a stale precomputed snapshot, so every graph-sourced section is computed at
-//! call time and every non-graph section carries a one-word `source` label.
+//! Typed `architecture_overview` application service over version-bound registry
+//! reporting metadata, `GraphStore` methods, and labeled artifact reads
+//! (entrypoints sidecar, wiki index, registry). Exact publication-matched counts
+//! and symbol hubs avoid whole-graph reporting scans; legacy or mismatched
+//! metadata falls back to the graph without affecting sibling sections.
 //!
 //! Shaping contract (D5): per-section item caps scaled by one `limit` knob,
 //! deterministic ordering everywhere (golden tests + prompt caching), a ~32KB
@@ -352,6 +352,10 @@ struct RouteGroup {
 struct EntrypointsBody {
     /// Top-degree structural symbols (runtime entry points and hubs — not `main()`).
     hubs: Vec<HubEntry>,
+    /// Distinguishes a legitimate empty hub set from an unavailable graph query.
+    hubs_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hubs_error: Option<String>,
     /// Scheduled / event-listener methods from the discover sidecar.
     scheduled: Section<ScheduledBody>,
 }
@@ -965,13 +969,8 @@ async fn build_entrypoints(
     hub_cap: usize,
     scheduled_cap: usize,
 ) -> (Section<EntrypointsBody>, Option<String>) {
-    if let Some(Err(e)) = pool {
-        return (Section::store_err(e), None);
-    }
-
-    let mut hubs: Vec<HubEntry> = pool
-        .and_then(|result| result.as_ref().ok())
-        .map(|pool| {
+    let (mut hubs, hubs_available, hubs_error): (Vec<HubEntry>, bool, Option<String>) = match pool {
+        Some(Ok(pool)) => (
             pool.nodes
                 .iter()
                 .map(|node| HubEntry {
@@ -980,9 +979,21 @@ async fn build_entrypoints(
                     name: node.node.name.clone(),
                     degree: node.degree,
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+                .collect(),
+            true,
+            None,
+        ),
+        Some(Err(error)) => (
+            Vec::new(),
+            false,
+            Some(format!("graph hub query unavailable: {error}")),
+        ),
+        None => (
+            Vec::new(),
+            false,
+            Some("graph hub query was not requested".to_string()),
+        ),
+    };
     hubs.sort_by(|a, b| b.degree.cmp(&a.degree).then_with(|| a.id.cmp(&b.id)));
     hubs.truncate(hub_cap);
     let entry_for_sidecar = entry.clone();
@@ -1003,7 +1014,15 @@ async fn build_entrypoints(
         ),
     };
     (
-        Section::ok("graph", EntrypointsBody { hubs, scheduled }),
+        Section::ok(
+            "graph",
+            EntrypointsBody {
+                hubs,
+                hubs_available,
+                hubs_error,
+                scheduled,
+            },
+        ),
         sidecar_mtime,
     )
 }
@@ -1077,6 +1096,8 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     let want_wiki_pages = want(SECTION_WIKI_PAGES);
     let want_hotspots = want(SECTION_HOTSPOTS);
     let need_pool = want_modules || want_entrypoints;
+    let graph_report = crate::application::graph_report::current(entry);
+    let summary_from_report = want_stats && graph_report.is_some();
     let symbol_kinds: Vec<String> = ["Class", "Interface", "Function", "Method"]
         .iter()
         .map(|s| s.to_string())
@@ -1088,18 +1109,24 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     let (fetched_summary, pool, fetched_communities, fetched_routes, fetched_hotspots) = tokio::join!(
         async {
             if want_stats {
-                Some(ctx.store.graph_summary().await)
+                Some(match graph_report {
+                    Some(report) => Ok(crate::application::graph_report::summary(report)),
+                    None => ctx.store.graph_summary().await,
+                })
             } else {
                 None
             }
         },
         async {
             if need_pool {
-                Some(
-                    ctx.store
-                        .graph_overview(OVERVIEW_NODE_POOL, 1, Some(&symbol_kinds))
-                        .await,
-                )
+                Some(match graph_report {
+                    Some(report) => Ok(crate::application::graph_report::symbol_pool(report)),
+                    None => {
+                        ctx.store
+                            .graph_overview(OVERVIEW_NODE_POOL, 1, Some(&symbol_kinds))
+                            .await
+                    }
+                })
             } else {
                 None
             }
@@ -1150,7 +1177,14 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
                         kinds: summary.kinds.clone(),
                     };
                     summary_for_warning = Some(summary);
-                    Section::ok("graph", body)
+                    Section::ok(
+                        if summary_from_report {
+                            "registry"
+                        } else {
+                            "graph"
+                        },
+                        body,
+                    )
                 }
             },
         )
@@ -1159,7 +1193,9 @@ async fn compose(ctx: ComposeCtx<'_>) -> Result<OverviewResponse, AppError> {
     };
     let mut warnings = build_warnings(
         &ctx,
-        summary_for_warning.as_ref(),
+        (!summary_from_report)
+            .then_some(summary_for_warning.as_ref())
+            .flatten(),
         artifacts_version.as_deref(),
     );
 
@@ -1294,7 +1330,10 @@ mod tests {
     use crate::domain::repository::RepoCatalogSnapshot;
     use crate::ports::repo_context_provider::RepoContext;
     use async_trait::async_trait;
-    use cih_core::{Node, NodeId, NodeKind, RegistryEntry, RegistryStats};
+    use cih_core::{
+        Node, NodeId, NodeKind, RegistryEntry, RegistryGraphHub, RegistryGraphReport,
+        RegistryKindCount, RegistryStats,
+    };
     use cih_graph_store::{
         CommunityEdge, CommunityInfo, Direction, GraphOverview, GraphOverviewNode, GraphSummary,
         HotspotNode, Impact, Path as GraphPath, Result as StoreResult, SimilarMethod, Subgraph,
@@ -1582,10 +1621,15 @@ mod tests {
 
     fn entry(path: &str, community_dir: Option<&str>, stats_nodes: usize) -> RegistryEntry {
         RegistryEntry {
+            repository_id: None,
             name: "demo".into(),
             path: path.to_string(),
             graph_key: "demo".into(),
             artifacts_dir: format!("{path}/.cih/artifacts/deadbeef"),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: community_dir.map(str::to_string),
             indexed_at: "2026-07-19T00:00:00Z".into(),
             last_git_head: None,
@@ -2065,6 +2109,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn matching_published_report_avoids_summary_and_overview_scans() {
+        let mut store = populated_store();
+        store.fail_summary = true;
+        store.fail_overview = true;
+        let mut entry = entry("/nonexistent/demo", Some("/x"), 100);
+        entry.published_artifact_version = Some("base-v1".into());
+        entry.published_graph_content_version = Some("content-v1".into());
+        entry.published_epoch = Some("epoch-v1".into());
+        entry.stats.published_graph_report = Some(RegistryGraphReport {
+            schema_version: 1,
+            graph_content_version: "content-v1".into(),
+            total_nodes: 100,
+            total_edges: 200,
+            kinds: store
+                .kinds
+                .iter()
+                .map(|kind| RegistryKindCount {
+                    kind: kind.kind.clone(),
+                    count: kind.count,
+                })
+                .chain(std::iter::once(RegistryKindCount {
+                    kind: "Other".into(),
+                    count: 17,
+                }))
+                .collect(),
+            symbol_hubs: store
+                .pool
+                .iter()
+                .map(|hub| RegistryGraphHub {
+                    node: hub.node.clone(),
+                    degree: hub.degree,
+                })
+                .collect(),
+        });
+
+        let v = compose_json(ctx_with(&store, &entry, vec![], 0)).await;
+        assert_eq!(v["stats"]["available"], true);
+        assert_eq!(v["stats"]["source"], "registry");
+        assert_eq!(v["stats"]["total_nodes"], 100);
+        assert_eq!(v["modules"]["available"], true);
+        assert!(v["modules"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|module| {
+                module["anchor_symbols"]
+                    .as_array()
+                    .is_some_and(|anchors| !anchors.is_empty())
+            }));
+    }
+
+    #[tokio::test]
+    async fn mismatched_published_report_uses_legacy_graph_fallback() {
+        let mut store = populated_store();
+        store.fail_summary = true;
+        let mut entry = entry("/nonexistent/demo", Some("/x"), 100);
+        entry.published_artifact_version = Some("base-v1".into());
+        entry.published_graph_content_version = Some("content-v2".into());
+        entry.published_epoch = Some("epoch-v2".into());
+        entry.stats.published_graph_report = Some(RegistryGraphReport {
+            schema_version: 1,
+            graph_content_version: "stale-content".into(),
+            total_nodes: 100,
+            total_edges: 200,
+            kinds: vec![RegistryKindCount {
+                kind: "Method".into(),
+                count: 100,
+            }],
+            symbol_hubs: Vec::new(),
+        });
+
+        let v = compose_json(ctx_with(&store, &entry, vec!["stats".into()], 0)).await;
+        assert_eq!(v["stats"]["available"], false);
+        assert!(v["stats"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("summary down"));
+    }
+
+    #[tokio::test]
     async fn overview_pool_failure_keeps_modules_and_warns_about_missing_anchors() {
         let mut store = populated_store();
         store.fail_overview = true;
@@ -2086,6 +2210,31 @@ mod tests {
                     && warning.contains("overview down")
             })
         }));
+    }
+
+    #[tokio::test]
+    async fn overview_pool_failure_does_not_suppress_scheduled_entrypoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cih = tmp.path().join(".cih");
+        std::fs::create_dir_all(&cih).unwrap();
+        std::fs::write(
+            cih.join("entrypoints.json"),
+            r#"[{"method_id":"Method:acme.Jobs#nightly","kind":"Scheduled","topics":[]}]"#,
+        )
+        .unwrap();
+        let mut store = populated_store();
+        store.fail_overview = true;
+        let entry = entry(tmp.path().to_str().unwrap(), Some("/x"), 100);
+        let v = compose_json(ctx_with(&store, &entry, vec!["entrypoints".into()], 0)).await;
+
+        assert_eq!(v["entrypoints"]["available"], true);
+        assert_eq!(v["entrypoints"]["hubs_available"], false);
+        assert!(v["entrypoints"]["hubs_error"]
+            .as_str()
+            .unwrap()
+            .contains("overview down"));
+        assert_eq!(v["entrypoints"]["scheduled"]["available"], true);
+        assert_eq!(v["entrypoints"]["scheduled"]["total"], 1);
     }
 
     #[test]

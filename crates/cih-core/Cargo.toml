@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
 petgraph.workspace = true
+rand.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true

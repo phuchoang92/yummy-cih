@@ -309,10 +309,15 @@ mod tests {
         .expect("lazy graph store");
         RepoContext {
             repo: crate::domain::repository::ResolvedRepo::from_entry(RegistryEntry {
+                repository_id: None,
                 name: "fixture".into(),
                 path: repo_path.display().to_string(),
                 graph_key: "cih_change_detection_test".into(),
                 artifacts_dir: String::new(),
+                latest_artifact_version: None,
+                published_artifact_version: None,
+                published_graph_content_version: None,
+                published_epoch: None,
                 community_artifacts_dir: None,
                 indexed_at: String::new(),
                 last_git_head: None,

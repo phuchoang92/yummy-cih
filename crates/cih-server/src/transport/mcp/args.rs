@@ -13,6 +13,18 @@ pub struct QueryArgs {
     /// Include a one-hop subgraph around the top results.
     #[serde(default)]
     pub expand: bool,
+    /// Aggregate expanded-result node cap shared by all top-five seeds
+    /// (default 500, hard maximum 5000, pass 0 for default).
+    #[serde(default)]
+    pub max_nodes: usize,
+    /// Aggregate expanded-result edge cap shared by all top-five seeds
+    /// (default 1000, hard maximum 10000, pass 0 for default).
+    #[serde(default)]
+    pub max_edges: usize,
+    /// Maximum serialized bytes for the logical expanded query result
+    /// (default 256 KiB, hard maximum 1 MiB, pass 0 for default).
+    #[serde(default)]
+    pub max_response_bytes: usize,
     /// Target service: a group member's registry name; empty = primary repo.
     #[serde(default)]
     pub repo: String,
@@ -114,6 +126,24 @@ pub struct ContextArgs {
     /// empty = the server's primary repo.
     #[serde(default)]
     pub repo: String,
+    /// Caller page size (0/omitted = 100; maximum 500).
+    #[serde(default)]
+    pub caller_limit: usize,
+    /// Callee page size (0/omitted = 100; maximum 500).
+    #[serde(default)]
+    pub callee_limit: usize,
+    /// Process page size (0/omitted = 100; maximum 500).
+    #[serde(default)]
+    pub process_limit: usize,
+    /// Opaque continuation for callers, returned in `callers_page.next_cursor`.
+    #[serde(default)]
+    pub caller_cursor: Option<String>,
+    /// Opaque continuation for callees, returned in `callees_page.next_cursor`.
+    #[serde(default)]
+    pub callee_cursor: Option<String>,
+    /// Opaque continuation for processes, returned in `processes_page.next_cursor`.
+    #[serde(default)]
+    pub process_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -482,6 +512,20 @@ pub struct GrepFilesArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListReposArgs {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListReposPageArgs {
+    /// Case-insensitive substring matched against repository name and path.
+    #[serde(default)]
+    pub filter: String,
+    /// Page size (default 50 when omitted or 0; maximum 200).
+    #[serde(default)]
+    pub limit: usize,
+    /// Opaque continuation returned by the previous page. Reuse the same filter
+    /// and limit; cursors expire and cannot cross registry revisions.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComplexityHotspotsArgs {

@@ -5,7 +5,9 @@ use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
 use super::super::error::{app_error_to_mcp, json_result};
 use super::super::CihServer;
-use crate::application::search::{FeatureMapCommand, QueryCommand, SearchCodeCommand};
+use crate::application::search::{
+    ExpansionLimits, FeatureMapCommand, QueryCommand, SearchCodeCommand,
+};
 use crate::transport::mcp::args::{FeatureMapArgs, QueryArgs, SearchCodeArgs};
 
 #[tool_router(router = search_router, vis = "pub(crate)")]
@@ -23,7 +25,13 @@ impl CihServer {
                 repo: args.repo,
                 query: args.q,
                 limit: crate::search::query_limit(args.limit),
-                expand: args.expand,
+                expansion: args.expand.then(|| {
+                    ExpansionLimits::from_wire(
+                        args.max_nodes,
+                        args.max_edges,
+                        args.max_response_bytes,
+                    )
+                }),
             })
             .await
             .map_err(app_error_to_mcp)?;

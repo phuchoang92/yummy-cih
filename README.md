@@ -93,6 +93,14 @@ Wait until healthy:
 docker compose ps   # both should show "running" / "healthy"
 ```
 
+FalkorDB health is restore-aware: Compose checks `INFO persistence` for
+`loading:0`, not Redis `PING` (which succeeds while a large RDB/AOF is still
+loading). During restore, `cih-server` keeps `/health` live and `/ready` returns
+HTTP 503 with `state: "BACKEND_LOADING"` plus `retry_after_ms`; readiness probes
+are cached and single-flighted for one second and never run graph DDL. MCP graph
+tools and `/api/graph/*` consult that same snapshot before dispatch; repository
+listing, file/grep, wiki, indexing status, and non-expanded search stay usable.
+
 ### 3. (Optional) Scan first — recommended for large repos
 
 ```bash
@@ -385,10 +393,11 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | Variable | Default | Meaning |
 |---|---|---|
 | `CIH_API_TOKEN` | — | Bearer token for `/mcp` and `/graph`; **required** on a non-loopback bind |
-| `CIH_CACHE_MAX_BYTES` | 1040 MiB | Total cache budget; must be ≥ the sum of the four below |
+| `CIH_CURSOR_SIGNING_KEY` | secure process-local key | Exactly 64 hexadecimal characters. Configure the same secret on every server instance to keep authenticated pagination cursors valid across restarts and replicas. |
+| `CIH_CACHE_MAX_BYTES` | 1536 MiB | Total cache budget; must be ≥ the sum of the four below |
 | `CIH_ARTIFACT_CACHE_MAX_BYTES` | 512 MiB | Parsed artifact snapshots |
 | `CIH_WIKI_CACHE_MAX_BYTES` | 256 MiB | Wiki indexes and resident renderers |
-| `CIH_SEARCH_CACHE_MAX_BYTES` | 256 MiB | Per-repo BM25 indexes |
+| `CIH_SEARCH_CACHE_MAX_BYTES` | 512 MiB | Aggregate retained BM25 indexes; sized to retain the observed ~409 MiB large-repo index |
 | `CIH_SEARCH_CACHE_MAX_ENTRIES` | 32 | Retained repository/version indexes |
 | `CIH_SEARCH_SIDECAR_ENABLED` | `true` | Load/publish `search-index.bin`; set false only as a rollback |
 | `CIH_SEARCH_SCORE_MAX_CONCURRENT` | min(4, CPUs) | Concurrent warm BM25 scorers |
@@ -396,6 +405,9 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | `CIH_SEARCH_COLD_MAX_CONCURRENT` | 1 | Concurrent sidecar decode or fallback builds |
 | `CIH_SEARCH_COLD_MAX_BYTES` | 512 MiB | Aggregate transient-memory admission for cold search loads |
 | `CIH_SEARCH_COLD_QUEUE_TIMEOUT_SECS` | 5 | Wait for cold-load count/memory admission |
+| `CIH_EMBED_INFERENCE_MAX_CONCURRENT` | 1 | Semantic model calls admitted to the dedicated blocking lane |
+| `CIH_EMBED_INFERENCE_QUEUE_TIMEOUT_MS` | 250 | Wait for semantic inference admission before retryable rejection |
+| `CIH_EMBED_INFERENCE_TIMEOUT_MS` | 1000 | Interactive query-inference deadline, leaving headroom for database work |
 | `CIH_RESOURCE_INDEX_CACHE_MAX_BYTES` | 16 MiB | JSONL resource paging indexes |
 | `CIH_ARTIFACT_CACHE_MAX_ENTRIES` | 32 | Retained repo versions (LRU beyond this) |
 | `CIH_ARTIFACT_CACHE_IDLE_TTL_SECS` | 1800 | Idle cache eviction (0 disables) |
@@ -405,7 +417,7 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | `CIH_GREP_MAX_CONCURRENT_REQUESTS` | 2 | Concurrent whole-repository grep requests |
 | `CIH_GREP_THREADS` | min(4, CPUs) | Dedicated workers within one admitted grep |
 | `CIH_GREP_QUEUE_TIMEOUT_SECS` | 2 | Wait for grep admission before retryable rejection |
-| `CIH_GREP_DEADLINE_SECS` | 80 | Cooperative scan deadline; returns a partial result |
+| `CIH_GREP_DEADLINE_SECS` | 10 | Cooperative scan deadline; returns a partial result before the 15s operation deadline |
 | `CIH_WIKI_LIVE_MAX_NODES` | 100000 | Above this, live wiki materialization requires a generated bundle |
 | `CIH_RESOURCE_MAX_BYTES` | 256 KiB | Byte cap for one MCP resource page |
 | `CIH_DETECT_CHANGES_MAX_SYMBOLS` | 200 | Blast-radius traversals per `detect_changes` |
@@ -415,6 +427,25 @@ See `docs/runbooks/multi-repo-host-serving.md` for guidance and
 | `CIH_INDEX_OUTPUT_CAP_BYTES` | 1 MiB | Retained `cih-engine` output per stream |
 | `CIH_MAX_CONCURRENT_QUERIES` | 64 | Concurrent Cypher queries |
 | `CIH_QUERY_QUEUE_TIMEOUT_MS` | 5000 | Wait for a query slot before shedding |
+| `CIH_GRAPH_QUERY_TIMEOUT_MS` | 10000 | FalkorDB-side execution cap for interactive `GRAPH.QUERY` reads |
+| `CIH_GRAPH_DRIVER_TIMEOUT_MS` | 12000 | Driver cap for one graph read; must exceed the backend cap |
+| `CIH_GRAPH_OPERATION_TIMEOUT_MS` | 15000 | Absolute deadline for one interactive MCP operation; must exceed the driver cap |
+| `CIH_MCP_RESPONSE_TARGET_BYTES` | 256 KiB | Soft target for the complete uncompressed logical JSON-RPC envelope |
+| `CIH_MCP_RESPONSE_MAX_BYTES` | 1 MiB | Response safety ceiling; must be at least 1 KiB and at least the target |
+| `CIH_MCP_RESPONSE_GUARD_MODE` | `warn` | `measure`, `warn`, or explicit `enforce`; enforcement returns `RESULT_TOO_LARGE` instead of an oversized response |
+
+MCP response accounting includes the JSON-RPC version and request id plus both
+compatibility `content` and `structuredContent` while both are emitted. The
+default `warn` mode measures exact uncompressed bytes without changing a
+response. Enable `enforce` only after the relevant operation has logical paging
+or result bounds; the guard never truncates or silently drops either payload
+representation.
+
+Embedding inference runs on Tokio's blocking pool behind its own lane. A timed
+out or disconnected request does not cancel fastembed: the running call keeps
+its lane slot until it actually finishes, so a timeout burst cannot exceed
+`CIH_EMBED_INFERENCE_MAX_CONCURRENT`. Offline bulk embedding uses the same
+admission lane but is not subject to the interactive inference deadline.
 
 `cih-engine analyze` writes search-sidecar format **2** as `search-index.bin` beside
 `nodes.jsonl`. Existing artifacts are backfilled on a no-op analyze, and the

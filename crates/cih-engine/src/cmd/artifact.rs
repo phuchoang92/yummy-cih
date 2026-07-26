@@ -1,8 +1,8 @@
 //! `cih-engine artifact` — export/import/bootstrap CIH bundle archives.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::runtime;
+use crate::db::load_replacement;
 use crate::DEFAULT_GRAPH_KEY;
 
 use super::args::ArtifactCommand;
@@ -68,47 +68,33 @@ pub fn run(command: ArtifactCommand) -> Result<()> {
                 &manifest.artifact_version[..8.min(manifest.artifact_version.len())]
             );
 
-            // Bulk-load into the configured graph backend.
+            // Publish through the same owned staging path as analyze/discover.
+            // Loading directly into the live key can expose a partial base-only
+            // graph when the optional community load fails.
             let backend = backend.unwrap_or_else(|| crate::DEFAULT_BACKEND.to_string());
             let falkor_url = falkor_url.unwrap_or_else(|| crate::default_db_url(&backend));
             let graph_key = graph_key.unwrap_or_else(|| DEFAULT_GRAPH_KEY.to_string());
-            runtime::block_on(async {
-                let store = cih_store_factory::connect_store(
-                    &backend,
-                    &falkor_url,
-                    &graph_key,
-                    &cih_store_factory::StoreOptions::default(),
-                )?;
-                store
-                    .ensure_schema()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                store
-                    .bulk_load(&artifacts)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                if let Some(comm) = community {
-                    store
-                        .bulk_load(&comm)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                Ok::<(), anyhow::Error>(())
-            })?;
+            let overlays: Vec<&GraphArtifacts> = community.iter().collect();
+            let stats = load_replacement(&backend, &falkor_url, &graph_key, &artifacts, &overlays)?;
+            tracing::info!(
+                nodes = stats.nodes,
+                edges = stats.edges,
+                backend,
+                graph = graph_key,
+                "bootstrap graph publication complete"
+            );
 
             // Register in registry.
             let root_abs = repo.canonicalize().unwrap_or(repo.clone());
             let registry_path = dirs_next_or_home().join(".cih").join("registry.json");
-            if let Err(e) =
-                register_repo_in_registry(&registry_path, &root_abs, &artifacts, &graph_key)
-            {
-                tracing::warn!(
-                    error = %e,
-                    registry = %registry_path.display(),
-                    "bootstrap loaded the graph but failed to register the repo; \
-                     it will not appear in `list_repos` until re-registered"
-                );
-            }
+            register_repo_in_registry(&registry_path, &root_abs, &artifacts, &overlays, &graph_key)
+                .with_context(|| {
+                    format!(
+                        "graph publication succeeded, but registry promotion at {} failed; \
+                         the bootstrap is incomplete",
+                        registry_path.display()
+                    )
+                })?;
 
             println!("Bootstrap complete. Graph key: {graph_key}");
             Ok(())
@@ -138,15 +124,14 @@ fn register_repo_in_registry(
     registry_path: &std::path::Path,
     root: &std::path::Path,
     artifacts: &cih_core::GraphArtifacts,
+    overlays: &[&cih_core::GraphArtifacts],
     graph_key: &str,
 ) -> Result<()> {
-    use cih_core::{Registry, RegistryEntry, RegistryStats};
-    let mut registry = if registry_path.exists() {
-        let bytes = std::fs::read(registry_path)?;
-        serde_json::from_slice::<Registry>(&bytes).unwrap_or_default()
-    } else {
-        Registry::default()
+    use cih_core::{
+        ensure_repository_id, graph_content_version, new_publication_epoch, RegistryEntry,
+        RegistryStats, RegistryStore,
     };
+
     let name = root
         .file_name()
         .and_then(|n| n.to_str())
@@ -158,24 +143,90 @@ fn register_repo_in_registry(
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    let entry = RegistryEntry {
+    let overlay_versions = overlays
+        .iter()
+        .map(|overlay| ("community", overlay.version.as_str()))
+        .collect::<Vec<_>>();
+    let community_artifacts_dir = overlays.first().and_then(|overlay| {
+        overlay
+            .nodes_path
+            .parent()
+            .map(|path| path.to_string_lossy().to_string())
+    });
+    let artifact_version = artifacts.version.as_str().to_string();
+    let mut entry = RegistryEntry {
+        repository_id: None,
         name: name.clone(),
         path: root_str.clone(),
         graph_key: graph_key.to_string(),
         artifacts_dir,
-        community_artifacts_dir: None,
+        latest_artifact_version: Some(artifact_version.clone()),
+        published_artifact_version: Some(artifact_version),
+        published_graph_content_version: Some(graph_content_version(
+            artifacts.version.as_str(),
+            &overlay_versions,
+        )),
+        published_epoch: Some(new_publication_epoch()),
+        community_artifacts_dir,
         indexed_at: cih_core::registry::now_rfc3339(),
         last_git_head: None,
         // Placeholder entry — real counts land on the next analyze.
         stats: RegistryStats::default(),
     };
-    registry.entries.retain(|r| r.path != root_str);
-    registry.entries.push(entry);
-    if let Some(parent) = registry_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(&registry).map_err(|e| anyhow::anyhow!("{e}"))?;
-    std::fs::write(registry_path, json)?;
+    let identity_root = root.to_path_buf();
+    RegistryStore::new(registry_path).update(move |registry| {
+        let preferred = registry
+            .find(&root_str)
+            .and_then(|registered| registered.repository_id.as_ref());
+        entry.repository_id = Some(ensure_repository_id(&identity_root, preferred)?);
+        registry.upsert(entry);
+        Ok(())
+    })?;
     println!("Registered repo '{}' in registry.", name);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_core::{GraphArtifacts, RegistryStore, VersionId};
+
+    fn artifacts(path: std::path::PathBuf, version: &str) -> GraphArtifacts {
+        GraphArtifacts {
+            nodes_path: path.join("nodes.jsonl"),
+            edges_path: path.join("edges.jsonl"),
+            version: VersionId::new(version),
+        }
+    }
+
+    #[test]
+    fn bootstrap_registry_mirror_retains_imported_overlay_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo root");
+        let base = artifacts(repo.join(".cih/artifacts/base-v1"), "base-v1");
+        let community = artifacts(
+            repo.join(".cih/artifacts-community/community-v2"),
+            "community-v2",
+        );
+        let registry_path = temp.path().join("registry.json");
+
+        register_repo_in_registry(
+            &registry_path,
+            &repo,
+            &base,
+            &[&community],
+            "fixture-graph",
+        )
+        .expect("registry promotion");
+
+        let snapshot = RegistryStore::new(&registry_path).load().expect("registry");
+        let entry = snapshot.registry.find(repo.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(
+            entry.community_artifacts_dir.as_deref(),
+            community.nodes_path.parent().map(|path| path.to_string_lossy()).as_deref()
+        );
+        assert!(entry.repository_id.is_some());
+        assert!(entry.published_epoch.is_some());
+    }
 }

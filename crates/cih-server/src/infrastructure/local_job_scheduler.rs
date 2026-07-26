@@ -609,10 +609,15 @@ mod tests {
 
     fn entry(name: &str, path: &str, graph_key: &str) -> RegistryEntry {
         RegistryEntry {
+            repository_id: None,
             name: name.to_string(),
             path: path.to_string(),
             graph_key: graph_key.to_string(),
             artifacts_dir: String::new(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: String::new(),
             last_git_head: None,
@@ -891,10 +896,15 @@ mod tests {
         std::fs::write(artifacts_dir.join("nodes.jsonl"), "").unwrap();
         std::fs::write(artifacts_dir.join("edges.jsonl"), "").unwrap();
         let repo = ResolvedRepo::from_entry(cih_core::RegistryEntry {
+            repository_id: None,
             name: "fixture".into(),
             path: dir.path().display().to_string(),
             graph_key: "fixture".into(),
             artifacts_dir: artifacts_dir.display().to_string(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
             community_artifacts_dir: None,
             indexed_at: String::new(),
             last_git_head: None,
