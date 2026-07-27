@@ -930,7 +930,7 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         "callee found by short name, with its line range"
     );
     let in_files = store
-        .nodes_in_files(&[CALLER_FILE.to_string(), CALLEE_FILE.to_string()])
+        .nodes_in_files(&[CALLER_FILE.to_string(), CALLEE_FILE.to_string()], 100)
         .await?;
     check!(
         in_files.iter().any(|n| n.id.as_str() == CALLER_ID),
@@ -941,6 +941,15 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
             .iter()
             .any(|n| n.id.as_str() == CALLEE_ID && n.range.start_line == 10),
         "callee found via nodes_in_files, with its line range"
+    );
+    // The bound is honored: a `limit` of 1 must return at most one row (both
+    // adapters push the LIMIT into the query rather than trimming after load).
+    let capped = store
+        .nodes_in_files(&[CALLER_FILE.to_string(), CALLEE_FILE.to_string()], 1)
+        .await?;
+    check!(
+        capped.len() <= 1,
+        "nodes_in_files honors its limit: {capped:?}"
     );
 
     // -- processes / communities --------------------------------------------

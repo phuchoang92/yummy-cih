@@ -1518,7 +1518,7 @@ mod tests {
         async fn candidates_by_name(&self, _name: &str, _limit: usize) -> StoreResult<Vec<Node>> {
             unimpl()
         }
-        async fn nodes_in_files(&self, _files: &[String]) -> StoreResult<Vec<Node>> {
+        async fn nodes_in_files(&self, _files: &[String], _limit: usize) -> StoreResult<Vec<Node>> {
             unimpl()
         }
         async fn processes_for_symbols(&self, _ids: &[NodeId]) -> StoreResult<Vec<String>> {

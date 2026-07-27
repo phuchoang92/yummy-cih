@@ -793,7 +793,7 @@ impl GraphStore for LadybugStore {
         Ok(out.iter().map(|r| node_from_row(r)).collect())
     }
 
-    async fn nodes_in_files(&self, files: &[String]) -> Result<Vec<Node>> {
+    async fn nodes_in_files(&self, files: &[String], limit: usize) -> Result<Vec<Node>> {
         if files.is_empty() {
             return Ok(vec![]);
         }
@@ -801,11 +801,13 @@ impl GraphStore for LadybugStore {
             "[{}]",
             files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
         );
+        // Bounded `LIMIT` with a deterministic order: keeps a single huge generated
+        // file from loading an unbounded symbol set, and makes truncation stable.
         let columns = node_columns("n");
         let q = format!(
             "MATCH (n:Symbol) WHERE n.file IN {list} \
                AND n.kind IN ['Method', 'Constructor', 'Function', 'Class', 'Interface', 'Enum'] \
-             RETURN {columns} ORDER BY n.file, n.id"
+             RETURN {columns} ORDER BY n.file, n.id LIMIT {limit}"
         );
         let out = self
             .with_read_conn(Vec::new(), move |conn| rows(conn, &q))

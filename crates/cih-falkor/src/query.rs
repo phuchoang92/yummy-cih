@@ -701,7 +701,7 @@ impl GraphStore for FalkorStore {
             .collect())
     }
 
-    async fn nodes_in_files(&self, files: &[String]) -> Result<Vec<Node>> {
+    async fn nodes_in_files(&self, files: &[String], limit: usize) -> Result<Vec<Node>> {
         if files.is_empty() {
             return Ok(vec![]);
         }
@@ -710,13 +710,17 @@ impl GraphStore for FalkorStore {
             files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
         );
         // Limit to callable/structural kinds most useful for change-impact analysis.
+        // The bounded `LIMIT` keeps a single huge generated file from loading an
+        // unbounded symbol set into memory; the deterministic order makes the
+        // truncated page stable.
         let columns = node_columns("n");
         let q = format!(
             "MATCH (n:Symbol) \
              WHERE n.file IN {list} \
                AND n.kind IN ['Method', 'Constructor', 'Function', 'Class', 'Interface', 'Enum'] \
              RETURN {columns} \
-             ORDER BY n.file, n.id"
+             ORDER BY n.file, n.id \
+             LIMIT {limit}"
         );
         Ok(self
             .rows(&q)

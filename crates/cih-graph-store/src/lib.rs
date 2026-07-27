@@ -1121,10 +1121,13 @@ pub trait GraphStore: Send + Sync {
     /// the caller supplies a short name without a kind prefix.
     async fn candidates_by_name(&self, name: &str, limit: usize) -> Result<Vec<Node>>;
 
-    /// Find all nodes whose `file` property is in `files` (repo-relative paths).
-    /// Scoped to callable/structural kinds (Method, Constructor, Function, Class,
-    /// Interface, Enum). Used by `detect_changes` to map changed files → symbols.
-    async fn nodes_in_files(&self, files: &[String]) -> Result<Vec<Node>>;
+    /// Find nodes whose `file` property is in `files` (repo-relative paths),
+    /// scoped to callable/structural kinds (Method, Constructor, Function, Class,
+    /// Interface, Enum) and ordered deterministically by `(file, id)`. Returns at
+    /// most `limit` rows so a single huge generated file cannot force an unbounded
+    /// in-memory load; callers that need to detect truncation over-fetch by one.
+    /// Used by `detect_changes` to map changed files → symbols.
+    async fn nodes_in_files(&self, files: &[String], limit: usize) -> Result<Vec<Node>>;
 
     /// Return the Process node IDs directly reachable from `symbol_ids` via
     /// STEP_IN_PROCESS edges.  Used by `detect_changes` to list affected processes.

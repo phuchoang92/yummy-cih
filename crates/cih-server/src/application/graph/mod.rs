@@ -1086,7 +1086,7 @@ mod tests {
             unimplemented()
         }
 
-        async fn nodes_in_files(&self, _files: &[String]) -> StoreResult<Vec<Node>> {
+        async fn nodes_in_files(&self, _files: &[String], _limit: usize) -> StoreResult<Vec<Node>> {
             unimplemented()
         }
 

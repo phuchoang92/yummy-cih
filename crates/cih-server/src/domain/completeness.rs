@@ -167,11 +167,48 @@ impl Completeness {
             reasons,
         }
     }
+
+    /// Record that the candidate set itself was capped by a store-side load limit
+    /// before any analysis ran, so `total_candidates` is a lower bound and more
+    /// candidates certainly exist. Forces `complete = false`.
+    pub(crate) fn with_truncated_candidates(mut self) -> Self {
+        if !self.reasons.contains(&"candidate_load_limit") {
+            self.reasons.push("candidate_load_limit");
+        }
+        self.complete = false;
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ResultBounds;
+    use super::{Completeness, ResultBounds};
+
+    #[test]
+    fn truncated_candidate_load_is_never_reported_complete() {
+        // A fully-analyzed page (omitted == 0, failed == 0) would be `complete`,
+        // but if the candidate set itself was capped before analysis the report
+        // must flip to incomplete and record the load-limit reason.
+        let base = Completeness::from_work(5000, 5000, 0);
+        assert!(base.complete);
+        let truncated = base.with_truncated_candidates();
+        assert!(!truncated.complete);
+        assert!(truncated.reasons.contains(&"candidate_load_limit"));
+    }
+
+    #[test]
+    fn truncated_candidate_reason_is_not_duplicated() {
+        let comp = Completeness::from_work(10, 10, 0)
+            .with_truncated_candidates()
+            .with_truncated_candidates();
+        assert_eq!(
+            comp.reasons
+                .iter()
+                .filter(|reason| **reason == "candidate_load_limit")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn trace_page_reports_every_independent_incompleteness_reason() {

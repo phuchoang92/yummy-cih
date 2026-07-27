@@ -43,9 +43,18 @@ impl DetectChangesCommand {
     }
 }
 
+/// Default ceiling on how many changed symbols are loaded from the store before
+/// analysis. Bounds memory when a single huge generated file matches thousands of
+/// symbols; comfortably above any realistic human diff. Override with
+/// `CIH_DETECT_CHANGES_MAX_LOAD`.
+const DEFAULT_MAX_LOAD: usize = 5000;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DetectChangesBudget {
     max_symbols: usize,
+    /// Cap on the changed-symbol set loaded from the store. Never below
+    /// `max_symbols` (the fan-out prefix must fit within what is loaded).
+    max_load: usize,
     batch_size: usize,
     max_depth: u32,
     deadline: Duration,
@@ -58,8 +67,15 @@ impl DetectChangesBudget {
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(200);
+        let max_load = std::env::var("CIH_DETECT_CHANGES_MAX_LOAD")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_LOAD)
+            .max(max_symbols);
         Self {
             max_symbols,
+            max_load,
             batch_size: 20,
             max_depth: 4,
             deadline: blocking_timeout(),
@@ -67,9 +83,10 @@ impl DetectChangesBudget {
     }
 
     #[cfg(test)]
-    fn fixed(max_symbols: usize, batch_size: usize, max_depth: u32) -> Self {
+    fn fixed(max_symbols: usize, max_load: usize, batch_size: usize, max_depth: u32) -> Self {
         Self {
             max_symbols,
+            max_load: max_load.max(max_symbols),
             batch_size,
             max_depth,
             deadline: Duration::from_secs(5),
@@ -206,12 +223,17 @@ impl ChangeDetectionService {
             });
         }
 
-        let changed_nodes = canonicalize_candidates(
-            store
-                .nodes_in_files(&changed_files)
-                .await
-                .map_err(|error| graph_error("resolve changed files", error))?,
-        );
+        // Over-fetch by one past the load cap so a single huge generated file
+        // cannot pull an unbounded symbol set into memory, while still letting us
+        // detect (and honestly report) that the changed-symbol set was truncated.
+        let load_cap = self.budget.max_load;
+        let mut loaded = store
+            .nodes_in_files(&changed_files, load_cap.saturating_add(1))
+            .await
+            .map_err(|error| graph_error("resolve changed files", error))?;
+        let load_truncated = loaded.len() > load_cap;
+        loaded.truncate(load_cap);
+        let changed_nodes = canonicalize_candidates(loaded);
 
         // Budgeted, batched blast-radius fan-out: at most TRAVERSAL_BATCH
         // traversals in flight, candidates beyond the budget accounted as omitted.
@@ -251,7 +273,14 @@ impl ChangeDetectionService {
             .await
             .map_err(|error| graph_error("resolve affected processes", error))?;
 
-        let comp = completeness(changed_nodes.len(), attempted, failed_traversals);
+        let comp = {
+            let base = completeness(changed_nodes.len(), attempted, failed_traversals);
+            if load_truncated {
+                base.with_truncated_candidates()
+            } else {
+                base
+            }
+        };
         let risk = cih_graph_store::risk_from_fanout(affected_symbols.len());
 
         let changed_symbols: Vec<ChangedSymbol> = changed_nodes
@@ -431,7 +460,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let service = ChangeDetectionService::with_dependencies(
             Arc::new(FixedChangedFiles { files: Vec::new() }),
-            DetectChangesBudget::fixed(10, 2, 4),
+            DetectChangesBudget::fixed(10, 5000, 2, 4),
         );
         let command = DetectChangesCommand::try_new(ChangeScope::Working, String::new()).unwrap();
 
