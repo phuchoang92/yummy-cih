@@ -3,7 +3,7 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{model::CallToolResult, tool, tool_router, ErrorData as McpError};
 
-use super::super::error::{app_error_to_mcp, json_result, json_result_compatible, text_result};
+use super::super::error::{app_error_to_mcp, json_result, text_result};
 use super::super::CihServer;
 use crate::application::change_detection::DetectChangesCommand;
 use crate::application::graph::{
@@ -102,7 +102,7 @@ impl CihServer {
                 &output.edges,
             ));
         }
-        json_result_compatible(&output.communities, &output)
+        json_result(&output)
     }
 
     #[tool(
@@ -131,7 +131,7 @@ impl CihServer {
         if format == RouteMapFormat::Openapi {
             return json_result(&render_openapi(&output.routes));
         }
-        json_result_compatible(&output.routes, &output)
+        json_result(&output)
     }
 
     #[tool(

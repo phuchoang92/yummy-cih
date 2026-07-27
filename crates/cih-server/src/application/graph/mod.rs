@@ -173,12 +173,23 @@ impl GraphQueryService {
             .repos
             .resolve(RepoSelector::from_wire(&command.repo))
             .await?;
-        let routes = repo
+        // Over-fetch by one: the store applies a hard `LIMIT` and returns no total,
+        // so without this probe route_map could never report `complete` and a capped
+        // list would look authoritative. The extra row proves whether more exist;
+        // truncate it back off before returning.
+        let limit = command.limit;
+        let mut routes = repo
             .store
-            .route_map(command.prefix.as_deref(), command.limit)
+            .route_map(command.prefix.as_deref(), limit.saturating_add(1))
             .await
             .map_err(graph_error)?;
-        let completeness = ResultBounds::backend_limited(routes.len(), command.limit);
+        let has_more = routes.len() > limit;
+        routes.truncate(limit);
+        let completeness = if has_more {
+            ResultBounds::backend_limited(routes.len(), limit)
+        } else {
+            ResultBounds::exact_limit(routes.len(), routes.len(), Some(limit))
+        };
         Ok(RouteMapOutput {
             routes,
             completeness,
@@ -974,6 +985,7 @@ mod tests {
 
     struct DbEffectsFailingStore {
         root: Node,
+        routes: Vec<RouteInfo>,
     }
 
     fn unimplemented<T>() -> StoreResult<T> {
@@ -1061,9 +1073,13 @@ mod tests {
         async fn route_map(
             &self,
             _prefix: Option<&str>,
-            _limit: usize,
+            limit: usize,
         ) -> StoreResult<Vec<RouteInfo>> {
-            unimplemented()
+            // Emulate a backend `LIMIT`: return at most `limit` rows so the
+            // application-layer over-fetch probe can observe truncation.
+            let mut routes = self.routes.clone();
+            routes.truncate(limit);
+            Ok(routes)
         }
 
         async fn candidates_by_name(&self, _name: &str, _limit: usize) -> StoreResult<Vec<Node>> {
@@ -1207,7 +1223,7 @@ mod tests {
         }
     }
 
-    fn trace_service(root: Node) -> GraphQueryService {
+    fn service_with_store(store: DbEffectsFailingStore) -> GraphQueryService {
         let entry = RegistryEntry {
             repository_id: None,
             name: "trace-test".to_string(),
@@ -1225,7 +1241,7 @@ mod tests {
         };
         let context = Arc::new(RepoContext {
             repo: ResolvedRepo::from_entry(entry.clone()),
-            store: Arc::new(DbEffectsFailingStore { root }),
+            store: Arc::new(store),
             search: Arc::new(EmptySearch),
         });
         let provider = FixedRepoContext {
@@ -1242,6 +1258,92 @@ mod tests {
             RepoContextService::new(Arc::new(provider)),
             ChangeDetectionService::new(Arc::new(EmptyChangedFiles)),
         )
+    }
+
+    fn trace_service(root: Node) -> GraphQueryService {
+        service_with_store(DbEffectsFailingStore {
+            root,
+            routes: Vec::new(),
+        })
+    }
+
+    fn route_service(routes: Vec<RouteInfo>) -> GraphQueryService {
+        let root = Node {
+            id: NodeId::new("Method:test.Api#root/0"),
+            kind: NodeKind::Method,
+            name: "root".to_string(),
+            qualified_name: Some("test.Api.root".to_string()),
+            file: "src/test/Api.java".to_string(),
+            range: Default::default(),
+            props: None,
+        };
+        service_with_store(DbEffectsFailingStore { root, routes })
+    }
+
+    fn sample_route(path: &str) -> RouteInfo {
+        RouteInfo {
+            path: path.to_string(),
+            http_method: "GET".to_string(),
+            decorator: "@GetMapping".to_string(),
+            handler_id: NodeId::new(format!("Method:test.Api#handle{path}/0")),
+            handler_name: "handle".to_string(),
+            handler_qualified: format!("test.Api.handle{path}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_map_reports_complete_when_the_full_set_fits_the_limit() {
+        // Exactly `limit` routes exist: the +1 over-fetch finds no extra row, so the
+        // page is the whole set and must be reported complete with an exact total —
+        // the case the old always-`backend_limited` path wrongly flagged incomplete.
+        let service = route_service(vec![
+            sample_route("/a"),
+            sample_route("/b"),
+            sample_route("/c"),
+        ]);
+        let output = service
+            .routes(RouteMapCommand {
+                repo: String::new(),
+                prefix: None,
+                limit: 3,
+            })
+            .await
+            .expect("route_map should succeed");
+        assert_eq!(output.routes.len(), 3);
+        assert!(output.completeness.complete);
+        assert_eq!(output.completeness.total_known, Some(3));
+        assert_eq!(output.completeness.omitted, Some(0));
+        assert!(output.completeness.reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn route_map_probe_flags_truncation_in_the_serialized_payload() {
+        // Four routes available, caller asks for three: the over-fetch proves a
+        // fourth exists, so the page is incomplete. The completeness must ride in
+        // the serialized object the tool now emits into the primary MCP content
+        // block (json_result, not the legacy bare array).
+        let service = route_service(vec![
+            sample_route("/a"),
+            sample_route("/b"),
+            sample_route("/c"),
+            sample_route("/d"),
+        ]);
+        let output = service
+            .routes(RouteMapCommand {
+                repo: String::new(),
+                prefix: None,
+                limit: 3,
+            })
+            .await
+            .expect("route_map should succeed");
+        assert_eq!(output.routes.len(), 3);
+        assert!(!output.completeness.complete);
+        assert_eq!(output.completeness.total_known, None);
+        assert_eq!(output.completeness.limit, Some(3));
+
+        let json = serde_json::to_value(&output).expect("route output should serialize");
+        assert_eq!(json["completeness"]["complete"], serde_json::json!(false));
+        assert!(json["routes"].is_array());
     }
 
     #[test]
