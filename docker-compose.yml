@@ -64,11 +64,15 @@ services:
       CIH_ALLOW_INSECURE: "1"
       # Optional: enable ask_codebase tool
       # CIH_AGENT_API_KEY: ${CIH_AGENT_API_KEY}
-      HF_HOME: /data/hf-cache
+      # Embedding model is pre-baked into the image at /opt/cih/hf-cache and also
+      # bind-mounted below from the checkout, so fastembed never hits huggingface.co.
+      HF_HOME: /opt/cih/hf-cache
       RUST_LOG: info,cih_server=debug
     volumes:
       - cih-home:/home/cih/.cih
-      - cih-data:/data
+      # Vendored embedding model (read-only). Overrides the image-baked copy with the
+      # git-checked-out one, so `git pull` alone fixes offline use before any rebuild.
+      - ./vendor/hf-cache:/opt/cih/hf-cache:ro
       - ${REPO_PATH}:/repo:ro
     depends_on:
       falkordb:
@@ -128,8 +132,13 @@ services:
       CIH_GRAPH_KEY: cih
       # pgvector connection for the `embed` command.
       CIH_PG_URL: postgres://${POSTGRES_USER:-cih}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cih}
+      # Use the vendored embedding model instead of downloading from HuggingFace.
+      # Without this the engine falls back to a throwaway ./.fastembed_cache and
+      # would hit huggingface.co on `embed`/`discover`.
+      HF_HOME: /opt/cih/hf-cache
     volumes:
       - cih-home:/home/cih/.cih
+      - ./vendor/hf-cache:/opt/cih/hf-cache:ro
       - ${REPO_PATH}:/repo
     depends_on:
       falkordb:
@@ -141,5 +150,4 @@ services:
 volumes:
   falkordb-data:
   cih-home:
-  cih-data:
   pg-data:

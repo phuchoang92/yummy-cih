@@ -377,7 +377,7 @@ Then just run `analyze /repo` without extra flags — the scope file is picked u
 | `CIH_BIND` | `0.0.0.0:8080` | MCP server listen address |
 | `CIH_ARTIFACTS_DIR` | `/repo/.cih/artifacts` | Artifact path for BM25 `query` tool |
 | `CIH_PG_URL` | *(auto-wired from compose)* | pgvector connection URL for semantic search |
-| `HF_HOME` | `/data/hf-cache` | HuggingFace model cache (downloaded on first `embed`) |
+| `HF_HOME` | `/opt/cih/hf-cache` | Embedding-model cache. Points at the model pre-baked into the image (and bind-mounted from `vendor/hf-cache`), so nothing is downloaded from HuggingFace — see [Offline / air-gapped use](#offline--air-gapped-use) |
 | `CIH_LLM_API_KEY` | — | API key for `wiki --llm` (also accepts `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) |
 
 Override any variable under `cih-server → environment` in `docker-compose.yml`.
@@ -460,8 +460,11 @@ the sidecar before mounting artifacts into `cih-server`.
 | Volume | Mounted at | Contains |
 |---|---|---|
 | `falkordb-data` | FalkorDB container | Graph data — survives restarts |
-| `cih-data` | `/data` in cih-server | Embedding model cache |
+| `pg-data` | Postgres container | pgvector embedding store (`embed` output) |
 | *(your repo)* | `/repo` in both containers | Source files + `.cih/` artifacts |
+
+(The embedding **model** is not stored in a volume — it is baked into the image and
+bind-mounted from `vendor/hf-cache`; see [Offline / air-gapped use](#offline--air-gapped-use).)
 
 Wipe graph and start fresh:
 ```bash
@@ -472,6 +475,35 @@ Stop without wiping:
 ```bash
 docker compose down
 ```
+
+---
+
+## Offline / air-gapped use
+
+CIH's semantic search embeds code with the `all-MiniLM-L6-v2` ONNX model. By
+default `fastembed` downloads it from **huggingface.co** on first use — which
+fails on hosts whose network blocks that domain.
+
+To avoid any HuggingFace access, the model (~87 MB) is **vendored in this repo** at
+`vendor/hf-cache/models--Qdrant--all-MiniLM-L6-v2-onnx/` in the standard hf-hub cache
+layout, and it reaches the running container two ways, so no download ever happens:
+
+- **Baked into the image** — the `Dockerfile` copies it to `/opt/cih/hf-cache`, and
+  `HF_HOME` points there. A plain `docker pull` of the published image is already
+  self-contained.
+- **Bind-mounted from the checkout** — `docker-compose.yml` mounts
+  `./vendor/hf-cache` (read-only) into both `cih-server` and `engine`. A `git pull`
+  alone makes offline use work, even before the image is rebuilt.
+
+**Running natively (no Docker):** point fastembed at the vendored cache:
+
+```bash
+HF_HOME="$PWD/vendor/hf-cache" cih-engine embed /path/to/repo   # or FASTEMBED_CACHE_DIR=...
+```
+
+**Refreshing the vendored model** (e.g. a new revision): on a machine that *can*
+reach HuggingFace, run `scripts/fetch-embedding-model.sh`, then commit the updated
+`vendor/hf-cache/`.
 
 ---
 

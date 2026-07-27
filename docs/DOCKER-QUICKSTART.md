@@ -84,7 +84,8 @@ services:
       CIH_GRAPH_KEY: cih
       CIH_BIND: 0.0.0.0:8080
       CIH_ARTIFACTS_DIR: /data/artifacts
-      HF_HOME: /data/hf-cache
+      # Embedding model is pre-baked into the image (HF_HOME defaults to
+      # /opt/cih/hf-cache), so no HuggingFace download is needed.
       RUST_LOG: info
     volumes:
       - cih-data:/data

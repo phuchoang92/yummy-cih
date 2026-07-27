@@ -66,9 +66,7 @@ docker run -d --name cih-box `
   -e FALKOR_URL=redis://falkordb:6379 `
   -e CIH_GRAPH_KEY=cih `
   -e CIH_PG_URL="postgres://cih:$($env:PGPW)@postgres:5432/cih" `
-  -e HF_HOME=/data/hf-cache `
   -v cih-repo:/repo `
-  -v cih-data:/data `
   -v cih-home:/home/cih/.cih `
   --entrypoint sleep `
   $IMG infinity
@@ -93,9 +91,7 @@ docker run -d --name cih-server `
   -e CIH_ALLOW_INSECURE=1 `
   -e CIH_ARTIFACTS_DIR=/repo/.cih/artifacts `
   -e CIH_PG_URL="postgres://cih:$($env:PGPW)@postgres:5432/cih" `
-  -e HF_HOME=/data/hf-cache `
   -v cih-repo:/repo `
-  -v cih-data:/data `
   -v cih-home:/home/cih/.cih `
   $IMG
 ```
