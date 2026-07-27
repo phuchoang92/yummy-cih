@@ -222,6 +222,17 @@ pub async fn run() -> Result<()> {
     if cfg.api_token.is_none() {
         tracing::warn!("CIH_API_TOKEN is not set — server is open to unauthenticated requests");
     }
+    let cursor_key_configured = crate::application::cursor::signing_key_is_configured();
+    cfg.check_cursor_key_posture(cursor_key_configured)?;
+    if !cursor_key_configured && !cfg.is_loopback_bind() {
+        tracing::warn!(
+            setting = "CIH_CURSOR_SIGNING_KEY",
+            bind = %cfg.bind,
+            "network-exposed bind without a shared cursor key: pagination cursors will not \
+             validate across restarts or replicas behind a load balancer; set the same \
+             64-hex secret on every instance"
+        );
+    }
     let store = build_store(&cfg).await?;
     let search_cache = SearchCache::from_config(&retrieval, cache_budgets.search_bytes);
     if let Some(artifacts_dir) = cfg.artifacts_dir.as_deref() {

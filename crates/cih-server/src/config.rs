@@ -24,6 +24,10 @@ pub struct Config {
     pub api_token: Option<String>,
     /// Escape hatch: allow a non-loopback bind without an API token (trusted network).
     pub allow_insecure: bool,
+    /// Opt-in: refuse to start unless `CIH_CURSOR_SIGNING_KEY` is set. For
+    /// multi-replica deployments, where an unset key means each replica signs
+    /// pagination cursors with its own process-local key and siblings reject them.
+    pub require_cursor_key: bool,
     /// Max bytes `read_file` will load from a single file before erroring.
     pub read_file_max_bytes: u64,
     /// Max lines `read_file` returns when no explicit line range is given.
@@ -364,6 +368,7 @@ impl std::fmt::Debug for Config {
                 &self.api_token.as_deref().map(|_| "[REDACTED]"),
             )
             .field("allow_insecure", &self.allow_insecure)
+            .field("require_cursor_key", &self.require_cursor_key)
             .field("max_concurrent_queries", &self.max_concurrent_queries)
             .field("query_queue_timeout_ms", &self.query_queue_timeout_ms)
             .field("graph_query_timeout_ms", &self.graph_query_timeout_ms)
@@ -434,6 +439,9 @@ impl Config {
             allow_insecure: std::env::var("CIH_ALLOW_INSECURE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            require_cursor_key: std::env::var("CIH_REQUIRE_CURSOR_KEY")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             read_file_max_bytes: env_parse("CIH_READ_FILE_MAX_BYTES", DEFAULT_READ_FILE_MAX_BYTES),
             read_file_max_lines: env_parse("CIH_READ_FILE_MAX_LINES", DEFAULT_READ_FILE_MAX_LINES),
             max_concurrent_queries: env_parse(
@@ -480,6 +488,21 @@ impl Config {
              to run open on a trusted network.",
             self.bind
         ))
+    }
+
+    /// Enforce the opt-in cursor-signing-key requirement. When
+    /// `CIH_REQUIRE_CURSOR_KEY` is set, refuse to start unless a shared signing
+    /// key is configured — otherwise each replica signs pagination cursors with
+    /// its own process-local key and siblings reject them under load balancing.
+    /// `key_configured` is passed in (rather than read here) so `Config` stays
+    /// free of the signing-key module and the decision is unit-testable.
+    pub fn check_cursor_key_posture(&self, key_configured: bool) -> Result<()> {
+        cursor_key_posture(self.require_cursor_key, key_configured)
+    }
+
+    /// True when the configured bind address is loopback (dev mode).
+    pub fn is_loopback_bind(&self) -> bool {
+        bind_is_loopback(&self.bind)
     }
 
     fn validate_runtime_settings(&self) -> Result<()> {
@@ -610,6 +633,21 @@ fn bind_is_loopback(bind: &str) -> bool {
     }
 }
 
+/// Decide the cursor-signing-key startup posture: `Ok` unless the operator
+/// required a shared key (`CIH_REQUIRE_CURSOR_KEY`) but none is configured. A
+/// random per-process key is still cryptographically secure, so this is opt-in —
+/// it guards availability (cursors valid across restarts/replicas), not secrecy.
+fn cursor_key_posture(require_cursor_key: bool, key_configured: bool) -> Result<()> {
+    if !require_cursor_key || key_configured {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "refusing to start: CIH_REQUIRE_CURSOR_KEY is set but CIH_CURSOR_SIGNING_KEY is not. \
+         Configure the same 64-hexadecimal secret on every replica so pagination cursors \
+         survive restarts and load balancing, or unset CIH_REQUIRE_CURSOR_KEY."
+    ))
+}
+
 /// The `StoreOptions` this server applies to every store it constructs
 /// (startup primary + per-graph-key stores), so tuning is uniform.
 pub fn store_options(cfg: &Config) -> cih_store_factory::StoreOptions {
@@ -638,7 +676,7 @@ pub fn store_runtime_options(cfg: &Config) -> cih_store_factory::StoreRuntimeOpt
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_is_loopback, embed_inference_config, parse_response_guard_mode,
+        bind_is_loopback, cursor_key_posture, embed_inference_config, parse_response_guard_mode,
         validate_graph_deadlines, validate_grep_deadlines, validate_grep_operation_deadline,
         validate_response_guard, CacheBudgets, McpResponseGuardMode,
         DEFAULT_ARTIFACT_CACHE_MAX_BYTES, DEFAULT_MCP_RESPONSE_MAX_BYTES,
@@ -741,6 +779,20 @@ mod tests {
         assert!(!bind_is_loopback("10.0.0.5:8080"));
         // Unparseable host fails safe (treated as exposed).
         assert!(!bind_is_loopback("not-an-addr:8080"));
+    }
+
+    #[test]
+    fn cursor_key_posture_fails_only_when_required_and_absent() {
+        // Opt-in and absent → refuse to start, with actionable guidance.
+        let error = cursor_key_posture(true, false).unwrap_err().to_string();
+        assert!(error.contains("refusing to start"));
+        assert!(error.contains("CIH_CURSOR_SIGNING_KEY"));
+        assert!(error.contains("CIH_REQUIRE_CURSOR_KEY"));
+        // Opt-in and present → fine.
+        assert!(cursor_key_posture(true, true).is_ok());
+        // Not required → fine either way (default deployments unaffected).
+        assert!(cursor_key_posture(false, false).is_ok());
+        assert!(cursor_key_posture(false, true).is_ok());
     }
 
     #[test]

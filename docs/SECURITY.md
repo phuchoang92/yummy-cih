@@ -28,6 +28,26 @@ Escape hatches:
 Put the server behind TLS (reverse proxy) for any non-local deployment; the bearer
 token is sent in a header and must not travel in cleartext.
 
+### Pagination cursors across restarts and replicas
+
+Keyset pagination cursors (`context`, `list_repos`) are signed with
+`CIH_CURSOR_SIGNING_KEY` (exactly 64 hexadecimal characters). **When it is unset the
+server signs with a secure but process-local key**, so cursors stop validating after a
+restart and — behind a load balancer — a cursor issued by one replica is rejected
+(`wrong_key_id`) by its siblings. This is an availability concern, not a secrecy one
+(the random key is still cryptographically sound).
+
+- **Single instance / local dev:** leave it unset. On a non-loopback bind the server
+  logs a warning at startup.
+- **Multiple replicas (or you want cursors to survive restarts):** set the *same*
+  64-hex secret on every instance:
+  ```bash
+  CIH_CURSOR_SIGNING_KEY=$(openssl rand -hex 32)   # identical on all replicas
+  ```
+- **`CIH_REQUIRE_CURSOR_KEY=1`** makes it mandatory — the server refuses to start
+  unless `CIH_CURSOR_SIGNING_KEY` is set. Use it in orchestrated/multi-replica
+  deployments to fail fast instead of silently degrading.
+
 ## 2. LLM data egress
 
 `cih-server` no longer performs any **LLM** egress. The embedded `ask_codebase`

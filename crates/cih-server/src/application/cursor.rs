@@ -15,6 +15,14 @@ use crate::domain::error::AppError;
 pub(crate) const CURSOR_SIGNING_KEY_ENV: &str = "CIH_CURSOR_SIGNING_KEY";
 pub(crate) const DEFAULT_CURSOR_TTL_SECS: u64 = 15 * 60;
 
+/// Whether a shared cursor signing key is configured (set and non-empty). Used by
+/// the startup posture check so it can report presence without holding the secret.
+pub(crate) fn signing_key_is_configured() -> bool {
+    std::env::var(CURSOR_SIGNING_KEY_ENV)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
 const ENVELOPE_SCHEMA: u8 = 1;
 const ENVELOPE_PREFIX: &str = "c1";
 const MAX_CURSOR_BYTES: usize = 8 * 1024;
@@ -96,10 +104,15 @@ impl CursorCodec {
                 let mut key = [0_u8; 32];
                 rand::rng().fill_bytes(&mut key);
                 let key_id = key_id("process-v1", &key);
-                tracing::warn!(
+                // Secure, but process-local: bootstrap owns the operator-facing,
+                // bind-aware warning (see `Config::check_cursor_key_posture`), so
+                // this stays at debug to avoid a duplicate on first cursor use.
+                tracing::debug!(
                     setting = CURSOR_SIGNING_KEY_ENV,
                     %key_id,
-                    "cursor signing uses a secure process-local key; cursors expire on restart"
+                    "cursor signing uses a secure process-local key; cursors do not \
+                     validate across restarts or sibling replicas — set \
+                     CIH_CURSOR_SIGNING_KEY to the same 64-hex secret on every instance"
                 );
                 Ok(Self::new(key, key_id))
             }
