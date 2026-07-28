@@ -469,7 +469,7 @@ pub fn analyze_from_scope_with_options(
     }
 
     let ParseScopeOutcome::Parsed {
-        parse_output,
+        mut parse_output,
         current_hashes,
         cache_stats,
     } = incremental
@@ -547,7 +547,14 @@ pub fn analyze_from_scope_with_options(
         di_wiring.as_ref(),
     );
 
-    let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
+    // Capture the raw resolved-edge count before the merge consumes the vectors.
+    let resolved_edge_count = resolve_output.edges.len();
+    // Move both raw edge vectors into the merge so they are freed here rather than
+    // held (a full extra copy) through the write phase; deduped output is identical.
+    let mut edges = combined_edges(
+        std::mem::take(&mut parse_output.edges),
+        std::mem::take(&mut resolve_output.edges),
+    );
     edges.extend(jar_edges);
     edges.extend(aug_edges);
 
@@ -634,7 +641,6 @@ pub fn analyze_from_scope_with_options(
     // overlapping with the two largest assembled graph collections.
     let node_count = all_nodes.len();
     let edge_count = edges.len();
-    let resolved_edge_count = resolve_output.edges.len();
     let unresolved_reference_count = resolve_output.skipped;
     let unresolved_external_fqcns = std::mem::take(&mut resolve_output.unresolved_external_fqcns);
     let parsed_file_count = parse_output.parsed_files.len();
@@ -648,10 +654,10 @@ pub fn analyze_from_scope_with_options(
         .iter()
         .filter(|n| n.kind == NodeKind::Route)
         .count();
+    // The raw edge vectors were already moved into `combined_edges`; only the
+    // merged `edges` and the remaining parse/resolve scratch need releasing here.
     drop(edges);
-    drop(std::mem::take(&mut resolve_output.edges));
     drop(std::mem::take(&mut resolve_output.unresolved_refs));
-    drop(parse_output.edges);
     drop(parse_output.parsed_files);
     drop(parse_output.skipped);
 

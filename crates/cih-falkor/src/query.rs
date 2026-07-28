@@ -1112,8 +1112,19 @@ fn stored_transition_order(a: &StoredTransition, b: &StoredTransition) -> Orderi
 }
 
 fn parse_call_sites(raw: &str) -> Vec<CallSiteArgs> {
-    serde_json::from_str::<Vec<serde_json::Value>>(raw)
-        .unwrap_or_default()
+    let values: Vec<serde_json::Value> = match serde_json::from_str(raw) {
+        Ok(values) => values,
+        Err(error) => {
+            // Empty / null / [] is a legitimately-absent value, not corruption;
+            // anything else that fails to parse is dropped call-site evidence and
+            // should be visible rather than silently becoming an empty list.
+            if is_meaningful_json_payload(raw) {
+                tracing::warn!(%error, "dropping unparseable call_sites payload");
+            }
+            return Vec::new();
+        }
+    };
+    values
         .into_iter()
         .filter_map(|value| {
             let args = value.get("args")?.as_array()?;
@@ -1125,4 +1136,44 @@ fn parse_call_sites(raw: &str) -> Vec<CallSiteArgs> {
             })
         })
         .collect()
+}
+
+/// A cell that is empty or a JSON `null` / `[]` is a legitimately-absent value,
+/// not corruption — so a parse failure on one of those should not warn.
+fn is_meaningful_json_payload(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !(trimmed.is_empty() || trimmed == "null" || trimmed == "[]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_meaningful_json_payload, parse_call_sites};
+
+    #[test]
+    fn parse_call_sites_reads_valid_payload() {
+        let out = parse_call_sites(r#"[{"args":["a","b"]},{"args":["c"]}]"#);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].args, vec!["a", "b"]);
+        assert_eq!(out[1].args, vec!["c"]);
+    }
+
+    #[test]
+    fn parse_call_sites_returns_empty_on_malformed_or_absent() {
+        // Behavior is unchanged (empty on failure) — the refactor only adds a warn.
+        assert!(parse_call_sites("not json").is_empty());
+        assert!(parse_call_sites("{\"args\":").is_empty());
+        assert!(parse_call_sites("").is_empty());
+        assert!(parse_call_sites("null").is_empty());
+        assert!(parse_call_sites("[]").is_empty());
+    }
+
+    #[test]
+    fn only_non_absent_payloads_are_worth_warning_about() {
+        assert!(!is_meaningful_json_payload(""));
+        assert!(!is_meaningful_json_payload("  "));
+        assert!(!is_meaningful_json_payload("null"));
+        assert!(!is_meaningful_json_payload("[]"));
+        assert!(is_meaningful_json_payload("not json"));
+        assert!(is_meaningful_json_payload("{\"args\":"));
+    }
 }
