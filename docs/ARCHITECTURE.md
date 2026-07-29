@@ -657,7 +657,10 @@ Compose uses the same `loading:0` condition instead of `PING`, keeping dependent
 services stopped while an AOF/RDB restore is still in progress. Index creation
 belongs to analysis/publication or explicit repair; it is never a health or
 readiness side effect. Falkor schema and both load paths share one required
-index set for `Symbol.id`, `Symbol.kind`, `Symbol.name`, and `Symbol.file`.
+index set for `Symbol.id`, `Symbol.kind`, `Symbol.name`, and `Symbol.file`,
+plus the numeric complexity properties `Symbol.cyclomatic`, `Symbol.cognitive`,
+and `Symbol.transitiveLoopDepth` so `complexity_hotspots`' range predicates
+stay index-backed instead of scanning every Method on large graphs.
 Only a verified already-exists response is idempotent; restore/loading and all
 unexpected DDL failures invalidate staging instead of being discarded.
 
@@ -678,3 +681,14 @@ workspace member, so every `cargo build`/`test --workspace`) compiles the
 native `lbug` dep — needs a C++ toolchain + cmake, and on macOS Homebrew
 `openssl@3` (auto-detected by `build.rs`, or set `OPENSSL_LIB_DIR`).
 Its contract run is hermetic — no external DB, runs in `cargo test --workspace`.
+
+**Scale limitation — no secondary indexes.** The pinned `lbug` engine only
+index-accelerates primary-key equality (`Symbol.id`); its `CREATE INDEX` binder
+rejects non-PK properties and its filter-pushdown optimizer rewrites only PK
+equality into index scans. Every `name`-, `file`-, or `kind`-filtered read —
+including the symbol-name resolution that starts most tool calls — is therefore
+a full `Symbol` table scan on this backend, with no DB-side timeout. That is
+acceptable at the ~100k-node scale ladybug targets today; on large graphs
+(hundreds of thousands to millions of symbols) use the `falkor` backend, whose
+required-index set keeps those lookups indexed. Revisit if a future `lbug`
+release ships usable secondary indexes.

@@ -17,8 +17,10 @@ const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS: usize = 100_000_000;
 const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const SCHEMA_DESCRIPTOR: &str = concat!(
-    "cih-search-schema-v2;",
+    "cih-search-schema-v3;",
     "tokenizer=ascii-alnum-camel-v1;",
+    "doc-kinds=class,interface,enum,record,annotation,method,function,constructor,field,",
+    "route,dbtable,dbquery,integrationroute,messagedestination;",
     "fields=kind,name,qualified_name,node_id,file,route,integration,message,dbquery;",
     "k1=1.2;b=0.75;",
     "representation=interned-files,boxed-postings,no-text,no-doc-freq"

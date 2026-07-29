@@ -82,6 +82,13 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        // A local `cih-engine analyze <corpus>` A/B run (the workflow CLAUDE.md
+        // prescribes for parser changes) leaves `.cih/` in the corpus; copying
+        // its parse cache would flip this analyze onto the artifact-reuse path
+        // and zero out the syntactic-callable measurement.
+        if entry.file_name() == ".cih" {
+            continue;
+        }
         let to = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_dir(&entry.path(), &to)?;

@@ -21,6 +21,20 @@ use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
 use crate::ports::graph_readiness::GraphReadiness;
 use crate::ports::search_provider::SearchProvider;
 
+/// Hard ceiling on `graph_overview` materialization, enforced here so every
+/// caller is bounded before the store builds overview rows in memory — the
+/// HTTP adapter's query-param clamp reuses these values, but the application
+/// layer must not rely on any one transport doing so.
+pub(crate) const OVERVIEW_NODE_CAP: usize = 20_000;
+pub(crate) const OVERVIEW_EDGE_CAP: usize = 100_000;
+
+fn overview_ceiling(max_nodes: usize, max_edges: usize) -> (usize, usize) {
+    (
+        max_nodes.clamp(1, OVERVIEW_NODE_CAP),
+        max_edges.clamp(1, OVERVIEW_EDGE_CAP),
+    )
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct BrowserSearchResult {
     pub(crate) hits: Vec<SearchHit>,
@@ -90,6 +104,7 @@ impl GraphBrowserService {
         max_edges: usize,
         kinds: Option<&[String]>,
     ) -> Result<GraphOverview, AppError> {
+        let (max_nodes, max_edges) = overview_ceiling(max_nodes, max_edges);
         self.store
             .graph_overview(max_nodes, max_edges, kinds)
             .await
@@ -327,6 +342,16 @@ mod tests {
     use async_trait::async_trait;
     use cih_graph_store::BackendReadiness;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn overview_ceiling_bounds_every_caller() {
+        assert_eq!(overview_ceiling(0, 0), (1, 1));
+        assert_eq!(overview_ceiling(5_000, 25_000), (5_000, 25_000));
+        assert_eq!(
+            overview_ceiling(usize::MAX, usize::MAX),
+            (OVERVIEW_NODE_CAP, OVERVIEW_EDGE_CAP)
+        );
+    }
 
     #[test]
     fn graph_errors_map_to_transport_independent_variants() {

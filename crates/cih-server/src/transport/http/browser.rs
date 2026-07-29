@@ -132,11 +132,11 @@ struct RoutesParams {
 #[doc(hidden)]
 pub const OVERVIEW_DEFAULT_NODES: usize = 5_000;
 #[doc(hidden)]
-pub const OVERVIEW_MAX_NODES: usize = 20_000;
+pub const OVERVIEW_MAX_NODES: usize = crate::application::browser::OVERVIEW_NODE_CAP;
 #[doc(hidden)]
 pub const OVERVIEW_DEFAULT_EDGES: usize = 25_000;
 #[doc(hidden)]
-pub const OVERVIEW_MAX_EDGES: usize = 100_000;
+pub const OVERVIEW_MAX_EDGES: usize = crate::application::browser::OVERVIEW_EDGE_CAP;
 
 async fn graph_overview(
     State(state): State<BrowserState>,

@@ -413,3 +413,33 @@ fn db_query_nodes_are_searchable_by_table_and_sql_text() {
         "the physical SQL must outrank generically-named audit symbols"
     );
 }
+
+/// Free functions (Go/Python/Rust/JS/TS emit `NodeKind::Function`, not `Method`)
+/// must be first-class search documents — in function-centric languages they are
+/// the bulk of the graph, and excluding them made `search_code` miss most symbols.
+#[test]
+fn function_nodes_are_searchable() {
+    let nodes = vec![
+        node(
+            "Function:src/services/user.service#getUserById/1",
+            NodeKind::Function,
+            "getUserById",
+            Some("user.service.getUserById"),
+        ),
+        node(
+            "Method:com.acme.UserService#delete/1",
+            NodeKind::Method,
+            "delete",
+            Some("com.acme.UserService.delete"),
+        ),
+    ];
+
+    let index = SearchIndex::build(&nodes);
+    assert_eq!(index.len(), 2, "Function nodes must produce BM25 documents");
+
+    let hits = index.search("get user by id", 10);
+    assert_eq!(
+        hits[0].node_id.as_str(),
+        "Function:src/services/user.service#getUserById/1"
+    );
+}

@@ -35,7 +35,18 @@ const BATCH: usize = 4000;
 /// Required indexed lookups for every supported graph publication path.
 /// Schema setup, Cypher upsert completion, and native-bulk completion all use
 /// this one list so a new hot lookup cannot silently miss one loader.
-const REQUIRED_SYMBOL_INDEXES: [&str; 4] = ["id", "kind", "name", "file"];
+/// The numeric complexity properties back `complexity_hotspots`' range
+/// predicates — without them the tool degree-scans every Method/Constructor
+/// and times out on million-node graphs.
+const REQUIRED_SYMBOL_INDEXES: [&str; 7] = [
+    "id",
+    "kind",
+    "name",
+    "file",
+    "cyclomatic",
+    "cognitive",
+    "transitiveLoopDepth",
+];
 
 /// Default max wait for a query permit before shedding (used when no explicit
 /// limit is configured, e.g. the engine bulk-load path).

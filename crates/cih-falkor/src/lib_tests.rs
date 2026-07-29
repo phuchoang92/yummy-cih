@@ -247,7 +247,18 @@ fn duplicate_index_candidate_and_index_tokens_are_exact() {
     assert!(super::cell_has_token("Symbol", "Symbol"));
     assert!(!super::cell_has_token("candidateId", "id"));
     assert_eq!(super::duration_millis(Duration::from_nanos(1)), 1);
-    assert_eq!(REQUIRED_SYMBOL_INDEXES, ["id", "kind", "name", "file"]);
+    assert_eq!(
+        REQUIRED_SYMBOL_INDEXES,
+        [
+            "id",
+            "kind",
+            "name",
+            "file",
+            "cyclomatic",
+            "cognitive",
+            "transitiveLoopDepth"
+        ]
+    );
 }
 
 #[test]

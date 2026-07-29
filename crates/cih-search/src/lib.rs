@@ -29,6 +29,7 @@ pub fn is_searchable_kind(kind: NodeKind) -> bool {
             | NodeKind::Record
             | NodeKind::Annotation
             | NodeKind::Method
+            | NodeKind::Function
             | NodeKind::Constructor
             | NodeKind::Field
             | NodeKind::Route
