@@ -2,6 +2,7 @@
 
 pub(crate) mod admin;
 pub(crate) mod cross_repo;
+pub(crate) mod doc_pack;
 pub(crate) mod docs;
 pub(crate) mod files;
 pub(crate) mod graph;

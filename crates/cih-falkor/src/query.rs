@@ -7,14 +7,14 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use cih_graph_store::{
     stored_edge_token, BackendReadiness, CallSiteArgs, CommunityEdge, CommunityInfo, ContextFilter,
     ContextPage, ContextSection, DbEffect, Direction, ExecutionTransition, GraphOverview,
     GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError, GraphSummary, HotspotNode,
     InterceptingAdvice, Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path,
-    Result, RouteInfo, SimilarMethod, StoredTransition, SymbolContext, TransitionBatch,
-    TransitionQuery, EXECUTION_BATCH_SIZE,
+    Result, RouteInfo, SimilarMethod, StoredTransition, SymbolContext, TestCoveragePage,
+    TransitionBatch, TransitionQuery, EXECUTION_BATCH_SIZE,
 };
 
 use crate::neighbor_nodes;
@@ -109,14 +109,21 @@ impl GraphStore for FalkorStore {
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
         let columns = node_columns("n");
+        // `n.props` rides along so single-node reads expose the persisted
+        // props JSON (identity metadata for doc_pack); list queries keep the
+        // lean 7-column projection.
         let q = format!(
             "CYPHER id={id} \
              MATCH (n:Symbol {{id:$id}}) \
-             RETURN {columns} LIMIT 1",
+             RETURN {columns}, coalesce(n.props, '') LIMIT 1",
             id = cstr(id.as_str())
         );
         let rows = self.rows(&q).await?;
-        Ok(rows.first().map(|r| node_from_row(r)))
+        Ok(rows.first().map(|r| {
+            let mut node = node_from_row(r);
+            node.props = r.get(7).and_then(|raw| serde_json::from_str(raw).ok());
+            node
+        }))
     }
 
     async fn batched_transitions(
@@ -911,6 +918,54 @@ impl GraphStore for FalkorStore {
             .iter()
             .map(|r| node_from_row(r))
             .collect())
+    }
+
+    async fn test_coverage_page(&self, id: &NodeId, limit: usize) -> Result<TestCoveragePage> {
+        if limit == 0 {
+            return Err(GraphStoreError::InvalidInput(
+                "test_coverage_page limit must be at least 1".into(),
+            ));
+        }
+        // The queried node's kind selects the scope; a missing node is an
+        // empty complete page, not an error (callers gate identity separately).
+        let Some(node) = self.get_node(id).await? else {
+            return Ok(TestCoveragePage {
+                tests: Vec::new(),
+                has_more: false,
+            });
+        };
+        let id_lit = cstr(id.as_str());
+        let columns = node_columns("t");
+        let probe = limit.saturating_add(1);
+        // Pattern predicates, not `EXISTS { MATCH … }` — FalkorDB rejects the
+        // braced-subquery form (contract-tested on the legacy query).
+        let scope = match node.kind {
+            NodeKind::Class | NodeKind::Interface => format!(
+                "target.id = {id_lit} \
+                 OR (:Symbol {{id: {id_lit}}})-[:HAS_METHOD]->(target)"
+            ),
+            NodeKind::Method | NodeKind::Constructor => format!(
+                "target.id = {id_lit} \
+                 OR (target)-[:HAS_METHOD]->(:Symbol {{id: {id_lit}}})"
+            ),
+            _ => format!("target.id = {id_lit}"),
+        };
+        let q = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
+             WHERE {scope} \
+             RETURN DISTINCT {columns} \
+             ORDER BY t.file, t.name, t.id \
+             LIMIT {probe}"
+        );
+        let mut tests: Vec<Node> = self
+            .rows(&q)
+            .await?
+            .iter()
+            .map(|r| node_from_row(r))
+            .collect();
+        let has_more = tests.len() > limit;
+        tests.truncate(limit);
+        Ok(TestCoveragePage { tests, has_more })
     }
 
     async fn tests_for_files(&self, files: &[String]) -> Result<Vec<Node>> {

@@ -95,6 +95,22 @@ impl TestingService {
         self.taint.taint_paths(repo, command).await
     }
 
+    /// Kind-aware bounded test coverage on an already-resolved repository
+    /// context (doc_pack's tests section). Unlike the public `test_coverage`
+    /// tool this pages honestly via the store's `limit + 1` probe and, for
+    /// Class/Interface queries, includes member-targeting tests.
+    pub(crate) async fn test_coverage_page_in_context(
+        &self,
+        repo: &ResolvedRepoContext,
+        id: &NodeId,
+        limit: usize,
+    ) -> Result<cih_graph_store::TestCoveragePage, AppError> {
+        repo.store
+            .test_coverage_page(id, limit)
+            .await
+            .map_err(graph_error)
+    }
+
     async fn resolve(&self, repo: &str) -> Result<std::sync::Arc<ResolvedRepoContext>, AppError> {
         self.repos.resolve(RepoSelector::from_wire(repo)).await
     }

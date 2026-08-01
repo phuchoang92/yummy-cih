@@ -69,6 +69,7 @@ pub(crate) struct TestingUseCases {
 pub(crate) struct DocsUseCases {
     pub(crate) wiki_search: WikiSearchService,
     pub(crate) wiki_page: WikiPageService,
+    pub(crate) doc_pack: crate::application::doc_pack::DocPackService,
 }
 
 #[derive(Clone)]

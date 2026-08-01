@@ -130,6 +130,10 @@ impl CihServer {
         &self.services.docs.wiki_page
     }
 
+    pub(crate) fn doc_pack_service(&self) -> &crate::application::doc_pack::DocPackService {
+        &self.services.docs.doc_pack
+    }
+
     pub(crate) fn graph_queries(&self) -> &crate::application::graph::GraphQueryService {
         &self.services.graph.queries
     }
@@ -655,7 +659,7 @@ mod tests {
         let router = crate::transport::mcp::router();
         assert_eq!(
             router.list_all().len(),
-            33,
+            35,
             "tool count changed after the split — a tool was dropped or duplicated"
         );
         for tool in [
@@ -670,6 +674,8 @@ mod tests {
             "index_cancel",
             "impact",
             "architecture_overview",
+            "doc_pack",
+            "doc_status",
         ] {
             assert!(router.has_route(tool), "missing tool after split: {tool}");
         }

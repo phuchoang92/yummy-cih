@@ -655,6 +655,8 @@ Available MCP tools:
 | `communities` | Return discovered communities |
 | `query` | Search graph/artifact text |
 | `route_map` | Return HTTP route mappings |
+| `doc_pack` | Bounded documentation evidence pack for one node, with markdown skeleton + evidence hash |
+| `doc_status` | Fresh/stale report for doc_pack-generated pages under a docs directory |
 
 Example tool calls:
 

@@ -511,6 +511,40 @@ pub struct GrepFilesArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocPackArgs {
+    /// Symbol name or full NodeId (e.g. "Route:GET /api/orders",
+    /// "OrderService"). Short names trigger disambiguation.
+    pub name: String,
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active repo.
+    #[serde(default)]
+    pub repo: String,
+    /// Repo group name enabling the cross-repo consumers section on Route
+    /// nodes. Leave empty to skip contract evidence.
+    #[serde(default)]
+    pub group: String,
+    /// Include the bounded source excerpt section (default true).
+    #[serde(default = "default_true")]
+    pub include_source: bool,
+    /// Evidence sections to include: "flow", "upstream", "tests", "source",
+    /// "contracts". Omit for all five; an explicit empty list is rejected.
+    #[serde(default)]
+    pub sections: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocStatusArgs {
+    /// Repo name or absolute path (from registry). Leave empty to use the server's active repo.
+    #[serde(default)]
+    pub repo: String,
+    /// Repo-relative documentation directory to scan (default "docs").
+    #[serde(default)]
+    pub docs_dir: String,
+    /// Max CIH pages to compare (default 100, clamped to 1..=500, pass 0 for default).
+    #[serde(default)]
+    pub max_pages: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListReposArgs {}
 
 #[derive(Debug, Deserialize, JsonSchema)]

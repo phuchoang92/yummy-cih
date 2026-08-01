@@ -63,6 +63,8 @@ Full: `Kind:fully.qualified.Name` (e.g. `Class:com.acme.OrderService`,
 | Git-aware change impact | `detect_changes` |
 | Tests to re-run / coverage gaps | `regression_scope`, `test_coverage`, `untested_paths` |
 | Source→sink taint (SQLi, exec, file, XSS) | `taint_paths` |
+| Per-node documentation evidence pack (markdown skeleton + evidence hash) | `doc_pack` |
+| Fresh/stale report for generated doc pages | `doc_status` (`docs_dir`, per-node hashes — unrelated repo changes don't stale a page) |
 | Complexity / duplication | `complexity_hotspots`, `find_duplicates` |
 | Cross-repo contracts | `group_contracts`, `api_impact` (`include_callers` walks consumer call chains), `shape_check` |
 | Cross-repo execution chain | `trace_flow_x` (hops repos via group contracts; steps carry `repo` + `via.kind == "CONTRACT"` at crossings) |
@@ -89,8 +91,9 @@ of a member repo (disable with `CIH_NO_AUTO_GROUP_SYNC=1`). `status` reports per
 
 Persona playbooks (when-to-use, step-by-step tool calls, output shape) live in
 `docs/agent-workflows/`: `exploring.md`, `impact-analysis.md`, `debugging.md`,
-`product-owner.md`, `tester.md`, `security.md`. Parser assumptions and known graph
-limitations are in `docs/ARCHITECTURE.md`.
+`product-owner.md`, `tester.md`, `security.md`, `documenting.md` (doc_pack →
+prose markers → doc_status regeneration loop). Parser assumptions and known
+graph limitations are in `docs/ARCHITECTURE.md`.
 
 ## Developing CIH itself
 

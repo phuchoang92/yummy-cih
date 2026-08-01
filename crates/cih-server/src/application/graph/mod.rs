@@ -200,6 +200,22 @@ impl GraphQueryService {
         &self,
         command: TraceFlowCommand,
     ) -> Result<SymbolQueryOutput<TraceFlowOutput>, AppError> {
+        let repo = self
+            .repos
+            .resolve(RepoSelector::from_wire(&command.repo))
+            .await?;
+        self.trace_flow_in_context(&repo, command).await
+    }
+
+    /// [`trace_flow`](Self::trace_flow) on an already-resolved repository
+    /// context — doc_pack shares one version-bound context across every
+    /// section build instead of re-resolving per query. `command.repo` is
+    /// ignored here; the context is the repository.
+    pub(crate) async fn trace_flow_in_context(
+        &self,
+        repo: &crate::ports::repo_context_provider::RepoContext,
+        command: TraceFlowCommand,
+    ) -> Result<SymbolQueryOutput<TraceFlowOutput>, AppError> {
         let window_end = command
             .offset
             .checked_add(command.max_nodes)
@@ -215,10 +231,6 @@ impl GraphQueryService {
                 ),
             });
         }
-        let repo = self
-            .repos
-            .resolve(RepoSelector::from_wire(&command.repo))
-            .await?;
         let mut exclude_kinds = parse_node_kinds(&command.exclude_kinds)?;
         if command.business_only && !exclude_kinds.contains(&NodeKind::Constructor) {
             exclude_kinds.push(NodeKind::Constructor);

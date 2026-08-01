@@ -343,6 +343,10 @@ where
     let r = incremental_case(mk, key.clone()).await;
     finish(mk, &[key], "incremental", r).await?;
 
+    let key = format!("{ns}_paged_tests");
+    let r = paged_test_coverage_case(mk, key.clone()).await;
+    finish(mk, &[key], "paged test coverage", r).await?;
+
     let key = format!("{ns}_pub");
     let r = publish_case(mk, key.clone()).await;
     finish(mk, &[key.clone(), format!("{key}-staging")], "publish", r).await?;
@@ -742,6 +746,36 @@ async fn reads_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Resul
         n.range.start_line == 10 && n.range.end_line == 20,
         "get_node returns the persisted line range, not zeros: {:?}",
         n.range
+    );
+    check!(
+        n.props.is_none(),
+        "a node loaded without props reads back without props: {:?}",
+        n.props
+    );
+    // Single-node reads must expose the persisted props JSON (identity
+    // metadata for doc_pack) — list queries keep the lean projection.
+    let caller_node = store
+        .get_node(&NodeId::new(CALLER_ID))
+        .await?
+        .context("caller exists")?;
+    let caller_props = caller_node.props.as_ref().context("caller props JSON")?;
+    check!(
+        caller_props.get("cyclomatic").and_then(|v| v.as_u64()) == Some(7)
+            && caller_props
+                .get("transitiveLoopDepth")
+                .and_then(|v| v.as_u64())
+                == Some(2),
+        "get_node returns persisted complexity props: {caller_props:?}"
+    );
+    let route_node = store
+        .get_node(&NodeId::new(ROUTE_ID))
+        .await?
+        .context("route exists")?;
+    let route_props = route_node.props.as_ref().context("route props JSON")?;
+    check!(
+        route_props.get("httpMethod").and_then(|v| v.as_str()) == Some("GET")
+            && route_props.get("path").and_then(|v| v.as_str()) == Some("/api/things"),
+        "get_node returns persisted route props: {route_props:?}"
     );
     let weird = store
         .get_node(&NodeId::new(WEIRD_ID))
@@ -1411,6 +1445,167 @@ async fn flow_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyhow::Result
     );
 
     store.drop_graph().await.context("drop_graph cleanup")?;
+    Ok(())
+}
+
+/// Kind-aware paged test coverage: Class/Interface member expansion, the
+/// Method/Constructor owner roll-up, honest `limit + 1` over-fetch, and the
+/// `(file, name, id)` ordering contract — none of which the legacy silent
+/// `LIMIT 50` query can express. The legacy query's public behavior (no
+/// member-targeting tests on a class query) is pinned here too.
+async fn paged_test_coverage_case(
+    mk: &dyn Fn(&str) -> MkResult,
+    key: String,
+) -> anyhow::Result<()> {
+    const SOLO_CLASS: &str = "Class:pg.Solo";
+    const SOLO_METHOD: &str = "Method:pg.Solo#m/0";
+    const SOLO_MEMBER_TEST: &str = "Method:pg.SoloTest#tm/0";
+    const BOTH_CLASS: &str = "Class:pg.Both";
+    const BOTH_METHOD: &str = "Method:pg.Both#m/0";
+    const BOTH_CLASS_TEST: &str = "Method:pg.BothTest#tc/0";
+    const BOTH_MEMBER_TEST: &str = "Method:pg.BothTest#tm/0";
+    const HOT_METHOD: &str = "Method:pg.Hot#h/0";
+
+    let mut nodes = vec![
+        node(SOLO_CLASS, NodeKind::Class, "Solo", "pg/Solo.java"),
+        node(SOLO_METHOD, NodeKind::Method, "m", "pg/Solo.java"),
+        node(SOLO_MEMBER_TEST, NodeKind::Method, "tm", "pg/SoloTest.java"),
+        node(BOTH_CLASS, NodeKind::Class, "Both", "pg/Both.java"),
+        node(BOTH_METHOD, NodeKind::Method, "m", "pg/Both.java"),
+        node(BOTH_CLASS_TEST, NodeKind::Method, "tc", "pg/BothTest.java"),
+        node(BOTH_MEMBER_TEST, NodeKind::Method, "tm", "pg/BothTest.java"),
+        node(HOT_METHOD, NodeKind::Method, "h", "pg/Hot.java"),
+    ];
+    let mut edges = vec![
+        edge(SOLO_CLASS, SOLO_METHOD, EdgeKind::HasMethod),
+        edge(SOLO_MEMBER_TEST, SOLO_METHOD, EdgeKind::Tests),
+        edge(BOTH_CLASS, BOTH_METHOD, EdgeKind::HasMethod),
+        edge(BOTH_CLASS_TEST, BOTH_CLASS, EdgeKind::Tests),
+        edge(BOTH_MEMBER_TEST, BOTH_METHOD, EdgeKind::Tests),
+    ];
+    // Seven direct tests of the hot method: five distinct names plus a
+    // same-name overload pair that only the `id` tie-breaker can order.
+    for index in (0..5).rev() {
+        let id = format!("Method:pg.HotTest#t{index}/0");
+        nodes.push(node(
+            &id,
+            NodeKind::Method,
+            &format!("t{index}"),
+            "pg/HotTest.java",
+        ));
+        edges.push(edge(&id, HOT_METHOD, EdgeKind::Tests));
+    }
+    for arity in [1, 0] {
+        let id = format!("Method:pg.HotTest#same/{arity}");
+        nodes.push(node(&id, NodeKind::Method, "same", "pg/HotTest.java"));
+        edges.push(edge(&id, HOT_METHOD, EdgeKind::Tests));
+    }
+
+    let artifacts = GraphArtifacts::write(
+        &artifacts_dir_for(&key),
+        VersionId::new("paged-tests-v1"),
+        &nodes,
+        &edges,
+    )?;
+    let store = mk(&key)?;
+    let _ = store.drop_graph().await;
+    store.bulk_load(&artifacts).await?;
+    store.ensure_schema().await?;
+
+    // Class with NO direct test: the member's test must surface on the class
+    // query (the exact fixture the legacy query cannot answer).
+    let solo = store
+        .test_coverage_page(&NodeId::new(SOLO_CLASS), 10)
+        .await?;
+    check!(
+        ids_of(&solo.tests) == vec![SOLO_MEMBER_TEST] && !solo.has_more,
+        "class query includes member-targeting tests via HAS_METHOD: {:?}",
+        ids_of(&solo.tests)
+    );
+    // Public legacy behavior is unchanged: no member expansion on a class.
+    let legacy = store.test_coverage(&NodeId::new(SOLO_CLASS)).await?;
+    check!(
+        !ids_of(&legacy).contains(&SOLO_MEMBER_TEST),
+        "legacy test_coverage must not gain member-targeting class results: {:?}",
+        ids_of(&legacy)
+    );
+
+    let both = store
+        .test_coverage_page(&NodeId::new(BOTH_CLASS), 10)
+        .await?;
+    check!(
+        ids_of(&both.tests) == vec![BOTH_CLASS_TEST, BOTH_MEMBER_TEST] && !both.has_more,
+        "class query combines direct and member tests deterministically: {:?}",
+        ids_of(&both.tests)
+    );
+
+    // Member query keeps the owner roll-up and never leaks sibling classes.
+    let member = store
+        .test_coverage_page(&NodeId::new(BOTH_METHOD), 10)
+        .await?;
+    check!(
+        ids_of(&member.tests) == vec![BOTH_CLASS_TEST, BOTH_MEMBER_TEST] && !member.has_more,
+        "method query rolls up to owner-class tests only: {:?}",
+        ids_of(&member.tests)
+    );
+
+    // Over-fetch honesty + deterministic (file, name, id) ordering.
+    let page = store
+        .test_coverage_page(&NodeId::new(HOT_METHOD), 3)
+        .await?;
+    check!(
+        page.tests.len() == 3 && page.has_more,
+        "limit is honored and the probe row reports has_more: {} / {}",
+        page.tests.len(),
+        page.has_more
+    );
+    let full = store
+        .test_coverage_page(&NodeId::new(HOT_METHOD), 10)
+        .await?;
+    check!(
+        full.tests.len() == 7 && !full.has_more,
+        "exhaustive page is complete: {} / {}",
+        full.tests.len(),
+        full.has_more
+    );
+    let full_ids = ids_of(&full.tests);
+    check!(
+        full_ids
+            == vec![
+                "Method:pg.HotTest#same/0",
+                "Method:pg.HotTest#same/1",
+                "Method:pg.HotTest#t0/0",
+                "Method:pg.HotTest#t1/0",
+                "Method:pg.HotTest#t2/0",
+                "Method:pg.HotTest#t3/0",
+                "Method:pg.HotTest#t4/0",
+            ],
+        "ordering is (file, name, id) with the id tie-breaker: {full_ids:?}"
+    );
+    check!(
+        page.tests
+            .iter()
+            .map(|test| test.id.as_str())
+            .eq(full_ids.iter().take(3).copied()),
+        "a bounded page is a prefix of the exhaustive ordering"
+    );
+
+    let absent = store
+        .test_coverage_page(&NodeId::new("Method:pg.None#x/0"), 5)
+        .await?;
+    check!(
+        absent.tests.is_empty() && !absent.has_more,
+        "a missing node yields an empty complete page: {absent:?}"
+    );
+    check!(
+        store
+            .test_coverage_page(&NodeId::new(HOT_METHOD), 0)
+            .await
+            .is_err(),
+        "limit 0 is rejected as invalid input"
+    );
+
+    store.drop_graph().await?;
     Ok(())
 }
 

@@ -202,6 +202,198 @@ fn load_group_contracts(group: &str) -> Result<Vec<ContractMatch>, AppError> {
         .collect()
 }
 
+/// Hard bounds on the doc-pack contract scan: a malformed or enormous
+/// contracts artifact must not make one `doc_pack` call unbounded.
+const CONTRACT_SCAN_MAX_ROWS: usize = 50_000;
+const CONTRACT_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Provider-scoped consumer lookup for one exact route (doc_pack's contracts
+/// section — internal, not a tool surface).
+#[derive(Clone, Debug)]
+pub(crate) struct RouteConsumersQuery {
+    pub(crate) group: String,
+    pub(crate) provider_repo: String,
+    /// Canonical provider Route NodeId string (`Route:METHOD /path`) — the
+    /// exact value group sync writes as `ContractMatch.provider_id`.
+    pub(crate) provider_route: String,
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) limit: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RouteConsumersProjection {
+    pub(crate) consumers: Vec<RouteConsumer>,
+    /// False when the consumer list was cut by `limit` or the scan stopped at
+    /// a row/byte cap before EOF — an empty incomplete list proves nothing.
+    pub(crate) complete: bool,
+    pub(crate) contracts_synced_at: Option<String>,
+    pub(crate) contracts_stale: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RouteConsumer {
+    pub(crate) consumer_repo: String,
+    pub(crate) consumer_endpoint: String,
+}
+
+impl ContractService {
+    /// Stream the group's contracts JSONL through a byte/row-capped reader and
+    /// return the consumers of exactly `(provider_repo, provider_route)`.
+    /// Deliberately not built on [`load_group_contracts`] (unbounded
+    /// `read_to_string`) or [`api_impact_sync`] (its filter ignores provider
+    /// identity, so two providers exposing the same method/path would leak
+    /// each other's consumers).
+    pub(crate) async fn route_consumers(
+        &self,
+        query: RouteConsumersQuery,
+    ) -> Result<RouteConsumersProjection, AppError> {
+        let repo_contexts = self.repo_contexts.clone();
+        run_blocking_heavy(blocking_timeout(), "doc_pack contract scan", move || {
+            let catalog = repo_contexts.catalog_snapshot();
+            route_consumers_sync(&query, &catalog)
+        })
+        .await
+        .map_err(blocking_error)?
+    }
+}
+
+fn route_consumers_sync(
+    query: &RouteConsumersQuery,
+    catalog: &RepoCatalogSnapshot,
+) -> Result<RouteConsumersProjection, AppError> {
+    let path = cih_core::contracts_path(&query.group).ok_or_else(|| AppError::Unavailable {
+        dependency: "contracts path",
+        message: "cannot determine HOME for group contracts path".into(),
+        retryable: false,
+    })?;
+    let file = std::fs::File::open(&path).map_err(|e| AppError::InvalidInput {
+        field: "group",
+        message: format!(
+            "cannot read contracts for group '{group}': {e}. \
+             Run `cih-engine group sync {group}` first",
+            group = query.group
+        ),
+    })?;
+    let (consumers, complete) = scan_route_consumers(
+        file,
+        query,
+        ScanCaps {
+            max_rows: CONTRACT_SCAN_MAX_ROWS,
+            max_bytes: CONTRACT_SCAN_MAX_BYTES,
+        },
+    )?;
+    let (contracts_synced_at, contracts_stale) = group_freshness(&query.group, catalog);
+    Ok(RouteConsumersProjection {
+        consumers,
+        complete,
+        contracts_synced_at,
+        contracts_stale,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ScanCaps {
+    max_rows: usize,
+    max_bytes: u64,
+}
+
+/// Streaming provider-scoped scan over a contracts JSONL source. Returns the
+/// matching consumers (sorted, at most `query.limit`) and whether the scan was
+/// complete — false when the consumer list was cut by `limit` or a row/byte
+/// cap stopped the scan before EOF.
+fn scan_route_consumers(
+    source: impl std::io::Read,
+    query: &RouteConsumersQuery,
+    caps: ScanCaps,
+) -> Result<(Vec<RouteConsumer>, bool), AppError> {
+    use std::io::{BufRead, Read};
+
+    let target_key = format!(
+        "{} {}",
+        query.method,
+        cih_core::normalize_contract_path(&query.path)
+    );
+    let mut reader = std::io::BufReader::new(source).take(caps.max_bytes);
+    let mut consumers = Vec::new();
+    let mut rows = 0usize;
+    let mut scan_capped = false;
+    let mut consumers_capped = false;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|e| AppError::Unavailable {
+                dependency: "contracts artifact",
+                message: format!("cannot read contracts for group '{}': {e}", query.group),
+                retryable: true,
+            })?;
+        if read == 0 {
+            // EOF of the capped reader. `limit() == 0` here means the byte cap
+            // was consumed — conservatively incomplete even at exact EOF.
+            scan_capped = reader.limit() == 0;
+            break;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if reader.limit() == 0 && !line.ends_with('\n') {
+            // The byte cap sliced this line mid-row: never parse a truncated
+            // record, and never call the scan complete.
+            scan_capped = true;
+            break;
+        }
+        rows += 1;
+        if rows > caps.max_rows {
+            scan_capped = true;
+            break;
+        }
+        let item: ContractMatch = serde_json::from_str(&line).map_err(malformed_contract)?;
+        if item.kind != ContractMatchKind::HttpRoute
+            || item.provider_repo != query.provider_repo
+            || item.match_key != target_key
+        {
+            continue;
+        }
+        if item.provider_id != query.provider_route {
+            if item.provider_id.starts_with("Route:") {
+                // A different canonical route in the same repo sharing the
+                // normalized match key (e.g. `/orders/{id}` vs `/orders/{code}`).
+                continue;
+            }
+            // Same provider repo + match key but a provider_id that is not a
+            // canonical Route NodeId: the artifact's format has drifted from
+            // what group sync writes. Surface that loudly — an equality filter
+            // over drifted ids would masquerade as "no consumers".
+            return Err(AppError::Unavailable {
+                dependency: "contracts artifact",
+                message: format!(
+                    "contract for {} {} in provider '{}' carries non-canonical \
+                     provider_id '{}' (expected a `Route:METHOD /path` NodeId); \
+                     re-run `cih-engine group sync {}`",
+                    query.method, query.path, query.provider_repo, item.provider_id, query.group
+                ),
+                retryable: false,
+            });
+        }
+        if consumers.len() == query.limit {
+            // The `limit + 1`-th match proves more exist; stop scanning.
+            consumers_capped = true;
+            break;
+        }
+        consumers.push(RouteConsumer {
+            consumer_repo: item.consumer_repo,
+            consumer_endpoint: item.consumer_id,
+        });
+    }
+    consumers.sort_by(|a, b| {
+        (a.consumer_repo.as_str(), a.consumer_endpoint.as_str())
+            .cmp(&(b.consumer_repo.as_str(), b.consumer_endpoint.as_str()))
+    });
+    Ok((consumers, !scan_capped && !consumers_capped))
+}
+
 /// Contract-sync freshness for a group: `(contracts_synced_at, contracts_stale)`.
 /// Conservative on missing data: an unstamped or unregistered group reads as stale.
 fn group_freshness(group_name: &str, catalog: &RepoCatalogSnapshot) -> (Option<String>, bool) {
@@ -949,6 +1141,149 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn contract_line(provider_repo: &str, provider_id: &str, consumer_repo: &str) -> String {
+        serde_json::to_string(&ContractMatch {
+            kind: ContractMatchKind::HttpRoute,
+            provider_repo: provider_repo.into(),
+            provider_id: provider_id.into(),
+            consumer_repo: consumer_repo.into(),
+            consumer_id: format!("ExternalEndpoint:GET /orders ({consumer_repo})"),
+            match_key: "GET /orders".into(),
+        })
+        .unwrap()
+    }
+
+    fn route_query(provider_repo: &str, limit: usize) -> RouteConsumersQuery {
+        RouteConsumersQuery {
+            group: "shop".into(),
+            provider_repo: provider_repo.into(),
+            provider_route: "Route:GET /orders".into(),
+            method: "GET".into(),
+            path: "/orders".into(),
+            limit,
+        }
+    }
+
+    fn wide_caps() -> ScanCaps {
+        ScanCaps {
+            max_rows: 1000,
+            max_bytes: 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn route_scan_filters_by_provider_repo_and_exact_route() {
+        // Two providers expose the same method/path (same match_key); the scan
+        // must return only the queried provider's consumers — the exact leak
+        // api_impact_sync's match-key-only filter cannot prevent.
+        let input = [
+            contract_line("orders-a", "Route:GET /orders", "checkout"),
+            contract_line("orders-b", "Route:GET /orders", "mobile"),
+            // Same repo, different canonical route sharing the normalized key.
+            contract_line("orders-a", "Route:GET /orders/{code}", "batch"),
+        ]
+        .join("\n");
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders-a", 10),
+            wide_caps(),
+        )
+        .unwrap();
+        assert!(complete);
+        assert_eq!(
+            consumers,
+            vec![RouteConsumer {
+                consumer_repo: "checkout".into(),
+                consumer_endpoint: "ExternalEndpoint:GET /orders (checkout)".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn route_scan_over_fetch_reports_incomplete() {
+        let input = [
+            contract_line("orders", "Route:GET /orders", "a"),
+            contract_line("orders", "Route:GET /orders", "b"),
+            contract_line("orders", "Route:GET /orders", "c"),
+        ]
+        .join("\n");
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders", 2),
+            wide_caps(),
+        )
+        .unwrap();
+        assert_eq!(consumers.len(), 2, "over-fetched row is never returned");
+        assert!(!complete);
+    }
+
+    #[test]
+    fn route_scan_non_canonical_provider_id_is_a_format_error_not_no_consumers() {
+        let input = contract_line("orders", "GET /orders", "checkout");
+        let error = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders", 10),
+            wide_caps(),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("non-canonical") && message.contains("group sync"),
+            "format drift must be loud: {message}"
+        );
+    }
+
+    #[test]
+    fn route_scan_row_cap_stops_before_eof_and_reports_incomplete() {
+        let input = [
+            contract_line("orders", "Route:GET /orders", "a"),
+            contract_line("orders", "Route:GET /orders", "b"),
+        ]
+        .join("\n");
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders", 10),
+            ScanCaps {
+                max_rows: 1,
+                max_bytes: 1024 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(consumers.len(), 1);
+        assert!(!complete, "hitting the row cap before EOF is incomplete");
+    }
+
+    #[test]
+    fn route_scan_byte_cap_never_parses_a_truncated_row() {
+        let line = contract_line("orders", "Route:GET /orders", "checkout");
+        let input = format!("{line}\n{line}\n");
+        // Cap mid-way through the second row: the sliced record must not be
+        // parsed (it would be malformed JSON) and the scan must be incomplete.
+        let cap = (line.len() + 1 + line.len() / 2) as u64;
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(input),
+            &route_query("orders", 10),
+            ScanCaps {
+                max_rows: 1000,
+                max_bytes: cap,
+            },
+        )
+        .unwrap();
+        assert_eq!(consumers.len(), 1, "rows before the cap are still counted");
+        assert!(!complete);
+    }
+
+    #[test]
+    fn route_scan_malformed_full_row_is_an_error() {
+        let error = scan_route_consumers(
+            std::io::Cursor::new("not-json\n"),
+            &route_query("orders", 10),
+            wide_caps(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("malformed contracts artifact"));
     }
 
     #[test]

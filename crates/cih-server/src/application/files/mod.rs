@@ -53,6 +53,152 @@ impl FileService {
             .resolve_repo(RepoSelector::from_wire(&command.repo))?;
         grep_files(repo.canonical_path, command, self.grep.clone()).await
     }
+
+    /// Raw (un-numbered) bounded line span for an already-resolved repository
+    /// context — doc_pack's source section. Applies the same containment and
+    /// whole-file size guard as `read_file`, then streams lines, cutting at
+    /// `max_lines` / `max_bytes` on a UTF-8 character boundary.
+    pub(crate) async fn read_span_in_context(
+        &self,
+        context: &crate::ports::repo_context_provider::RepoContext,
+        command: SourceSpanCommand,
+    ) -> Result<SourceSpan, AppError> {
+        let repo_root = context.repo.canonical_path.clone();
+        let max_file_bytes = self.limits.max_bytes;
+        if std::path::Path::new(&command.path)
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(invalid("path", "must not contain '..' components"));
+        }
+        run_blocking(blocking_timeout(), "read source span", move || {
+            let full_path = repo_root.join(&command.path);
+            let canon_path = canonical_contained_target(&repo_root, &full_path).map_err(
+                |error| match error {
+                    ContainmentError::Root(e) => {
+                        invalid("path", format!("cannot resolve repo root: {e}"))
+                    }
+                    ContainmentError::Target(e) => {
+                        invalid("path", format!("cannot resolve '{}': {e}", command.path))
+                    }
+                    ContainmentError::Outside => invalid("path", "escapes repo root"),
+                },
+            )?;
+            let file_size = std::fs::metadata(&canon_path)
+                .map_err(|e| invalid("path", format!("cannot stat '{}': {e}", command.path)))?
+                .len();
+            if file_size > max_file_bytes {
+                return Err(invalid(
+                    "path",
+                    format!(
+                        "file '{}' is {file_size} bytes, over the {max_file_bytes}-byte read limit",
+                        command.path
+                    ),
+                ));
+            }
+            read_span(&canon_path, command)
+        })
+        .await
+        .map_err(blocking_error)?
+    }
+}
+
+pub(crate) struct SourceSpanCommand {
+    /// Repo-relative file path.
+    pub(crate) path: String,
+    /// 1-based inclusive; 0 means line 1.
+    pub(crate) start_line: u32,
+    /// 1-based inclusive; 0 means "until a cap or EOF".
+    pub(crate) end_line: u32,
+    pub(crate) max_lines: usize,
+    pub(crate) max_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct SourceSpan {
+    pub(crate) path: String,
+    pub(crate) start_line: u32,
+    /// Last line that contributed content (may be partially included).
+    pub(crate) end_line: u32,
+    /// True when the requested span was cut by `max_lines`/`max_bytes`.
+    pub(crate) truncated: bool,
+    pub(crate) content: String,
+}
+
+/// Largest prefix of `text` that fits `budget` bytes without splitting a
+/// UTF-8 character.
+fn char_boundary_prefix(text: &str, budget: usize) -> &str {
+    if text.len() <= budget {
+        return text;
+    }
+    let mut cut = budget;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &text[..cut]
+}
+
+fn read_span(
+    full_path: &std::path::Path,
+    command: SourceSpanCommand,
+) -> Result<SourceSpan, AppError> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(full_path)
+        .map_err(|e| invalid("path", format!("cannot read '{}': {e}", command.path)))?;
+    let reader = std::io::BufReader::new(file);
+    let start = command.start_line.max(1);
+    let requested_end = if command.end_line == 0 {
+        u32::MAX
+    } else {
+        command.end_line.max(start)
+    };
+    let mut content = String::new();
+    let mut end_line = start;
+    let mut included = 0usize;
+    let mut truncated = false;
+    for (index, line) in reader.lines().enumerate() {
+        let line =
+            line.map_err(|e| invalid("path", format!("cannot read '{}': {e}", command.path)))?;
+        let number = index as u32 + 1;
+        if number < start {
+            continue;
+        }
+        if number > requested_end {
+            break;
+        }
+        if included == command.max_lines {
+            truncated = true;
+            break;
+        }
+        let separator = usize::from(included > 0);
+        let budget = command.max_bytes.saturating_sub(content.len() + separator);
+        if line.len() > budget {
+            let prefix = char_boundary_prefix(&line, budget);
+            truncated = true;
+            if !prefix.is_empty() {
+                if included > 0 {
+                    content.push('\n');
+                }
+                content.push_str(prefix);
+                end_line = number;
+            }
+            break;
+        }
+        if included > 0 {
+            content.push('\n');
+        }
+        content.push_str(&line);
+        end_line = number;
+        included += 1;
+    }
+    Ok(SourceSpan {
+        path: command.path,
+        start_line: start,
+        end_line,
+        truncated,
+        content,
+    })
 }
 
 pub(crate) struct ReadFileCommand {
@@ -78,6 +224,36 @@ pub struct ReadFileLimits {
     pub max_lines: usize,
 }
 
+/// Why [`canonical_contained_target`] rejected a candidate. Callers map each
+/// variant to their own field-specific `AppError` wording (read_file's `path`,
+/// the glob fast path's `glob`, doc_status's `docs_dir`).
+#[derive(Debug)]
+pub(crate) enum ContainmentError {
+    /// The repository root itself could not be canonicalized.
+    Root(std::io::Error),
+    /// The candidate path could not be canonicalized (missing, permission, …).
+    Target(std::io::Error),
+    /// The resolved candidate escapes the resolved repository root.
+    Outside,
+}
+
+/// The one canonical root/target containment check: resolve symlinks on both
+/// sides, then require the resolved target to stay under the resolved root.
+/// Every path-crossing feature (read_file, the literal-glob fast path,
+/// doc_status's docs walk) must go through this instead of growing another
+/// inline `canonicalize` + `starts_with` copy.
+pub(crate) fn canonical_contained_target(
+    root: &Path,
+    candidate: &Path,
+) -> Result<PathBuf, ContainmentError> {
+    let canonical_root = root.canonicalize().map_err(ContainmentError::Root)?;
+    let target = candidate.canonicalize().map_err(ContainmentError::Target)?;
+    if !target.starts_with(&canonical_root) {
+        return Err(ContainmentError::Outside);
+    }
+    Ok(target)
+}
+
 async fn read_file(
     repo_root: PathBuf,
     limits: ReadFileLimits,
@@ -99,15 +275,16 @@ async fn read_file(
 
         // Resolve symlinks before the containment check so an in-repo symlink
         // cannot point outside the repository root.
-        let canon_root = repo_root
-            .canonicalize()
-            .map_err(|error| invalid("path", format!("cannot resolve repo root: {error}")))?;
-        let canon_path = full_path
-            .canonicalize()
-            .map_err(|error| invalid("path", format!("cannot resolve '{path_label}': {error}")))?;
-        if !canon_path.starts_with(&canon_root) {
-            return Err(invalid("path", "escapes repo root"));
-        }
+        let canon_path =
+            canonical_contained_target(&repo_root, &full_path).map_err(|error| match error {
+                ContainmentError::Root(e) => {
+                    invalid("path", format!("cannot resolve repo root: {e}"))
+                }
+                ContainmentError::Target(e) => {
+                    invalid("path", format!("cannot resolve '{path_label}': {e}"))
+                }
+                ContainmentError::Outside => invalid("path", "escapes repo root"),
+            })?;
 
         read_sliced(&canon_path, &path_label, limits, start_line, end_line)
     })
@@ -665,27 +842,23 @@ fn plan_walk(root: &Path, glob: &str) -> Result<WalkPlan, AppError> {
         };
         let last = index + 1 == components.len();
         if metadata.file_type().is_symlink() {
-            let canonical_root = root
-                .canonicalize()
-                .map_err(|error| invalid("glob", format!("cannot resolve repo root: {error}")))?;
-            let target = candidate.canonicalize().map_err(|error| {
-                invalid(
-                    "glob",
-                    format!(
-                        "cannot resolve literal path '{}': {error}",
-                        prefix.display()
+            let target =
+                canonical_contained_target(root, &candidate).map_err(|error| match error {
+                    ContainmentError::Root(e) => {
+                        invalid("glob", format!("cannot resolve repo root: {e}"))
+                    }
+                    ContainmentError::Target(e) => invalid(
+                        "glob",
+                        format!("cannot resolve literal path '{}': {e}", prefix.display()),
                     ),
-                )
-            })?;
-            if !target.starts_with(&canonical_root) {
-                return Err(invalid(
-                    "glob",
-                    format!(
-                        "literal path '{}' resolves outside the repository root",
-                        prefix.display()
+                    ContainmentError::Outside => invalid(
+                        "glob",
+                        format!(
+                            "literal path '{}' resolves outside the repository root",
+                            prefix.display()
+                        ),
                     ),
-                ));
-            }
+                })?;
             if !last || !whole_glob {
                 // Directory-link prefixes are never traversed. We still resolve
                 // them first so an outside-root target is rejected rather than
@@ -1418,5 +1591,121 @@ mod tests {
         let saturated = saturated.to_string();
         assert!(saturated.contains("CIH_BLOCKING_MAX_CONCURRENT"));
         assert!(saturated.contains("CIH_BLOCKING_QUEUE_TIMEOUT_SECS"));
+    }
+
+    fn containment_root(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("cih-containment-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/App.java"), "class App {}\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn contained_target_resolves_ordinary_files() {
+        let root = containment_root("plain");
+        let target = canonical_contained_target(&root, &root.join("src/App.java")).unwrap();
+        assert!(target.ends_with("src/App.java"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn contained_target_reports_missing_and_outside_distinctly() {
+        let root = containment_root("errors");
+        assert!(matches!(
+            canonical_contained_target(&root, &root.join("src/Missing.java")),
+            Err(ContainmentError::Target(_))
+        ));
+
+        let outside = std::env::temp_dir().join(format!(
+            "cih-containment-outside-{}.java",
+            std::process::id()
+        ));
+        std::fs::write(&outside, "class Outside {}\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(&outside, root.join("src/Escape.java")).unwrap();
+            assert!(matches!(
+                canonical_contained_target(&root, &root.join("src/Escape.java")),
+                Err(ContainmentError::Outside)
+            ));
+            // A symlink to an in-repo target resolves to the contained file.
+            symlink(root.join("src/App.java"), root.join("src/Alias.java")).unwrap();
+            let aliased = canonical_contained_target(&root, &root.join("src/Alias.java")).unwrap();
+            assert!(aliased.ends_with("src/App.java"));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn read_span_slices_lines_without_numbering() {
+        let root = containment_root("span");
+        std::fs::write(root.join("src/App.java"), "a\nb\nc\nd\ne\n").unwrap();
+        let span = read_span(
+            &root.join("src/App.java"),
+            SourceSpanCommand {
+                path: "src/App.java".into(),
+                start_line: 2,
+                end_line: 4,
+                max_lines: 120,
+                max_bytes: 8 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(span.content, "b\nc\nd");
+        assert_eq!((span.start_line, span.end_line), (2, 4));
+        assert!(!span.truncated);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_span_caps_lines_and_bytes_on_char_boundaries() {
+        let root = containment_root("span-caps");
+        std::fs::write(root.join("src/App.java"), "one\ntwo\nthree\nfour\n").unwrap();
+        let line_capped = read_span(
+            &root.join("src/App.java"),
+            SourceSpanCommand {
+                path: "src/App.java".into(),
+                start_line: 1,
+                end_line: 4,
+                max_lines: 2,
+                max_bytes: 8 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(line_capped.content, "one\ntwo");
+        assert!(line_capped.truncated);
+
+        // Multi-byte content must be cut on a character boundary.
+        std::fs::write(root.join("src/App.java"), "héllo wörld ünïcode\n").unwrap();
+        let byte_capped = read_span(
+            &root.join("src/App.java"),
+            SourceSpanCommand {
+                path: "src/App.java".into(),
+                start_line: 1,
+                end_line: 1,
+                max_lines: 120,
+                max_bytes: 8,
+            },
+        )
+        .unwrap();
+        assert!(byte_capped.truncated);
+        assert!(byte_capped.content.len() <= 8);
+        assert!(byte_capped
+            .content
+            .is_char_boundary(byte_capped.content.len()));
+        assert!(byte_capped.content.starts_with("héllo"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn char_boundary_prefix_never_splits_characters() {
+        assert_eq!(char_boundary_prefix("héllo", 2), "h");
+        assert_eq!(char_boundary_prefix("héllo", 3), "hé");
+        assert_eq!(char_boundary_prefix("héllo", 100), "héllo");
+        assert_eq!(char_boundary_prefix("héllo", 0), "");
     }
 }

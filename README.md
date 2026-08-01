@@ -268,6 +268,8 @@ Available MCP tools:
 | `detect_changes` | Dev | Changed symbols + their blast radius (git-aware) |
 | `group_contracts` | Architect | Cross-service HTTP + event contracts for a repo group |
 | `taint_paths` | Dev, Security | Source→sink taint paths (SQL injection, command exec, file write, XSS) |
+| `doc_pack` | Doc agent | Bounded per-node documentation evidence pack + deterministic markdown skeleton with an evidence hash |
+| `doc_status` | Doc agent | Fresh/stale report for generated doc pages after a re-index (per-node hashes, not repo-wide clocks) |
 
 ---
 

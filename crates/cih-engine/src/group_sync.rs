@@ -375,6 +375,68 @@ mod tests {
         matches[0].kind
     }
 
+    /// Downstream consumers (cih-server's doc_pack contract scan) compare a
+    /// live Route node's `id.as_str()` against `ContractMatch.provider_id` by
+    /// equality. This fixture pins the write side of that contract: the synced
+    /// provider_id is exactly the canonical `Route:METHOD /path` NodeId string
+    /// read from the provider's artifacts.
+    #[test]
+    fn synced_provider_id_is_the_canonical_route_node_id() {
+        let dir =
+            std::env::temp_dir().join(format!("cih-group-sync-provider-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut route = Node {
+            id: cih_core::NodeId::new("Route:GET /api/things"),
+            kind: NodeKind::Route,
+            name: "GET /api/things".into(),
+            qualified_name: None,
+            file: "api.js".into(),
+            range: cih_core::Range::default(),
+            props: None,
+        };
+        route.props = Some(serde_json::json!({
+            // Lower-case on purpose: sync uppercases the method but must not
+            // touch the id string.
+            "httpMethod": "get",
+            "path": "/api/things",
+        }));
+        GraphArtifacts::write(&dir, VersionId::new("test-v1"), &[route.clone()], &[]).unwrap();
+        let entry = RegistryEntry {
+            repository_id: None,
+            name: "provider-repo".into(),
+            path: dir.display().to_string(),
+            graph_key: "provider-repo".into(),
+            artifacts_dir: dir.display().to_string(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: None,
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        };
+        let provider = load_repo_contracts(&entry).unwrap();
+        assert_eq!(provider.routes.len(), 1);
+        assert_eq!(provider.routes[0].id, route.id.as_str());
+        assert_eq!(provider.routes[0].method, "GET");
+
+        let consumer = RepoContracts {
+            endpoints: vec![EndpointContract {
+                repo: "consumer-repo".into(),
+                id: "ExternalEndpoint:GET /api/things".into(),
+                method: "GET".into(),
+                path: "/api/things".into(),
+            }],
+            ..Default::default()
+        };
+        let matches = match_contracts(&[provider, consumer]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].provider_id, route.id.as_str());
+        assert!(matches[0].provider_id.starts_with("Route:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn spring_framework_yields_spring_event_match() {
         let kind = matched_kind(

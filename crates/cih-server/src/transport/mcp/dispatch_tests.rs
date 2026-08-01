@@ -105,7 +105,7 @@ async fn tools_list_returns_full_surface_with_schemas() {
     }
     assert_eq!(
         tools.len(),
-        33,
+        35,
         "tool count drifted from the registered surface"
     );
 
@@ -150,6 +150,72 @@ async fn dispatch_call_that_cannot_resolve_returns_error() {
     assert!(
         res.is_err(),
         "unresolvable call must return an error, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_doc_pack_rejects_empty_name_before_resolution() {
+    // Command validation must fail before repo/symbol resolution — no live
+    // store is connected in this suite, so reaching the graph would hang/err
+    // differently.
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "doc_pack".into(),
+            arguments: Some(
+                serde_json::json!({ "name": "  " })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "doc_pack with an empty name must fail validation, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_doc_pack_rejects_explicit_empty_sections() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "doc_pack".into(),
+            arguments: Some(
+                serde_json::json!({ "name": "OrderService", "sections": [] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "an explicit empty sections list must be rejected, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_doc_status_rejects_escaping_docs_dir() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "doc_status".into(),
+            arguments: Some(
+                serde_json::json!({ "docs_dir": "../outside" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "a docs_dir with '..' must fail validation, got {res:?}"
     );
     client.cancel().await.ok();
 }

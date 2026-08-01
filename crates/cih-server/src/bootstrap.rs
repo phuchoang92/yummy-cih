@@ -132,13 +132,25 @@ pub(crate) fn assemble_services(
     );
 
     let repos = RepoContextService::new(repo_contexts);
+    // Named service values shared between their use-case owners and the
+    // composite DocPackService (every service is a cheap Clone over Arcs).
+    let graph_queries = GraphQueryService::new(
+        repos.clone(),
+        ChangeDetectionService::new(Arc::new(GitChangedFilesSource)),
+    );
+    let testing_service = TestingService::new(repos.clone(), TaintService::new(artifacts));
+    let file_service = FileService::new(repos.clone(), read_file_limits, grep_runtime);
+    let doc_pack = crate::application::doc_pack::DocPackService::new(
+        repos.clone(),
+        graph_queries.clone(),
+        testing_service.clone(),
+        file_service.clone(),
+        contract_service.clone(),
+    );
     Arc::new(AppServices {
         repos: repos.clone(),
         graph: GraphUseCases {
-            queries: GraphQueryService::new(
-                repos.clone(),
-                ChangeDetectionService::new(Arc::new(GitChangedFilesSource)),
-            ),
+            queries: graph_queries,
             architecture_overview,
             browser: browser_service,
         },
@@ -149,14 +161,15 @@ pub(crate) fn assemble_services(
             contracts: contract_service,
         },
         testing: TestingUseCases {
-            analysis: TestingService::new(repos.clone(), TaintService::new(artifacts)),
+            analysis: testing_service,
         },
         docs: DocsUseCases {
             wiki_search,
             wiki_page,
+            doc_pack,
         },
         files: FileUseCases {
-            access: FileService::new(repos.clone(), read_file_limits, grep_runtime),
+            access: file_service,
         },
         admin: AdminUseCases {
             repositories: RepositoryAdminService::new(repos.clone(), graph_key, group),

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use cih_core::RegistryEntry;
 use cih_graph_store::{
-    CommunityInfo, GraphOverview, GraphStore, GraphStoreError, GraphSummary, HotspotNode,
-    KindCount, Result as StoreResult, RouteInfo,
+    CommunityInfo, GraphOverview, GraphStore, GraphSummary, HotspotNode, KindCount,
+    Result as StoreResult, RouteInfo,
 };
 
 use crate::domain::error::AppError;
@@ -249,54 +249,7 @@ mod remedy {
     }
 }
 
-/// A section that is either served (with a one-word `source` label) or
-/// explicitly unavailable with a reason + remedy. A requested section always
-/// appears — `available: false` means "a pipeline step has not run" or "a query
-/// failed", never "none found" (agents must not read absence as a codebase fact).
-#[derive(Serialize)]
-#[serde(untagged)]
-pub(crate) enum Section<T: Serialize> {
-    Available {
-        available: bool,
-        /// One of: graph | registry | artifact | wiki-live | wiki-bundle (D4).
-        source: &'static str,
-        #[serde(flatten)]
-        body: T,
-    },
-    Unavailable {
-        available: bool,
-        reason: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        remedy: Option<String>,
-    },
-}
-
-impl<T: Serialize> Section<T> {
-    fn ok(source: &'static str, body: T) -> Self {
-        Self::Available {
-            available: true,
-            source,
-            body,
-        }
-    }
-
-    fn off(reason: impl Into<String>, remedy: Option<String>) -> Self {
-        Self::Unavailable {
-            available: false,
-            reason: reason.into(),
-            remedy,
-        }
-    }
-
-    /// Backend failure on a non-first query: per-section error, worded so an
-    /// outage cannot masquerade as "discover never ran" (D5 error taxonomy).
-    fn store_err(e: &GraphStoreError) -> Self {
-        Self::off(
-            format!("graph query failed: {e}"),
-            Some("check the graph backend / server logs — this is a serving error, not a fact about the codebase".into()),
-        )
-    }
-}
+pub(crate) use crate::application::section::Section;
 
 #[derive(Serialize)]
 struct StatsBody {
@@ -1335,9 +1288,9 @@ mod tests {
         RegistryKindCount, RegistryStats,
     };
     use cih_graph_store::{
-        CommunityEdge, CommunityInfo, Direction, GraphOverview, GraphOverviewNode, GraphSummary,
-        HotspotNode, Impact, Path as GraphPath, Result as StoreResult, SimilarMethod, Subgraph,
-        SymbolContext,
+        CommunityEdge, CommunityInfo, Direction, GraphOverview, GraphOverviewNode, GraphStoreError,
+        GraphSummary, HotspotNode, Impact, Path as GraphPath, Result as StoreResult, SimilarMethod,
+        Subgraph, SymbolContext,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 

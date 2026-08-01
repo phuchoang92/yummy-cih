@@ -10,14 +10,14 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use cih_graph_store::{
     stored_edge_token, CallSiteArgs, CommunityEdge, CommunityInfo, ContextCursorKey, ContextFilter,
     ContextPage, ContextSection, DbEffect, Direction, ExecutionTransition, GraphOverview,
     GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError, GraphSummary, HotspotNode,
     InterceptingAdvice, Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path,
-    Result, RouteInfo, SimilarMethod, StoredTransition, SymbolContext, TransitionBatch,
-    TransitionQuery, EXECUTION_BATCH_SIZE,
+    Result, RouteInfo, SimilarMethod, StoredTransition, SymbolContext, TestCoveragePage,
+    TransitionBatch, TransitionQuery, EXECUTION_BATCH_SIZE,
 };
 use lbug::{Connection, Value};
 
@@ -244,15 +244,24 @@ impl GraphStore for LadybugStore {
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
         let columns = node_columns("n");
+        // `n.props` rides along so single-node reads expose the persisted
+        // props JSON (identity metadata for doc_pack); list queries keep the
+        // lean 7-column projection.
         let q = format!(
             "MATCH (n:Symbol {{id: {id}}}) \
-             RETURN {columns} LIMIT 1",
+             RETURN {columns}, coalesce(n.props, '') LIMIT 1",
             id = cstr(id.as_str())
         );
         let out = self
             .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
             .await?;
-        Ok(out.first().map(|r| node_from_row(r)))
+        Ok(out.first().map(|r| {
+            let mut node = node_from_row(r);
+            node.props = r
+                .get(7)
+                .and_then(|cell| serde_json::from_str(&cell_str(cell)).ok());
+            node
+        }))
     }
 
     async fn batched_transitions(
@@ -995,6 +1004,57 @@ impl GraphStore for LadybugStore {
             .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
             .await?;
         Ok(out.iter().map(|r| node_from_row(r)).collect())
+    }
+
+    async fn test_coverage_page(&self, id: &NodeId, limit: usize) -> Result<TestCoveragePage> {
+        if limit == 0 {
+            return Err(GraphStoreError::InvalidInput(
+                "test_coverage_page limit must be at least 1".into(),
+            ));
+        }
+        // The queried node's kind selects the scope; a missing node is an
+        // empty complete page, not an error (callers gate identity separately).
+        let Some(node) = self.get_node(id).await? else {
+            return Ok(TestCoveragePage {
+                tests: Vec::new(),
+                has_more: false,
+            });
+        };
+        let id_lit = cstr(id.as_str());
+        let columns = node_columns("t");
+        let probe = limit.saturating_add(1);
+        // Kùzu dialect: `EXISTS { MATCH … }` subqueries (the pattern-predicate
+        // form FalkorDB uses is not accepted here — mirrors the legacy query).
+        let scope = match node.kind {
+            NodeKind::Class | NodeKind::Interface => format!(
+                "target.id = {id_lit} \
+                 OR EXISTS {{ \
+                       MATCH (owner:Symbol)-[:HAS_METHOD]->(member:Symbol) \
+                       WHERE owner.id = {id_lit} AND member.id = target.id \
+                    }}"
+            ),
+            NodeKind::Method | NodeKind::Constructor => format!(
+                "target.id = {id_lit} \
+                 OR EXISTS {{ \
+                       MATCH (owner:Symbol)-[:HAS_METHOD]->(member:Symbol) \
+                       WHERE member.id = {id_lit} AND owner.id = target.id \
+                    }}"
+            ),
+            _ => format!("target.id = {id_lit}"),
+        };
+        let q = format!(
+            "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
+             WHERE {scope} \
+             RETURN DISTINCT {columns} \
+             ORDER BY t.file, t.name, t.id LIMIT {probe}"
+        );
+        let out = self
+            .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
+            .await?;
+        let mut tests: Vec<Node> = out.iter().map(|r| node_from_row(r)).collect();
+        let has_more = tests.len() > limit;
+        tests.truncate(limit);
+        Ok(TestCoveragePage { tests, has_more })
     }
 
     async fn tests_for_files(&self, files: &[String]) -> Result<Vec<Node>> {

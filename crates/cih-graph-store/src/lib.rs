@@ -935,6 +935,15 @@ pub struct SimilarMethod {
     pub jaccard: f32,
 }
 
+/// One bounded page of kind-aware test coverage (see
+/// [`GraphStore::test_coverage_page`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TestCoveragePage {
+    pub tests: Vec<Node>,
+    /// True when the backend's `limit + 1` probe proved more tests exist.
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommunityEdge {
     pub src: String,
@@ -1199,6 +1208,19 @@ pub trait GraphStore: Send + Sync {
     /// Return all test method/class nodes that have a direct TESTS edge to `id` or
     /// to the class that owns `id`. Returns up to 50 results.
     async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>>;
+
+    /// Kind-aware, caller-bounded test coverage with an honest `limit + 1`
+    /// over-fetch probe — unlike [`test_coverage`](GraphStore::test_coverage),
+    /// whose hard-coded cap silently truncates. Scope depends on the queried
+    /// node's kind: Class/Interface additionally include tests targeting
+    /// members reached via the type's outgoing HAS_METHOD edges;
+    /// Method/Constructor keep the member→owner roll-up; every other kind is
+    /// direct-TESTS only. Results are deterministic (`file`, `name`, then `id`
+    /// tie-breaker) and deduplicated. A missing node yields an empty complete
+    /// page. Adapters must push `LIMIT limit + 1` into the backend query.
+    async fn test_coverage_page(&self, _id: &NodeId, _limit: usize) -> Result<TestCoveragePage> {
+        Err(GraphStoreError::Unimplemented("test_coverage_page"))
+    }
 
     /// Given repo-relative file paths, return the distinct test class/method nodes
     /// that have a TESTS edge to any symbol in those files.

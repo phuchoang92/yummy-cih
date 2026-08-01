@@ -24,6 +24,7 @@ pub(crate) fn router() -> ToolRouter<CihServer> {
         + CihServer::crossrepo_router()
         + CihServer::testing_router()
         + CihServer::wiki_router()
+        + CihServer::doc_pack_router()
         + CihServer::overview_router()
         + CihServer::admin_router()
 }
