@@ -1,10 +1,15 @@
 name: Windows portable
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main, master]
     tags: ["v*"]
+
+concurrency:
+  group: windows-portable-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -13,6 +18,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   TARGET: x86_64-pc-windows-msvc
+  DEV_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'dev') }}
   # lbug 0.18.2's stock build script downloads the current Ladybug native
   # release. Pin that otherwise-floating input; this release publishes the
   # verified liblbug-static-windows-x86_64.zip asset.
@@ -22,18 +28,38 @@ jobs:
   qualify:
     name: Windows x64 qualification
     runs-on: windows-2022
+    timeout-minutes: 180
     env:
       CIH_SIGNING_CERT_BASE64: ${{ secrets.CIH_SIGNING_CERT_BASE64 }}
       CIH_SIGNING_CERT_PASSWORD: ${{ secrets.CIH_SIGNING_CERT_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # PR qualification must describe and build the exact dev commit, not
+          # GitHub's synthetic pull-request merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Verify tag matches workspace version
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Resolve package identity
         shell: pwsh
         run: |
           $version = ((Get-Content Cargo.toml | Select-String '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value)
-          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} does not match workspace version $version" }
+          if (-not $version) { throw "workspace package version not found" }
+          $sourceCommit = (git rev-parse HEAD).Trim()
+          if ("${{ github.ref }}" -like "refs/tags/v*") {
+            if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} does not match workspace version $version" }
+            $packageVersion = $version
+            $artifactName = "windows-portable-release"
+          } elseif ("$env:DEV_CANDIDATE" -eq "true") {
+            $packageVersion = "$version-candidate.${{ github.run_number }}"
+            $artifactName = "windows-portable-candidate-${{ github.run_number }}"
+          } else {
+            $packageVersion = ""
+            $artifactName = ""
+          }
+          "WORKSPACE_VERSION=$version" >> $env:GITHUB_ENV
+          "SOURCE_COMMIT=$sourceCommit" >> $env:GITHUB_ENV
+          "PACKAGE_VERSION=$packageVersion" >> $env:GITHUB_ENV
+          "PACKAGE_ARTIFACT_NAME=$artifactName" >> $env:GITHUB_ENV
 
       - name: Show pinned toolchain
         run: rustc --version && cargo --version
@@ -130,14 +156,14 @@ jobs:
             -WorkDir "$env:RUNNER_TEMP\cih smoke"
 
       - name: Install SBOM and license tooling
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
         shell: pwsh
         run: |
           cargo install cargo-cyclonedx --locked
           cargo install cargo-license --locked
 
       - name: Generate SBOM and notices
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
@@ -146,7 +172,7 @@ jobs:
           cargo license --authors --do-not-bundle --avoid-dev-deps | Out-File -Encoding utf8 dist\THIRD_PARTY_NOTICES.txt
 
       - name: Optional Authenticode signing
-        if: startsWith(github.ref, 'refs/tags/v') && env.CIH_SIGNING_CERT_BASE64 != ''
+        if: (startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true') && env.CIH_SIGNING_CERT_BASE64 != ''
         shell: pwsh
         run: |
           $pfx = Join-Path $env:RUNNER_TEMP "cih-signing.pfx"
@@ -159,35 +185,60 @@ jobs:
           }
 
       - name: Package audited portable ZIP
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".Substring(1)
-          ./scripts/windows/package.ps1 -Version $version -SbomPath dist\sbom.cdx.json -NoticesPath dist\THIRD_PARTY_NOTICES.txt
+          ./scripts/windows/package.ps1 -Version $env:PACKAGE_VERSION -SbomPath dist\sbom.cdx.json -NoticesPath dist\THIRD_PARTY_NOTICES.txt
 
       - name: Installer lifecycle gates
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".Substring(1)
           ./scripts/windows/test-installer.ps1 `
-            -ZipPath "dist\cih-v$version-windows-x64.zip" `
-            -ChecksumPath "dist\cih-v$version-windows-x64.sha256" `
+            -ZipPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.zip" `
+            -ChecksumPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.sha256" `
             -WorkDir "$env:RUNNER_TEMP\installer tests"
 
+      - name: Write qualification record
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
+        shell: pwsh
+        run: |
+          $checksumPath = "dist\cih-v$env:PACKAGE_VERSION-windows-x64.sha256"
+          $checksum = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+')[0]
+          $signingPath = "dist\cih-v$env:PACKAGE_VERSION-windows-x64\SIGNING_STATUS.txt"
+          $signing = (Get-Content -LiteralPath $signingPath -Raw).Trim()
+          $record = @"
+          # Windows v$env:WORKSPACE_VERSION qualification
+
+          - Source commit: $env:SOURCE_COMMIT
+          - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - Package: cih-v$env:PACKAGE_VERSION-windows-x64.zip
+          - SHA-256: $checksum
+          - CI runner: windows-2022
+          - Signing: $signing
+          - Windows CI: passed
+          - Clean Windows 10 x64: pending
+          - Clean Windows 11 x64: pending
+
+          Network must be disconnected after downloading the candidate. Record the exact OS builds and replace the two pending results only after the full offline install/index/serve/re-index/uninstall sequence passes.
+          "@
+          Set-Content -LiteralPath dist\windows-v$env:WORKSPACE_VERSION-qualification.md -Encoding utf8 -Value $record
+
       - name: Upload qualification artifacts
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: windows-portable-release
+          name: ${{ env.PACKAGE_ARTIFACT_NAME }}
           path: |
             dist/cih-v*-windows-x64.zip
             dist/cih-v*-windows-x64.sha256
             dist/sbom.cdx.json
             dist/THIRD_PARTY_NOTICES.txt
-            scripts/windows/install.ps1
-            scripts/windows/uninstall.ps1
+            dist/windows-v*-qualification.md
+            scripts/windows/*.ps1
+            crates/cih-engine/tests/corpus/java-spring-aop/**
           if-no-files-found: error
+          retention-days: 14
 
   release:
     name: Publish GitHub Release
