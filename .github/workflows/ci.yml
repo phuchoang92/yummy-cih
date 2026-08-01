@@ -12,6 +12,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  LBUG_VERSION: 0.18.2
+  LBUG_SHARED: 1
+  LBUG_LIB_KIND: shared
 
 jobs:
   test:
@@ -19,6 +22,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install pinned Ladybug shared runtime
+        shell: bash
+        run: |
+          lbug_dir="$RUNNER_TEMP/lbug-0.18.2"
+          archive="$RUNNER_TEMP/liblbug-linux-x86_64.tar.gz"
+          mkdir -p "$lbug_dir"
+          curl -fSL "https://github.com/LadybugDB/ladybug/releases/download/v0.18.2/liblbug-linux-x86_64.tar.gz" -o "$archive"
+          echo "210a018b17918a109b3b5f45326b8da9a7a21b926b2e6577312e033fae0373ef  $archive" | sha256sum --check --strict
+          tar xzf "$archive" -C "$lbug_dir"
+          test -f "$lbug_dir/liblbug.so"
+          test -f "$lbug_dir/lbug.h"
+          echo "LBUG_LIBRARY_DIR=$lbug_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lbug_dir" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$lbug_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "$lbug_dir" >> "$GITHUB_PATH"
 
       # Toolchain (channel + components) is pinned by rust-toolchain.toml.
       - name: Show toolchain

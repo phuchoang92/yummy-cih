@@ -67,6 +67,7 @@ function Is-SystemDll([string] $Name) {
 }
 
 function Is-ApprovedCompanionDll([string] $Name) {
+    $Name -ieq "lbug_shared.dll" -or
     $Name -like "libssl-3*.dll" -or
     $Name -like "libcrypto-3*.dll" -or
     $Name -like "vcruntime*.dll" -or

@@ -22,6 +22,11 @@ env:
   # Keep the Rust wrapper and the native C API on the same release. In
   # particular, lbug 0.18.2 calls Arrow-table APIs absent from 0.16.1.
   LBUG_VERSION: 0.18.2
+  # The static prebuilt force-links a private Zstd copy that collides with
+  # cih-core's zstd-sys. Keep Ladybug embedded but isolate its native symbols
+  # behind the official shared runtime shipped in the portable ZIP.
+  LBUG_SHARED: 1
+  LBUG_LIB_KIND: shared
 
 jobs:
   qualify:
@@ -94,6 +99,27 @@ jobs:
             Copy-Item -LiteralPath $source -Destination (Join-Path $aliases "$name.lib") -Force
           }
           "LIB=$aliases;$lib;$env:LIB" >> $env:GITHUB_ENV
+
+      - name: Install pinned Ladybug shared runtime
+        shell: pwsh
+        run: |
+          $lbugDir = Join-Path $env:RUNNER_TEMP "lbug-0.18.2"
+          $archive = Join-Path $env:RUNNER_TEMP "liblbug-windows-x86_64.zip"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/LadybugDB/ladybug/releases/download/v0.18.2/liblbug-windows-x86_64.zip" `
+            -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "b53a955d7bc8e945fb7142ae3bd8008572d8b9bc8f9c7089a7a42dcc2122624e"
+          if ($actual -ne $expected) { throw "Ladybug archive checksum mismatch: $actual" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $lbugDir
+          foreach ($required in @("lbug_shared.dll", "lbug_shared.lib", "lbug.h")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $lbugDir $required) -PathType Leaf)) {
+              throw "Ladybug archive is missing $required"
+            }
+          }
+          "LBUG_LIBRARY_DIR=$lbugDir" >> $env:GITHUB_ENV
+          "LBUG_INCLUDE_DIR=$lbugDir" >> $env:GITHUB_ENV
+          "PATH=$lbugDir;$env:PATH" >> $env:GITHUB_ENV
 
       - name: Developer and portable feature matrix
         shell: pwsh
