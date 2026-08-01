@@ -19,10 +19,9 @@ env:
   RUST_BACKTRACE: 1
   TARGET: x86_64-pc-windows-msvc
   DEV_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'dev') }}
-  # lbug 0.18.2's stock build script downloads the current Ladybug native
-  # release. Pin that otherwise-floating input; this release publishes the
-  # verified liblbug-static-windows-x86_64.zip asset.
-  LBUG_VERSION: 0.16.1
+  # Keep the Rust wrapper and the native C API on the same release. In
+  # particular, lbug 0.18.2 calls Arrow-table APIs absent from 0.16.1.
+  LBUG_VERSION: 0.18.2
 
 jobs:
   qualify:
