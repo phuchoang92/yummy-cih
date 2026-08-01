@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+#[cfg(feature = "semantic")]
 use cih_embed::{EmbedInferenceError, EmbedStore, SemanticHit};
 use cih_search::{
     rrf_merge, search_index_path, search_schema_fingerprint, SearchHit, SearchIndex,
@@ -28,6 +29,14 @@ use crate::ports::search_provider::{SearchProvider, SearchProviderError};
 
 const MIB: usize = 1024 * 1024;
 const WARNING_KEY_LIMIT: usize = 1024;
+
+#[cfg(feature = "semantic")]
+pub(crate) type SemanticStore = EmbedStore;
+
+/// Opaque placeholder that keeps the search composition API identical in the
+/// BM25-only portable build without linking the semantic runtime.
+#[cfg(not(feature = "semantic"))]
+pub(crate) struct SemanticStore;
 
 #[derive(Clone, Debug, Eq)]
 struct SearchIndexKey {
@@ -877,7 +886,7 @@ impl Drop for FlightLeaderGuard {
 #[derive(Clone)]
 pub struct SearchState {
     cache: SearchCache,
-    embed_store: Option<Arc<EmbedStore>>,
+    embed_store: Option<Arc<SemanticStore>>,
     artifacts_dir: Option<PathBuf>,
 }
 
@@ -885,14 +894,14 @@ impl SearchState {
     #[cfg(test)]
     pub(crate) fn new(
         artifacts_dir: Option<PathBuf>,
-        embed_store: Option<Arc<EmbedStore>>,
+        embed_store: Option<Arc<SemanticStore>>,
     ) -> Self {
         Self::with_cache(artifacts_dir, embed_store, SearchCache::from_env())
     }
 
     pub(crate) fn with_cache(
         artifacts_dir: Option<PathBuf>,
-        embed_store: Option<Arc<EmbedStore>>,
+        embed_store: Option<Arc<SemanticStore>>,
         cache: SearchCache,
     ) -> Self {
         Self {
@@ -915,7 +924,6 @@ impl SearchState {
         }
 
         let lexical_query = query.to_string();
-        let semantic_query = query.to_string();
         let lexical = async {
             match self.bm25_index().await? {
                 Some(index) => {
@@ -927,35 +935,51 @@ impl SearchState {
                 None => Ok(Vec::new()),
             }
         };
-        let semantic = async {
-            let Some(embed_store) = &self.embed_store else {
-                return Ok(Vec::new());
-            };
-            let metrics = self.cache.runtime.metrics.clone();
-            metrics.semantic_attempted.fetch_add(1, Ordering::Relaxed);
-            let started = Instant::now();
-            let result = embed_store
-                .semantic_search(&semantic_query, limit.saturating_mul(2), 0.5)
-                .await;
-            metrics
-                .semantic_elapsed_ms
-                .fetch_add(elapsed_ms(started), Ordering::Relaxed);
-            match result {
-                Ok(hits) => {
-                    metrics.semantic_succeeded.fetch_add(1, Ordering::Relaxed);
-                    Ok(hits.into_iter().map(semantic_to_search_hit).collect())
-                }
-                Err(error) => {
-                    record_semantic_failure(&metrics, &error);
-                    Err(SearchProviderError::new(
-                        format!("semantic search failed: {error}"),
-                        true,
-                    ))
-                }
-            }
-        };
+        let semantic = self.semantic_hits(query, limit);
         let (lexical, semantic) = tokio::join!(lexical, semantic);
         Ok(rrf_merge(lexical?, semantic?, limit))
+    }
+
+    #[cfg(feature = "semantic")]
+    async fn semantic_hits(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, SearchProviderError> {
+        let Some(embed_store) = &self.embed_store else {
+            return Ok(Vec::new());
+        };
+        let metrics = self.cache.runtime.metrics.clone();
+        metrics.semantic_attempted.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let result = embed_store
+            .semantic_search(query, limit.saturating_mul(2), 0.5)
+            .await;
+        metrics
+            .semantic_elapsed_ms
+            .fetch_add(elapsed_ms(started), Ordering::Relaxed);
+        match result {
+            Ok(hits) => {
+                metrics.semantic_succeeded.fetch_add(1, Ordering::Relaxed);
+                Ok(hits.into_iter().map(semantic_to_search_hit).collect())
+            }
+            Err(error) => {
+                record_semantic_failure(&metrics, &error);
+                Err(SearchProviderError::new(
+                    format!("semantic search failed: {error}"),
+                    true,
+                ))
+            }
+        }
+    }
+
+    #[cfg(not(feature = "semantic"))]
+    async fn semantic_hits(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<SearchHit>, SearchProviderError> {
+        Ok(Vec::new())
     }
 
     async fn bm25_index(&self) -> Result<Option<Arc<SearchIndex>>, SearchProviderError> {
@@ -1146,6 +1170,7 @@ pub fn query_limit(raw: usize) -> usize {
     if raw == 0 { 10 } else { raw }.clamp(1, 50)
 }
 
+#[cfg(feature = "semantic")]
 fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
     SearchHit::from_parts(
         hit.node_id,
@@ -1159,6 +1184,7 @@ fn semantic_to_search_hit(hit: SemanticHit) -> SearchHit {
     )
 }
 
+#[cfg(feature = "semantic")]
 fn record_semantic_failure(metrics: &SearchRuntimeMetrics, error: &anyhow::Error) {
     metrics.semantic_failed.fetch_add(1, Ordering::Relaxed);
     if let Some(inference) = error.downcast_ref::<EmbedInferenceError>() {
@@ -1366,6 +1392,7 @@ mod tests {
         assert_eq!(idle.scorer_peak_per_query_scratch_bytes, 256);
     }
 
+    #[cfg(feature = "semantic")]
     #[test]
     fn semantic_failure_metrics_distinguish_timeout_and_admission_rejection() {
         let metrics = SearchRuntimeMetrics::default();

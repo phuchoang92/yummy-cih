@@ -43,7 +43,7 @@ pub(crate) struct GroupContractsCommand {
 
 impl GroupContractsCommand {
     pub(crate) fn try_new(group: String, kind: String) -> Result<Self, AppError> {
-        let group = required("group", group)?;
+        let group = required_group(group)?;
         let kind = parse_contract_kind(&kind).map_err(|message| AppError::InvalidInput {
             field: "kind",
             message,
@@ -77,7 +77,7 @@ impl ApiImpactCommand {
         include_callers: bool,
         caller_depth: u32,
     ) -> Result<Self, AppError> {
-        let group = required("group", group)?;
+        let group = required_group(group)?;
         let method = required("method", method)?.to_ascii_uppercase();
         if !matches!(
             method.as_str(),
@@ -139,6 +139,15 @@ fn required(field: &'static str, value: String) -> Result<String, AppError> {
     }
 }
 
+fn required_group(value: String) -> Result<String, AppError> {
+    let group = required("group", value)?;
+    cih_core::validate_group_name(&group).map_err(|error| AppError::InvalidInput {
+        field: "group",
+        message: error.to_string(),
+    })?;
+    Ok(group)
+}
+
 fn parse_contract_kind(kind: &str) -> Result<Option<ContractMatchKind>, String> {
     match kind.trim().to_ascii_lowercase().as_str() {
         "" | "all" => Ok(None),
@@ -193,7 +202,7 @@ fn load_group_contracts(group: &str) -> Result<Vec<ContractMatch>, AppError> {
         field: "group",
         message: format!(
             "cannot read contracts for group '{group}': {e}. \
-                 Run `cih-engine group sync {group}` first"
+                 Run `cih group sync {group}` first"
         ),
     })?;
     raw.lines()
@@ -262,6 +271,10 @@ fn route_consumers_sync(
     query: &RouteConsumersQuery,
     catalog: &RepoCatalogSnapshot,
 ) -> Result<RouteConsumersProjection, AppError> {
+    cih_core::validate_group_name(&query.group).map_err(|error| AppError::InvalidInput {
+        field: "group",
+        message: error.to_string(),
+    })?;
     let path = cih_core::contracts_path(&query.group).ok_or_else(|| AppError::Unavailable {
         dependency: "contracts path",
         message: "cannot determine HOME for group contracts path".into(),
@@ -271,7 +284,7 @@ fn route_consumers_sync(
         field: "group",
         message: format!(
             "cannot read contracts for group '{group}': {e}. \
-             Run `cih-engine group sync {group}` first",
+             Run `cih group sync {group}` first",
             group = query.group
         ),
     })?;
@@ -311,7 +324,7 @@ fn scan_route_consumers(
 
     let target_key = format!(
         "{} {}",
-        query.method,
+        query.method.to_ascii_uppercase(),
         cih_core::normalize_contract_path(&query.path)
     );
     let mut reader = std::io::BufReader::new(source).take(caps.max_bytes);
@@ -371,7 +384,7 @@ fn scan_route_consumers(
                 message: format!(
                     "contract for {} {} in provider '{}' carries non-canonical \
                      provider_id '{}' (expected a `Route:METHOD /path` NodeId); \
-                     re-run `cih-engine group sync {}`",
+                     re-run `cih group sync {}`",
                     query.method, query.path, query.provider_repo, item.provider_id, query.group
                 ),
                 retryable: false,
@@ -441,7 +454,7 @@ fn group_contracts_sync(
     let raw = std::fs::read_to_string(&path).map_err(|e| AppError::InvalidInput {
         field: "group",
         message: format!(
-            "cannot read contracts for group '{}' at {}: {e}. Run `cih-engine group sync {}` first",
+            "cannot read contracts for group '{}' at {}: {e}. Run `cih group sync {}` first",
             command.group,
             path.display(),
             command.group
@@ -636,7 +649,7 @@ impl TraceFlowXCommand {
         Ok(Self {
             entry_point: required("entry_point", entry_point)?,
             repo: RepoSelector::from_wire(&repo),
-            group: required("group", group)?,
+            group: required_group(group)?,
             max_depth: (if max_depth == 0 {
                 xflow::DEFAULT_DEPTH
             } else {
@@ -694,7 +707,7 @@ pub(crate) fn validate_group_member(
         field: "repo",
         message: format!(
             "repo '{repo_name}' is not a member of group '{group}' (members: {}) — \
-             pass `repo` naming one of them or add it with `cih-engine group add`",
+             pass `repo` naming one of them or add it with `cih group add`",
             members.join(", ")
         ),
     })
@@ -743,7 +756,7 @@ impl ContractService {
         .map_err(|error| AppError::InvalidInput {
             field: "repo",
             message: format!(
-                    "cannot load artifacts for '{start_repo}': {e} — re-run `cih-engine analyze {start_repo}`"
+                    "cannot load artifacts for '{start_repo}': {e} — re-run `cih analyze {start_repo}`"
                 , e = error
             ),
         })?;
@@ -823,7 +836,7 @@ impl ShapeCheckCommand {
         consumer: String,
     ) -> Result<Self, AppError> {
         Ok(Self {
-            group: required("group", group)?,
+            group: required_group(group)?,
             provider: required("provider", provider)?,
             consumer: required("consumer", consumer)?,
         })
@@ -1051,7 +1064,7 @@ fn shape_check_loaded(
             provider_only,
             consumer_only,
             note: if return_type_raw.is_none() {
-                Some("returnType not available — re-run `cih-engine analyze` to populate it")
+                Some("returnType not available — re-run `cih analyze` to populate it")
             } else {
                 None
             },
@@ -1141,6 +1154,37 @@ mod tests {
                 ..
             }
         ));
+
+        for unsafe_group in ["..", "../shop", "/tmp/shop", "shop/team", "shop\\team"] {
+            let error =
+                GroupContractsCommand::try_new(unsafe_group.into(), String::new()).unwrap_err();
+            assert!(matches!(
+                error,
+                AppError::InvalidInput { field: "group", .. }
+            ));
+            assert!(ApiImpactCommand::try_new(
+                unsafe_group.into(),
+                "GET".into(),
+                "/orders".into(),
+                false,
+                0,
+            )
+            .is_err());
+            assert!(TraceFlowXCommand::try_new(
+                "Route:GET /orders".into(),
+                String::new(),
+                unsafe_group.into(),
+                0,
+                0,
+            )
+            .is_err());
+            assert!(ShapeCheckCommand::try_new(
+                unsafe_group.into(),
+                "orders".into(),
+                "checkout".into(),
+            )
+            .is_err());
+        }
     }
 
     fn contract_line(provider_repo: &str, provider_id: &str, consumer_repo: &str) -> String {
@@ -1199,6 +1243,22 @@ mod tests {
                 consumer_endpoint: "ExternalEndpoint:GET /orders (checkout)".into(),
             }]
         );
+    }
+
+    #[test]
+    fn route_scan_normalizes_provider_method_case_like_group_sync() {
+        let input = contract_line("orders", "Route:GET /orders", "checkout");
+        let mut query = route_query("orders", 10);
+        query.method = "get".into();
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &query,
+            wide_caps(),
+        )
+        .unwrap();
+        assert!(complete);
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(consumers[0].consumer_repo, "checkout");
     }
 
     #[test]

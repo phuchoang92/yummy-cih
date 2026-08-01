@@ -1,4 +1,4 @@
 [toolchain]
-# rmcp targets a recent stable (Edition 2024 is stable since Rust 1.85).
-channel = "stable"
+# Windows portable releases are qualified with this exact compiler.
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]

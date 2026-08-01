@@ -38,6 +38,7 @@ LAYERS = {
     "cih-wiki": 4,
     "cih-grouping": 4,
     "cih-server": 4,
+    "cih-cli": 4,
 }
 
 DEP_RE = re.compile(r'^\s*"?(cih-[a-z-]+)"?\s*(?:=|\.workspace)')

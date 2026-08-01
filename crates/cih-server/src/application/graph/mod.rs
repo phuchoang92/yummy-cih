@@ -983,7 +983,7 @@ mod tests {
     use cih_graph_store::{
         CommunityEdge, CommunityInfo, Direction, FlowNode, FlowPage, GraphOverview, GraphStore,
         GraphSummary, HotspotNode, Impact, ImpactNode, LoadStats, Path as GraphPath,
-        Result as StoreResult, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+        Result as StoreResult, RouteInfo, SimilarMethod, Subgraph, SymbolContext, TestCoveragePage,
     };
     use cih_search::SearchHit;
 
@@ -1169,6 +1169,14 @@ mod tests {
         }
 
         async fn test_coverage(&self, _id: &NodeId) -> StoreResult<Vec<Node>> {
+            unimplemented()
+        }
+
+        async fn test_coverage_page(
+            &self,
+            _id: &NodeId,
+            _limit: usize,
+        ) -> StoreResult<TestCoveragePage> {
             unimplemented()
         }
 

@@ -329,9 +329,20 @@ mod tests {
     }
 
     fn context(repo_path: &std::path::Path) -> RepoContext {
+        let (backend, url) = if cfg!(feature = "falkor") {
+            ("falkor", "redis://127.0.0.1:6380".to_string())
+        } else {
+            (
+                "ladybug",
+                std::env::temp_dir()
+                    .join("cih-change-detection-test")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
         let store = cih_store_factory::connect_store(
-            "falkor",
-            "redis://127.0.0.1:6380",
+            backend,
+            &url,
             "cih_change_detection_test",
             &cih_store_factory::StoreOptions::default(),
         )

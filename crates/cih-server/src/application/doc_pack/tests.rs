@@ -662,6 +662,18 @@ fn explicit_empty_sections_are_rejected() {
 }
 
 #[test]
+fn unsafe_group_names_are_rejected_before_contract_io() {
+    for group in ["..", "../shop", "/tmp/shop", "shop/team", "shop\\team"] {
+        let error = DocPackCommand::try_new("X".into(), String::new(), group.into(), true, None)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::InvalidInput { field: "group", .. }
+        ));
+    }
+}
+
+#[test]
 fn sections_deduplicate_and_normalize_to_declaration_order() {
     let command = DocPackCommand::try_new(
         "X".into(),
@@ -1279,6 +1291,50 @@ async fn doc_status_caps_pages_and_walk_entries_and_skips_symlinks() {
         .unwrap();
     assert!(!status.completeness.complete);
     assert!(status.completeness.reasons.contains(&"page_limit"));
+}
+
+#[test]
+fn doc_status_scan_io_errors_are_not_silently_skipped() {
+    let root = std::env::temp_dir().join(format!("cih-doc-status-io-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let docs = root.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+
+    let missing_dir = docs.join("missing");
+    let read_error = read_scan_entries(&root, &missing_dir).unwrap_err();
+    assert!(matches!(
+        read_error,
+        AppError::Unavailable {
+            dependency: "doc_status scan",
+            retryable: true,
+            ..
+        }
+    ));
+
+    let missing_page = docs.join("missing.md");
+    let metadata_error = scan_entry_metadata(&root, &missing_page).unwrap_err();
+    assert!(matches!(
+        metadata_error,
+        AppError::Unavailable {
+            dependency: "doc_status scan",
+            retryable: true,
+            ..
+        }
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn doc_status_missing_docs_dir_is_explicitly_incomplete() {
+    let harness = harness("status-missing-docs");
+    let status = harness
+        .service
+        .status(DocStatusCommand::try_new(String::new(), "missing-docs".into(), 0).unwrap())
+        .await
+        .unwrap();
+    assert!(status.pages.is_empty());
+    assert!(!status.completeness.complete);
+    assert!(status.completeness.reasons.contains(&"docs_dir_missing"));
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+cih-core.workspace = true
 cih-graph-store.workspace = true
 cih-falkor = { workspace = true, optional = true }
 cih-ladybug = { workspace = true, optional = true }

@@ -86,7 +86,7 @@ pub fn run(command: ArtifactCommand) -> Result<()> {
 
             // Register in registry.
             let root_abs = repo.canonicalize().unwrap_or(repo.clone());
-            let registry_path = dirs_next_or_home().join(".cih").join("registry.json");
+            let registry_path = cih_core::RegistryStore::global()?.path().to_path_buf();
             register_repo_in_registry(&registry_path, &root_abs, &artifacts, &overlays, &graph_key)
                 .with_context(|| {
                     format!(
@@ -112,12 +112,6 @@ fn find_latest_version_dir(artifacts_dir: &std::path::Path) -> Result<std::path:
     entries
         .pop()
         .ok_or_else(|| anyhow::anyhow!("no artifact versions found in {}", artifacts_dir.display()))
-}
-
-fn dirs_next_or_home() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 fn register_repo_in_registry(

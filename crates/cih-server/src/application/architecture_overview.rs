@@ -233,19 +233,19 @@ mod remedy {
     use cih_core::RegistryEntry;
 
     pub(super) fn analyze(entry: &RegistryEntry) -> String {
-        format!("cih-engine analyze {}", entry.path)
+        format!("cih analyze {}", entry.path)
     }
 
     pub(super) fn discover(entry: &RegistryEntry) -> String {
-        format!("cih-engine discover {}", entry.path)
+        format!("cih discover {}", entry.path)
     }
 
     pub(super) fn load(entry: &RegistryEntry) -> String {
-        format!("cih-engine load {}", entry.path)
+        format!("cih load {}", entry.path)
     }
 
     pub(super) fn wiki(entry: &RegistryEntry) -> String {
-        format!("cih-engine wiki {}", entry.path)
+        format!("cih wiki {}", entry.path)
     }
 }
 
@@ -1290,7 +1290,7 @@ mod tests {
     use cih_graph_store::{
         CommunityEdge, CommunityInfo, Direction, GraphOverview, GraphOverviewNode, GraphStoreError,
         GraphSummary, HotspotNode, Impact, Path as GraphPath, Result as StoreResult, SimilarMethod,
-        Subgraph, SymbolContext,
+        Subgraph, SymbolContext, TestCoveragePage,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1527,6 +1527,13 @@ mod tests {
                 .collect())
         }
         async fn test_coverage(&self, _id: &NodeId) -> StoreResult<Vec<Node>> {
+            unimpl()
+        }
+        async fn test_coverage_page(
+            &self,
+            _id: &NodeId,
+            _limit: usize,
+        ) -> StoreResult<TestCoveragePage> {
             unimpl()
         }
         async fn tests_for_files(&self, _files: &[String]) -> StoreResult<Vec<Node>> {
@@ -1845,7 +1852,7 @@ mod tests {
         assert!(v["wiki_pages"]["remedy"]
             .as_str()
             .unwrap()
-            .contains("cih-engine wiki"));
+            .contains("cih wiki"));
         // Registry stats match the graph → no skew warning.
         assert_eq!(v["warnings"].as_array().unwrap().len(), 0);
         // No call-time timestamps anywhere in provenance (byte stability, D4).
@@ -1972,7 +1979,7 @@ mod tests {
         assert!(v["modules"]["remedy"]
             .as_str()
             .unwrap()
-            .contains("cih-engine discover"));
+            .contains("cih discover"));
         // Zero routes with no Route kind is a legitimate graph fact — available.
         assert_eq!(v["route_groups"]["available"], true);
         assert_eq!(v["route_groups"]["total_routes"], 0);

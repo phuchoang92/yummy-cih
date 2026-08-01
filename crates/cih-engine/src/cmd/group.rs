@@ -1,24 +1,8 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use cih_core::{now_rfc3339, GroupEntry, GroupRegistry, Registry};
 
-fn validate_group_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        bail!("group name cannot be empty");
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!(
-            "invalid group name '{}': only alphanumeric, '-', and '_' are allowed",
-            name
-        );
-    }
-    Ok(())
-}
-
 pub fn run_group_create(name: &str) -> Result<()> {
-    validate_group_name(name)?;
+    cih_core::validate_group_name(name)?;
     let mut registry = GroupRegistry::load();
     if registry.find(name).is_some() {
         println!("Group '{name}' already exists.");
@@ -35,6 +19,7 @@ pub fn run_group_create(name: &str) -> Result<()> {
 }
 
 pub fn run_group_add(name: &str, repo: &str) -> Result<()> {
+    cih_core::validate_group_name(name)?;
     let repo_registry = Registry::load();
     let repo_name = repo_registry
         .find(repo)
@@ -55,6 +40,7 @@ pub fn run_group_add(name: &str, repo: &str) -> Result<()> {
 }
 
 pub fn run_group_remove(name: &str, repo: &str) -> Result<()> {
+    cih_core::validate_group_name(name)?;
     let repo_registry = Registry::load();
     let repo_name = repo_registry
         .find(repo)
@@ -97,7 +83,7 @@ pub fn run_group_list(json: bool) -> Result<()> {
 }
 
 pub fn run_group_sync(name: &str, json: bool) -> Result<()> {
-    validate_group_name(name)?;
+    cih_core::validate_group_name(name)?;
     let summary = super::group_sync::sync_group(name)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -111,7 +97,7 @@ pub fn run_group_sync(name: &str, json: bool) -> Result<()> {
 }
 
 pub fn run_group_status(name: &str, json: bool) -> Result<()> {
-    validate_group_name(name)?;
+    cih_core::validate_group_name(name)?;
     let group_registry = GroupRegistry::load();
     let group = group_registry
         .find(name)

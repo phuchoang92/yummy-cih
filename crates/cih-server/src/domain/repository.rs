@@ -109,7 +109,7 @@ pub(crate) fn resolve_entry<'a>(
     if registry.entries.is_empty() {
         return Err(AppError::InvalidInput {
             field: "repo",
-            message: "no repos in registry; run `cih-engine analyze <repo>` first".into(),
+            message: "no repos in registry; run `cih index <repo>` first".into(),
         });
     }
     match selector {

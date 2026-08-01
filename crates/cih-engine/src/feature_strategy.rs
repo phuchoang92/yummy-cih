@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+#[cfg(feature = "semantic")]
 use cih_embed::{EmbedModel, EmbedModelKind};
+#[cfg(feature = "semantic")]
+use cih_grouping::{EmbedConfig, EmbedStrategy, Embedder};
 use cih_grouping::{
-    EmbedConfig, EmbedStrategy, Embedder, FeatureGroupEntry, FeatureLlmCaller, FeatureStrategy,
-    HybridStrategy, LlmConfig, LlmStrategy, PackageConfig, PackageStrategy, StructuralConfig,
-    StructuralStrategy,
+    FeatureGroupEntry, FeatureLlmCaller, FeatureStrategy, HybridStrategy, LlmConfig, LlmStrategy,
+    PackageConfig, PackageStrategy, StructuralConfig, StructuralStrategy,
 };
 
 use crate::llm::{LlmAdapter, LlmRequest};
@@ -22,10 +24,12 @@ pub struct FeatureLlmOptions {
 }
 
 /// `cih-embed::EmbedModel` wrapped as a `cih-grouping::Embedder`.
+#[cfg(feature = "semantic")]
 struct EngineEmbedder {
     model: EmbedModel,
 }
 
+#[cfg(feature = "semantic")]
 impl Embedder for EngineEmbedder {
     fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         self.model.embed(texts)
@@ -77,11 +81,10 @@ pub fn make_feature_llm_caller(
 ///
 /// - `"package"` (default): fast file-path heuristic, zero cost.
 /// - `"structural"`: annotation + in-degree cross-cutting detection.
-/// - `"hybrid"`: structural → package → embed → llm (if `llm` provided) in sequence.
+/// - `"hybrid"`: structural → package → embed (when compiled) → llm (if configured).
 /// - `"llm"`: LLM-only (requires `llm` to be `Some`; falls back to package if absent).
 ///
-/// Returns `Err` only when `"hybrid"` or `"embed"` is requested and the embedding model
-/// fails to load (e.g. model file not found).
+/// Returns `Err` only when a compiled-in embedding model fails to load.
 pub fn build_feature_strategy(
     kind: crate::discover::FeatureStrategyKind,
     pkg_cfg: PackageConfig,
@@ -114,14 +117,21 @@ pub fn build_feature_strategy(
             }
         }
         FeatureStrategyKind::Hybrid => {
-            let embedder = load_embedder()?;
             let structural = Box::new(StructuralStrategy::new(StructuralConfig::default()));
             let package = Box::new(PackageStrategy::new(pkg_cfg));
-            let embed = Box::new(EmbedStrategy::new(embedder, EmbedConfig::default()));
 
             let catch_all = vec!["shared".into(), "core".into(), "common".into()];
 
-            let mut strategies: Vec<Box<dyn FeatureStrategy>> = vec![structural, package, embed];
+            let mut strategies: Vec<Box<dyn FeatureStrategy>> = vec![structural, package];
+
+            #[cfg(feature = "semantic")]
+            {
+                let embedder = load_embedder()?;
+                strategies.push(Box::new(EmbedStrategy::new(
+                    embedder,
+                    EmbedConfig::default(),
+                )));
+            }
 
             if let Some(opts) = llm {
                 let caller = Arc::new(EngineLlmCaller {
@@ -156,6 +166,7 @@ pub fn build_feature_strategy(
     }
 }
 
+#[cfg(feature = "semantic")]
 fn load_embedder() -> Result<Arc<dyn Embedder>> {
     let model = EmbedModel::load(EmbedModelKind::MiniLm)?;
     Ok(Arc::new(EngineEmbedder { model }))

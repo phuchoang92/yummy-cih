@@ -174,7 +174,7 @@ impl ArtifactCache {
                 .ok_or_else(|| AppError::InvalidInput {
                     field: "repo",
                     message: format!(
-                        "repo '{}' has no graph artifacts; run `cih-engine analyze` first",
+                        "repo '{}' has no graph artifacts; run `cih index` first",
                         repo.registry_entry.name
                     ),
                 })?;

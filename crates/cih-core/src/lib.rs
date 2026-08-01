@@ -11,6 +11,7 @@ mod artifacts; // JSONL read/write helpers on GraphArtifacts (Phase 2)
 pub mod entrypoints;
 pub mod group;
 pub mod ir;
+pub mod paths;
 pub mod registry;
 pub mod repo_map;
 
@@ -20,8 +21,8 @@ pub use entrypoints::{
 };
 pub use group::{
     cih_home, contracts_path, group_contracts_stale, group_dir, normalize_contract_path,
-    sync_state_path, ContractMatch, ContractMatchKind, GroupEntry, GroupRegistry, SyncRepoSnapshot,
-    SyncState,
+    sync_state_path, validate_group_name, ContractMatch, ContractMatchKind, GroupEntry,
+    GroupRegistry, SyncRepoSnapshot, SyncState,
 };
 pub use ir::{
     looks_like_sql, BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind,
@@ -29,6 +30,7 @@ pub use ir::{
     ReferenceSite, SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile, SymbolDef,
     TypeBinding, UrlPart,
 };
+pub use paths::CihPaths;
 pub use registry::{
     ensure_repository_id, git_changed_files, git_head, graph_content_version, load_repository_id,
     new_publication_epoch, now_rfc3339, unix_secs_to_rfc3339, Registry, RegistryEntry,

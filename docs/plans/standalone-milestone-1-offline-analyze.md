@@ -1,5 +1,11 @@
 # Standalone Milestone 1 — offline, DB-free `cih analyze` (Windows-GNU-ready)
 
+> **Superseded.** The Windows standalone product is now the unified `cih.exe`
+> described in [Windows portable CIH](../windows-portable.md). It uses embedded
+> Ladybug for local graph reads and writes, includes `index`, `serve`, and `doctor`,
+> and targets `x86_64-pc-windows-msvc`. This milestone is retained only as design
+> history and must not be implemented independently.
+
 ## Goal
 
 Ship a `cih` binary whose `analyze` runs fully offline — **no Docker, FalkorDB, or

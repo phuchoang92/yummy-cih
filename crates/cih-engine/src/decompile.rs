@@ -315,6 +315,15 @@ fn ensure_tool_jar(config: &DecompileConfig, tool: &str, cih_dir: &Path) -> Resu
         return Ok(dest);
     }
 
+    if std::env::var("CIH_OFFLINE").is_ok_and(|value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    }) {
+        bail!(
+            "decompiler tool {tool:?} is not installed and CIH_OFFLINE forbids downloading it; \
+             configure tool_jar/tool_bin to a local tool or disable decompilation"
+        );
+    }
+
     download_tool(release.url, &dest, release.filename)?;
     Ok(dest)
 }

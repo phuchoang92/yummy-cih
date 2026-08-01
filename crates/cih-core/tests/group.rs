@@ -222,3 +222,31 @@ fn normalize_contract_path_is_idempotent_on_wildcards() {
     assert_eq!(once, "/api/orders/{*}");
     assert_eq!(normalize_contract_path(&once), once);
 }
+
+#[test]
+fn group_names_are_safe_filesystem_components() {
+    for valid in ["shop", "shop-1", "shop_v2", "đội"] {
+        assert!(
+            cih_core::validate_group_name(valid).is_ok(),
+            "valid group name rejected: {valid}"
+        );
+    }
+    for invalid in [
+        "",
+        ".",
+        "..",
+        "../shop",
+        "shop/team",
+        "shop\\team",
+        "/tmp/shop",
+    ] {
+        assert!(
+            cih_core::validate_group_name(invalid).is_err(),
+            "unsafe group name accepted: {invalid}"
+        );
+        assert!(
+            cih_core::group_dir(invalid).is_none(),
+            "unsafe group name produced a filesystem path: {invalid}"
+        );
+    }
+}

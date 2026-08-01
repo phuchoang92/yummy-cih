@@ -22,12 +22,10 @@
 //! the port guarantee holds structurally.
 //!
 //! Readers check `CURRENT` before each query and transparently reopen when it
-//! moved (in-flight queries keep the old `Arc<Database>` — and, on POSIX, its
-//! unlinked file — alive until they finish). The server's forever per-key
-//! store cache never needs invalidating.
-//!
-//! POSIX-only for now: GC deletes version files readers may hold open, which
-//! Windows forbids.
+//! moved. On POSIX, GC can unlink an old version while a reader holds it open;
+//! on Windows, sharing violations are recorded and retried after readers rotate
+//! to the new version. The server's forever per-key store cache never needs
+//! invalidating.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,6 +42,7 @@ mod schema;
 /// Keep the previous version around at least this long after a publish, so a
 /// reader that read `CURRENT` just before the flip can still open it.
 const GC_GRACE: Duration = Duration::from_secs(600);
+const GC_PENDING_FILE: &str = ".gc-pending";
 
 pub(crate) struct OpenHandle {
     pub(crate) version: String,
@@ -60,6 +59,16 @@ pub struct LadybugStore {
     /// (semaphore, acquire timeout) — server-side backpressure; queries are
     /// CPU-bound and in-process, so bounding concurrency still matters.
     limiter: Option<(Arc<tokio::sync::Semaphore>, Duration)>,
+}
+
+impl Drop for LadybugStore {
+    fn drop(&mut self) {
+        // Release this process's reader before the shutdown retry. A sharing
+        // violation held by another process remains in .gc-pending for its
+        // next connect/read/write retry.
+        self.state.get_mut().take();
+        Self::gc_versions(&self.key_dir());
+    }
 }
 
 impl LadybugStore {
@@ -115,6 +124,10 @@ impl LadybugStore {
     /// the graph doesn't exist (queries then return empty results, matching
     /// the auto-created-empty-graph behavior of the Falkor adapter).
     pub(crate) async fn read_handle(&self) -> Result<Option<Arc<Database>>> {
+        // A prior Windows GC may have encountered a reader-held version. Retry
+        // before selecting CURRENT; failures remain best-effort and cannot make
+        // an otherwise healthy graph unreadable.
+        Self::gc_versions(&self.key_dir());
         let mut state = self.state.lock().await;
         // A writable handle is this process's own build — always current.
         if let Some(h) = state.as_ref() {
@@ -178,6 +191,7 @@ impl LadybugStore {
     /// don't need the flip — `read_handle` short-circuits to the writable
     /// handle.
     pub(crate) async fn write_handle(&self) -> Result<(String, Arc<Database>)> {
+        Self::gc_versions(&self.key_dir());
         let mut state = self.state.lock().await;
         if let Some(h) = state.as_ref() {
             if h.writable {
@@ -248,8 +262,11 @@ impl LadybugStore {
         ));
         std::fs::write(&tmp, format!("{version}\n"))
             .map_err(|e| GraphStoreError::Backend(format!("write {}: {e}", tmp.display())))?;
-        std::fs::rename(&tmp, dir.join("CURRENT"))
-            .map_err(|e| GraphStoreError::Backend(format!("flip CURRENT: {e}")))?;
+        let current = dir.join("CURRENT");
+        if let Err(error) = atomic_replace(&tmp, &current) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(GraphStoreError::Backend(format!("flip CURRENT: {error}")));
+        }
         Ok(())
     }
 
@@ -353,7 +370,8 @@ impl LadybugStore {
     }
 
     /// Best-effort GC: delete version files that are neither `CURRENT` nor the
-    /// immediately previous version, and are older than [`GC_GRACE`].
+    /// immediately previous version, and are older than [`GC_GRACE`]. Windows
+    /// sharing violations are recorded and retried on the next read or write.
     pub(crate) fn gc_versions(dir: &Path) {
         let current = std::fs::read_to_string(dir.join("CURRENT"))
             .map(|s| s.trim().to_string())
@@ -389,6 +407,20 @@ impl LadybugStore {
                     .take(1),
             )
             .collect();
+        let pending_path = dir.join(GC_PENDING_FILE);
+        let pending: std::collections::HashSet<String> = std::fs::read_to_string(&pending_path)
+            .ok()
+            .into_iter()
+            .flat_map(|contents| {
+                contents
+                    .lines()
+                    .filter(|name| is_safe_version_name(name))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut still_pending = std::collections::BTreeSet::new();
+        let mut candidates: std::collections::BTreeSet<String> = pending.iter().cloned().collect();
         for (_, name) in &versions {
             if keep.contains(&name.as_str()) {
                 continue;
@@ -401,15 +433,30 @@ impl LadybugStore {
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age > GC_GRACE);
             if old_enough {
-                for p in Self::version_paths(dir, name) {
-                    let _ = if p.is_dir() {
-                        std::fs::remove_dir_all(&p)
-                    } else {
-                        std::fs::remove_file(&p)
-                    };
-                }
+                candidates.insert(name.clone());
             }
         }
+        for name in candidates {
+            if keep.contains(&name.as_str()) || !is_safe_version_name(&name) {
+                continue;
+            }
+            let failed = Self::version_paths(dir, &name).into_iter().any(|path| {
+                let result = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                match result {
+                    Ok(()) => false,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(_) => true,
+                }
+            });
+            if failed {
+                still_pending.insert(name);
+            }
+        }
+        persist_pending_gc(&pending_path, &still_pending);
     }
 
     /// Execute `f` with a connection on the current readable database, under
@@ -442,6 +489,65 @@ impl LadybugStore {
                 "graph store overloaded: timed out waiting for a query slot".into(),
             )),
         }
+    }
+}
+
+fn is_safe_version_name(name: &str) -> bool {
+    name.strip_prefix('v').is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn persist_pending_gc(path: &Path, pending: &std::collections::BTreeSet<String>) {
+    if pending.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    static PENDING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = parent.join(format!(
+        "{GC_PENDING_FILE}.tmp-{}-{}",
+        std::process::id(),
+        PENDING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let body = pending.iter().cloned().collect::<Vec<_>>().join("\n") + "\n";
+    if std::fs::write(&tmp, body).is_ok() && atomic_replace(&tmp, path).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -504,5 +610,115 @@ mod lib_tests {
         .unwrap();
         assert_eq!(store.next_version(), "v4");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_replace_overwrites_existing_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("CURRENT");
+        let next = dir.path().join("CURRENT.tmp");
+        std::fs::write(&current, "v1\n").unwrap();
+        std::fs::write(&next, "v2\n").unwrap();
+        atomic_replace(&next, &current).unwrap();
+        assert_eq!(std::fs::read_to_string(current).unwrap(), "v2\n");
+        assert!(!next.exists());
+    }
+
+    #[test]
+    fn gc_keeps_current_and_previous_but_removes_stale_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        for version in ["v1", "v2", "v3"] {
+            std::fs::write(dir.path().join(version), version).unwrap();
+        }
+        std::fs::write(dir.path().join("CURRENT"), "v3\n").unwrap();
+        // Pending entries bypass the ten-minute age gate and model a retry
+        // left by a Windows sharing violation.
+        std::fs::write(dir.path().join(GC_PENDING_FILE), "v1\n").unwrap();
+        LadybugStore::gc_versions(dir.path());
+        assert!(!dir.path().join("v1").exists());
+        assert!(dir.path().join("v2").exists());
+        assert!(dir.path().join("v3").exists());
+        assert!(!dir.path().join(GC_PENDING_FILE).exists());
+    }
+
+    #[test]
+    fn unicode_and_spaced_graph_paths_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("CIH graphs 数据");
+        let store = LadybugStore::connect(&root.to_string_lossy(), "repo 日本語").unwrap();
+        std::fs::create_dir_all(store.key_dir()).unwrap();
+        std::fs::write(store.key_dir().join("v1"), b"fixture").unwrap();
+        store.flip_current("v1").unwrap();
+        assert_eq!(store.read_current().as_deref(), Some("v1"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_current_replacement_leaves_previous_pointer_readable() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, GENERIC_READ, OPEN_EXISTING,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("CURRENT");
+        let next = dir.path().join("CURRENT.tmp");
+        std::fs::write(&current, "v1\n").unwrap();
+        std::fs::write(&next, "v2\n").unwrap();
+        let wide: Vec<u16> = current.as_os_str().encode_wide().chain(Some(0)).collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        assert!(atomic_replace(&next, &current).is_err());
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), "v1\n");
+        unsafe { CloseHandle(handle) };
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reader_locked_old_version_is_recorded_and_retried() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, GENERIC_READ, OPEN_EXISTING,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        for version in ["v1", "v2", "v3"] {
+            std::fs::write(dir.path().join(version), version).unwrap();
+        }
+        std::fs::write(dir.path().join("CURRENT"), "v3\n").unwrap();
+        std::fs::write(dir.path().join(GC_PENDING_FILE), "v1\n").unwrap();
+        let locked = dir.path().join("v1");
+        let wide: Vec<u16> = locked.as_os_str().encode_wide().chain(Some(0)).collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        LadybugStore::gc_versions(dir.path());
+        assert!(locked.exists());
+        assert!(dir.path().join(GC_PENDING_FILE).exists());
+        unsafe { CloseHandle(handle) };
+        LadybugStore::gc_versions(dir.path());
+        assert!(!locked.exists());
+        assert!(!dir.path().join(GC_PENDING_FILE).exists());
     }
 }

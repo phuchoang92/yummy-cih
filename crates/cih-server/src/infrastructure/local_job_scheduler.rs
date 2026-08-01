@@ -15,7 +15,7 @@ use crate::domain::indexing::{
 };
 use crate::infrastructure::engine_process_runner::TokioEngineProcessRunner;
 use crate::infrastructure::index_jobs::{
-    evict_terminal, find_engine_binary, new_job_id, unix_now_secs, JobState, Jobs,
+    evict_terminal, new_job_id, unix_now_secs, JobState, Jobs,
 };
 use crate::ports::artifact_repository::ArtifactRepository;
 use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
@@ -53,6 +53,7 @@ pub struct IndexScheduler {
 struct IndexEngineConfig {
     backend: String,
     falkor_url: String,
+    program: crate::IndexProgram,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +89,7 @@ impl IndexScheduler {
         artifacts: Arc<dyn ArtifactRepository>,
         backend: String,
         falkor_url: String,
+        program: crate::IndexProgram,
     ) -> Self {
         let usize_env = |name: &str, default: usize| {
             std::env::var(name)
@@ -115,6 +117,7 @@ impl IndexScheduler {
             IndexEngineConfig {
                 backend,
                 falkor_url,
+                program,
             },
         )
     }
@@ -287,7 +290,7 @@ impl IndexScheduler {
                         started_at_secs,
                         finished_at_secs,
                         error: format!(
-                            "cih-engine exited {code}: {}\n{}",
+                            "CIH index process exited {code}: {}\n{}",
                             stderr.trim(),
                             stdout.trim()
                         ),
@@ -495,17 +498,18 @@ impl IndexJobScheduler for IndexScheduler {
             Admission::Admitted => {}
         }
 
-        let mut args = vec![
+        let mut args = self.engine.program.prefix_args.clone();
+        args.extend([
             "analyze".to_string(),
             canonical.display().to_string(),
             "--all".to_string(),
-        ];
+        ]);
         for language in &command_key.languages {
             args.push("--language".to_string());
             args.push(language.clone());
         }
         let spec = EngineProcessSpec {
-            program: find_engine_binary(),
+            program: self.engine.program.program.clone(),
             args,
             current_dir: canonical.clone(),
             env: vec![
@@ -637,6 +641,10 @@ mod tests {
             IndexEngineConfig {
                 backend: "memory".into(),
                 falkor_url: String::new(),
+                program: crate::IndexProgram {
+                    program: PathBuf::from("fake-cih-engine"),
+                    prefix_args: Vec::new(),
+                },
             },
         )
     }
@@ -925,6 +933,10 @@ mod tests {
             IndexEngineConfig {
                 backend: "memory".into(),
                 falkor_url: String::new(),
+                program: crate::IndexProgram {
+                    program: PathBuf::from("fake-cih-engine"),
+                    prefix_args: Vec::new(),
+                },
             },
         );
         let canonical = dir.path().canonicalize().unwrap();

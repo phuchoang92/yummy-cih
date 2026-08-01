@@ -11,7 +11,7 @@ use crate::transport::mcp::args::{GetWikiPageArgs, SearchWikiArgs};
 #[tool_router(router = wiki_router, vis = "pub(crate)")]
 impl CihServer {
     #[tool(
-        description = "Search the generated wiki (role-based docs produced by `cih-engine wiki`). \
+        description = "Search the generated wiki (role-based docs produced by `cih wiki`). \
             BM25 over page titles and bodies. Facets: kind (persona pages carry their persona \
             as the kind — `po`, `ba`, `dev` — plus `index`, `routes`, `api-flow`), role (the \
             feature/module grouping, e.g. `loan`, `system`), and feature (community id). \

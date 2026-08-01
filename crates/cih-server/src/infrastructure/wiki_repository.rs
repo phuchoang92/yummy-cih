@@ -906,7 +906,7 @@ impl WikiSearchState {
         let wiki_dir = repo.canonical_path.join(".cih").join("wiki");
         if !wiki_dir.join("manifest.json").is_file() {
             return Err(WikiError::NotFound(format!(
-                "no generated wiki at {} — run `cih-engine wiki <repo>` first",
+                "no generated wiki at {} — run `cih index <repo>` first",
                 wiki_dir.display()
             )));
         }

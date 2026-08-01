@@ -1,0 +1,226 @@
+name: Windows portable
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  TARGET: x86_64-pc-windows-msvc
+  # lbug 0.18.2's stock build script downloads the current Ladybug native
+  # release. Pin that otherwise-floating input; this release publishes the
+  # verified liblbug-static-windows-x86_64.zip asset.
+  LBUG_VERSION: 0.16.1
+
+jobs:
+  qualify:
+    name: Windows x64 qualification
+    runs-on: windows-2022
+    env:
+      CIH_SIGNING_CERT_BASE64: ${{ secrets.CIH_SIGNING_CERT_BASE64 }}
+      CIH_SIGNING_CERT_PASSWORD: ${{ secrets.CIH_SIGNING_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = ((Get-Content Cargo.toml | Select-String '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value)
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} does not match workspace version $version" }
+
+      - name: Show pinned toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-portable
+
+      - name: Locate OpenSSL 3
+        shell: pwsh
+        run: |
+          $roots = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL")
+          $root = $roots | Where-Object { Test-Path (Join-Path $_ "bin") } | Select-Object -First 1
+          if (-not $root) {
+            choco install openssl -y
+            $root = $roots | Where-Object { Test-Path (Join-Path $_ "bin") } | Select-Object -First 1
+          }
+          if (-not $root) { throw "OpenSSL 3 installation not found" }
+          $opensslVersion = & (Join-Path $root "bin\openssl.exe") version
+          if ($opensslVersion -notmatch '^OpenSSL 3\.') { throw "OpenSSL 3 is required; found $opensslVersion" }
+          "OPENSSL_ROOT_DIR=$root" >> $env:GITHUB_ENV
+          "PATH=$(Join-Path $root 'bin');$env:PATH" >> $env:GITHUB_ENV
+          $lib = @((Join-Path $root "lib\VC\x64\MD"), (Join-Path $root "lib")) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $lib) { throw "OpenSSL import-library directory not found" }
+          # lbug's stock build script asks MSVC for ssl.lib/crypto.lib while
+          # OpenSSL 3 distributions commonly ship libssl.lib/libcrypto.lib.
+          # Supply deterministic aliases without modifying the database crate.
+          $aliases = Join-Path $env:RUNNER_TEMP "openssl-import-libs"
+          New-Item -ItemType Directory -Force $aliases | Out-Null
+          foreach ($name in @("ssl", "crypto")) {
+            $source = @((Join-Path $lib "$name.lib"), (Join-Path $lib "lib$name.lib")) | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $source) { throw "OpenSSL import library for $name not found in $lib" }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $aliases "$name.lib") -Force
+          }
+          "LIB=$aliases;$lib;$env:LIB" >> $env:GITHUB_ENV
+
+      - name: Developer and portable feature matrix
+        shell: pwsh
+        run: |
+          cargo check --locked -p cih-engine
+          cargo check --locked -p cih-server
+          cargo check --locked -p cih-engine --no-default-features --features ladybug
+          cargo check --locked -p cih-server --no-default-features --features ladybug
+          cargo check --locked -p cih-engine --no-default-features --features ladybug,semantic
+          cargo check --locked -p cih-server --no-default-features --features ladybug,semantic
+          cargo check --locked -p cih-engine --no-default-features --features falkor
+          cargo check --locked -p cih-server --no-default-features --features falkor
+          cargo check --locked -p cih-engine --no-default-features --features falkor,semantic
+          cargo check --locked -p cih-server --no-default-features --features falkor,semantic
+          cargo check --locked -p cih-engine --no-default-features --features semantic
+          cargo check --locked -p cih-server --no-default-features --features semantic
+
+      - name: Workspace quality and developer-profile tests
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          python scripts/check_layering.py
+          cargo test --locked --workspace --all-targets
+
+      - name: Execute non-default feature tests
+        shell: pwsh
+        run: |
+          cargo test --locked -p cih-engine --no-default-features --features ladybug
+          cargo test --locked -p cih-server --no-default-features --features ladybug
+          cargo test --locked -p cih-engine --no-default-features --features falkor
+          cargo test --locked -p cih-server --no-default-features --features falkor
+          cargo test --locked -p cih-engine --no-default-features --features ladybug,semantic
+          cargo test --locked -p cih-server --no-default-features --features ladybug,semantic
+          cargo test --locked -p cih-engine --no-default-features --features falkor,semantic
+          cargo test --locked -p cih-server --no-default-features --features falkor,semantic
+
+      - name: Ladybug Windows contract and publication tests
+        run: cargo test --locked -p cih-ladybug --all-targets
+
+      - name: Build portable executable
+        run: cargo build --locked --release -p cih-cli --target ${{ env.TARGET }}
+
+      - name: Verify portable dependency exclusions
+        shell: pwsh
+        run: |
+          $tree = cargo tree --locked -p cih-cli -e normal
+          $forbidden = @("cih-falkor", "cih-embed", "fastembed", "ort ", "pgvector", "tokio-postgres", "redis ")
+          foreach ($name in $forbidden) {
+            if ($tree -match [regex]::Escape($name)) { throw "portable dependency tree contains $name" }
+          }
+
+      - name: Portable offline and HTTP/MCP smoke test
+        shell: pwsh
+        run: |
+          ./scripts/windows/smoke.ps1 `
+            -Exe "target\${{ env.TARGET }}\release\cih.exe" `
+            -Fixture "crates\cih-engine\tests\corpus\java-spring-aop" `
+            -WorkDir "$env:RUNNER_TEMP\cih smoke"
+
+      - name: Install SBOM and license tooling
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo install cargo-license --locked
+
+      - name: Generate SBOM and notices
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          cargo cyclonedx --manifest-path crates\cih-cli\Cargo.toml --format json --all --target $env:TARGET
+          Move-Item -LiteralPath crates\cih-cli\bom.json -Destination dist\sbom.cdx.json
+          cargo license --authors --do-not-bundle --avoid-dev-deps | Out-File -Encoding utf8 dist\THIRD_PARTY_NOTICES.txt
+
+      - name: Optional Authenticode signing
+        if: startsWith(github.ref, 'refs/tags/v') && env.CIH_SIGNING_CERT_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cih-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CIH_SIGNING_CERT_BASE64))
+          signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:CIH_SIGNING_CERT_PASSWORD "target\${{ env.TARGET }}\release\cih.exe"
+          $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:CIH_SIGNING_CERT_PASSWORD)
+          foreach ($script in @("scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")) {
+            $signed = Set-AuthenticodeSignature -FilePath $script -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
+            if ($signed.Status -ne "Valid") { throw "failed to sign $script`: $($signed.StatusMessage)" }
+          }
+
+      - name: Package audited portable ZIP
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".Substring(1)
+          ./scripts/windows/package.ps1 -Version $version -SbomPath dist\sbom.cdx.json -NoticesPath dist\THIRD_PARTY_NOTICES.txt
+
+      - name: Installer lifecycle gates
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".Substring(1)
+          ./scripts/windows/test-installer.ps1 `
+            -ZipPath "dist\cih-v$version-windows-x64.zip" `
+            -ChecksumPath "dist\cih-v$version-windows-x64.sha256" `
+            -WorkDir "$env:RUNNER_TEMP\installer tests"
+
+      - name: Upload qualification artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-release
+          path: |
+            dist/cih-v*-windows-x64.zip
+            dist/cih-v*-windows-x64.sha256
+            dist/sbom.cdx.json
+            dist/THIRD_PARTY_NOTICES.txt
+            scripts/windows/install.ps1
+            scripts/windows/uninstall.ps1
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: qualify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-portable-release
+          path: release
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/dist/cih-v*-windows-x64.zip
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Windows 10/11 x64 portable release. See `SIGNING_STATUS.txt` inside the ZIP for the Authenticode status.
+
+            The package operates offline after download and includes `cih.exe`, audited native DLLs, installer/uninstaller scripts, checksums, SBOM, notices, and provenance.
+          files: |
+            release/dist/cih-v*-windows-x64.zip
+            release/dist/cih-v*-windows-x64.sha256
+            release/dist/sbom.cdx.json
+            release/dist/THIRD_PARTY_NOTICES.txt
+            release/scripts/windows/install.ps1
+            release/scripts/windows/uninstall.ps1

@@ -25,7 +25,60 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::runtime;
-use args::{Cli, Command, ConfigCommand, FeaturesCommand, GroupCommand};
+use args::{ArtifactCommand, Cli, Command, ConfigCommand, DbArgs, FeaturesCommand, GroupCommand};
+
+/// Product-level defaults injected before command dispatch. Explicit command
+/// values always win, so compatibility binaries retain their environment and
+/// CLI behavior while the portable product can select Ladybug deterministically.
+#[derive(Clone, Debug, Default)]
+pub struct ProductDefaults {
+    pub backend: Option<String>,
+    pub store_url: Option<String>,
+    pub graph_key: Option<String>,
+}
+
+impl ProductDefaults {
+    fn apply(&self, command: &mut Command) {
+        let apply_db = |db: &mut DbArgs| {
+            if db.backend.is_none() {
+                db.backend.clone_from(&self.backend);
+            }
+            if db.falkor_url.is_none() {
+                db.falkor_url.clone_from(&self.store_url);
+            }
+            if db.graph_key.is_none() {
+                db.graph_key.clone_from(&self.graph_key);
+            }
+        };
+        match command {
+            Command::Analyze(args) => apply_db(&mut args.db),
+            Command::Resolve { db, .. } => apply_db(db),
+            Command::Discover(args) => apply_db(&mut args.db),
+            Command::Refresh(args) => apply_db(&mut args.db),
+            Command::Taint(args) => apply_db(&mut args.db),
+            Command::Artifact {
+                command:
+                    ArtifactCommand::Bootstrap {
+                        backend,
+                        falkor_url,
+                        graph_key,
+                        ..
+                    },
+            } => {
+                if backend.is_none() {
+                    backend.clone_from(&self.backend);
+                }
+                if falkor_url.is_none() {
+                    falkor_url.clone_from(&self.store_url);
+                }
+                if graph_key.is_none() {
+                    graph_key.clone_from(&self.graph_key);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Binary entry point: tracing + runtime init, parse, dispatch.
 pub fn main() -> Result<()> {
@@ -59,7 +112,15 @@ pub fn main() -> Result<()> {
         return Ok(());
     }
 
-    match cli.command {
+    dispatch(cli.command, ProductDefaults::default())
+}
+
+/// Execute one already-parsed engine command. This entry point does not
+/// initialize tracing or create a Tokio runtime; the product binary owns those
+/// process-wide concerns.
+pub fn dispatch(mut command: Command, defaults: ProductDefaults) -> Result<()> {
+    defaults.apply(&mut command);
+    match command {
         Command::Scan { repo, json } => crate::scan::run_scan(&repo, json),
         Command::Analyze(a) => analyze::run(a),
         Command::Resolve { repo, db, json } => crate::analyze::run_resolve(
@@ -71,6 +132,7 @@ pub fn main() -> Result<()> {
             json,
         ),
         Command::Discover(a) => discover::run(a),
+        #[cfg(feature = "semantic")]
         Command::Embed {
             repo,
             pg_url,

@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -49,17 +49,39 @@ pub struct ContractMatch {
     pub match_key: String,
 }
 
-/// The `~/.cih` home directory (registry, groups, and `config.toml` live here),
-/// or `None` when `HOME` is unset. Single source of truth for this path.
+/// The CIH home directory (registry, groups, and `config.toml` live here), or
+/// `None` when the platform-specific user data root cannot be determined.
+/// `CIH_HOME` overrides the default on every platform.
 pub fn cih_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cih"))
+    crate::CihPaths::discover().map(|paths| paths.home().to_path_buf())
 }
 
 fn groups_path() -> Option<PathBuf> {
     cih_home().map(|dir| dir.join("groups.json"))
 }
 
+/// Validate a group name before it is used as a registry key or filesystem
+/// path component. Keeping this in core gives the CLI and every server
+/// transport one rule and prevents absolute/parent paths from escaping
+/// `~/.cih/groups`.
+pub fn validate_group_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        bail!("group name cannot be empty");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "invalid group name '{}': only alphanumeric, '-', and '_' are allowed",
+            name
+        );
+    }
+    Ok(())
+}
+
 pub fn group_dir(name: &str) -> Option<PathBuf> {
+    validate_group_name(name).ok()?;
     cih_home().map(|dir| dir.join("groups").join(name))
 }
 

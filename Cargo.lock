@@ -552,6 +552,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cih-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cih-core",
+ "cih-engine",
+ "cih-graph-store",
+ "cih-server",
+ "cih-store-factory",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cih-community"
 version = "0.1.0"
 dependencies = [
@@ -707,8 +726,10 @@ dependencies = [
  "lbug",
  "serde_json",
  "strum 0.27.2",
+ "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -829,6 +850,7 @@ name = "cih-store-factory"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cih-core",
  "cih-falkor",
  "cih-graph-store",
  "cih-ladybug",

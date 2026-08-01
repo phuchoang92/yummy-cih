@@ -35,6 +35,14 @@ pub fn resolve_pg_url(explicit: Option<String>) -> Option<String> {
     explicit.or_else(|| std::env::var("CIH_PG_URL").ok())
 }
 
+/// Initialize the engine's process-wide runtime without parsing CLI arguments.
+/// Unified products call this once before [`dispatch`].
+pub fn initialize_runtime() -> anyhow::Result<()> {
+    runtime::init()
+}
+
+pub use cmd::{dispatch, ProductDefaults};
+
 #[cfg(test)]
 mod config_tests {
     #[test]
@@ -63,6 +71,7 @@ pub mod wiki;
 
 pub(crate) mod decompile;
 pub(crate) mod decompile_config;
+#[cfg(feature = "semantic")]
 pub(crate) mod embed;
 pub(crate) mod feature_strategy;
 pub(crate) mod node_prefix;

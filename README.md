@@ -11,6 +11,28 @@ LLM enrichment.
 
 ---
 
+## Windows portable release
+
+Windows 10/11 x64 users can install the release without Rust, Docker, Java,
+Node.js, or an external database. Download `install.ps1` and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version <version>
+cih doctor
+cih index C:\path\to\repository
+cih serve C:\path\to\repository --open
+```
+
+The installer places the command in `%LOCALAPPDATA%\Programs\CIH` and stores
+indexes and configuration in `%LOCALAPPDATA%\CIH`. Set `CIH_HOME` to override
+the data directory. See [the Windows portable guide](docs/windows-portable.md)
+for ZIP installation, checksums, offline behavior, and uninstall instructions.
+
+The Docker/developer workflow below remains supported and uses the compatibility
+`cih-engine` and `cih-server` binaries.
+
+---
+
 ## Prerequisites
 
 - **Docker** and **Docker Compose** (v2)

@@ -19,7 +19,7 @@ use crate::transport::mcp::args::{
 impl CihServer {
     #[tool(
         description = "Index a repository so its code graph becomes queryable by the other tools. \
-            Runs scan → parse → resolve → load into the live FalkorDB graph. \
+            Runs scan → parse → resolve → load into the configured graph backend. \
             Returns immediately with a `job_id`; use index_status(job_id=...) to poll for completion. \
             Typical time: 5–120 seconds depending on repo size. \
             An already-registered repo re-indexes under its own graph key; a NEW repo requires an \
@@ -61,7 +61,7 @@ impl CihServer {
 
     #[tool(
         description = "Cancel a queued or running index job started by index_repo. A running \
-            cih-engine process is killed; a queued job never starts. Returns immediately with \
+            CIH indexing process is killed; a queued job never starts. Returns immediately with \
             status \"cancelling\" — poll index_status(job_id=...) until the status settles as \
             \"cancelled\". Jobs that already finished cannot be cancelled."
     )]

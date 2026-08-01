@@ -12,6 +12,26 @@ mod infrastructure;
 mod ports;
 mod transport;
 
+use std::path::PathBuf;
+
+/// Executable and fixed argument prefix used by server-triggered indexing.
+/// The portable product uses the current executable with no prefix; the compatibility
+/// server uses the adjacent `cih-engine` binary with no prefix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexProgram {
+    pub program: PathBuf,
+    pub prefix_args: Vec<String>,
+}
+
+impl IndexProgram {
+    pub fn legacy() -> Self {
+        Self {
+            program: crate::infrastructure::index_jobs::find_engine_binary(),
+            prefix_args: Vec::new(),
+        }
+    }
+}
+
 pub mod utils;
 pub mod viz;
 
@@ -21,7 +41,7 @@ pub mod scale_bench;
 pub(crate) mod config;
 pub(crate) mod layout;
 
-pub use bootstrap::run;
+pub use bootstrap::{run, run_with_config, ServeConfig};
 
 /// Compatibility exports for MCP argument DTOs used by downstream clients.
 pub mod args {

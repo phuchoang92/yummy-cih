@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::{middleware, routing::get};
+#[cfg(feature = "semantic")]
 use cih_embed::{EmbedModelKind, EmbedStore};
 use cih_graph_store::GraphStore;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -20,6 +21,19 @@ use tower_http::{
 /// arguments are small; this caps memory a large authed POST can force us to
 /// buffer.
 const MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+/// Explicit server inputs used by the unified executable. Environment-driven
+/// operational limits remain supported, while repository identity and the
+/// embedded graph location are fixed by the product entry point.
+#[derive(Clone, Debug)]
+pub struct ServeConfig {
+    pub bind: String,
+    pub backend: String,
+    pub store_url: String,
+    pub graph_key: String,
+    pub artifacts_dir: Option<std::path::PathBuf>,
+    pub index_program: crate::IndexProgram,
+}
 
 use crate::application::admin::resolve_patterns::ResolvePatternService;
 use crate::application::admin::RepositoryAdminService;
@@ -48,7 +62,7 @@ use crate::infrastructure::graph_store_provider::build_store;
 use crate::infrastructure::local_job_scheduler::{IndexScheduler, RegistryIndexTargetResolver};
 use crate::infrastructure::repo_context_provider::DefaultRepoContextProvider;
 use crate::infrastructure::retrieval_metrics::RuntimeRetrievalMetrics;
-use crate::infrastructure::search_provider::{SearchCache, SearchState};
+use crate::infrastructure::search_provider::{SearchCache, SearchState, SemanticStore};
 use crate::infrastructure::wiki_repository::{
     WikiBundlePageRepository, WikiBundleSearchRepository, WikiOverviewRepository, WikiSearchState,
 };
@@ -61,7 +75,7 @@ use crate::transport::mcp::{CihServer, ResponseGuardConfig};
 pub(crate) fn assemble_services(
     store: Arc<dyn GraphStore>,
     artifacts_dir: Option<std::path::PathBuf>,
-    embed_store: Option<Arc<EmbedStore>>,
+    embed_store: Option<Arc<SemanticStore>>,
     graph_key: String,
     group: Option<String>,
     backend: String,
@@ -72,6 +86,7 @@ pub(crate) fn assemble_services(
     read_file_limits: ReadFileLimits,
     grep_runtime: Arc<GrepRuntime>,
     wiki_state: WikiSearchState,
+    index_program: crate::IndexProgram,
 ) -> Arc<AppServices> {
     let search = SearchState::with_cache(
         artifacts_dir.clone(),
@@ -100,6 +115,7 @@ pub(crate) fn assemble_services(
         artifacts.clone(),
         backend,
         falkor_url,
+        index_program,
     ));
     let indexing_service = IndexingService::new(
         Arc::new(RegistryIndexTargetResolver),
@@ -180,6 +196,7 @@ pub(crate) fn assemble_services(
     })
 }
 
+#[cfg(feature = "semantic")]
 async fn initialize_optional_semantic<T, F, Fut>(
     pg_url: Option<&str>,
     inference: cih_embed::EmbedInferenceConfig,
@@ -207,6 +224,23 @@ pub async fn run() -> Result<()> {
         .init();
 
     let cfg = Config::try_from_env()?;
+    run_config(cfg, crate::IndexProgram::legacy()).await
+}
+
+/// Start the server from explicit product configuration. Tracing and runtime
+/// initialization belong to the caller so a unified executable initializes
+/// each process-wide facility exactly once.
+pub async fn run_with_config(config: ServeConfig) -> Result<()> {
+    let mut cfg = Config::try_from_env()?;
+    cfg.bind = config.bind;
+    cfg.backend = config.backend;
+    cfg.falkor_url = config.store_url;
+    cfg.graph_key = config.graph_key;
+    cfg.artifacts_dir = config.artifacts_dir;
+    run_config(cfg, config.index_program).await
+}
+
+async fn run_config(cfg: Config, index_program: crate::IndexProgram) -> Result<()> {
     let cache_budgets = CacheBudgets::from_env()?;
     let retrieval = RetrievalConfig::from_env()?;
     retrieval.validate_operation_deadline(cfg.graph_operation_timeout_ms)?;
@@ -251,6 +285,7 @@ pub async fn run() -> Result<()> {
     if let Some(artifacts_dir) = cfg.artifacts_dir.as_deref() {
         search_cache.preflight_artifacts(artifacts_dir);
     }
+    #[cfg(feature = "semantic")]
     let embed_store = initialize_optional_semantic(
         cfg.pg_url.as_deref(),
         retrieval.embed_inference,
@@ -266,6 +301,13 @@ pub async fn run() -> Result<()> {
         },
     )
     .await?;
+    #[cfg(not(feature = "semantic"))]
+    let embed_store: Option<Arc<SemanticStore>> = {
+        if cfg.pg_url.is_some() {
+            tracing::warn!("CIH_PG_URL ignored: this CIH build includes BM25 search only");
+        }
+        None
+    };
     let graph_key = cfg.graph_key.clone();
     // One shared state: the axum /wiki/search route and the MCP wiki tools use
     // the same mtime-invalidated index cache.
@@ -290,6 +332,7 @@ pub async fn run() -> Result<()> {
         },
         grep_runtime,
         wiki_state.clone(),
+        index_program,
     );
     let observability: Arc<dyn crate::ports::observability::ObservabilityPort> =
         Arc::new(crate::infrastructure::tracing_observability::TracingObservability);
@@ -397,7 +440,7 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic"))]
 mod tests {
     use super::initialize_optional_semantic;
     use std::sync::atomic::{AtomicBool, Ordering};

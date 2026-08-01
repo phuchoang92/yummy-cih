@@ -67,14 +67,15 @@ pub fn unix_now_secs() -> u64 {
 
 /// Locate the `cih-engine` binary: check alongside this binary first, then fall back to PATH.
 pub fn find_engine_binary() -> PathBuf {
+    let file_name = format!("cih-engine{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe() {
         let candidate = exe
             .parent()
             .unwrap_or(std::path::Path::new("."))
-            .join("cih-engine");
+            .join(&file_name);
         if candidate.exists() {
             return candidate;
         }
     }
-    PathBuf::from("cih-engine")
+    PathBuf::from(file_name)
 }

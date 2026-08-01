@@ -37,9 +37,20 @@ type TestClient = rmcp::service::RunningService<rmcp::RoleClient, DummyClient>;
 /// Build a `CihServer` (lazy store connection — no live DB) and serve it over an
 /// in-memory duplex pair; return a connected client.
 async fn serve_test_server() -> TestClient {
+    let (backend, url) = if cfg!(feature = "falkor") {
+        ("falkor", "redis://127.0.0.1:6380".to_string())
+    } else {
+        (
+            "ladybug",
+            std::env::temp_dir()
+                .join("cih-dispatch-test-ladybug")
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
     let store: Arc<dyn GraphStore> = cih_store_factory::connect_store(
-        "falkor",
-        "redis://127.0.0.1:6380",
+        backend,
+        &url,
         "cih_dispatch_test",
         &cih_store_factory::StoreOptions::default(),
     )
@@ -50,8 +61,8 @@ async fn serve_test_server() -> TestClient {
         None,
         "cih_dispatch_test".into(),
         None,
-        "falkor".into(),
-        "redis://127.0.0.1:6380".into(),
+        backend.into(),
+        url,
         (4, Duration::from_secs(5)),
         cih_store_factory::StoreRuntimeOptions::default(),
         SearchCache::new(4, 16 * 1024 * 1024),
@@ -61,6 +72,7 @@ async fn serve_test_server() -> TestClient {
         },
         Arc::new(GrepRuntime::for_tests()),
         WikiSearchState::new(),
+        crate::IndexProgram::legacy(),
     );
     let server = CihServer::new(services);
     let (server_t, client_t) = tokio::io::duplex(8192);

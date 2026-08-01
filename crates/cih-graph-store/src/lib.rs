@@ -1218,9 +1218,7 @@ pub trait GraphStore: Send + Sync {
     /// direct-TESTS only. Results are deterministic (`file`, `name`, then `id`
     /// tie-breaker) and deduplicated. A missing node yields an empty complete
     /// page. Adapters must push `LIMIT limit + 1` into the backend query.
-    async fn test_coverage_page(&self, _id: &NodeId, _limit: usize) -> Result<TestCoveragePage> {
-        Err(GraphStoreError::Unimplemented("test_coverage_page"))
-    }
+    async fn test_coverage_page(&self, id: &NodeId, limit: usize) -> Result<TestCoveragePage>;
 
     /// Given repo-relative file paths, return the distinct test class/method nodes
     /// that have a TESTS edge to any symbol in those files.

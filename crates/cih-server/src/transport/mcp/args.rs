@@ -214,7 +214,7 @@ pub struct DetectChangesArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GroupContractsArgs {
-    /// Group name created with `cih-engine group create`.
+    /// Group name created with `cih group create`.
     pub group: String,
     /// Optional kind filter: `all`, `http`, `http_route`, `kafka`, `kafka_topic`,
     /// `spring`, or `spring_event`. Leave empty for all.
@@ -224,7 +224,7 @@ pub struct GroupContractsArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApiImpactArgs {
-    /// Group name created with `cih-engine group create`.
+    /// Group name created with `cih group create`.
     pub group: String,
     /// HTTP method: GET, POST, PUT, DELETE, PATCH (case-insensitive).
     pub method: String,
@@ -241,9 +241,9 @@ pub struct ApiImpactArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ShapeCheckArgs {
-    /// Group name created with `cih-engine group create`.
+    /// Group name created with `cih group create`.
     pub group: String,
-    /// Provider repo name (as registered with `cih-engine analyze`).
+    /// Provider repo name (as registered with `cih analyze`).
     pub provider: String,
     /// Consumer repo name (as registered).
     pub consumer: String,
@@ -333,7 +333,7 @@ pub struct TraceFlowXArgs {
     #[serde(default)]
     pub repo: String,
     /// Repo group whose synced contracts bridge the repos
-    /// (`cih-engine group sync <group>` must have run).
+    /// (`cih group sync <group>` must have run).
     pub group: String,
     /// Per-repo traversal depth (default 6, clamped to 10, pass 0 for default).
     #[serde(default)]

@@ -353,7 +353,7 @@ fn render_contracts(contracts: &SectionState<ContractsBody>, out: &mut String) {
             }
             if body.contracts_stale {
                 out.push_str(
-                    "\n> Group contracts are stale — re-run `cih-engine group sync` and \
+                    "\n> Group contracts are stale — re-run `cih group sync` and \
                      regenerate.\n",
                 );
             }

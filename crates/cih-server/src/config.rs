@@ -8,6 +8,13 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
+#[cfg(feature = "semantic")]
+pub(crate) type SemanticInferenceConfig = cih_embed::EmbedInferenceConfig;
+
+#[cfg(not(feature = "semantic"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SemanticInferenceConfig;
+
 #[derive(Clone)]
 pub struct Config {
     pub backend: String,
@@ -104,7 +111,7 @@ impl McpResponseGuardMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RetrievalConfig {
-    pub(crate) embed_inference: cih_embed::EmbedInferenceConfig,
+    pub(crate) embed_inference: SemanticInferenceConfig,
     pub(crate) search_cache_max_entries: usize,
     pub(crate) search_score_max_concurrent: usize,
     pub(crate) search_score_queue_timeout_ms: u64,
@@ -124,6 +131,7 @@ impl RetrievalConfig {
         let cpus = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
+        #[cfg(feature = "semantic")]
         let embed_inference = embed_inference_config(
             positive_env(
                 "CIH_EMBED_INFERENCE_MAX_CONCURRENT",
@@ -138,6 +146,8 @@ impl RetrievalConfig {
                 cih_embed::DEFAULT_EMBED_INFERENCE_TIMEOUT_MS,
             )?,
         )?;
+        #[cfg(not(feature = "semantic"))]
+        let embed_inference = SemanticInferenceConfig;
         let config = Self {
             embed_inference,
             search_cache_max_entries: positive_env("CIH_SEARCH_CACHE_MAX_ENTRIES", 32usize)?,
@@ -193,11 +203,12 @@ impl RetrievalConfig {
     }
 }
 
+#[cfg(feature = "semantic")]
 fn embed_inference_config(
     max_concurrent: usize,
     queue_timeout_ms: u64,
     inference_timeout_ms: u64,
-) -> Result<cih_embed::EmbedInferenceConfig> {
+) -> Result<SemanticInferenceConfig> {
     cih_embed::EmbedInferenceConfig::new(
         max_concurrent,
         std::time::Duration::from_millis(queue_timeout_ms),
@@ -676,16 +687,18 @@ pub fn store_runtime_options(cfg: &Config) -> cih_store_factory::StoreRuntimeOpt
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_is_loopback, cursor_key_posture, embed_inference_config, parse_response_guard_mode,
-        validate_graph_deadlines, validate_grep_deadlines, validate_grep_operation_deadline,
-        validate_response_guard, CacheBudgets, McpResponseGuardMode,
-        DEFAULT_ARTIFACT_CACHE_MAX_BYTES, DEFAULT_MCP_RESPONSE_MAX_BYTES,
-        DEFAULT_MCP_RESPONSE_TARGET_BYTES, DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES,
-        DEFAULT_SEARCH_CACHE_MAX_BYTES, DEFAULT_WIKI_CACHE_MAX_BYTES,
+        bind_is_loopback, cursor_key_posture, parse_response_guard_mode, validate_graph_deadlines,
+        validate_grep_deadlines, validate_grep_operation_deadline, validate_response_guard,
+        CacheBudgets, McpResponseGuardMode, DEFAULT_ARTIFACT_CACHE_MAX_BYTES,
+        DEFAULT_MCP_RESPONSE_MAX_BYTES, DEFAULT_MCP_RESPONSE_TARGET_BYTES,
+        DEFAULT_RESOURCE_INDEX_CACHE_MAX_BYTES, DEFAULT_SEARCH_CACHE_MAX_BYTES,
+        DEFAULT_WIKI_CACHE_MAX_BYTES,
     };
 
+    #[cfg(feature = "semantic")]
     #[test]
     fn embedding_inference_settings_form_one_typed_runtime_config() {
+        use super::embed_inference_config;
         let config = embed_inference_config(2, 125, 750).unwrap();
         assert_eq!(config.max_concurrent(), 2);
         assert_eq!(config.queue_timeout().as_millis(), 125);

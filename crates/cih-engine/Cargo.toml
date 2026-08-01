@@ -19,10 +19,10 @@ cih-grouping.workspace = true
 cih-community.workspace = true
 cih-lang.workspace = true
 cih-wiki.workspace = true
-cih-embed.workspace = true
+cih-embed = { workspace = true, optional = true }
 cih-jar.workspace = true
 cih-graph-store.workspace = true
-cih-store-factory.workspace = true
+cih-store-factory = { workspace = true, default-features = false }
 cih-parse.workspace = true
 cih-resolve.workspace = true
 cih-search.workspace = true
@@ -52,5 +52,9 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 tempfile = "3"
 
 [features]
+default = ["falkor", "semantic"]
+# Keep the legacy external-service profile as the default for cih-engine.
+falkor = ["cih-store-factory/falkor"]
 # Opt-in embedded LadybugDB backend (adds the cih-ladybug adapter to the factory).
 ladybug = ["cih-store-factory/ladybug"]
+semantic = ["dep:cih-embed"]

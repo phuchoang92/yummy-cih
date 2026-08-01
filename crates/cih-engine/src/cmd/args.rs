@@ -55,6 +55,7 @@ pub enum Command {
     },
     /// Detect communities and process traces from the latest analyzed artifacts.
     Discover(DiscoverArgs),
+    #[cfg(feature = "semantic")]
     /// Embed searchable graph nodes from the latest analyzed artifacts into pgvector.
     Embed {
         /// Repository root with `.cih/artifacts/<version>` from a prior analyze/resolve run.

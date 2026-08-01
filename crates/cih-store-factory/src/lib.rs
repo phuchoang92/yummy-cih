@@ -48,9 +48,9 @@ pub struct StoreRuntimeOptions {
 pub fn default_url(backend: &str) -> String {
     match backend {
         // Embedded backend: the "url" is a filesystem root.
-        "ladybug" => std::env::var("HOME")
-            .map(|h| format!("{h}/.cih/ladybug"))
-            .unwrap_or_else(|_| ".cih-ladybug".to_string()),
+        "ladybug" => cih_core::CihPaths::discover()
+            .map(|paths| paths.graphs().to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".cih-ladybug".to_string()),
         _ => "redis://127.0.0.1:6380".to_string(),
     }
 }
@@ -94,6 +94,10 @@ pub fn connect_store_with_runtime(
     opts: &StoreOptions,
     runtime: &StoreRuntimeOptions,
 ) -> anyhow::Result<Arc<dyn GraphStore>> {
+    #[cfg(not(feature = "falkor"))]
+    let _ = runtime;
+    #[cfg(not(any(feature = "falkor", feature = "ladybug")))]
+    let _ = (url, graph_key, opts);
     match backend {
         #[cfg(feature = "falkor")]
         "falkor" => {

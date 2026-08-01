@@ -172,7 +172,12 @@ fn read_span(
             break;
         }
         let separator = usize::from(included > 0);
-        let budget = command.max_bytes.saturating_sub(content.len() + separator);
+        let remaining = command.max_bytes.saturating_sub(content.len());
+        if separator > remaining {
+            truncated = true;
+            break;
+        }
+        let budget = remaining - separator;
         if line.len() > budget {
             let prefix = char_boundary_prefix(&line, budget);
             truncated = true;
@@ -1698,6 +1703,44 @@ mod tests {
             .content
             .is_char_boundary(byte_capped.content.len()));
         assert!(byte_capped.content.starts_with("héllo"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_span_counts_blank_line_separators_against_byte_cap() {
+        let root = containment_root("span-blank-byte-cap");
+        std::fs::write(root.join("src/App.java"), "abc\n\n\n").unwrap();
+
+        let exhausted = read_span(
+            &root.join("src/App.java"),
+            SourceSpanCommand {
+                path: "src/App.java".into(),
+                start_line: 1,
+                end_line: 3,
+                max_lines: 120,
+                max_bytes: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(exhausted.content, "abc");
+        assert!(exhausted.truncated);
+        assert!(exhausted.content.len() <= 3);
+
+        let one_blank = read_span(
+            &root.join("src/App.java"),
+            SourceSpanCommand {
+                path: "src/App.java".into(),
+                start_line: 1,
+                end_line: 3,
+                max_lines: 120,
+                max_bytes: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(one_blank.content, "abc\n");
+        assert_eq!(one_blank.end_line, 2);
+        assert!(one_blank.truncated);
+        assert!(one_blank.content.len() <= 4);
         let _ = std::fs::remove_dir_all(&root);
     }
 

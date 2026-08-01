@@ -13,7 +13,7 @@ use crate::transport::mcp::args::{FeatureMapArgs, QueryArgs, SearchCodeArgs};
 #[tool_router(router = search_router, vis = "pub(crate)")]
 impl CihServer {
     #[tool(
-        description = "Hybrid search over code symbols using BM25 and optional semantic embeddings."
+        description = "Search over code symbols using BM25, optionally fused with semantic embeddings when the running CIH build enables them."
     )]
     async fn query(
         &self,
@@ -40,7 +40,8 @@ impl CihServer {
 
     #[tool(
         description = "Search for code by natural language or keywords. Returns ranked code matches \
-            with node ID, kind, name, file, and line number. Uses BM25 + semantic (RRF fusion). \
+            with node ID, kind, name, file, and line number. Always uses local BM25; builds with \
+            semantic support may add RRF-fused embedding results. \
             Use this when you need to find where a concept, feature, or business capability is \
             implemented. Example: search_code(query='rate limiting', limit=10)"
     )]

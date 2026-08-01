@@ -191,6 +191,12 @@ impl DocPackCommand {
             let group = group.trim();
             (!group.is_empty()).then(|| group.to_string())
         };
+        if let Some(group) = group.as_deref() {
+            cih_core::validate_group_name(group).map_err(|error| AppError::InvalidInput {
+                field: "group",
+                message: error.to_string(),
+            })?;
+        }
         let explicit = sections.is_some();
         let mut selected = match sections {
             None => DocSection::ALL.to_vec(),
@@ -1074,7 +1080,7 @@ impl DocPackService {
             return SectionState::Unavailable {
                 code: UnavailableCode::RuntimeError,
                 reason: "node records no source file".into(),
-                remedy: Some("re-run `cih-engine analyze` if this symbol should have one".into()),
+                remedy: Some("re-run `cih analyze` if this symbol should have one".into()),
             };
         }
         let start_line = node.range.start_line.max(1);
@@ -1127,7 +1133,7 @@ impl DocPackService {
                 code: UnavailableCode::MissingRouteProps,
                 reason: "this Route node lacks httpMethod/path properties".into(),
                 remedy: Some(format!(
-                    "re-run `cih-engine analyze {}` to repopulate route metadata",
+                    "re-run `cih analyze {}` to repopulate route metadata",
                     context.repo.registry_entry.path
                 )),
             };
@@ -1413,12 +1419,13 @@ impl DocPackService {
             reasons.push("docs_dir_missing");
         }
         let returned = pages.len();
+        let complete = reasons.is_empty();
         Ok(DocStatusOutput {
             repo: repo_name,
             docs_dir: command.docs_dir,
             pages,
             completeness: ResultBounds {
-                complete: !scan.pages_capped && !scan.entries_capped,
+                complete,
                 total_known: None,
                 returned,
                 omitted: None,
@@ -1575,11 +1582,7 @@ fn scan_docs_with_caps(
     let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
         std::collections::VecDeque::from([(docs_root.clone(), 0)]);
     'walk: while let Some((dir, depth)) = queue.pop_front() {
-        let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries.filter_map(|entry| entry.ok()).collect(),
-            Err(_) => continue,
-        };
-        entries.sort_by_key(|entry| entry.file_name());
+        let entries = read_scan_entries(repo_root, &dir)?;
         for entry in entries {
             visited_entries += 1;
             if visited_entries > caps.max_entries {
@@ -1587,9 +1590,7 @@ fn scan_docs_with_caps(
                 break 'walk;
             }
             let entry_path = entry.path();
-            let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
-                continue;
-            };
+            let metadata = scan_entry_metadata(repo_root, &entry_path)?;
             if metadata.file_type().is_symlink() {
                 continue;
             }
@@ -1631,6 +1632,48 @@ fn scan_docs_with_caps(
         }
     }
     Ok(scan)
+}
+
+fn scan_path_label(repo_root: &Path, path: &Path) -> String {
+    path.strip_prefix(repo_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn scan_io_error(
+    repo_root: &Path,
+    path: &Path,
+    operation: &'static str,
+    error: std::io::Error,
+) -> AppError {
+    AppError::Unavailable {
+        dependency: "doc_status scan",
+        message: format!(
+            "cannot {operation} '{}': {error}",
+            scan_path_label(repo_root, path)
+        ),
+        retryable: true,
+    }
+}
+
+fn read_scan_entries(repo_root: &Path, dir: &Path) -> Result<Vec<std::fs::DirEntry>, AppError> {
+    let source = std::fs::read_dir(dir)
+        .map_err(|error| scan_io_error(repo_root, dir, "read directory", error))?;
+    let mut entries = Vec::new();
+    for entry in source {
+        entries
+            .push(entry.map_err(|error| {
+                scan_io_error(repo_root, dir, "read directory entry in", error)
+            })?);
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn scan_entry_metadata(repo_root: &Path, path: &Path) -> Result<std::fs::Metadata, AppError> {
+    std::fs::symlink_metadata(path)
+        .map_err(|error| scan_io_error(repo_root, path, "read metadata for", error))
 }
 
 enum ParsedPage {

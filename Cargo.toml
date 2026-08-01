@@ -23,6 +23,7 @@
 #               cih-wiki          wiki page generation library
 #               cih-grouping      feature grouping strategies (package, LLM, embed, hybrid)
 #               cih-server        rmcp+axum MCP server; exposes all tools over Streamable HTTP
+#               cih-cli           unified portable executable
 
 [workspace]
 resolver = "2"
@@ -45,6 +46,7 @@ members = [
   "crates/cih-wiki",
   "crates/cih-server",
   "crates/cih-grouping",
+  "crates/cih-cli",
 ]
 
 [workspace.package]
@@ -109,7 +111,8 @@ cih-core = { path = "crates/cih-core" }
 cih-taint = { path = "crates/cih-taint" }
 cih-patterns = { path = "crates/cih-patterns" }
 cih-grouping = { path = "crates/cih-grouping" }
-cih-engine = { path = "crates/cih-engine" }
+cih-engine = { path = "crates/cih-engine", default-features = false }
+cih-server = { path = "crates/cih-server", default-features = false }
 cih-lang = { path = "crates/cih-lang" }
 cih-parse = { path = "crates/cih-parse" }
 cih-resolve = { path = "crates/cih-resolve" }
@@ -120,7 +123,7 @@ cih-embed = { path = "crates/cih-embed" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }
 cih-ladybug = { path = "crates/cih-ladybug" }
-cih-store-factory = { path = "crates/cih-store-factory" }
+cih-store-factory = { path = "crates/cih-store-factory", default-features = false }
 cih-wiki = { path = "crates/cih-wiki" }
 
 # Full debuginfo balloons target/ into tens of GB across builds; line tables

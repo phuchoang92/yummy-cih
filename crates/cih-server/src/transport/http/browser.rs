@@ -317,10 +317,17 @@ fn load_feature_clusters(artifacts_dir: Option<&Path>) -> anyhow::Result<Vec<Clu
         )
     })?;
     let feat_dir = cih_grouping::find_feature_artifact_dir(repo, &version).ok_or_else(|| {
-        anyhow::anyhow!(
+        #[cfg(feature = "semantic")]
+        let message = format!(
             "no embedding clusters found for graph version {version} — run \
-             `cih-engine discover <repo> --feature-strategy embed` first"
-        )
+             `cih discover <repo> --feature-strategy embed` first"
+        );
+        #[cfg(not(feature = "semantic"))]
+        let message = format!(
+            "no embedding clusters found for graph version {version}; this CIH build does not \
+             include semantic/vector clustering"
+        );
+        anyhow::anyhow!(message)
     })?;
     let mut entries = cih_grouping::read_feature_artifact(&feat_dir)?;
 
@@ -628,9 +635,20 @@ mod tests {
 
     #[tokio::test]
     async fn browser_handler_maps_application_validation_to_bad_request() {
+        let (backend, url) = if cfg!(feature = "falkor") {
+            ("falkor", "redis://127.0.0.1:6380".to_string())
+        } else {
+            (
+                "ladybug",
+                std::env::temp_dir()
+                    .join("cih-browser-boundary-test")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
         let store: std::sync::Arc<dyn GraphStore> = cih_store_factory::connect_store(
-            "falkor",
-            "redis://127.0.0.1:6380",
+            backend,
+            &url,
             "browser_boundary_test",
             &cih_store_factory::StoreOptions::default(),
         )

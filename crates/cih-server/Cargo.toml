@@ -13,10 +13,10 @@ path = "src/lib.rs"
 
 [dependencies]
 cih-core.workspace = true
-cih-embed.workspace = true
+cih-embed = { workspace = true, optional = true }
 cih-grouping.workspace = true
 cih-graph-store.workspace = true
-cih-store-factory.workspace = true
+cih-store-factory = { workspace = true, default-features = false }
 cih-search.workspace = true
 cih-wiki.workspace = true
 cih-taint.workspace = true
@@ -58,5 +58,8 @@ rmcp = { version = "0.7", features = ["client"] }
 cih-ladybug = { workspace = true }
 
 [features]
+default = ["falkor", "semantic"]
+falkor = ["cih-store-factory/falkor"]
 # Opt-in embedded LadybugDB backend (adds the cih-ladybug adapter to the factory).
 ladybug = ["cih-store-factory/ladybug"]
+semantic = ["dep:cih-embed"]

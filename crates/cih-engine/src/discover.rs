@@ -526,6 +526,7 @@ fn prune_published_discover_artifacts(repo: &Path, emit: &DiscoverOutcome) {
 
 /// A node eligible for embed feature clustering: first-party (not from a jar / not `external`) and
 /// not a test source. Third-party and test nodes are excluded so they don't form junk features.
+#[cfg(feature = "semantic")]
 fn is_project_node(n: &cih_core::Node) -> bool {
     let is_external = n
         .props
@@ -542,6 +543,7 @@ fn is_project_node(n: &cih_core::Node) -> bool {
 /// Covers the common directory and filename conventions across the supported
 /// languages — kept conservative on bare `test`/`spec` segments so a `test`
 /// *package* (e.g. Java `com/test/…`) is not mistaken for a test source.
+#[cfg(any(feature = "semantic", test))]
 fn is_test_source(f: &str) -> bool {
     // Third-party JVM artifact.
     if f.ends_with(".jar") {
@@ -576,6 +578,7 @@ fn is_test_source(f: &str) -> bool {
 /// `EmbedClusterStrategy`. All async DB work runs on `crate::runtime::block_on` — the codebase's
 /// single shared Tokio runtime — which sidesteps the nested-runtime panics a fresh
 /// `Runtime::new().block_on()` would cause if discover were ever driven from within a runtime.
+#[cfg(feature = "semantic")]
 fn build_embed_cluster_strategy(
     nodes: &[cih_core::Node],
     overrides: &DiscoverOverrides,
@@ -682,8 +685,21 @@ fn build_embed_cluster_strategy(
     )))
 }
 
+#[cfg(not(feature = "semantic"))]
+fn build_embed_cluster_strategy(
+    _nodes: &[cih_core::Node],
+    _overrides: &DiscoverOverrides,
+    _repo: &Path,
+    _source_version: &str,
+) -> Result<Box<dyn FeatureStrategy>> {
+    anyhow::bail!(
+        "this CIH build omits semantic embeddings; use package, structural, hybrid, or llm feature grouping"
+    )
+}
+
 /// Embed-clustering result: (cluster assignments as `(node_id, cluster)`,
 /// per-node centroid confidence, per-node display metadata).
+#[cfg(feature = "semantic")]
 type EmbedClusterResult = (
     Vec<(String, usize)>,
     std::collections::HashMap<String, f32>,
@@ -694,6 +710,7 @@ type EmbedClusterResult = (
 /// healing the `cih_node_vectors` backfill), stream the k-NN edges interning them
 /// to compact indices over the project subset, run weighted Leiden, then fetch
 /// per-node confidence + metadata in Postgres. The 600k vectors never enter Rust.
+#[cfg(feature = "semantic")]
 async fn compute_embed_clusters(
     pg_url: &str,
     node_ids: &[String],

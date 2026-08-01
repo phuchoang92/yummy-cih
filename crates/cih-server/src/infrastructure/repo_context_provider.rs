@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cih_embed::EmbedStore;
 use cih_graph_store::GraphStore;
 
 use crate::domain::error::AppError;
@@ -21,7 +20,7 @@ use crate::domain::repository::{
     normalize_path, resolve_entry, RepoCatalogSnapshot, RepoSelector, ResolvedRepo,
 };
 use crate::infrastructure::cache::single_flight::SingleFlight;
-use crate::infrastructure::search_provider::{SearchCache, SearchState};
+use crate::infrastructure::search_provider::{SearchCache, SearchState, SemanticStore};
 use crate::ports::repo_context_provider::{RepoContext, RepoContextProvider};
 
 trait RepoCatalog: Send + Sync {
@@ -65,7 +64,7 @@ struct LocalRepoInfrastructure {
     falkor_url: String,
     store_limits: (usize, Duration),
     store_runtime: cih_store_factory::StoreRuntimeOptions,
-    embed_store: Option<Arc<EmbedStore>>,
+    embed_store: Option<Arc<SemanticStore>>,
     search_cache: SearchCache,
 }
 
@@ -117,7 +116,7 @@ impl DefaultRepoContextProvider {
         falkor_url: String,
         store_limits: (usize, Duration),
         store_runtime: cih_store_factory::StoreRuntimeOptions,
-        embed_store: Option<Arc<EmbedStore>>,
+        embed_store: Option<Arc<SemanticStore>>,
         search_cache: SearchCache,
     ) -> Self {
         let search_key = search_cache_key(
@@ -319,9 +318,20 @@ mod tests {
     }
 
     fn lazy_store() -> Arc<dyn GraphStore> {
+        let (backend, url) = if cfg!(feature = "falkor") {
+            ("falkor", "redis://127.0.0.1:6380".to_string())
+        } else {
+            (
+                "ladybug",
+                std::env::temp_dir()
+                    .join("cih-repo-context-test")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
         cih_store_factory::connect_store(
-            "falkor",
-            "redis://127.0.0.1:6380",
+            backend,
+            &url,
             "repo_context_test",
             &cih_store_factory::StoreOptions::default(),
         )

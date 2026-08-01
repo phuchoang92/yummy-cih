@@ -16,7 +16,7 @@ use crate::transport::mcp::args::{
 impl CihServer {
     #[tool(
         description = "Return cross-service contract matches for a repo group. \
-        Run `cih-engine group sync <group>` first. Optional kind filter: \
+        Run `cih group sync <group>` first. Optional kind filter: \
         all, http/http_route, kafka/kafka_topic, spring/spring_event."
     )]
     async fn group_contracts(
@@ -36,7 +36,7 @@ impl CihServer {
     #[tool(
         description = "Return all services that consume a given HTTP route across a repo group. \
         Path variables ({id}, :id) are normalized to wildcards for matching. \
-        Run `cih-engine group sync <group>` first."
+        Run `cih group sync <group>` first."
     )]
     async fn api_impact(
         &self,
@@ -63,7 +63,7 @@ impl CihServer {
         through the group's synced contract matches (HTTP consumer → provider route → handler; \
         Kafka publisher → listener). Walks each repo's graph artifacts; the entry point resolves \
         in the start repo — pass `repo` (a group member's registry name/path) to choose it, or \
-        leave empty for the server's active graph key. Run `cih-engine group sync <group>` \
+        leave empty for the server's active graph key. Run `cih group sync <group>` \
         first. Steps carry `repo` and `via.kind` (`CONTRACT` marks a cross-repo crossing)."
     )]
     async fn trace_flow_x(
@@ -89,8 +89,8 @@ impl CihServer {
     #[tool(
         description = "Compare provider HTTP handler response DTO fields against consumer \
         field accesses for all shared HTTP contracts between two repos. \
-        Re-run `cih-engine analyze` on both repos (to populate returnType), \
-        then `cih-engine group sync <group>` before calling this."
+        Re-run `cih analyze` on both repos (to populate returnType), \
+        then `cih group sync <group>` before calling this."
     )]
     async fn shape_check(
         &self,

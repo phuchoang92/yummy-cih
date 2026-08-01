@@ -337,7 +337,7 @@ fn read_wiki_page(
     let wiki_dir = repo.canonical_path.join(".cih").join("wiki");
     let manifest_raw = std::fs::read_to_string(wiki_dir.join("manifest.json")).map_err(|_| {
         McpError::invalid_params(
-            format!("no generated wiki for '{name}' — run `cih-engine wiki` first"),
+            format!("no generated wiki for '{name}' — run `cih wiki` first"),
             None,
         )
     })?;

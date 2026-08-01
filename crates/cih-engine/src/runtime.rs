@@ -26,6 +26,9 @@ pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
 /// Build the shared runtime eagerly and return an error instead of panicking.
 /// Call this from `main` so startup failures are user-visible.
 pub fn init() -> Result<()> {
+    if RT.get().is_some() {
+        return Ok(());
+    }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
