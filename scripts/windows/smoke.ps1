@@ -17,6 +17,24 @@ $repo = Join-Path $WorkDir ("fixture repo 日本語 " + (("x" * 96) -join ""))
 if (Test-Path -LiteralPath $repo) { Remove-Item -LiteralPath $repo -Recurse -Force }
 Copy-Item -LiteralPath $Fixture -Destination $repo -Recurse
 
+function Start-CihProcess {
+    param(
+        [Parameter(Mandatory = $true)] [string[]] $Arguments,
+        [string] $WorkingDirectory
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Exe
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in $Arguments) {
+        [void] $startInfo.ArgumentList.Add($argument)
+    }
+    if ($WorkingDirectory) {
+        $startInfo.WorkingDirectory = $WorkingDirectory
+    }
+    return [Diagnostics.Process]::Start($startInfo)
+}
+
 $normalHome = $env:CIH_HOME
 $readOnlyHome = Join-Path $WorkDir "read only home"
 New-Item -ItemType Directory -Force -Path $readOnlyHome | Out-Null
@@ -60,14 +78,14 @@ $secondRepo = Join-Path $WorkDir "second fixture"
 Copy-Item -LiteralPath $Fixture -Destination $secondRepo -Recurse
 & $Exe index $secondRepo --force --no-wiki
 if ($LASTEXITCODE -ne 0) { throw "second repository index failed" }
-$ambiguous = Start-Process -FilePath $Exe -ArgumentList @("serve") -WorkingDirectory $WorkDir -PassThru -NoNewWindow
+$ambiguous = Start-CihProcess -Arguments @("serve") -WorkingDirectory $WorkDir
 if (-not $ambiguous.WaitForExit(5000)) {
     Stop-Process -Id $ambiguous.Id
     throw "cih serve without a repo did not reject an ambiguous registry"
 }
 if ($ambiguous.ExitCode -eq 0) { throw "cih serve accepted an ambiguous registry" }
 
-$server = Start-Process -FilePath $Exe -ArgumentList @("serve", $repo, "--bind", "127.0.0.1:$Port") -PassThru -NoNewWindow
+$server = Start-CihProcess -Arguments @("serve", $repo, "--bind", "127.0.0.1:$Port")
 try {
     $ready = $false
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
@@ -80,7 +98,7 @@ try {
     }
     if (-not $ready) { throw "cih serve did not become ready" }
 
-    $conflict = Start-Process -FilePath $Exe -ArgumentList @("serve", $repo, "--bind", "127.0.0.1:$Port") -PassThru -NoNewWindow
+    $conflict = Start-CihProcess -Arguments @("serve", $repo, "--bind", "127.0.0.1:$Port")
     if (-not $conflict.WaitForExit(5000)) {
         Stop-Process -Id $conflict.Id
         throw "second server did not reject a conflicting port"
