@@ -17,6 +17,22 @@ fn repo_name(path: &str) -> String {
         .to_string()
 }
 
+fn registry_path_string(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        // Analyze persists the canonical root through scan::normalize_path,
+        // which uses forward slashes even for Windows verbatim paths. Keep
+        // discover on the same registry representation while retaining the
+        // native Path for filesystem and repository-identity operations.
+        rendered.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        rendered.into_owned()
+    }
+}
+
 pub(crate) fn entry_from_analyze(emit: &EmitOutcome, graph_key: &str) -> RegistryEntry {
     let path = emit.scope_file.repo_root.clone();
     RegistryEntry {
@@ -137,7 +153,7 @@ pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) -> anyhow::Re
 /// Persist a `DiscoverOutcome` update. Returns whether a matching entry was
 /// durably updated, allowing cleanup to remain behind registry promotion.
 pub(crate) fn persist_discover(repo_path: &Path, disc: &DiscoverOutcome) -> anyhow::Result<()> {
-    let path_str = repo_path.display().to_string();
+    let path_str = registry_path_string(repo_path);
     let update = Registry::update(|reg| {
         let entry = reg.find_mut(&path_str).ok_or_else(|| {
             anyhow::anyhow!("registry entry not found for {path_str}; run analyze first")
@@ -194,6 +210,24 @@ mod tests {
             last_git_head: None,
             stats: RegistryStats::default(),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discover_registry_path_matches_analyze_windows_format() {
+        assert_eq!(
+            registry_path_string(Path::new(r"\\?\D:\CIH Home 数据\fixture repo 日本語")),
+            "//?/D:/CIH Home 数据/fixture repo 日本語"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn discover_registry_path_preserves_unix_backslash_names() {
+        assert_eq!(
+            registry_path_string(Path::new(r"/tmp/repo\literal")),
+            r"/tmp/repo\literal"
+        );
     }
 
     #[test]
