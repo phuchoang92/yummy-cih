@@ -40,6 +40,12 @@ fn write(root: &Path, rel: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
+fn has_path_component(path: &Path, expected: &str) -> bool {
+    let expected = std::ffi::OsStr::new(expected);
+    path.components()
+        .any(|component| component.as_os_str() == expected)
+}
+
 fn all_scope() -> ScopeRequest {
     ScopeRequest {
         all: true,
@@ -862,7 +868,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
         "latest_graph_artifacts must still return the analyze version after discover"
     );
     assert!(
-        latest.nodes_path.to_string_lossy().contains("artifacts/"),
+        has_path_component(&latest.nodes_path, "artifacts"),
         "latest_graph_artifacts path must be under .cih/artifacts/, not artifacts-community/"
     );
 
@@ -884,27 +890,15 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
         run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
-        discover
-            .source_artifacts
-            .nodes_path
-            .to_string_lossy()
-            .contains("artifacts/"),
+        has_path_component(&discover.source_artifacts.nodes_path, "artifacts"),
         "source_artifacts must be under .cih/artifacts/"
     );
     assert!(
-        !discover
-            .source_artifacts
-            .nodes_path
-            .to_string_lossy()
-            .contains("artifacts-community"),
+        !has_path_component(&discover.source_artifacts.nodes_path, "artifacts-community"),
         "source_artifacts must NOT be under .cih/artifacts-community/"
     );
     assert!(
-        discover
-            .artifacts
-            .nodes_path
-            .to_string_lossy()
-            .contains("artifacts-community"),
+        has_path_component(&discover.artifacts.nodes_path, "artifacts-community"),
         "discover.artifacts must be under .cih/artifacts-community/"
     );
     assert_ne!(
