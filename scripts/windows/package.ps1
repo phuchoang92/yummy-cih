@@ -21,9 +21,36 @@ foreach ($required in @($SbomPath, $NoticesPath, (Join-Path $root "LICENSE"))) {
         throw "required package input is missing: $required"
     }
 }
-if (-not (Get-Command dumpbin.exe -ErrorAction SilentlyContinue)) {
+function Resolve-Dumpbin {
+    $command = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    # GitHub's Windows image installs the MSVC tools but does not put dumpbin
+    # on PATH unless a Developer Command Prompt has initialized the process.
+    $programFilesX86 = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::ProgramFilesX86
+    )
+    $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+        $installation = @(
+            & $vswhere -latest -products * `
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                -property installationPath
+        ) | Select-Object -First 1
+        if ($installation) {
+            $tools = Join-Path $installation "VC\Tools\MSVC"
+            $candidate = Get-ChildItem -LiteralPath $tools -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName "bin\Hostx64\x64\dumpbin.exe" } |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+                Select-Object -First 1
+            if ($candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
+        }
+    }
+
     throw "dumpbin.exe is required to audit runtime DLL dependencies"
 }
+$dumpbin = Resolve-Dumpbin
 
 $output = Join-Path $root $OutputDir
 New-Item -ItemType Directory -Force -Path $output | Out-Null
@@ -53,7 +80,7 @@ $systemNames = [System.Collections.Generic.HashSet[string]]::new(
 ) | ForEach-Object { [void] $systemNames.Add($_) }
 
 function Get-Dependencies([string] $Binary) {
-    $output = & dumpbin.exe /NOLOGO /DEPENDENTS $Binary 2>&1
+    $output = & $dumpbin /NOLOGO /DEPENDENTS $Binary 2>&1
     if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $Binary`n$output" }
     @($output | ForEach-Object {
         if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] }
