@@ -390,12 +390,18 @@ impl LadybugStore {
         // Keep the current version and the most RECENTLY MODIFIED other one
         // (grace for readers) — recency by mtime, not version number, so a
         // stale higher-numbered orphan can't shadow the real previous version.
-        versions.sort_unstable_by_key(|(_, name)| {
-            std::cmp::Reverse(
-                dir.join(name)
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        versions.sort_unstable_by_key(|(number, name)| {
+            (
+                std::cmp::Reverse(
+                    dir.join(name)
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                ),
+                // Windows may assign identical mtimes to versions created in
+                // quick succession. Prefer the higher version in that tie so
+                // the retained predecessor is deterministic.
+                std::cmp::Reverse(*number),
             )
         });
         let keep: Vec<&str> = std::iter::once(current.as_str())
