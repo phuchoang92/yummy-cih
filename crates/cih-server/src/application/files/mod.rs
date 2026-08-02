@@ -259,6 +259,14 @@ pub(crate) fn canonical_contained_target(
     Ok(target)
 }
 
+/// Stable repo-relative path spelling for serialized output and diagnostics.
+/// Disk access stays on native [`Path`] values; only the wire label uses `/`
+/// so callers and glob syntax see the same form on every operating system.
+pub(crate) fn portable_relative_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 async fn read_file(
     repo_root: PathBuf,
     limits: ReadFileLimits,
@@ -1132,7 +1140,7 @@ fn scan_candidate(
         let line = String::from_utf8_lossy(&bytes);
         if regex.is_match(&line) {
             matches.push(GrepMatch {
-                file: candidate.relative.to_string_lossy().into_owned(),
+                file: portable_relative_path(&candidate.relative),
                 line: line_number,
                 text: cap_text(&line, GREP_MAX_TEXT_BYTES),
             });
@@ -1307,9 +1315,8 @@ mod tests {
 
     #[test]
     fn literal_walk_prefix_extracts_metachar_free_prefixes() {
-        let p = |g: &str| {
-            literal_walk_prefix(g).map(|(p, whole)| (p.to_string_lossy().into_owned(), whole))
-        };
+        let p =
+            |g: &str| literal_walk_prefix(g).map(|(p, whole)| (portable_relative_path(&p), whole));
         assert_eq!(
             p("src/main/App.java"),
             Some(("src/main/App.java".into(), true))

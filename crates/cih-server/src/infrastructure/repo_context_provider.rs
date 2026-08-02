@@ -389,14 +389,15 @@ mod tests {
 
     #[test]
     fn versioned_artifacts_dir_maps_to_normalized_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo/.cih/artifacts");
         assert_eq!(
-            unversioned_artifacts_dir(Path::new("/repo/.cih/artifacts/b5bb9fb09e9b7a16")),
-            PathBuf::from("/repo/.cih/artifacts")
+            unversioned_artifacts_dir(&repo.join("b5bb9fb09e9b7a16")),
+            repo
         );
-        assert_ne!(
-            unversioned_artifacts_dir(Path::new("/a/.cih/artifacts/deadbeef")),
-            unversioned_artifacts_dir(Path::new("/b/.cih/artifacts/deadbeef"))
-        );
+        let a = temp.path().join("a/.cih/artifacts/deadbeef");
+        let b = temp.path().join("b/.cih/artifacts/deadbeef");
+        assert_ne!(unversioned_artifacts_dir(&a), unversioned_artifacts_dir(&b));
     }
 
     #[test]

@@ -1198,10 +1198,13 @@ impl DocStatusCommand {
             }
         };
         let candidate = Path::new(&docs_dir);
-        if candidate.is_absolute()
-            || candidate
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
+        if candidate.has_root()
+            || candidate.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
         {
             return Err(AppError::InvalidInput {
                 field: "docs_dir",
@@ -1534,7 +1537,9 @@ fn scan_docs_with_caps(
     max_pages: usize,
     caps: WalkCaps,
 ) -> Result<DocsScan, AppError> {
-    use crate::application::files::{canonical_contained_target, ContainmentError};
+    use crate::application::files::{
+        canonical_contained_target, portable_relative_path, ContainmentError,
+    };
 
     let docs_root = match canonical_contained_target(repo_root, &repo_root.join(docs_dir)) {
         Ok(root) => root,
@@ -1606,9 +1611,8 @@ fn scan_docs_with_caps(
             let relative = entry_path
                 .strip_prefix(&docs_root)
                 .map(|suffix| Path::new(docs_dir).join(suffix))
-                .unwrap_or_else(|_| entry_path.clone())
-                .to_string_lossy()
-                .into_owned();
+                .unwrap_or_else(|_| entry_path.clone());
+            let relative = portable_relative_path(&relative);
             match parse_page(&entry_path, &relative) {
                 ParsedPage::NotCih => {}
                 ParsedPage::Candidate(candidate) => {
@@ -1635,10 +1639,7 @@ fn scan_docs_with_caps(
 }
 
 fn scan_path_label(repo_root: &Path, path: &Path) -> String {
-    path.strip_prefix(repo_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+    crate::application::files::portable_relative_path(path.strip_prefix(repo_root).unwrap_or(path))
 }
 
 fn scan_io_error(
