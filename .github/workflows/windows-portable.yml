@@ -144,6 +144,52 @@ jobs:
             -Fixture "crates\cih-engine\tests\corpus\java-spring-aop" `
             -WorkDir "$env:RUNNER_TEMP\cih smoke"
 
+      # Exercise candidate production before the slower developer matrix too.
+      # Artifacts are uploaded only after every subsequent qualification gate.
+      - name: Install SBOM and license tooling
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
+        shell: pwsh
+        run: |
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo install cargo-license --locked --version 0.7.0
+
+      - name: Generate SBOM and notices
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          cargo cyclonedx --manifest-path crates\cih-cli\Cargo.toml --format json --all --target $env:TARGET --override-filename bom
+          Move-Item -LiteralPath crates\cih-cli\bom.json -Destination dist\sbom.cdx.json
+          cargo license --authors --do-not-bundle --avoid-dev-deps | Out-File -Encoding utf8 dist\THIRD_PARTY_NOTICES.txt
+
+      - name: Optional Authenticode signing
+        if: (startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true') && env.CIH_SIGNING_CERT_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cih-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CIH_SIGNING_CERT_BASE64))
+          signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:CIH_SIGNING_CERT_PASSWORD "target\${{ env.TARGET }}\release\cih.exe"
+          $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:CIH_SIGNING_CERT_PASSWORD)
+          foreach ($script in @("scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")) {
+            $signed = Set-AuthenticodeSignature -FilePath $script -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
+            if ($signed.Status -ne "Valid") { throw "failed to sign $script`: $($signed.StatusMessage)" }
+          }
+
+      - name: Package audited portable ZIP
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
+        shell: pwsh
+        run: |
+          ./scripts/windows/package.ps1 -Version $env:PACKAGE_VERSION -SbomPath dist\sbom.cdx.json -NoticesPath dist\THIRD_PARTY_NOTICES.txt
+
+      - name: Installer lifecycle gates
+        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
+        shell: pwsh
+        run: |
+          ./scripts/windows/test-installer.ps1 `
+            -ZipPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.zip" `
+            -ChecksumPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.sha256" `
+            -WorkDir "$env:RUNNER_TEMP\installer tests"
+
       - name: Developer and portable feature matrix
         shell: pwsh
         run: |
@@ -182,50 +228,6 @@ jobs:
 
       - name: Ladybug Windows contract and publication tests
         run: cargo test --locked -p cih-ladybug --all-targets
-
-      - name: Install SBOM and license tooling
-        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
-        shell: pwsh
-        run: |
-          cargo install cargo-cyclonedx --locked
-          cargo install cargo-license --locked
-
-      - name: Generate SBOM and notices
-        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          cargo cyclonedx --manifest-path crates\cih-cli\Cargo.toml --format json --all --target $env:TARGET
-          Move-Item -LiteralPath crates\cih-cli\bom.json -Destination dist\sbom.cdx.json
-          cargo license --authors --do-not-bundle --avoid-dev-deps | Out-File -Encoding utf8 dist\THIRD_PARTY_NOTICES.txt
-
-      - name: Optional Authenticode signing
-        if: (startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true') && env.CIH_SIGNING_CERT_BASE64 != ''
-        shell: pwsh
-        run: |
-          $pfx = Join-Path $env:RUNNER_TEMP "cih-signing.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CIH_SIGNING_CERT_BASE64))
-          signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:CIH_SIGNING_CERT_PASSWORD "target\${{ env.TARGET }}\release\cih.exe"
-          $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:CIH_SIGNING_CERT_PASSWORD)
-          foreach ($script in @("scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")) {
-            $signed = Set-AuthenticodeSignature -FilePath $script -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
-            if ($signed.Status -ne "Valid") { throw "failed to sign $script`: $($signed.StatusMessage)" }
-          }
-
-      - name: Package audited portable ZIP
-        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
-        shell: pwsh
-        run: |
-          ./scripts/windows/package.ps1 -Version $env:PACKAGE_VERSION -SbomPath dist\sbom.cdx.json -NoticesPath dist\THIRD_PARTY_NOTICES.txt
-
-      - name: Installer lifecycle gates
-        if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
-        shell: pwsh
-        run: |
-          ./scripts/windows/test-installer.ps1 `
-            -ZipPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.zip" `
-            -ChecksumPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.sha256" `
-            -WorkDir "$env:RUNNER_TEMP\installer tests"
 
       - name: Write qualification record
         if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
