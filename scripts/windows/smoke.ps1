@@ -117,7 +117,9 @@ try {
         }
     } | ConvertTo-Json -Depth 8 -Compress
     $response = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:$Port/mcp" -Headers $headers -Body $initialize
-    $session = @($response.Headers.GetValues("Mcp-Session-Id")) | Select-Object -First 1
+    # PowerShell exposes HttpResponseHeaders as a generic dictionary whose
+    # values are string sequences; enumerate the selected value explicitly.
+    $session = $response.Headers["Mcp-Session-Id"] | Select-Object -First 1
     if (-not $session) { throw "MCP initialize returned no session id" }
     $headers["Mcp-Session-Id"] = [string] $session
     $notification = @{ jsonrpc = "2.0"; method = "notifications/initialized"; params = @{} } | ConvertTo-Json -Compress
