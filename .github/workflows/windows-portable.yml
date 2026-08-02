@@ -121,6 +121,29 @@ jobs:
           "LBUG_INCLUDE_DIR=$lbugDir" >> $env:GITHUB_ENV
           "PATH=$lbugDir;$env:PATH" >> $env:GITHUB_ENV
 
+      # Build and exercise the shipped profile before the slower developer
+      # matrix. Portable regressions now fail in minutes instead of after every
+      # workspace configuration has compiled and tested.
+      - name: Build portable executable
+        run: cargo build --locked --release -p cih-cli --target ${{ env.TARGET }}
+
+      - name: Verify portable dependency exclusions
+        shell: pwsh
+        run: |
+          $tree = cargo tree --locked -p cih-cli -e normal
+          $forbidden = @("cih-falkor", "cih-embed", "fastembed", "ort ", "pgvector", "tokio-postgres", "redis ")
+          foreach ($name in $forbidden) {
+            if ($tree -match [regex]::Escape($name)) { throw "portable dependency tree contains $name" }
+          }
+
+      - name: Portable offline and HTTP/MCP smoke test
+        shell: pwsh
+        run: |
+          ./scripts/windows/smoke.ps1 `
+            -Exe "target\${{ env.TARGET }}\release\cih.exe" `
+            -Fixture "crates\cih-engine\tests\corpus\java-spring-aop" `
+            -WorkDir "$env:RUNNER_TEMP\cih smoke"
+
       - name: Developer and portable feature matrix
         shell: pwsh
         run: |
@@ -159,26 +182,6 @@ jobs:
 
       - name: Ladybug Windows contract and publication tests
         run: cargo test --locked -p cih-ladybug --all-targets
-
-      - name: Build portable executable
-        run: cargo build --locked --release -p cih-cli --target ${{ env.TARGET }}
-
-      - name: Verify portable dependency exclusions
-        shell: pwsh
-        run: |
-          $tree = cargo tree --locked -p cih-cli -e normal
-          $forbidden = @("cih-falkor", "cih-embed", "fastembed", "ort ", "pgvector", "tokio-postgres", "redis ")
-          foreach ($name in $forbidden) {
-            if ($tree -match [regex]::Escape($name)) { throw "portable dependency tree contains $name" }
-          }
-
-      - name: Portable offline and HTTP/MCP smoke test
-        shell: pwsh
-        run: |
-          ./scripts/windows/smoke.ps1 `
-            -Exe "target\${{ env.TARGET }}\release\cih.exe" `
-            -Fixture "crates\cih-engine\tests\corpus\java-spring-aop" `
-            -WorkDir "$env:RUNNER_TEMP\cih smoke"
 
       - name: Install SBOM and license tooling
         if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'

@@ -135,8 +135,14 @@ try {
         $body = @{ jsonrpc = "2.0"; id = $call.id; method = "tools/call"; params = @{ name = $call.name; arguments = $call.arguments } } | ConvertTo-Json -Depth 8 -Compress
         $called = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:$Port/mcp" -Headers $headers -Body $body
         if ($called.Content -match '"isError"\s*:\s*true') { throw "$($call.name) returned an MCP error" }
-        if ($call.name -in @("search_code", "query") -and $called.Content -notmatch 'bm25') {
-            throw "$($call.name) did not report the portable BM25 source"
+        # search_code intentionally preserves its compact compatibility shape
+        # and omits SearchHit source metadata. Prove it returned ranked code,
+        # then use query's full SearchHit response to verify the BM25 backend.
+        if ($call.name -eq "search_code" -and $called.Content -notmatch 'node_id') {
+            throw "search_code returned no ranked code matches"
+        }
+        if ($call.name -eq "query" -and $called.Content -notmatch 'bm25') {
+            throw "query did not report the portable BM25 source"
         }
     }
 
