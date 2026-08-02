@@ -78,6 +78,7 @@ $systemNames = [System.Collections.Generic.HashSet[string]]::new(
     "secur32.dll", "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll",
     "ucrtbase.dll", "version.dll", "winhttp.dll", "winmm.dll", "ws2_32.dll"
 ) | ForEach-Object { [void] $systemNames.Add($_) }
+$systemDirectory = [Environment]::SystemDirectory
 
 function Get-Dependencies([string] $Binary) {
     $output = & $dumpbin /NOLOGO /DEPENDENTS $Binary 2>&1
@@ -88,9 +89,15 @@ function Get-Dependencies([string] $Binary) {
 }
 
 function Is-SystemDll([string] $Name) {
-    $Name.StartsWith("api-ms-win-", [StringComparison]::OrdinalIgnoreCase) -or
-    $Name.StartsWith("ext-ms-win-", [StringComparison]::OrdinalIgnoreCase) -or
-    $systemNames.Contains($Name)
+    # These runtimes must remain portable even when the build image happens to
+    # have a copy installed in System32.
+    if (Is-ApprovedCompanionDll $Name) { return $false }
+    if ($Name.StartsWith("api-ms-win-", [StringComparison]::OrdinalIgnoreCase) -or
+        $Name.StartsWith("ext-ms-win-", [StringComparison]::OrdinalIgnoreCase) -or
+        $systemNames.Contains($Name)) {
+        return $true
+    }
+    Test-Path -LiteralPath (Join-Path $systemDirectory $Name) -PathType Leaf
 }
 
 function Is-ApprovedCompanionDll([string] $Name) {
