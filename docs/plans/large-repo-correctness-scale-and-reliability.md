@@ -127,6 +127,33 @@ matrix, restore drill, concurrent-publisher fencing, crash matrix, and rollback
 drill also remain mandatory. The macOS Ladybug/server test link still emits the
 known duplicate-Zstd-symbol warning, although the tests pass.
 
+### 2.2 Publication-store foundation checkpoint — 2026-08-03
+
+The first bounded Phase 1 publication slice is implemented on branch
+`feat/authoritative-publication-foundation`. It adds the backend-neutral
+`GraphPublicationStore` lifecycle port and validated publication identities without
+expanding the existing `GraphStore` read/write trait. Ladybug persists immutable epoch
+records and commits `(epoch, fencing token)` through a same-directory, write-through
+atomic `CURRENT` replacement. Falkor persists the same contract through one Redis Lua
+CAS whose keys share a cluster hash slot. The store factory constructs the lifecycle
+port independently from graph-query stores.
+
+The shared contract proves expected-epoch conflicts, monotonic fencing, immutable
+epoch lookup, repository binding, durable reconnect, orphan-epoch safety, and exactly
+one winner for concurrent CAS attempts. Server repository resolution supports an
+injected authoritative store and connects the request to its immutable physical graph
+key. Production injection remains deliberately disabled until the engine coordinator
+writes authoritative records, so file/search-only requests do not gain a premature
+backend dependency.
+
+This is not Phase 1 completion. The engine publication coordinator still has to load
+directly into immutable physical graph keys, produce the manifest and validation
+digests, acquire durable publisher leases/tokens, CAS the new record, mirror the
+registry only after CAS, and reconcile abandoned candidates. The shared request
+context must expose the pinned publication identity in a separately reviewed change;
+its current shape has a high application-wide blast radius. Browser/readiness paths
+also remain on their legacy primary-store wiring until that coordinator is active.
+
 ## 3. Current baseline
 
 ### 3.1 Capabilities that must be preserved

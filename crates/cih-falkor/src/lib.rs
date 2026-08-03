@@ -25,8 +25,11 @@ use redis::Value;
 use serialize::*;
 
 mod bulk;
+mod publication;
 mod query;
 mod serialize;
+
+pub use publication::FalkorPublicationStore;
 
 /// Rows per UNWIND batch during bulk load. Larger batches cut Redis round-trips on big graphs
 /// (~2M edges at 600k nodes) at the cost of bigger per-statement strings — 4000 is a good balance.

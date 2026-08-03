@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use serde::{Deserialize, Serialize};
+pub mod publication;
 mod traversal;
 
 /// Maximum number of source nodes sent to an adapter's one-hop query.

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cih_graph_store::publication::GraphPublicationStore;
 use cih_graph_store::GraphStore;
 
 use crate::domain::error::AppError;
@@ -101,6 +102,7 @@ pub(crate) struct DefaultRepoContextProvider {
     primary_graph_key: String,
     catalog: Arc<dyn RepoCatalog>,
     infrastructure: Arc<dyn RepoInfrastructure>,
+    publication_store: Option<Arc<dyn GraphPublicationStore>>,
     graphs: SingleFlight<Arc<dyn GraphStore>, AppError>,
     searches: SingleFlight<SearchState>,
 }
@@ -134,6 +136,11 @@ impl DefaultRepoContextProvider {
                 embed_store,
                 search_cache,
             }),
+            // The engine does not publish authoritative records yet. Keep
+            // production on the legacy graph key until the coordinator lands;
+            // otherwise file/search-only requests would acquire a new backend
+            // dependency while every registry entry still lacks a pointer.
+            None,
             [(primary_graph_key, primary_store)],
             [(search_key, primary_search)],
         )
@@ -143,6 +150,7 @@ impl DefaultRepoContextProvider {
         primary_graph_key: String,
         catalog: Arc<dyn RepoCatalog>,
         infrastructure: Arc<dyn RepoInfrastructure>,
+        publication_store: Option<Arc<dyn GraphPublicationStore>>,
         graphs: impl IntoIterator<Item = (String, Arc<dyn GraphStore>)>,
         searches: impl IntoIterator<Item = (String, SearchState)>,
     ) -> Self {
@@ -150,6 +158,7 @@ impl DefaultRepoContextProvider {
             primary_graph_key,
             catalog,
             infrastructure,
+            publication_store,
             graphs: SingleFlight::with(graphs),
             searches: SingleFlight::with(searches),
         }
@@ -171,7 +180,26 @@ impl RepoContextProvider for DefaultRepoContextProvider {
 
     async fn resolve(&self, selector: RepoSelector) -> Result<Arc<RepoContext>, AppError> {
         let repo = self.resolve_repo(selector)?;
-        let graph_key = repo.graph_key().to_string();
+        let publication = match (
+            repo.registry_entry.repository_id.as_ref(),
+            self.publication_store.as_ref(),
+        ) {
+            (Some(repository_id), Some(publication_store)) => publication_store
+                .current(repository_id)
+                .await
+                .map_err(|error| AppError::Unavailable {
+                    dependency: "graph publication store",
+                    retryable: error
+                        .retry_metadata()
+                        .is_some_and(|metadata| metadata.retryable),
+                    message: error.to_string(),
+                })?,
+            _ => None,
+        };
+        let graph_key = publication.as_ref().map_or_else(
+            || repo.graph_key().to_string(),
+            |record| record.physical_graph_key.clone(),
+        );
         let graph_key_for_init = graph_key.clone();
         let infrastructure = self.infrastructure.clone();
         let store = self
@@ -209,9 +237,13 @@ fn search_cache_key(artifacts_root: Option<PathBuf>, graph_key: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cih_graph_store::publication::{
+        ArtifactVersion, CurrentPublication, GraphContentVersion, GraphPublicationEpoch,
+        ManifestDigest, PublicationCasResult, PublisherFencingToken, ValidationDigest,
+    };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::RwLock;
+    use std::sync::{Mutex, RwLock};
 
     struct TestCatalog {
         entries: RwLock<HashMap<String, cih_core::RegistryEntry>>,
@@ -278,6 +310,7 @@ mod tests {
 
     struct TestInfrastructure {
         store: Arc<dyn GraphStore>,
+        requested_graph_keys: Mutex<Vec<String>>,
         graph_calls: AtomicUsize,
         search_calls: AtomicUsize,
         fail_graph_calls: AtomicUsize,
@@ -288,7 +321,11 @@ mod tests {
 
     #[async_trait]
     impl RepoInfrastructure for TestInfrastructure {
-        async fn connect_graph(&self, _graph_key: &str) -> Result<Arc<dyn GraphStore>, AppError> {
+        async fn connect_graph(&self, graph_key: &str) -> Result<Arc<dyn GraphStore>, AppError> {
+            self.requested_graph_keys
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(graph_key.to_string());
             self.graph_calls.fetch_add(1, Ordering::SeqCst);
             let active = self.active_graph_calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active_graph_calls
@@ -364,6 +401,7 @@ mod tests {
     fn infrastructure(fail_graph_calls: usize, delay: Duration) -> Arc<TestInfrastructure> {
         Arc::new(TestInfrastructure {
             store: lazy_store(),
+            requested_graph_keys: Mutex::new(Vec::new()),
             graph_calls: AtomicUsize::new(0),
             search_calls: AtomicUsize::new(0),
             fail_graph_calls: AtomicUsize::new(fail_graph_calls),
@@ -371,6 +409,62 @@ mod tests {
             max_active_graph_calls: AtomicUsize::new(0),
             delay,
         })
+    }
+
+    struct StaticPublicationStore {
+        publication: CurrentPublication,
+    }
+
+    #[async_trait]
+    impl GraphPublicationStore for StaticPublicationStore {
+        async fn current(
+            &self,
+            repository_id: &cih_core::RepositoryId,
+        ) -> cih_graph_store::Result<Option<CurrentPublication>> {
+            Ok(
+                (&self.publication.repository_id == repository_id)
+                    .then(|| self.publication.clone()),
+            )
+        }
+
+        async fn by_epoch(
+            &self,
+            repository_id: &cih_core::RepositoryId,
+            epoch: &GraphPublicationEpoch,
+        ) -> cih_graph_store::Result<Option<CurrentPublication>> {
+            Ok((&self.publication.repository_id == repository_id
+                && &self.publication.epoch == epoch)
+                .then(|| self.publication.clone()))
+        }
+
+        async fn compare_and_swap(
+            &self,
+            _repository_id: &cih_core::RepositoryId,
+            _expected_epoch: Option<&GraphPublicationEpoch>,
+            _next: &CurrentPublication,
+            _fencing_token: PublisherFencingToken,
+        ) -> cih_graph_store::Result<PublicationCasResult> {
+            Err(cih_graph_store::GraphStoreError::Unimplemented(
+                "static publication test store is read-only",
+            ))
+        }
+    }
+
+    fn digest(byte: char) -> String {
+        std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn publication(repository_id: cih_core::RepositoryId) -> CurrentPublication {
+        CurrentPublication {
+            repository_id,
+            epoch: GraphPublicationEpoch::parse(digest('2')).unwrap(),
+            graph_content_version: GraphContentVersion::parse(digest('3')).unwrap(),
+            physical_graph_key: "repo-immutable-epoch-2".into(),
+            artifact_version: ArtifactVersion::parse(digest('4')).unwrap(),
+            graph_content_manifest_digest: ManifestDigest::parse(digest('5')).unwrap(),
+            validation_digest: ValidationDigest::parse(digest('6')).unwrap(),
+            previous_epoch: None,
+        }
     }
 
     fn provider(
@@ -382,6 +476,7 @@ mod tests {
             primary_graph_key.into(),
             catalog,
             infrastructure,
+            None,
             [],
             [],
         )
@@ -422,6 +517,38 @@ mod tests {
         assert_eq!(repo.canonical_path, temp.path().canonicalize().unwrap());
         assert_eq!(infra.graph_calls.load(Ordering::SeqCst), 0);
         assert_eq!(infra.search_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn authoritative_publication_pins_the_physical_graph_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join(".cih/artifacts/v1");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let repository_id = cih_core::RepositoryId::parse(digest('1')).unwrap();
+        let mut registry_entry = entry("repo", temp.path(), "legacy-key", &artifacts);
+        registry_entry.repository_id = Some(repository_id.clone());
+        let catalog = Arc::new(TestCatalog::new([registry_entry]));
+        let infra = infrastructure(0, Duration::ZERO);
+        let provider = DefaultRepoContextProvider::with_parts(
+            "legacy-key".into(),
+            catalog,
+            infra.clone(),
+            Some(Arc::new(StaticPublicationStore {
+                publication: publication(repository_id),
+            })),
+            [],
+            [],
+        );
+
+        provider.resolve(RepoSelector::Default).await.unwrap();
+
+        assert_eq!(
+            *infra
+                .requested_graph_keys
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec!["repo-immutable-epoch-2"]
+        );
     }
 
     #[test]

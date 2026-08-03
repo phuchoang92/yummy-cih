@@ -10,6 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use cih_graph_store::publication::GraphPublicationStore;
 use cih_graph_store::GraphStore;
 
 /// Construction-time tuning that only some consumers apply.
@@ -84,6 +85,40 @@ pub fn connect_store(
     )
 }
 
+/// Construct the backend's authoritative publication lifecycle store.
+///
+/// This is intentionally separate from [`connect_store`]: graph queries are
+/// pinned to an immutable physical key, while this port owns only epoch lookup
+/// and fenced pointer publication.
+pub fn connect_publication_store(
+    backend: &str,
+    url: &str,
+) -> anyhow::Result<Arc<dyn GraphPublicationStore>> {
+    match backend {
+        #[cfg(feature = "falkor")]
+        "falkor" => Ok(Arc::new(
+            cih_falkor::FalkorPublicationStore::connect(url)
+                .map_err(|error| anyhow::anyhow!("FalkorDB publication store: {error}"))?,
+        )),
+        #[cfg(feature = "ladybug")]
+        "ladybug" => {
+            let root = url.strip_prefix("file://").unwrap_or(url);
+            Ok(Arc::new(
+                cih_ladybug::LadybugPublicationStore::connect(root)
+                    .map_err(|error| anyhow::anyhow!("Ladybug publication store: {error}"))?,
+            ))
+        }
+        "neptune" => {
+            anyhow::bail!("neptune publication store not implemented yet — go-live target")
+        }
+        "postgres" => anyhow::bail!("postgres publication store not implemented yet"),
+        other => anyhow::bail!(
+            "unknown CIH_GRAPH_BACKEND='{other}' (compiled-in backends: {})",
+            compiled_backends().join(", ")
+        ),
+    }
+}
+
 /// Connect a store with optional runtime deadlines. This is additive to
 /// [`connect_store`] so existing engine/server callers retain their behavior
 /// until they explicitly inject bounded read settings.
@@ -151,6 +186,27 @@ mod tests {
         assert!(msg.contains("nosuch"), "names the bad backend: {msg}");
         #[cfg(feature = "falkor")]
         assert!(msg.contains("falkor"), "lists compiled-in backends: {msg}");
+    }
+
+    #[test]
+    fn unknown_publication_backend_lists_compiled_in_ones() {
+        let Err(error) = connect_publication_store("nosuch", "unused") else {
+            panic!("unknown publication backend must error");
+        };
+        let message = error.to_string();
+        assert!(message.contains("nosuch"));
+        #[cfg(feature = "ladybug")]
+        assert!(message.contains("ladybug"));
+    }
+
+    #[cfg(feature = "ladybug")]
+    #[test]
+    fn ladybug_publication_store_constructs_without_touching_disk() {
+        let root = tempfile::tempdir().expect("temp root");
+        let nested = root.path().join("not-created-yet");
+        connect_publication_store("ladybug", &nested.to_string_lossy())
+            .expect("lazy publication store");
+        assert!(!nested.exists());
     }
 
     #[cfg(feature = "falkor")]

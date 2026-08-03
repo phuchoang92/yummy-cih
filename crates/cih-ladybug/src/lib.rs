@@ -36,8 +36,11 @@ use lbug::{Connection, Database, SystemConfig};
 
 mod bulk;
 mod convert;
+mod publication;
 mod query;
 mod schema;
+
+pub use publication::LadybugPublicationStore;
 
 /// Keep the previous version around at least this long after a publish, so a
 /// reader that read `CURRENT` just before the flip can still open it.

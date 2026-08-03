@@ -16,3 +16,6 @@ default = ["falkor"]
 falkor = ["dep:cih-falkor"]
 # Opt-in (not in defaults): embedded LadybugDB backend.
 ladybug = ["dep:cih-ladybug"]
+
+[dev-dependencies]
+tempfile = "3"

@@ -724,6 +724,7 @@ dependencies = [
  "cih-graph-store",
  "csv",
  "lbug",
+ "serde",
  "serde_json",
  "strum 0.27.2",
  "tempfile",
@@ -854,6 +855,7 @@ dependencies = [
  "cih-falkor",
  "cih-graph-store",
  "cih-ladybug",
+ "tempfile",
 ]
 
 [[package]]

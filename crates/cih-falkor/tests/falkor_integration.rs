@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use cih_falkor::FalkorStore;
+use cih_falkor::{FalkorPublicationStore, FalkorStore};
 use cih_graph_store::GraphStore;
 
 fn falkor_url() -> String {
@@ -29,4 +29,24 @@ async fn falkor_passes_the_graph_store_contract() {
     })
     .await
     .expect("contract suite infrastructure");
+}
+
+#[tokio::test]
+#[ignore = "requires a live FalkorDB (FALKOR_URL, default redis://127.0.0.1:6380); run with --ignored"]
+async fn falkor_passes_the_publication_store_contract() {
+    let namespace = format!(
+        "cih:test:publication:{}:{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let store = Arc::new(
+        FalkorPublicationStore::connect_with_namespace(&falkor_url(), namespace)
+            .expect("connect publication store"),
+    );
+    cih_graph_store::publication::contract::run_publication_contract_suite(store)
+        .await
+        .expect("publication contract suite");
 }

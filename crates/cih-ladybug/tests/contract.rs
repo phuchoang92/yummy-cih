@@ -5,8 +5,14 @@
 
 use std::sync::Arc;
 
+use cih_core::RepositoryId;
+use cih_graph_store::publication::{
+    ArtifactVersion, CurrentPublication, GraphContentVersion, GraphPublicationEpoch,
+    GraphPublicationStore, ManifestDigest, PublicationCasResult, PublisherFencingToken,
+    ValidationDigest,
+};
 use cih_graph_store::GraphStore;
-use cih_ladybug::LadybugStore;
+use cih_ladybug::{LadybugPublicationStore, LadybugStore};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ladybug_passes_the_graph_store_contract() {
@@ -29,6 +35,89 @@ async fn ladybug_passes_the_graph_store_contract() {
     .expect("contract suite infrastructure");
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ladybug_passes_the_publication_store_contract() {
+    let root = tempfile::tempdir().expect("publication root");
+    let store =
+        Arc::new(LadybugPublicationStore::connect(root.path()).expect("connect publication store"));
+    cih_graph_store::publication::contract::run_publication_contract_suite(store)
+        .await
+        .expect("publication contract suite");
+}
+
+fn digest(byte: char) -> String {
+    std::iter::repeat_n(byte, 64).collect()
+}
+
+fn publication(
+    repository_id: RepositoryId,
+    epoch: char,
+    previous_epoch: Option<GraphPublicationEpoch>,
+) -> CurrentPublication {
+    CurrentPublication {
+        repository_id,
+        epoch: GraphPublicationEpoch::parse(digest(epoch)).unwrap(),
+        graph_content_version: GraphContentVersion::parse(digest('a')).unwrap(),
+        physical_graph_key: format!("immutable-{epoch}"),
+        artifact_version: ArtifactVersion::parse(digest('b')).unwrap(),
+        graph_content_manifest_digest: ManifestDigest::parse(digest('c')).unwrap(),
+        validation_digest: ValidationDigest::parse(digest('d')).unwrap(),
+        previous_epoch,
+    }
+}
+
+#[tokio::test]
+async fn ladybug_publication_pointer_survives_reconnect_and_ignores_orphan_epoch() {
+    let root = tempfile::tempdir().expect("publication root");
+    let repository_id = RepositoryId::parse(digest('1')).unwrap();
+    let first = publication(repository_id.clone(), '2', None);
+    let store = LadybugPublicationStore::connect(root.path()).unwrap();
+    assert_eq!(
+        store
+            .compare_and_swap(
+                &repository_id,
+                None,
+                &first,
+                PublisherFencingToken::new(1).unwrap(),
+            )
+            .await
+            .unwrap(),
+        PublicationCasResult::Published
+    );
+    drop(store);
+
+    let second = publication(repository_id.clone(), '3', Some(first.epoch.clone()));
+    let epoch_path = root
+        .path()
+        .join(".publications")
+        .join(repository_id.as_str())
+        .join(format!("{}.json", second.epoch.as_str()));
+    std::fs::write(&epoch_path, serde_json::to_vec(&second).unwrap()).unwrap();
+
+    let reconnected = LadybugPublicationStore::connect(root.path()).unwrap();
+    assert_eq!(
+        reconnected.current(&repository_id).await.unwrap(),
+        Some(first.clone()),
+        "an orphan epoch written before pointer CAS must not become current"
+    );
+    assert_eq!(
+        reconnected
+            .compare_and_swap(
+                &repository_id,
+                Some(&first.epoch),
+                &second,
+                PublisherFencingToken::new(2).unwrap(),
+            )
+            .await
+            .unwrap(),
+        PublicationCasResult::Published
+    );
+    assert_eq!(
+        reconnected.current(&repository_id).await.unwrap(),
+        Some(second)
+    );
 }
 
 /// Ladybug-specific: a FAILED load must leave `CURRENT` — and this store's
