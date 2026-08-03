@@ -153,6 +153,14 @@ pub enum PublicationCasResult {
 
 #[async_trait]
 pub trait GraphPublicationStore: Send + Sync {
+    /// Durably allocate a monotonically increasing token for one publication
+    /// attempt. Allocation and CAS are deliberately separate: a process that
+    /// stalls after allocation can never overwrite a later publisher.
+    async fn allocate_fencing_token(
+        &self,
+        repository_id: &RepositoryId,
+    ) -> Result<PublisherFencingToken>;
+
     async fn current(&self, repository_id: &RepositoryId) -> Result<Option<CurrentPublication>>;
 
     async fn by_epoch(
@@ -208,10 +216,14 @@ pub mod contract {
         let repository_id = RepositoryId::parse(digest('1')).map_err(GraphStoreError::Other)?;
         assert!(store.current(&repository_id).await?.is_none());
 
+        let first_allocated = store.allocate_fencing_token(&repository_id).await?;
+        let second_allocated = store.allocate_fencing_token(&repository_id).await?;
+        assert!(second_allocated > first_allocated);
+
         let first = publication(&repository_id, '2', None);
         assert_eq!(
             store
-                .compare_and_swap(&repository_id, None, &first, PublisherFencingToken::new(1)?,)
+                .compare_and_swap(&repository_id, None, &first, second_allocated)
                 .await?,
             PublicationCasResult::Published
         );
@@ -228,24 +240,20 @@ pub mod contract {
                     &repository_id,
                     Some(&first.epoch),
                     &second,
-                    PublisherFencingToken::new(1)?,
+                    second_allocated,
                 )
                 .await?,
             PublicationCasResult::StaleFencingToken {
-                current_token: PublisherFencingToken::new(1)?,
+                current_token: second_allocated,
             }
         );
         assert_eq!(store.current(&repository_id).await?, Some(first.clone()));
 
+        let third_allocated = store.allocate_fencing_token(&repository_id).await?;
         let conflicting = publication(&repository_id, '4', None);
         assert_eq!(
             store
-                .compare_and_swap(
-                    &repository_id,
-                    None,
-                    &conflicting,
-                    PublisherFencingToken::new(2)?,
-                )
+                .compare_and_swap(&repository_id, None, &conflicting, third_allocated,)
                 .await?,
             PublicationCasResult::Conflict {
                 current_epoch: Some(first.epoch.clone()),
@@ -255,12 +263,7 @@ pub mod contract {
 
         assert_eq!(
             store
-                .compare_and_swap(
-                    &repository_id,
-                    Some(&first.epoch),
-                    &second,
-                    PublisherFencingToken::new(2)?,
-                )
+                .compare_and_swap(&repository_id, Some(&first.epoch), &second, third_allocated,)
                 .await?,
             PublicationCasResult::Published
         );

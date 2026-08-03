@@ -16,8 +16,12 @@ const DEFAULT_NAMESPACE: &str = "cih:publication";
 const PUBLICATION_CAS_SCRIPT: &str = r#"
 local current_epoch = redis.call('HGET', KEYS[1], 'epoch')
 local current_fence = tonumber(redis.call('HGET', KEYS[1], 'fence') or '0')
+local allocated_fence = tonumber(redis.call('GET', KEYS[3]) or '0')
 local requested_fence = tonumber(ARGV[4])
 
+if requested_fence < allocated_fence then
+    return {2, current_epoch or '', allocated_fence}
+end
 if requested_fence <= current_fence then
     return {2, current_epoch or '', current_fence}
 end
@@ -92,6 +96,14 @@ impl FalkorPublicationStore {
         )
     }
 
+    fn fence_key(&self, repository_id: &RepositoryId) -> String {
+        format!(
+            "{}:{{{}}}:fence-sequence",
+            self.namespace,
+            repository_id.as_str()
+        )
+    }
+
     fn parse_record(
         repository_id: &RepositoryId,
         expected_epoch: Option<&GraphPublicationEpoch>,
@@ -114,6 +126,19 @@ impl FalkorPublicationStore {
 
 #[async_trait]
 impl GraphPublicationStore for FalkorPublicationStore {
+    async fn allocate_fencing_token(
+        &self,
+        repository_id: &RepositoryId,
+    ) -> Result<PublisherFencingToken> {
+        let mut connection = self.connection().await?;
+        let token: u64 = redis::cmd("INCR")
+            .arg(self.fence_key(repository_id))
+            .query_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        PublisherFencingToken::new(token)
+    }
+
     async fn current(&self, repository_id: &RepositoryId) -> Result<Option<CurrentPublication>> {
         let mut connection = self.connection().await?;
         let raw: Option<String> = redis::cmd("HGET")
@@ -169,6 +194,7 @@ impl GraphPublicationStore for FalkorPublicationStore {
         let response: (i64, String, u64) = redis::Script::new(PUBLICATION_CAS_SCRIPT)
             .key(self.current_key(repository_id))
             .key(self.epoch_key(repository_id, &next.epoch))
+            .key(self.fence_key(repository_id))
             .arg(expected_epoch.map_or("", GraphPublicationEpoch::as_str))
             .arg(next.epoch.as_str())
             .arg(record)

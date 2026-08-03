@@ -2,9 +2,10 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use cih_core::{
-    ensure_repository_id, git_head, graph_content_version, new_publication_epoch, now_rfc3339,
-    GroupRegistry, Registry, RegistryEntry, RegistryStats,
+    ensure_repository_id, git_head, now_rfc3339, GroupRegistry, Registry, RegistryEntry,
+    RegistryStats,
 };
+use cih_graph_store::publication::CurrentPublication;
 
 use crate::analyze::EmitOutcome;
 use crate::discover::DiscoverOutcome;
@@ -76,7 +77,11 @@ pub(crate) fn entry_from_analyze(emit: &EmitOutcome, graph_key: &str) -> Registr
     }
 }
 
-pub(crate) fn update_entry_from_discover(entry: &mut RegistryEntry, disc: &DiscoverOutcome) {
+pub(crate) fn update_entry_from_discover(
+    entry: &mut RegistryEntry,
+    disc: &DiscoverOutcome,
+    publication: &CurrentPublication,
+) {
     entry.community_artifacts_dir = Some(disc.artifacts_dir.display().to_string());
     entry.stats.routes = disc.route_count;
     entry.stats.routes_current = true;
@@ -84,28 +89,30 @@ pub(crate) fn update_entry_from_discover(entry: &mut RegistryEntry, disc: &Disco
     entry.stats.processes = disc.process_count;
     let base_version = disc.source_artifacts.version.as_str();
     entry.latest_artifact_version = Some(base_version.to_string());
-    entry.published_artifact_version = Some(base_version.to_string());
-    entry.published_graph_content_version = Some(graph_content_version(
-        base_version,
-        &[("community", disc.version.as_str())],
-    ));
+    entry.published_artifact_version = Some(publication.artifact_version.to_string());
+    entry.published_graph_content_version = Some(publication.graph_content_version.to_string());
     entry.stats.published_graph_report = disc.published_graph_report.clone().filter(|report| {
         entry
             .published_graph_content_version
             .as_deref()
             .is_some_and(|version| report.matches_content(version))
     });
-    entry.published_epoch = Some(new_publication_epoch());
+    entry.published_epoch = Some(publication.epoch.to_string());
 }
 
 /// Persist an `EmitOutcome` to the global registry. Returns whether the durable
 /// registry transaction succeeded so callers can defer irreversible cleanup.
-pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) -> anyhow::Result<()> {
+pub(crate) fn persist_analyze(
+    emit: &EmitOutcome,
+    graph_key: &str,
+    publication: &CurrentPublication,
+) -> anyhow::Result<()> {
     let mut entry = entry_from_analyze(emit, graph_key);
     let repo = entry.name.clone();
     let reused_artifacts = emit.reused_artifacts;
     let fresh_report = emit.published_graph_report.clone();
-    let published_content_version = graph_content_version(&emit.version, &[]);
+    let published_content_version = publication.graph_content_version.to_string();
+    let publication = publication.clone();
     let update = Registry::update(move |reg| {
         // A reused no-op run re-measures nothing and reports zeros for the
         // resolve/coverage fields. Carry the previous values forward instead of
@@ -133,10 +140,14 @@ pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) -> anyhow::Re
         let preferred_id = previous
             .as_ref()
             .and_then(|previous| previous.repository_id.as_ref());
-        entry.repository_id = Some(ensure_repository_id(Path::new(&entry.path), preferred_id)?);
-        entry.published_artifact_version = Some(emit.version.clone());
+        let repository_id = ensure_repository_id(Path::new(&entry.path), preferred_id)?;
+        if repository_id != publication.repository_id {
+            anyhow::bail!("authoritative publication repository identity does not match registry");
+        }
+        entry.repository_id = Some(repository_id);
+        entry.published_artifact_version = Some(publication.artifact_version.to_string());
         entry.published_graph_content_version = Some(published_content_version);
-        entry.published_epoch = Some(new_publication_epoch());
+        entry.published_epoch = Some(publication.epoch.to_string());
         reg.upsert(entry);
         Ok(())
     });
@@ -152,17 +163,23 @@ pub(crate) fn persist_analyze(emit: &EmitOutcome, graph_key: &str) -> anyhow::Re
 
 /// Persist a `DiscoverOutcome` update. Returns whether a matching entry was
 /// durably updated, allowing cleanup to remain behind registry promotion.
-pub(crate) fn persist_discover(repo_path: &Path, disc: &DiscoverOutcome) -> anyhow::Result<()> {
+pub(crate) fn persist_discover(
+    repo_path: &Path,
+    disc: &DiscoverOutcome,
+    publication: &CurrentPublication,
+) -> anyhow::Result<()> {
     let path_str = registry_path_string(repo_path);
-    let update = Registry::update(|reg| {
+    let publication = publication.clone();
+    let update = Registry::update(move |reg| {
         let entry = reg.find_mut(&path_str).ok_or_else(|| {
             anyhow::anyhow!("registry entry not found for {path_str}; run analyze first")
         })?;
-        entry.repository_id = Some(ensure_repository_id(
-            repo_path,
-            entry.repository_id.as_ref(),
-        )?);
-        update_entry_from_discover(entry, disc);
+        let repository_id = ensure_repository_id(repo_path, entry.repository_id.as_ref())?;
+        if repository_id != publication.repository_id {
+            anyhow::bail!("authoritative publication repository identity does not match registry");
+        }
+        entry.repository_id = Some(repository_id);
+        update_entry_from_discover(entry, disc, &publication);
         Ok(entry.name.clone())
     });
 
@@ -179,7 +196,14 @@ pub(crate) fn persist_discover(repo_path: &Path, disc: &DiscoverOutcome) -> anyh
 mod tests {
     use std::path::PathBuf;
 
-    use cih_core::{GraphArtifacts, RegistryGraphReport, RegistryStats, VersionId};
+    use cih_core::{
+        graph_content_version, new_publication_epoch, GraphArtifacts, RegistryGraphReport,
+        RegistryStats, RepositoryId, VersionId,
+    };
+    use cih_graph_store::publication::{
+        ArtifactVersion, GraphContentVersion, GraphPublicationEpoch, ManifestDigest,
+        ValidationDigest,
+    };
 
     use super::*;
     use crate::analyze::CacheStats;
@@ -191,6 +215,19 @@ mod tests {
             nodes_path: directory.join("nodes.jsonl"),
             edges_path: directory.join("edges.jsonl"),
             version: VersionId::new(version),
+        }
+    }
+
+    fn publication(artifact: &str, content: &str) -> CurrentPublication {
+        CurrentPublication {
+            repository_id: RepositoryId::parse("1".repeat(64)).unwrap(),
+            epoch: GraphPublicationEpoch::parse("2".repeat(64)).unwrap(),
+            graph_content_version: GraphContentVersion::parse(content).unwrap(),
+            physical_graph_key: "repo-physical".into(),
+            artifact_version: ArtifactVersion::parse(artifact).unwrap(),
+            graph_content_manifest_digest: ManifestDigest::parse("3".repeat(64)).unwrap(),
+            validation_digest: ValidationDigest::parse("4".repeat(64)).unwrap(),
+            previous_epoch: None,
         }
     }
 
@@ -303,10 +340,15 @@ mod tests {
             }),
         };
 
-        update_entry_from_discover(&mut entry, &outcome);
+        let content = graph_content_version("base-v2", &[("community", "community-v3")]);
+        let publication = publication(&"a".repeat(64), &content);
+        update_entry_from_discover(&mut entry, &outcome, &publication);
 
         assert_eq!(entry.latest_artifact_version.as_deref(), Some("base-v2"));
-        assert_eq!(entry.published_artifact_version.as_deref(), Some("base-v2"));
+        assert_eq!(
+            entry.published_artifact_version.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
         assert_eq!(
             entry.published_graph_content_version.as_deref(),
             Some(graph_content_version(
@@ -316,6 +358,10 @@ mod tests {
             .as_deref()
         );
         assert_ne!(entry.published_epoch, previous_epoch);
+        assert_eq!(
+            entry.published_epoch.as_deref(),
+            Some("2".repeat(64).as_str())
+        );
         assert!(entry
             .stats
             .published_graph_report

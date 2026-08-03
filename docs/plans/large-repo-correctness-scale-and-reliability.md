@@ -142,17 +142,23 @@ The shared contract proves expected-epoch conflicts, monotonic fencing, immutabl
 epoch lookup, repository binding, durable reconnect, orphan-epoch safety, and exactly
 one winner for concurrent CAS attempts. Server repository resolution supports an
 injected authoritative store and connects the request to its immutable physical graph
-key. Production injection remains deliberately disabled until the engine coordinator
-writes authoritative records, so file/search-only requests do not gain a premature
-backend dependency.
+key. The second bounded slice adds durable monotonic fencing-token allocation and one
+engine coordinator used by analyze, resolve, discover, and artifact bootstrap. It
+writes immutable component-checksummed graph-content manifests, loads a fresh
+epoch-specific physical graph, writes a physical-key-bound validation report, CAS
+publishes the record, and only then mirrors its exact epoch/artifact/content values
+into the registry. Production per-repository resolution now consults the lifecycle
+store and pins the immutable physical key, while repositories without authoritative
+records retain the legacy fallback.
 
-This is not Phase 1 completion. The engine publication coordinator still has to load
-directly into immutable physical graph keys, produce the manifest and validation
-digests, acquire durable publisher leases/tokens, CAS the new record, mirror the
-registry only after CAS, and reconcile abandoned candidates. The shared request
-context must expose the pinned publication identity in a separately reviewed change;
-its current shape has a high application-wide blast radius. Browser/readiness paths
-also remain on their legacy primary-store wiring until that coordinator is active.
+This is not Phase 1 completion. The shared request context must expose the pinned
+publication and manifest identity in a separately reviewed change; its current shape
+has a high application-wide blast radius. The eager primary browser/readiness store
+also remains on legacy wiring so server health never blocks on publication metadata
+during startup. Remaining work includes authoritative manifest transport and
+verification, operational index/probe validation, crash reconciliation and abandoned
+candidate cleanup, request-aware generation retention, rollback, full overlay
+composition (including taint/PDG), and the fault-injection/qualification matrix.
 
 ## 3. Current baseline
 

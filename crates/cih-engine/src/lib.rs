@@ -63,6 +63,7 @@ pub mod discover;
 pub mod file_cache;
 pub mod group_sync;
 pub mod llm;
+pub(crate) mod publication;
 pub mod scan;
 pub mod scope;
 pub mod settings;

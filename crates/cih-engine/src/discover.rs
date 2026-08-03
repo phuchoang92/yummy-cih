@@ -57,9 +57,8 @@ impl std::str::FromStr for FeatureStrategyKind {
 }
 use serde::Serialize;
 
-use crate::db::{load_many, LoadOutcome};
+use crate::db::LoadOutcome;
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
-use crate::DEFAULT_GRAPH_KEY;
 
 /// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
@@ -89,7 +88,7 @@ pub fn run_discover(
     repo: PathBuf,
     backend: Option<String>,
     falkor_url: Option<String>,
-    graph_key: Option<String>,
+    _graph_key: Option<String>,
     no_load: bool,
     json: bool,
     overrides: DiscoverOverrides,
@@ -101,29 +100,34 @@ pub fn run_discover(
 
     let emit = run_discover_core(&repo, &overrides)?;
 
-    let load = if no_load {
+    let (load, publication) = if no_load {
         tracing::info!("Skipping graph load (--no-load)");
-        LoadOutcome::Skipped
+        (LoadOutcome::Skipped, None)
     } else {
         let be = backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
         let resolved_url = falkor_url
             .clone()
             .unwrap_or_else(|| crate::default_db_url(be));
         let url = resolved_url.as_str();
-        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        let artifact_sets = emit.artifact_sets_for_load();
-        match load_many(be, url, key, &artifact_sets) {
-            Ok(stats) => {
+        let overlays = [("community", &emit.artifacts)];
+        match crate::publication::publish_complete_graph(
+            &repo,
+            be,
+            url,
+            &emit.source_artifacts,
+            &overlays,
+        ) {
+            Ok(published) => {
                 tracing::info!(
-                    nodes = stats.nodes,
-                    edges = stats.edges,
+                    nodes = published.stats.nodes,
+                    edges = published.stats.edges,
                     "graph discover load complete"
                 );
-                LoadOutcome::Loaded(stats)
+                (LoadOutcome::Loaded(published.stats), Some(published.record))
             }
             Err(err) => {
                 tracing::warn!(error = %err, "graph discover load failed");
-                LoadOutcome::Failed(format!("{err:#}"))
+                (LoadOutcome::Failed(format!("{err:#}")), None)
             }
         }
     };
@@ -134,8 +138,8 @@ pub fn run_discover(
         emit.print_styled(&load);
     }
 
-    if matches!(load, LoadOutcome::Loaded(_)) {
-        crate::registry::persist_discover(&repo, &emit)?;
+    if let Some(publication) = publication.as_ref() {
+        crate::registry::persist_discover(&repo, &emit, publication)?;
         prune_published_discover_artifacts(&repo, &emit);
     }
 

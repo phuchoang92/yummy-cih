@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 const PUBLICATIONS_DIR: &str = ".publications";
 const CURRENT_FILE: &str = "CURRENT";
 const LOCK_FILE: &str = ".lock";
+const FENCE_FILE: &str = "FENCE";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CurrentPointer {
@@ -93,6 +94,34 @@ impl LadybugPublicationStore {
 
 #[async_trait]
 impl GraphPublicationStore for LadybugPublicationStore {
+    async fn allocate_fencing_token(
+        &self,
+        repository_id: &RepositoryId,
+    ) -> Result<PublisherFencingToken> {
+        let _lock = self.lock_repository(repository_id)?;
+        let path = self.repository_dir(repository_id).join(FENCE_FILE);
+        let current = match std::fs::read_to_string(&path) {
+            Ok(value) => value.trim().parse::<u64>().map_err(|error| {
+                GraphStoreError::Backend(format!(
+                    "parse Ladybug publication fence {}: {error}",
+                    path.display()
+                ))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => {
+                return Err(GraphStoreError::Backend(format!(
+                    "read Ladybug publication fence {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        let next = current.checked_add(1).ok_or_else(|| {
+            GraphStoreError::Backend("Ladybug publication fence exhausted".into())
+        })?;
+        atomic_write(&path, next.to_string().as_bytes())?;
+        PublisherFencingToken::new(next)
+    }
+
     async fn current(&self, repository_id: &RepositoryId) -> Result<Option<CurrentPublication>> {
         let Some(pointer) = self.read_pointer(repository_id)? else {
             return Ok(None);
@@ -148,6 +177,16 @@ impl GraphPublicationStore for LadybugPublicationStore {
 
         let _lock = self.lock_repository(repository_id)?;
         let current = self.read_pointer(repository_id)?;
+        let allocated_fence =
+            std::fs::read_to_string(self.repository_dir(repository_id).join(FENCE_FILE))
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+        if fencing_token.get() < allocated_fence {
+            return Ok(PublicationCasResult::StaleFencingToken {
+                current_token: PublisherFencingToken::new(allocated_fence)?,
+            });
+        }
         if let Some(pointer) = current.as_ref() {
             if fencing_token <= pointer.fencing_token {
                 return Ok(PublicationCasResult::StaleFencingToken {

@@ -121,6 +121,14 @@ impl DefaultRepoContextProvider {
         embed_store: Option<Arc<SemanticStore>>,
         search_cache: SearchCache,
     ) -> Self {
+        let publication_store =
+            match cih_store_factory::connect_publication_store(&backend, &falkor_url) {
+                Ok(store) => Some(store),
+                Err(error) => {
+                    tracing::warn!(%error, "authoritative publication lookup is unavailable");
+                    None
+                }
+            };
         let search_key = search_cache_key(
             primary_artifacts_root.as_deref().map(normalize_path),
             &primary_graph_key,
@@ -136,11 +144,7 @@ impl DefaultRepoContextProvider {
                 embed_store,
                 search_cache,
             }),
-            // The engine does not publish authoritative records yet. Keep
-            // production on the legacy graph key until the coordinator lands;
-            // otherwise file/search-only requests would acquire a new backend
-            // dependency while every registry entry still lacks a pointer.
-            None,
+            publication_store,
             [(primary_graph_key, primary_store)],
             [(search_key, primary_search)],
         )
@@ -417,6 +421,13 @@ mod tests {
 
     #[async_trait]
     impl GraphPublicationStore for StaticPublicationStore {
+        async fn allocate_fencing_token(
+            &self,
+            _repository_id: &cih_core::RepositoryId,
+        ) -> cih_graph_store::Result<cih_graph_store::publication::PublisherFencingToken> {
+            cih_graph_store::publication::PublisherFencingToken::new(1)
+        }
+
         async fn current(
             &self,
             repository_id: &cih_core::RepositoryId,

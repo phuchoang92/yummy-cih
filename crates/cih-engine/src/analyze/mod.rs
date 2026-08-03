@@ -11,7 +11,7 @@ use cih_search::{
 };
 use serde::Serialize;
 
-use crate::db::{load_with_progress, LoadOutcome};
+use crate::db::LoadOutcome;
 use crate::scope::{self, ScopeFile, ScopeRequest};
 use crate::versioning::{content_version, prune_other_versions};
 use crate::{scan, DEFAULT_GRAPH_KEY};
@@ -90,9 +90,9 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         },
     )?;
 
-    let load = if flags.no_load {
+    let (load, publication) = if flags.no_load {
         tracing::info!("Skipping graph load (--no-load)");
-        LoadOutcome::Skipped
+        (LoadOutcome::Skipped, None)
     } else {
         if emit.reused_artifacts {
             tracing::info!(
@@ -105,18 +105,23 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
             .clone()
             .unwrap_or_else(|| crate::default_db_url(backend));
         let falkor_url = resolved_url.as_str();
-        let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_with_progress(backend, falkor_url, graph_key, &emit.artifacts, flags.json) {
-            Ok(stats) => {
+        match crate::publication::publish_complete_graph(
+            Path::new(&emit.scope_file.repo_root),
+            backend,
+            falkor_url,
+            &emit.artifacts,
+            &[],
+        ) {
+            Ok(published) => {
                 tracing::info!(
-                    nodes = stats.nodes,
-                    edges = stats.edges,
+                    nodes = published.stats.nodes,
+                    edges = published.stats.edges,
                     backend,
                     url = falkor_url,
-                    graph = graph_key,
+                    graph = published.record.physical_graph_key,
                     "graph bulk load complete"
                 );
-                LoadOutcome::Loaded(stats)
+                (LoadOutcome::Loaded(published.stats), Some(published.record))
             }
             Err(err) => {
                 tracing::warn!(
@@ -125,7 +130,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
                     url = falkor_url,
                     "graph bulk load failed — artifacts are on disk, re-run or load manually"
                 );
-                LoadOutcome::Failed(format!("{err:#}"))
+                (LoadOutcome::Failed(format!("{err:#}")), None)
             }
         }
     };
@@ -136,9 +141,9 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         emit.print_styled(&load);
     }
 
-    if matches!(load, LoadOutcome::Loaded(_)) {
+    if let Some(publication) = publication.as_ref() {
         let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        crate::registry::persist_analyze(&emit, graph_key)?;
+        crate::registry::persist_analyze(&emit, graph_key, publication)?;
         prune_published_analyze_artifacts(&emit);
     }
 
@@ -193,28 +198,33 @@ pub fn run_resolve(
         },
     )?;
 
-    let load = if no_load {
+    let (load, publication) = if no_load {
         tracing::info!("Skipping graph load (--no-load)");
-        LoadOutcome::Skipped
+        (LoadOutcome::Skipped, None)
     } else {
         let be = backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
         let resolved_url = falkor_url
             .clone()
             .unwrap_or_else(|| crate::default_db_url(be));
         let url = resolved_url.as_str();
-        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_with_progress(be, url, key, &emit.artifacts, json) {
-            Ok(stats) => {
+        match crate::publication::publish_complete_graph(
+            Path::new(&emit.scope_file.repo_root),
+            be,
+            url,
+            &emit.artifacts,
+            &[],
+        ) {
+            Ok(published) => {
                 tracing::info!(
-                    nodes = stats.nodes,
-                    edges = stats.edges,
+                    nodes = published.stats.nodes,
+                    edges = published.stats.edges,
                     "graph resolve load complete"
                 );
-                LoadOutcome::Loaded(stats)
+                (LoadOutcome::Loaded(published.stats), Some(published.record))
             }
             Err(err) => {
                 tracing::warn!(error = %err, "graph load failed after resolve");
-                LoadOutcome::Failed(format!("{err:#}"))
+                (LoadOutcome::Failed(format!("{err:#}")), None)
             }
         }
     };
@@ -225,9 +235,9 @@ pub fn run_resolve(
         emit.print_styled(&load);
     }
 
-    if matches!(load, LoadOutcome::Loaded(_)) {
+    if let Some(publication) = publication.as_ref() {
         let graph_key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        crate::registry::persist_analyze(&emit, graph_key)?;
+        crate::registry::persist_analyze(&emit, graph_key, publication)?;
         prune_published_analyze_artifacts(&emit);
     }
 
