@@ -33,6 +33,28 @@ The Docker/developer workflow below remains supported and uses the compatibility
 
 ---
 
+## Linux portable release
+
+Linux x64 users can run the same offline local profile on glibc 2.28 or newer.
+The release bundles `cih`, LadybugDB, and OpenSSL; it does not require Rust,
+Java, Docker, FalkorDB, Postgres, or downloaded models.
+
+```bash
+bash install.sh --version <version>
+export PATH="$HOME/.local/bin:$PATH"
+cih doctor
+cih index /path/to/repository
+cih serve /path/to/repository --open
+```
+
+A matching `phuchoang29/yummy-cih:portable-v<version>` OCI image is built from
+the qualified tarball for container use. See the
+[Linux portable guide](docs/linux-portable.md) for direct archive execution,
+rootless installation, bind mounts, persistent data, compatibility, and
+uninstall instructions. Alpine/musl is not a native target; use the OCI image.
+
+---
+
 ## Prerequisites
 
 - **Docker** and **Docker Compose** (v2)

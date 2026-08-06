@@ -1,0 +1,325 @@
+name: Linux portable
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+concurrency:
+  group: linux-portable-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  TARGET: x86_64-unknown-linux-gnu
+  LBUG_VERSION: 0.18.2
+  LBUG_SHA256: 210a018b17918a109b3b5f45326b8da9a7a21b926b2e6577312e033fae0373ef
+  OPENSSL_VERSION: 3.5.7
+  OPENSSL_SHA256: a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
+  PATCHELF_VERSION: 0.18.0
+  PATCHELF_SHA256: ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0
+  LBUG_SHARED: 1
+  LBUG_LIB_KIND: shared
+  DEV_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'dev') }}
+
+jobs:
+  qualify:
+    name: Linux x64 qualification
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    timeout-minutes: 120
+    outputs:
+      artifact-name: ${{ steps.identity.outputs.artifact-name }}
+      package-version: ${{ steps.identity.outputs.package-version }}
+      stage-name: ${{ steps.identity.outputs.stage-name }}
+      workspace-version: ${{ steps.identity.outputs.workspace-version }}
+      source-commit: ${{ steps.identity.outputs.source-commit }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools and pinned Rust
+        shell: bash
+        run: |
+          dnf install -y binutils curl diffutils findutils gcc gcc-c++ git gzip jq make perl-core pkgconfig tar which
+          patchelf_archive="$RUNNER_TEMP/patchelf-$PATCHELF_VERSION-x86_64.tar.gz"
+          curl -fL "https://github.com/NixOS/patchelf/releases/download/$PATCHELF_VERSION/patchelf-$PATCHELF_VERSION-x86_64.tar.gz" -o "$patchelf_archive"
+          echo "$PATCHELF_SHA256  $patchelf_archive" | sha256sum --check --strict
+          tar xzf "$patchelf_archive" -C /usr/local
+          patchelf --version
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve package identity
+        id: identity
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test -n "$version"
+          source_commit=$(git rev-parse HEAD)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            [[ "v$version" == "$GITHUB_REF_NAME" ]] || { echo "tag does not match workspace version" >&2; exit 1; }
+            package_version=$version
+          elif [[ "$DEV_CANDIDATE" == true ]]; then
+            package_version="$version-candidate.$GITHUB_RUN_NUMBER"
+          else
+            package_version="$version-pr.$GITHUB_RUN_NUMBER"
+          fi
+          artifact_name="linux-portable-$GITHUB_RUN_ID"
+          stage_name="cih-v$package_version-linux-x64"
+          echo "workspace-version=$version" >> "$GITHUB_OUTPUT"
+          echo "package-version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "artifact-name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "stage-name=$stage_name" >> "$GITHUB_OUTPUT"
+          echo "source-commit=$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Build pinned OpenSSL 3 shared runtime
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/openssl-$OPENSSL_VERSION.tar.gz"
+          source_dir="$RUNNER_TEMP/openssl-$OPENSSL_VERSION"
+          prefix="$RUNNER_TEMP/openssl-runtime"
+          curl -fL "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz" -o "$archive"
+          echo "$OPENSSL_SHA256  $archive" | sha256sum --check --strict
+          tar xzf "$archive" -C "$RUNNER_TEMP"
+          cd "$source_dir"
+          ./Configure linux-x86_64 shared no-tests --prefix="$prefix" --libdir=lib
+          make -s -j2 libcrypto.so.3 libssl.so.3
+          mkdir -p "$prefix/lib"
+          install -m 0755 libcrypto.so.3 libssl.so.3 "$prefix/lib/"
+          ln -s libcrypto.so.3 "$prefix/lib/libcrypto.so"
+          ln -s libssl.so.3 "$prefix/lib/libssl.so"
+          echo "OPENSSL_ROOT_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "OPENSSL_LIB_DIR=$prefix/lib" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+
+      - name: Install pinned Ladybug shared runtime
+        shell: bash
+        run: |
+          lbug_dir="$RUNNER_TEMP/lbug-$LBUG_VERSION"
+          archive="$RUNNER_TEMP/liblbug-linux-x86_64.tar.gz"
+          mkdir -p "$lbug_dir"
+          curl -fL "https://github.com/LadybugDB/ladybug/releases/download/v$LBUG_VERSION/liblbug-linux-x86_64.tar.gz" -o "$archive"
+          echo "$LBUG_SHA256  $archive" | sha256sum --check --strict
+          tar xzf "$archive" -C "$lbug_dir"
+          test -f "$lbug_dir/liblbug.so"
+          test -f "$lbug_dir/lbug.h"
+          echo "LBUG_LIBRARY_DIR=$lbug_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lbug_dir" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$lbug_dir:$OPENSSL_LIB_DIR" >> "$GITHUB_ENV"
+
+      - name: Build portable executable
+        shell: bash
+        run: cargo build --locked --release -p cih-cli --target "$TARGET"
+
+      - name: Verify portable dependency exclusions
+        shell: bash
+        run: |
+          tree=$(cargo tree --locked -p cih-cli -e normal)
+          for forbidden in cih-falkor cih-embed fastembed pgvector tokio-postgres redis; do
+            if grep -Fq "$forbidden" <<<"$tree"; then
+              echo "portable dependency tree contains $forbidden" >&2
+              exit 1
+            fi
+          done
+
+      - name: Generate SBOM and third-party notices
+        shell: bash
+        run: |
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo install cargo-license --locked --version 0.7.0
+          mkdir -p dist
+          cargo cyclonedx --manifest-path crates/cih-cli/Cargo.toml --format json --all --target "$TARGET" --override-filename bom
+          mv crates/cih-cli/bom.json dist/sbom-linux-x64.cdx.json
+          cargo license --authors --do-not-bundle --avoid-dev-deps > dist/THIRD_PARTY_NOTICES-linux-x64.txt
+
+      - name: Package and audit portable tarball
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source-commit }}
+        run: |
+          chmod +x scripts/linux/*.sh
+          scripts/linux/package.sh \
+            --version "${{ steps.identity.outputs.package-version }}" \
+            --target-dir "target/$TARGET/release" \
+            --lbug-dir "$LBUG_LIBRARY_DIR" \
+            --openssl-lib-dir "$OPENSSL_LIB_DIR" \
+            --sbom dist/sbom-linux-x64.cdx.json \
+            --notices dist/THIRD_PARTY_NOTICES-linux-x64.txt
+          install -m 0755 scripts/linux/install.sh dist/install.sh
+          install -m 0755 scripts/linux/uninstall.sh dist/uninstall.sh
+
+      - name: Portable CLI and installer smoke tests
+        shell: bash
+        run: |
+          stage="dist/${{ steps.identity.outputs.stage-name }}"
+          scripts/linux/smoke.sh \
+            --cih "$stage/bin/cih" \
+            --fixture crates/cih-engine/tests/corpus/java-spring-aop \
+            --work-dir "$RUNNER_TEMP/cih smoke"
+          scripts/linux/test-installer.sh \
+            "dist/${{ steps.identity.outputs.stage-name }}.tar.gz" \
+            "dist/${{ steps.identity.outputs.stage-name }}.sha256"
+
+      - name: Targeted Rust tests
+        shell: bash
+        run: |
+          cargo test --locked -p cih-cli --target "$TARGET"
+          cargo test --locked -p cih-ladybug --all-targets --target "$TARGET"
+
+      - name: Write qualification record
+        shell: bash
+        run: |
+          stage="${{ steps.identity.outputs.stage-name }}"
+          checksum=$(awk '{print $1}' "dist/$stage.sha256")
+          cat >"dist/linux-v${{ steps.identity.outputs.workspace-version }}-qualification.md" <<EOF
+          # Linux v${{ steps.identity.outputs.workspace-version }} qualification
+
+          - Source commit: ${{ steps.identity.outputs.source-commit }}
+          - Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - Package: $stage.tar.gz
+          - SHA-256: $checksum
+          - Target: x86_64-unknown-linux-gnu
+          - glibc baseline: 2.28
+          - Linux CI: passed
+          EOF
+
+      - name: Upload qualification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.artifact-name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  container:
+    name: Distro and OCI qualification
+    needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.qualify.outputs.artifact-name }}
+          path: dist
+
+      - name: Test bundle on supported glibc distributions
+        shell: bash
+        run: |
+          stage="$PWD/dist/${{ needs.qualify.outputs.stage-name }}"
+          fixture="$PWD/crates/cih-engine/tests/corpus/java-spring-aop"
+          for image in rockylinux:8 ubuntu:20.04 debian:12-slim; do
+            docker pull "$image"
+            docker run --rm --network none --user 1001:1001 \
+              -e HOME=/tmp/home -e CIH_HOME=/tmp/data \
+              -v "$stage:/opt/cih:ro" -v "$fixture:/fixture:ro" \
+              "$image" sh -ec '
+                mkdir -p "$HOME" "$CIH_HOME" /tmp/repo
+                cp -a /fixture/. /tmp/repo/
+                /opt/cih/bin/cih doctor
+                /opt/cih/bin/cih index /tmp/repo --force --no-wiki
+              '
+          done
+
+      - name: Build and smoke-test portable OCI image
+        id: image
+        shell: bash
+        run: |
+          image="cih-portable:${{ needs.qualify.outputs.package-version }}"
+          docker build -f Dockerfile.portable \
+            --build-arg "BUNDLE_DIR=dist/${{ needs.qualify.outputs.stage-name }}" \
+            --build-arg "CIH_VERSION=${{ needs.qualify.outputs.package-version }}" \
+            --build-arg "SOURCE_COMMIT=${{ needs.qualify.outputs.source-commit }}" \
+            -t "$image" .
+          network="cih-portable-$GITHUB_RUN_ID"
+          repo_volume="cih-portable-repo-$GITHUB_RUN_ID"
+          data_volume="cih-portable-data-$GITHUB_RUN_ID"
+          server="cih-portable-server-$GITHUB_RUN_ID"
+          cleanup() {
+            docker rm -f "$server" >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+            docker volume rm "$repo_volume" "$data_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker network create --internal "$network"
+          docker volume create "$repo_volume"
+          docker volume create "$data_volume"
+          docker run --rm -v "$repo_volume:/repo" \
+            -v "$PWD/crates/cih-engine/tests/corpus/java-spring-aop:/fixture:ro" \
+            debian:bookworm-slim sh -ec 'cp -a /fixture/. /repo/; chown -R 1001:1001 /repo'
+          docker run --rm --network none -v "$repo_volume:/repo" -v "$data_volume:/data" \
+            "$image" index /repo --force
+          docker run -d --name "$server" --network "$network" -p 18080:8080 \
+            -v "$repo_volume:/repo" -v "$data_volume:/data" \
+            "$image" serve /repo --bind 0.0.0.0:8080
+          for attempt in {1..120}; do
+            curl -fsS http://127.0.0.1:18080/ready >/dev/null && break
+            [[ $attempt == 120 ]] && { docker logs "$server"; exit 1; }
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:18080/health >/dev/null
+          curl -fsS http://127.0.0.1:18080/graph >/dev/null
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Docker Hub image
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          test -n "$DOCKERHUB_USERNAME" -a -n "$DOCKERHUB_TOKEN"
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          source_image="${{ steps.image.outputs.image }}"
+          version_tag="phuchoang29/yummy-cih:portable-v${{ needs.qualify.outputs.workspace-version }}"
+          latest_tag="phuchoang29/yummy-cih:portable-latest"
+          docker tag "$source_image" "$version_tag"
+          docker tag "$source_image" "$latest_tag"
+          docker push "$version_tag"
+          docker push "$latest_tag"
+
+  release:
+    name: Publish Linux release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [qualify, container]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: portable-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.qualify.outputs.artifact-name }}
+          path: release
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/${{ needs.qualify.outputs.stage-name }}.tar.gz
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Portable CIH release assets. Linux x64 uses glibc 2.28 or newer and operates offline with embedded LadybugDB and BM25 search.
+          files: |
+            release/${{ needs.qualify.outputs.stage-name }}.tar.gz
+            release/${{ needs.qualify.outputs.stage-name }}.sha256
+            release/sbom-linux-x64.cdx.json
+            release/THIRD_PARTY_NOTICES-linux-x64.txt
+            release/linux-v*-qualification.md
+            release/install.sh
+            release/uninstall.sh

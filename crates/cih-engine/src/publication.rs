@@ -70,6 +70,10 @@ pub(crate) fn publish_complete_graph(
         .iter()
         .map(|(kind, artifact)| (*kind, artifact.version.as_str()))
         .collect::<Vec<_>>();
+    // Analyzer artifact directories still use a legacy shortened content hash.
+    // Promote that value to the publication schema's full digest identity
+    // without changing the on-disk artifact/cache layout.
+    let artifact_version = graph_content_version(base.version.as_str(), &[]);
     let content_version = graph_content_version(base.version.as_str(), &overlay_versions);
     let manifest = build_manifest(&repository_id, base, overlays, content_version.clone())?;
     let manifest_bytes = serde_json::to_vec(&manifest)?;
@@ -108,7 +112,7 @@ pub(crate) fn publish_complete_graph(
         epoch,
         graph_content_version: GraphContentVersion::parse(content_version)?,
         physical_graph_key,
-        artifact_version: ArtifactVersion::parse(base.version.as_str())?,
+        artifact_version: ArtifactVersion::parse(artifact_version)?,
         graph_content_manifest_digest: ManifestDigest::parse(manifest_digest)?,
         validation_digest: ValidationDigest::parse(validation_digest)?,
         previous_epoch: expected_epoch.clone(),
@@ -282,5 +286,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current, second.record);
+    }
+
+    #[test]
+    fn coordinator_promotes_legacy_artifact_versions_to_publication_digests() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let graph_root = temp.path().join("graphs");
+        let graph_url = graph_root.to_string_lossy().into_owned();
+        let mut legacy_artifact = artifact(&repo.join(".cih/artifacts"), 'a', "Method:A#run/0");
+        let legacy_version = "a".repeat(16);
+        legacy_artifact.version = VersionId::new(legacy_version.clone());
+
+        let published =
+            publish_complete_graph(&repo, "ladybug", &graph_url, &legacy_artifact, &[]).unwrap();
+
+        assert_eq!(
+            published.record.artifact_version.as_str(),
+            graph_content_version(&legacy_version, &[])
+        );
     }
 }

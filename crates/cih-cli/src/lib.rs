@@ -479,9 +479,37 @@ fn check_native_runtime() -> Check {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn check_native_runtime() -> Check {
-    Check::pass("Windows native-runtime check not applicable")
+    let maps = match std::fs::read_to_string("/proc/self/maps") {
+        Ok(maps) => maps,
+        Err(error) => {
+            return Check::fail(format!("cannot inspect loaded Linux libraries: {error}"));
+        }
+    };
+    check_linux_native_runtime_maps(&maps)
+}
+
+#[cfg(target_os = "linux")]
+fn check_linux_native_runtime_maps(maps: &str) -> Check {
+    let required = ["liblbug.so", "libssl.so.3", "libcrypto.so.3"];
+    let missing = required
+        .into_iter()
+        .filter(|name| !maps.lines().any(|line| line.contains(name)))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Check::pass("Ladybug and OpenSSL 3 shared libraries are loaded")
+    } else {
+        Check::fail(format!(
+            "required Linux shared libraries are not loaded: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn check_native_runtime() -> Check {
+    Check::pass("native-runtime bundle check not applicable")
 }
 
 #[cfg(windows)]
@@ -549,5 +577,19 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_native_runtime_check_reports_missing_companions() {
+        let complete = check_linux_native_runtime_maps(
+            "/bundle/lib/liblbug.so.0.18.2\n/bundle/lib/libssl.so.3\n/bundle/lib/libcrypto.so.3",
+        );
+        assert!(complete.ok);
+
+        let incomplete = check_linux_native_runtime_maps("/bundle/lib/liblbug.so.0.18.2");
+        assert!(!incomplete.ok);
+        assert!(incomplete.message.contains("libssl.so.3"));
+        assert!(incomplete.message.contains("libcrypto.so.3"));
     }
 }
