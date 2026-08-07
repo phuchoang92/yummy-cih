@@ -253,9 +253,10 @@ jobs:
           repo_volume="cih-portable-repo-$GITHUB_RUN_ID"
           data_volume="cih-portable-data-$GITHUB_RUN_ID"
           server="cih-portable-server-$GITHUB_RUN_ID"
+          probe="cih-portable-probe-$GITHUB_RUN_ID"
           api_token="cih-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           cleanup() {
-            docker rm -f "$server" >/dev/null 2>&1 || true
+            docker rm -f "$server" "$probe" >/dev/null 2>&1 || true
             docker network rm "$network" >/dev/null 2>&1 || true
             docker volume rm "$repo_volume" "$data_volume" >/dev/null 2>&1 || true
           }
@@ -268,18 +269,35 @@ jobs:
             debian:bookworm-slim sh -ec 'cp -a /fixture/. /repo/; chown -R 1001:1001 /repo'
           docker run --rm --network none -v "$repo_volume:/repo" -v "$data_volume:/data" \
             "$image" index /repo --force
-          docker run -d --name "$server" --network "$network" -p 18080:8080 \
+          docker run -d --name "$server" --network "$network" \
             -e CIH_API_TOKEN="$api_token" \
             -v "$repo_volume:/repo" -v "$data_volume:/data" \
             "$image" serve /repo --bind 0.0.0.0:8080
+          docker run -d --name "$probe" --network "$network" debian:bookworm-slim sleep infinity
+          http_status() {
+            docker exec "$probe" perl -MIO::Socket::INET -e '
+              my ($host, $path, $token) = @ARGV;
+              my $socket = IO::Socket::INET->new(
+                PeerHost => $host,
+                PeerPort => 8080,
+                Proto => "tcp",
+                Timeout => 2,
+              ) or exit 1;
+              my $authorization = length($token) ? "Authorization: Bearer $token\r\n" : "";
+              print {$socket} "GET $path HTTP/1.0\r\nHost: $host\r\n${authorization}Connection: close\r\n\r\n";
+              my $status = <$socket> // exit 1;
+              $status =~ m{^HTTP/\S+\s+(\d{3})} or exit 1;
+              print "$1\n";
+            ' "$server" "$1" "${2:-}"
+          }
           for attempt in {1..120}; do
-            curl -fsS http://127.0.0.1:18080/ready >/dev/null && break
+            [[ "$(http_status /ready 2>/dev/null || true)" == 200 ]] && break
             [[ $attempt == 120 ]] && { docker logs "$server"; exit 1; }
             sleep 0.25
           done
-          curl -fsS http://127.0.0.1:18080/health >/dev/null
-          [[ $(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/graph) == 401 ]]
-          curl -fsS -H "Authorization: Bearer $api_token" http://127.0.0.1:18080/graph >/dev/null
+          [[ "$(http_status /health)" == 200 ]]
+          [[ "$(http_status /graph)" == 401 ]]
+          [[ "$(http_status /graph "$api_token")" == 200 ]]
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Publish Docker Hub image
