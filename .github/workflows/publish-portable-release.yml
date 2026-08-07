@@ -1,0 +1,64 @@
+name: Publish portable release
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: publish-portable-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  dispatch:
+    name: Tag and dispatch portable release builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test -n "$version"
+          tag="v$version"
+          publish=true
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            tagged_commit=$(git rev-list -n 1 "$tag")
+            if [[ "$tagged_commit" != "$GITHUB_SHA" ]]; then
+              echo "::notice::Release $tag already points to $tagged_commit; bump the workspace version to publish $GITHUB_SHA"
+              publish=false
+            fi
+          else
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git tag -a "$tag" "$GITHUB_SHA" -m "Release $tag"
+            git push origin "refs/tags/$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch Linux and Windows release builds
+        if: steps.release.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          dispatch() {
+            local workflow=$1
+            for attempt in {1..12}; do
+              gh workflow run "$workflow" --ref "$RELEASE_TAG" && return 0
+              [[ $attempt == 12 ]] && return 1
+              sleep 5
+            done
+          }
+          dispatch linux-portable.yml
+          dispatch windows-portable.yml
+          echo "Dispatched portable release builds for $RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

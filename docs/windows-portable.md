@@ -23,8 +23,8 @@ downloaded package can be installed with:
 
 ```powershell
 .\install.ps1 `
-  -ZipPath .\cih-v0.1.0-windows-x64.zip `
-  -ChecksumPath .\cih-v0.1.0-windows-x64.sha256
+  -ZipPath .\cih-windows-0.1.0.zip `
+  -ChecksumPath .\cih-windows-0.1.0.sha256
 ```
 
 Installation and upgrades refuse to replace a running installed `cih.exe`. Stop
@@ -94,9 +94,14 @@ Unicode/spaced-path index-and-serve smoke test, re-indexes while the server hold
 older graph version, audits every non-system DLL recursively, and tests install,
 reinstall, checksum rejection, PATH idempotence, uninstall preservation, and purge.
 
-Every tag release includes the ZIP, SHA-256 checksum, CycloneDX SBOM, third-party
+Every release includes the ZIP, SHA-256 checksum, CycloneDX SBOM, third-party
 notices, installer scripts, and build provenance. `SIGNING_STATUS.txt` records
 whether optional Authenticode signing was applied. Before publishing broadly, run
 the same ZIP on clean Windows 10 and Windows 11 x64 VMs with no developer tools or
 runtime prerequisites installed; hosted GitHub Windows runners are not substitutes
 for that final desktop-OS qualification.
+
+Merging a new workspace version to `master` creates its `v<version>` tag and
+dispatches the Linux and Windows release builds automatically. If that version
+tag already belongs to an earlier commit, bump `[workspace.package].version`
+before merging another release.

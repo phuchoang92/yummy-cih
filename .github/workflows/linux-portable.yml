@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main, master]
     tags: ["v*"]
 
 concurrency:
@@ -71,8 +70,8 @@ jobs:
           else
             package_version="$version-pr.$GITHUB_RUN_NUMBER"
           fi
-          artifact_name="linux-portable-$GITHUB_RUN_ID"
-          stage_name="cih-v$package_version-linux-x64"
+          artifact_name="cih-linux-$package_version"
+          stage_name="cih-linux-$package_version"
           echo "workspace-version=$version" >> "$GITHUB_OUTPUT"
           echo "package-version=$package_version" >> "$GITHUB_OUTPUT"
           echo "artifact-name=$artifact_name" >> "$GITHUB_OUTPUT"
@@ -307,7 +306,10 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          test -n "$DOCKERHUB_USERNAME" -a -n "$DOCKERHUB_TOKEN"
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "::notice::Docker Hub credentials are not configured; skipping image publication"
+            exit 0
+          fi
           echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
           source_image="${{ steps.image.outputs.image }}"
           version_tag="phuchoang29/yummy-cih:portable-v${{ needs.qualify.outputs.workspace-version }}"
@@ -344,8 +346,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
           body: |
-            Portable CIH release assets. Linux x64 uses glibc 2.28 or newer and operates offline with embedded LadybugDB and BM25 search.
+            Portable CIH release assets for Linux and Windows. Packages operate offline after download and include audited native runtimes, checksums, SBOMs, notices, and provenance. Linux x64 requires glibc 2.28 or newer.
           files: |
             release/${{ needs.qualify.outputs.stage-name }}.tar.gz
             release/${{ needs.qualify.outputs.stage-name }}.sha256

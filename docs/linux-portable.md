@@ -27,15 +27,15 @@ To install an already downloaded package:
 
 ```bash
 bash install.sh \
-  --archive ./cih-v0.1.0-linux-x64.tar.gz \
-  --checksum ./cih-v0.1.0-linux-x64.sha256
+  --archive ./cih-linux-0.1.0.tar.gz \
+  --checksum ./cih-linux-0.1.0.sha256
 ```
 
 The archive can also run without installation:
 
 ```bash
-tar xzf cih-v0.1.0-linux-x64.tar.gz
-./cih-v0.1.0-linux-x64/bin/cih doctor
+tar xzf cih-linux-0.1.0.tar.gz
+./cih-linux-0.1.0/bin/cih doctor
 ```
 
 Keep the `bin` and `lib` directories together. The executable uses a relative
@@ -109,9 +109,14 @@ when explicitly requested:
 
 ## Release contents and qualification
 
-Each tagged Linux release includes the tarball, SHA-256 checksum, CycloneDX
+Each Linux release includes the tarball, SHA-256 checksum, CycloneDX
 SBOM, third-party notices, installer/uninstaller, qualification record, and
 GitHub build provenance. CI audits every ELF dependency and rejects a package
 that requires a glibc symbol newer than 2.28 or resolves LadybugDB/OpenSSL from
 outside the bundle. The same package is exercised on Rocky Linux 8, Ubuntu
 20.04, Debian 12, and in the published OCI image.
+
+Merging a new workspace version to `master` creates its `v<version>` tag and
+dispatches the Linux and Windows release builds automatically. If that version
+tag already belongs to an earlier commit, bump `[workspace.package].version`
+before merging another release.

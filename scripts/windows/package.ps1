@@ -54,7 +54,7 @@ $dumpbin = Resolve-Dumpbin
 
 $output = Join-Path $root $OutputDir
 New-Item -ItemType Directory -Force -Path $output | Out-Null
-$stage = Join-Path $output "cih-v$Version-windows-x64"
+$stage = Join-Path $output "cih-windows-$Version"
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
@@ -163,10 +163,10 @@ if (-not $openssl -or -not $crypto) {
     throw "OpenSSL 3 companion DLLs were not discovered in the final package"
 }
 
-$zip = Join-Path $output "cih-v$Version-windows-x64.zip"
+$zip = Join-Path $output "cih-windows-$Version.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
 $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-$checksum = Join-Path $output "cih-v$Version-windows-x64.sha256"
+$checksum = Join-Path $output "cih-windows-$Version.sha256"
 Set-Content -LiteralPath $checksum -Encoding ascii -NoNewline -Value "$hash  $([IO.Path]::GetFileName($zip))`n"
 Write-Host "Packaged $zip"

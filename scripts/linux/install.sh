@@ -40,16 +40,16 @@ trap 'rm -rf -- "$temporary"' EXIT
 
 if [[ -z $archive ]]; then
   [[ -n $version ]] || { echo "pass --version or --archive" >&2; exit 2; }
-  asset="cih-v${version}-linux-x64.tar.gz"
+  asset="cih-linux-${version}.tar.gz"
   base="https://github.com/$repository/releases/download/v$version"
   archive="$temporary/$asset"
-  checksum="$temporary/cih-v${version}-linux-x64.sha256"
+  checksum="$temporary/cih-linux-${version}.sha256"
   if command -v curl >/dev/null; then
     curl -fL "$base/$asset" -o "$archive"
-    curl -fL "$base/cih-v${version}-linux-x64.sha256" -o "$checksum"
+    curl -fL "$base/cih-linux-${version}.sha256" -o "$checksum"
   elif command -v wget >/dev/null; then
     wget -O "$archive" "$base/$asset"
-    wget -O "$checksum" "$base/cih-v${version}-linux-x64.sha256"
+    wget -O "$checksum" "$base/cih-linux-${version}.sha256"
   else
     echo "curl or wget is required to download CIH" >&2
     exit 1

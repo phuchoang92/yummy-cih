@@ -57,10 +57,10 @@ binary="$target_dir/cih"
 [[ -x $binary ]] || { echo "cih executable not found at $binary" >&2; exit 1; }
 [[ -f $root/LICENSE ]] || { echo "LICENSE is missing" >&2; exit 1; }
 
-stage_name="cih-v${version}-linux-x64"
+stage_name="cih-linux-${version}"
 stage="$output_dir/$stage_name"
 case "$stage" in
-  "$output_dir"/cih-v*-linux-x64) ;;
+  "$output_dir"/cih-linux-*) ;;
   *) echo "refusing unsafe staging path: $stage" >&2; exit 1 ;;
 esac
 rm -rf -- "$stage"

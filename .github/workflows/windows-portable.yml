@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main, master]
     tags: ["v*"]
 
 concurrency:
@@ -33,6 +32,10 @@ jobs:
     name: Windows x64 qualification
     runs-on: windows-2022
     timeout-minutes: 180
+    outputs:
+      package-artifact-name: ${{ steps.identity.outputs.package-artifact-name }}
+      workspace-version: ${{ steps.identity.outputs.workspace-version }}
+      source-commit: ${{ steps.identity.outputs.source-commit }}
     env:
       CIH_SIGNING_CERT_BASE64: ${{ secrets.CIH_SIGNING_CERT_BASE64 }}
       CIH_SIGNING_CERT_PASSWORD: ${{ secrets.CIH_SIGNING_CERT_PASSWORD }}
@@ -44,6 +47,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Resolve package identity
+        id: identity
         shell: pwsh
         run: |
           $version = ((Get-Content Cargo.toml | Select-String '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value)
@@ -52,10 +56,10 @@ jobs:
           if ("${{ github.ref }}" -like "refs/tags/v*") {
             if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} does not match workspace version $version" }
             $packageVersion = $version
-            $artifactName = "windows-portable-release"
+            $artifactName = "cih-windows-$packageVersion"
           } elseif ("$env:DEV_CANDIDATE" -eq "true") {
             $packageVersion = "$version-candidate.${{ github.run_number }}"
-            $artifactName = "windows-portable-candidate-${{ github.run_number }}"
+            $artifactName = "cih-windows-$packageVersion"
           } else {
             $packageVersion = ""
             $artifactName = ""
@@ -64,6 +68,9 @@ jobs:
           "SOURCE_COMMIT=$sourceCommit" >> $env:GITHUB_ENV
           "PACKAGE_VERSION=$packageVersion" >> $env:GITHUB_ENV
           "PACKAGE_ARTIFACT_NAME=$artifactName" >> $env:GITHUB_ENV
+          "workspace-version=$version" >> $env:GITHUB_OUTPUT
+          "source-commit=$sourceCommit" >> $env:GITHUB_OUTPUT
+          "package-artifact-name=$artifactName" >> $env:GITHUB_OUTPUT
 
       - name: Show pinned toolchain
         run: rustc --version && cargo --version
@@ -186,8 +193,8 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/windows/test-installer.ps1 `
-            -ZipPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.zip" `
-            -ChecksumPath "dist\cih-v$env:PACKAGE_VERSION-windows-x64.sha256" `
+            -ZipPath "dist\cih-windows-$env:PACKAGE_VERSION.zip" `
+            -ChecksumPath "dist\cih-windows-$env:PACKAGE_VERSION.sha256" `
             -WorkDir "$env:RUNNER_TEMP\installer tests"
 
       - name: Developer and portable feature matrix
@@ -233,16 +240,16 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') || env.DEV_CANDIDATE == 'true'
         shell: pwsh
         run: |
-          $checksumPath = "dist\cih-v$env:PACKAGE_VERSION-windows-x64.sha256"
+          $checksumPath = "dist\cih-windows-$env:PACKAGE_VERSION.sha256"
           $checksum = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+')[0]
-          $signingPath = "dist\cih-v$env:PACKAGE_VERSION-windows-x64\SIGNING_STATUS.txt"
+          $signingPath = "dist\cih-windows-$env:PACKAGE_VERSION\SIGNING_STATUS.txt"
           $signing = (Get-Content -LiteralPath $signingPath -Raw).Trim()
           $record = @"
           # Windows v$env:WORKSPACE_VERSION qualification
 
           - Source commit: $env:SOURCE_COMMIT
           - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          - Package: cih-v$env:PACKAGE_VERSION-windows-x64.zip
+          - Package: cih-windows-$env:PACKAGE_VERSION.zip
           - SHA-256: $checksum
           - CI runner: windows-2022
           - Signing: $signing
@@ -260,8 +267,8 @@ jobs:
         with:
           name: ${{ env.PACKAGE_ARTIFACT_NAME }}
           path: |
-            dist/cih-v*-windows-x64.zip
-            dist/cih-v*-windows-x64.sha256
+            dist/cih-windows-*.zip
+            dist/cih-windows-*.sha256
             dist/sbom.cdx.json
             dist/THIRD_PARTY_NOTICES.txt
             dist/windows-v*-qualification.md
@@ -285,25 +292,24 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: windows-portable-release
+          name: ${{ needs.qualify.outputs.package-artifact-name }}
           path: release
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: release/dist/cih-v*-windows-x64.zip
+          subject-path: release/dist/cih-windows-*.zip
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
           body: |
-            Portable CIH release assets. Windows 10/11 x64 users can inspect `SIGNING_STATUS.txt` inside the ZIP for the Authenticode status.
-
-            Platform packages operate offline after download and include audited native runtimes, installer/uninstaller scripts, checksums, SBOM, notices, and provenance.
+            Portable CIH release assets for Linux and Windows. Packages operate offline after download and include audited native runtimes, checksums, SBOMs, notices, and provenance. Windows 10/11 x64 users can inspect `SIGNING_STATUS.txt` inside the ZIP for the Authenticode status.
           files: |
-            release/dist/cih-v*-windows-x64.zip
-            release/dist/cih-v*-windows-x64.sha256
+            release/dist/cih-windows-*.zip
+            release/dist/cih-windows-*.sha256
             release/dist/sbom.cdx.json
             release/dist/THIRD_PARTY_NOTICES.txt
             release/scripts/windows/install.ps1

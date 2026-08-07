@@ -28,12 +28,12 @@ $temporary = Join-Path ([IO.Path]::GetTempPath()) ("cih-install-" + [Guid]::NewG
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
     if ($PSCmdlet.ParameterSetName -eq "Download") {
-        $asset = "cih-v$Version-windows-x64.zip"
+        $asset = "cih-windows-$Version.zip"
         $base = "https://github.com/$Repository/releases/download/v$Version"
         $ZipPath = Join-Path $temporary $asset
-        $ChecksumPath = Join-Path $temporary "$asset.sha256"
+        $ChecksumPath = Join-Path $temporary "cih-windows-$Version.sha256"
         Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $ZipPath
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/cih-v$Version-windows-x64.sha256" -OutFile $ChecksumPath
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/cih-windows-$Version.sha256" -OutFile $ChecksumPath
     } else {
         $ZipPath = (Resolve-Path -LiteralPath $ZipPath).Path
         if (-not $ChecksumPath) {
