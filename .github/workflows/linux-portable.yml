@@ -90,7 +90,7 @@ jobs:
           tar xzf "$archive" -C "$RUNNER_TEMP"
           cd "$source_dir"
           ./Configure linux-x86_64 shared no-tests --prefix="$prefix" --libdir=lib
-          make -s -j2 libcrypto.so.3 libssl.so.3
+          make -s -j2 build_libs
           mkdir -p "$prefix/lib"
           install -m 0755 libcrypto.so.3 libssl.so.3 "$prefix/lib/"
           ln -s libcrypto.so.3 "$prefix/lib/libcrypto.so"
