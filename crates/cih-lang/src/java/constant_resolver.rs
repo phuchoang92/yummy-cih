@@ -6,13 +6,13 @@ use std::collections::HashMap;
 
 use cih_core::StringConstant;
 
-use crate::constant_resolver::{ConstantResolver, ResolutionContext};
+use crate::constant_resolver::{
+    resolve_relative_module, strip_source_extension, ConstantResolver, ResolutionContext,
+    ResolvedConstant,
+};
 
-/// Index key: `(owner_fqcn, const_name)` → folded value.
-type ConstantIndex = HashMap<(String, String), String>;
-
-/// Index of static imports: `(file_path, imported_name)` → owner_fqcn.
-type StaticImportIndex = HashMap<(String, String), String>;
+/// Index key: `(owner_fqcn, const_name)` → folded value + provenance.
+type ConstantIndex = HashMap<(String, String), ResolvedConstant>;
 
 /// Index of superclass chains: `owner_fqcn` → parent_fqcn (one level).
 type SuperIndex = HashMap<String, String>;
@@ -20,15 +20,14 @@ type SuperIndex = HashMap<String, String>;
 pub struct JavaConstantResolver {
     /// (owner_fqcn, const_name) → value
     index: ConstantIndex,
-    /// For static imports: map from (owner_fqcn, member_name) → const_name → value.
-    /// We reuse `index` for this; static imports just resolve owner_fqcn from imports.
-    /// simple_name → owner_fqcn (for single-class imports `import static pkg.Cls.NAME`)
-    #[allow(dead_code)]
-    static_import_owners: StaticImportIndex,
     /// owner_fqcn → parent_fqcn (one level, for inheritance)
     super_index: SuperIndex,
     /// type simple_name → fqcn (from imports)
     type_index: HashMap<String, String>,
+    /// const_name → the ONE non-dynamic constant with that name repo-wide, or
+    /// `None` when 2+ exist (ambiguous — never guess). Last-resort fallback for
+    /// script-language sites only (`ResolutionContext::allow_unique_fallback`).
+    unique_by_name: HashMap<String, Option<ResolvedConstant>>,
 }
 
 impl JavaConstantResolver {
@@ -37,9 +36,18 @@ impl JavaConstantResolver {
         let mut type_index: HashMap<String, String> = HashMap::new();
         let mut super_index: SuperIndex = HashMap::new();
 
+        let mut unique_by_name: HashMap<String, Option<ResolvedConstant>> = HashMap::new();
         for c in constants {
             if !c.dynamic {
-                index.insert((c.owner_fqcn.clone(), c.const_name.clone()), c.value.clone());
+                let resolved = ResolvedConstant {
+                    value: c.value.clone(),
+                    env_default: c.env_default,
+                };
+                unique_by_name
+                    .entry(c.const_name.clone())
+                    .and_modify(|slot| *slot = None)
+                    .or_insert_with(|| Some(resolved.clone()));
+                index.insert((c.owner_fqcn.clone(), c.const_name.clone()), resolved);
             }
         }
 
@@ -56,16 +64,16 @@ impl JavaConstantResolver {
 
         Self {
             index,
-            static_import_owners: StaticImportIndex::new(),
             super_index,
             type_index,
+            unique_by_name,
         }
     }
 }
 
-impl ConstantResolver for JavaConstantResolver {
-    fn resolve(&self, name: &str, ctx: &ResolutionContext<'_>) -> Option<String> {
 
+impl ConstantResolver for JavaConstantResolver {
+    fn resolve(&self, name: &str, ctx: &ResolutionContext<'_>) -> Option<ResolvedConstant> {
         // 1. Simple identifier in same class
         if !name.contains('.') {
             // Try owner class first
@@ -95,6 +103,53 @@ impl ConstantResolver for JavaConstantResolver {
             if let Some(parent_fqcn) = self.super_index.get(ctx.owner_fqcn) {
                 if let Some(v) = self.index.get(&(parent_fqcn.clone(), name.to_string())) {
                     return Some(v.clone());
+                }
+            }
+            // Script-language cross-file resolution — gated so Java/Kotlin
+            // bare-name behavior stays byte-identical.
+            if ctx.allow_unique_fallback {
+                let convention_const = crate::contracts_common::is_screaming_snake(name);
+                // (a) Module-scope sites carry `File:src/x.ts`-derived owners;
+                // constants own the extensionless module path.
+                if let Some(stripped) = strip_source_extension(ctx.owner_fqcn) {
+                    if let Some(v) = self.index.get(&(stripped.to_string(), name.to_string())) {
+                        return Some(v.clone());
+                    }
+                    // Python module owners are DOTTED (`src.app.client`) while
+                    // `File:`-derived owners are slashed — try the dotted form.
+                    if let Some(v) = self
+                        .index
+                        .get(&(stripped.replace('/', "."), name.to_string()))
+                    {
+                        return Some(v.clone());
+                    }
+                }
+                // (b) Import-scoped: the site's file imports the constant's
+                // module (TS relative specifiers; Python dotted modules).
+                // Cross-file steps require the SCREAMING_SNAKE convention —
+                // lowercase names from concat chains stay same-file only.
+                if !convention_const {
+                    return None;
+                }
+                for imp in ctx.imports {
+                    if imp.is_static {
+                        continue;
+                    }
+                    if let Some(owner) = resolve_relative_module(ctx.file, &imp.raw) {
+                        if let Some(v) = self.index.get(&(owner, name.to_string())) {
+                            return Some(v.clone());
+                        }
+                    }
+                    // Python `from services.api import X` records the dotted
+                    // module, which IS the owner scheme.
+                    if let Some(v) = self.index.get(&(imp.raw.clone(), name.to_string())) {
+                        return Some(v.clone());
+                    }
+                }
+                // (c) Last resort: the repo-wide unique name (2+ candidates
+                // → None — degrade to a wildcard, never guess).
+                if let Some(v) = self.unique_by_name.get(name).and_then(Clone::clone) {
+                    return Some(v);
                 }
             }
             return None;

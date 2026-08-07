@@ -156,3 +156,19 @@ Present the list to the user and ask which symbol they mean, then retry with the
 - Use `max_depth: 6` for library utilities that may have deep transitive callers.
 - `direction: "both"` shows the full call neighbourhood but is noisy; prefer explicit
   `upstream` for blast radius and `downstream` for dependency analysis.
+- Cross-repo blast radius: if the repo belongs to a group, `status` lists each group
+  with `contracts_synced_at` and `stale`. When `stale` is true (a member repo was
+  re-indexed since the last sync), `api_impact`/`group_contracts` results may miss or
+  misreport consumers — re-run `cih-engine group sync <group>` first. Contract tool
+  responses carry the same `contracts_synced_at`/`contracts_stale` fields.
+- `api_impact(include_callers=true, caller_depth=3)` extends each consumer row with
+  `consumer_callers` — the methods that (transitively) reach the outbound call site,
+  each with its enclosing route when one handles it. That answers "which consumer
+  *endpoints* break if this provider route changes", not just which repos.
+- `trace_flow_x(entry_point=..., group=...)` follows an execution chain **across
+  repos**: within-repo steps mirror `trace_flow`; a step with `via.kind == "CONTRACT"`
+  marks a crossing (HTTP consumer endpoint → provider route → handler, or Kafka
+  publisher → listener). Budgets: `max_depth` per repo leg (default 6),
+  `max_hops` crossings (default 3). Unreachable member repos appear in `truncated`
+  instead of failing the trace. OSGi-style providers can carry two Route rows per
+  endpoint (secured `/v1` + non-secured `/ns/v1`) — expect one crossing per row.

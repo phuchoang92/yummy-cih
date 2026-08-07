@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cih_core::{Edge, EdgeKind, Node, NodeId};
+use cih_core::{Edge, EdgeKind, Node};
 
 const TLD_CAP: u8 = 20;
 
@@ -87,57 +87,62 @@ fn own_loop_depth(id: &str, id_to_idx: &HashMap<String, usize>, nodes: &[Node]) 
         .unwrap_or(0) as u8
 }
 
-fn dfs(
-    id: &str,
-    callees: &HashMap<String, Vec<String>>,
+// Explicit-stack DFS: CALLS chains grow with repository size (a million-node
+// graph can hold call chains far deeper than the thread stack), so the
+// traversal must not recurse. Visit order, memoization, and back-edge
+// handling are identical to the recursive formulation.
+fn dfs<'a>(
+    root: &'a str,
+    callees: &'a HashMap<String, Vec<String>>,
     id_to_idx: &HashMap<String, usize>,
     nodes: &[Node],
     memo: &mut HashMap<String, u8>,
     in_flight: &mut HashSet<String>,
     recursive_ids: &mut HashSet<String>,
-) -> u8 {
-    if let Some(&cached) = memo.get(id) {
-        return cached;
-    }
-    // Back-edge: cycle detected.
-    if in_flight.contains(id) {
-        recursive_ids.insert(id.to_string());
-        return 0;
+) {
+    struct Frame<'a> {
+        id: &'a str,
+        own_ld: u8,
+        next_callee: usize,
+        max_callee_tld: u8,
     }
 
-    in_flight.insert(id.to_string());
+    in_flight.insert(root.to_string());
+    let mut stack = vec![Frame {
+        id: root,
+        own_ld: own_loop_depth(root, id_to_idx, nodes),
+        next_callee: 0,
+        max_callee_tld: 0,
+    }];
 
-    let own_ld = own_loop_depth(id, id_to_idx, nodes);
-
-    let max_callee_tld = callees
-        .get(id)
-        .map(|dsts| {
-            dsts.iter()
-                .map(|dst| {
-                    dfs(
-                        dst,
-                        callees,
-                        id_to_idx,
-                        nodes,
-                        memo,
-                        in_flight,
-                        recursive_ids,
-                    )
-                })
-                .max()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
-
-    let tld = (own_ld as u16 + max_callee_tld as u16).min(TLD_CAP as u16) as u8;
-
-    in_flight.remove(id);
-    memo.insert(id.to_string(), tld);
-    tld
-}
-
-/// Convert a raw `NodeId` string reference to a plain `&str` for map lookup.
-#[allow(dead_code)]
-fn nid_str(id: &NodeId) -> &str {
-    id.as_str()
+    while let Some(top) = stack.last_mut() {
+        let id = top.id;
+        let dsts = callees.get(id).map(Vec::as_slice).unwrap_or(&[]);
+        if let Some(dst) = dsts.get(top.next_callee) {
+            top.next_callee += 1;
+            let dst = dst.as_str();
+            if let Some(&cached) = memo.get(dst) {
+                top.max_callee_tld = top.max_callee_tld.max(cached);
+            } else if in_flight.contains(dst) {
+                // Back-edge: cycle detected; contributes 0.
+                recursive_ids.insert(dst.to_string());
+            } else {
+                in_flight.insert(dst.to_string());
+                stack.push(Frame {
+                    id: dst,
+                    own_ld: own_loop_depth(dst, id_to_idx, nodes),
+                    next_callee: 0,
+                    max_callee_tld: 0,
+                });
+            }
+        } else {
+            let tld = (top.own_ld as u16 + top.max_callee_tld as u16).min(TLD_CAP as u16) as u8;
+            in_flight.remove(id);
+            memo.insert(id.to_string(), tld);
+            stack.pop();
+            if let Some(parent) = stack.last_mut() {
+                parent.max_callee_tld = parent.max_callee_tld.max(tld);
+            }
+        }
+    }
 }

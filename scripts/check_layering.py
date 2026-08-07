@@ -31,11 +31,14 @@ LAYERS = {
     # Storage
     "cih-graph-store": 3,
     "cih-falkor": 3,
+    "cih-ladybug": 3,
+    "cih-store-factory": 3,
     # Product
     "cih-engine": 4,
     "cih-wiki": 4,
     "cih-grouping": 4,
     "cih-server": 4,
+    "cih-cli": 4,
 }
 
 DEP_RE = re.compile(r'^\s*"?(cih-[a-z-]+)"?\s*(?:=|\.workspace)')

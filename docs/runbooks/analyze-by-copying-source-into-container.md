@@ -81,9 +81,7 @@ docker run -d --name cih-box `
   -e FALKOR_URL=redis://falkordb:6379 `
   -e CIH_GRAPH_KEY=cih `
   -e CIH_PG_URL="postgres://cih:$($env:PGPW)@postgres:5432/cih" `
-  -e HF_HOME=/data/hf-cache `
   -v cih-repo:/repo `
-  -v cih-data:/data `
   -v cih-home:/home/cih/.cih `
   --entrypoint sleep `
   $IMG infinity
@@ -99,7 +97,7 @@ docker exec cih-box sh -c "ls /repo | head"        # sanity check
 ### 5. Run the pipeline inside the container
 ```powershell
 docker exec cih-box cih-engine analyze /repo --all                    # graph → FalkorDB + .cih/artifacts
-docker exec cih-box cih-engine embed /repo                            # vectors → Postgres (1st run downloads model)
+docker exec cih-box cih-engine embed /repo                            # vectors → Postgres (model is baked into the image, no download)
 docker exec cih-box cih-engine discover /repo --feature-strategy embed # communities + embed feature groups
 ```
 `CIH_PG_URL`/`FALKOR_URL` come from the container env. `discover` loads FalkorDB by default (do **not**
@@ -115,9 +113,7 @@ docker run -d --name cih-server `
   -e CIH_BIND=0.0.0.0:8080 `
   -e CIH_ARTIFACTS_DIR=/repo/.cih/artifacts `
   -e CIH_PG_URL="postgres://cih:$($env:PGPW)@postgres:5432/cih" `
-  -e HF_HOME=/data/hf-cache `
   -v cih-repo:/repo `
-  -v cih-data:/data `
   -v cih-home:/home/cih/.cih `
   $IMG
 
@@ -176,9 +172,10 @@ Then in Claude Code: `list_repos`, `search_code(query="payment")`, and
 
 ## Caveats
 
-- **Model download at `embed`** hits HuggingFace once into `/data/hf-cache` (`cih-data` volume). On a
-  locked-down network, set `-e HTTPS_PROXY=...` or pre-seed the cache; otherwise skip `embed` and use a
-  plain `discover /repo` (package strategy).
+- **Model at `embed`** — no HuggingFace access is needed: the `all-MiniLM-L6-v2` model is pre-baked
+  into the image at `/opt/cih/hf-cache` (and `HF_HOME` points there). If you run a bespoke `docker run`
+  toolbox instead of the compose services, keep `-e HF_HOME=/opt/cih/hf-cache` (its default in the
+  image) or bind-mount the repo's `vendor/hf-cache` there so `embed` stays offline.
 - **`sleep` toolbox** (not `docker compose run engine`) because `docker cp` needs a running container
   and the compose services hard-code the `${REPO_PATH}:/repo` bind mount we're avoiding.
 - **Permissions**: the step-4 `chown` covers the uid-1001 engine user (usually harmless on Docker

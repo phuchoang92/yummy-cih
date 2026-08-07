@@ -36,7 +36,7 @@ fn walk(
                 if let Some(path_node) = child.child_by_field_name("path") {
                     let raw = text(path_node, src).trim_matches('"').trim_matches('<').trim_matches('>').to_string();
                     if !raw.is_empty() {
-                        imports.push(RawImport { raw, is_static: false, is_wildcard: false, range: range_of(child) });
+                        imports.push(RawImport { raw, is_static: false, is_wildcard: false, alias: None, range: range_of(child) });
                     }
                 }
             }

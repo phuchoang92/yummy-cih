@@ -17,16 +17,53 @@
 //! else is `pub(crate)`.
 
 #[doc(hidden)]
+pub const DEFAULT_BACKEND: &str = "falkor";
+#[doc(hidden)]
 pub const DEFAULT_FALKOR_URL: &str = "redis://127.0.0.1:6380";
 #[doc(hidden)]
 pub const DEFAULT_GRAPH_KEY: &str = "cih";
+
+/// Default DB url for a backend when `--falkor-url`/`FALKOR_URL` is not set.
+/// Single source of truth lives in the factory crate (shared with the server).
+pub fn default_db_url(backend: &str) -> String {
+    cih_store_factory::default_url(backend)
+}
+
+/// Resolve the Postgres URL: an explicit flag value wins, else `$CIH_PG_URL`.
+/// Returns `None` when neither is set; callers add their own context message.
+pub fn resolve_pg_url(explicit: Option<String>) -> Option<String> {
+    explicit.or_else(|| std::env::var("CIH_PG_URL").ok())
+}
+
+/// Initialize the engine's process-wide runtime without parsing CLI arguments.
+/// Unified products call this once before [`dispatch`].
+pub fn initialize_runtime() -> anyhow::Result<()> {
+    runtime::init()
+}
+
+pub use cmd::{dispatch, ProductDefaults};
+
+#[cfg(test)]
+mod config_tests {
+    #[test]
+    fn resolve_pg_url_prefers_explicit_over_env() {
+        // Explicit Some short-circuits before the env lookup, so this is
+        // deterministic regardless of CIH_PG_URL in the environment.
+        assert_eq!(
+            super::resolve_pg_url(Some("postgres://explicit".into())).as_deref(),
+            Some("postgres://explicit"),
+        );
+    }
+}
 
 pub mod analyze;
 pub mod cmd;
 pub mod db;
 pub mod discover;
 pub mod file_cache;
+pub mod group_sync;
 pub mod llm;
+pub(crate) mod publication;
 pub mod scan;
 pub mod scope;
 pub mod settings;
@@ -35,6 +72,7 @@ pub mod wiki;
 
 pub(crate) mod decompile;
 pub(crate) mod decompile_config;
+#[cfg(feature = "semantic")]
 pub(crate) mod embed;
 pub(crate) mod feature_strategy;
 pub(crate) mod node_prefix;

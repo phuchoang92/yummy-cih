@@ -40,6 +40,12 @@ fn write(root: &Path, rel: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
+fn has_path_component(path: &Path, expected: &str) -> bool {
+    let expected = std::ffi::OsStr::new(expected);
+    path.components()
+        .any(|component| component.as_os_str() == expected)
+}
+
 fn all_scope() -> ScopeRequest {
     ScopeRequest {
         all: true,
@@ -122,13 +128,18 @@ fn content_version_is_stable_for_identical_content() {
         "changed content must yield a new version"
     );
 
-    // Prune keeps only the current version dir.
+    // DB-free emission must retain both immutable versions. Pruning is a
+    // post-publication action: deleting `first` here would remove the only
+    // version that may still be serving if loading `changed` later fails.
     let artifacts_parent = root.join(".cih").join("artifacts");
-    let dirs: Vec<String> = fs::read_dir(&artifacts_parent)
+    let mut dirs: Vec<String> = fs::read_dir(&artifacts_parent)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(dirs, vec![changed.version.clone()]);
+    dirs.sort();
+    let mut expected = vec![first, changed.version.clone()];
+    expected.sort();
+    assert_eq!(dirs, expected);
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -140,6 +151,17 @@ fn incremental_noop_when_files_unchanged() {
     let first = analyze_emit(&scan, all_scope()).unwrap();
     assert!(!first.reused_artifacts);
     assert!(first.cache_stats.enabled);
+    let search_sidecar = first
+        .artifacts
+        .nodes_path
+        .parent()
+        .unwrap()
+        .join(cih_search::SEARCH_INDEX_FILE_NAME);
+    assert!(
+        search_sidecar.is_file(),
+        "fresh analysis must publish a search sidecar"
+    );
+    fs::remove_file(&search_sidecar).unwrap();
 
     let scan = scan::scan_repo(&root).unwrap();
     let second = analyze_emit(&scan, all_scope()).unwrap();
@@ -148,6 +170,10 @@ fn incremental_noop_when_files_unchanged() {
     assert!(second.cache_stats.noop);
     assert_eq!(second.version, first.version);
     assert_eq!(second.cache_stats.reparsed_files, 0);
+    assert!(
+        search_sidecar.is_file(),
+        "a no-op analysis must backfill a missing search sidecar"
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -428,6 +454,122 @@ fn repo_with_wiki_artifacts() -> PathBuf {
 }
 
 #[test]
+fn refresh_command_runs_analyze_and_writes_fingerprint_state() {
+    let root = temp_repo();
+
+    cih_engine::cmd::refresh::run(cih_engine::cmd::args::RefreshArgs {
+        repo: root.clone(),
+        db: cih_engine::cmd::args::DbArgs {
+            backend: None,
+            falkor_url: None,
+            graph_key: None,
+            no_load: true,
+        },
+        json: false,
+        force: false,
+        no_analyze: false,
+        no_discover: true,
+        no_wiki: true,
+        wiki_mode: None,
+        grouping: None,
+        wiki_language: None,
+        wiki_out: None,
+        llm: false,
+        llm_provider: None,
+        llm_api_key_env: None,
+        llm_model: None,
+        stage_and_swap: false,
+    })
+    .unwrap();
+
+    let state_path = root.join(".cih/refresh-state.json");
+    assert!(
+        state_path.exists(),
+        "refresh-state.json must be written after analyze"
+    );
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    // analyze_head is None when repo has no git (safe conservative default)
+    assert!(state.get("analyze_head").is_some());
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn refresh_command_skips_stages_when_no_flags_set() {
+    // With --no-analyze --no-discover --no-wiki every stage should be skipped
+    // and the command should succeed without touching the filesystem.
+    let root = temp_repo();
+
+    cih_engine::cmd::refresh::run(cih_engine::cmd::args::RefreshArgs {
+        repo: root.clone(),
+        db: cih_engine::cmd::args::DbArgs {
+            backend: None,
+            falkor_url: None,
+            graph_key: None,
+            no_load: true,
+        },
+        json: true,
+        force: false,
+        no_analyze: true,
+        no_discover: true,
+        no_wiki: true,
+        wiki_mode: None,
+        grouping: None,
+        wiki_language: None,
+        wiki_out: None,
+        llm: false,
+        llm_provider: None,
+        llm_api_key_env: None,
+        llm_model: None,
+        stage_and_swap: false,
+    })
+    .unwrap();
+
+    // No artifacts should have been written.
+    assert!(
+        !root.join(".cih/artifacts").exists(),
+        "analyze must not have run with --no-analyze"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_command_stage_and_swap_installs_output_atomically() {
+    let root = repo_with_wiki_artifacts();
+    let out_dir = root.join(".cih/wiki");
+    let stage_dir = root.join(".cih/wiki.tmp");
+    let bak_dir = root.join(".cih/wiki.bak");
+
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        stage_and_swap: true,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    // Final output exists at out_dir; staging and backup dirs are cleaned up.
+    assert!(out_dir.exists(), "out_dir must exist after stage-and-swap");
+    assert!(
+        !stage_dir.exists(),
+        "staging dir must be removed after successful swap"
+    );
+    assert!(
+        !bak_dir.exists(),
+        "backup dir must be removed after successful swap"
+    );
+    assert!(
+        out_dir.join("manifest.json").exists(),
+        "manifest.json must be in out_dir"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
     let root = repo_with_wiki_artifacts();
     wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
@@ -443,6 +585,100 @@ fn wiki_command_graph_only_writes_manifest_without_llm_metadata() {
     assert!(
         manifest.llm.is_none(),
         "graph-only wiki must omit llm metadata"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_pages_contain_provenance_front_matter() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    // All three cih_* fields must appear in the PO page's front matter.
+    let po_path = fs::read_dir(root.join(".cih/wiki/pages"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .flat_map(|feat_dir| {
+            fs::read_dir(feat_dir.path())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().file_name().map(|n| n == "po.md").unwrap_or(false))
+                .map(|e| e.path())
+        })
+        .next()
+        .expect("at least one po.md must be generated");
+
+    let po_content = fs::read_to_string(&po_path).unwrap();
+    assert!(
+        po_content.contains("cih_enrichment: graph-only"),
+        "po.md must contain cih_enrichment tier"
+    );
+    assert!(
+        po_content.contains("cih_graph_version:"),
+        "po.md must contain cih_graph_version"
+    );
+
+    // Graph-only mode must emit the no-LLM admonition.
+    assert!(
+        po_content.contains(":::note"),
+        "graph-only po.md must contain the graph-only admonition"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_llm_dry_run_pages_omit_graph_only_admonition() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        run_llm: true,
+        llm: wiki_cmd::LlmCallConfig {
+            model: "dry-model".into(),
+            api_key_env: Some(format!(
+                "CIH_TEST_MISSING_KEY_{}",
+                TEST_ID.load(Ordering::Relaxed)
+            )),
+            ..Default::default()
+        },
+        llm_dry_run: true,
+        wiki_mode: wiki_cmd::WikiMode::LlmSummary,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let po_path = fs::read_dir(root.join(".cih/wiki/pages"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .flat_map(|feat_dir| {
+            fs::read_dir(feat_dir.path())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().file_name().map(|n| n == "po.md").unwrap_or(false))
+                .map(|e| e.path())
+        })
+        .next()
+        .expect("at least one po.md must be generated");
+
+    let po_content = fs::read_to_string(&po_path).unwrap();
+    assert!(
+        po_content.contains("cih_enrichment: llm-summary"),
+        "llm-summary po.md must have llm-summary tier"
+    );
+    assert!(
+        !po_content.contains(":::note"),
+        "llm-summary po.md must NOT contain the graph-only admonition"
     );
 
     fs::remove_dir_all(&root).unwrap();
@@ -632,7 +868,7 @@ fn discover_preserves_analyze_artifacts_on_disk() {
         "latest_graph_artifacts must still return the analyze version after discover"
     );
     assert!(
-        latest.nodes_path.to_string_lossy().contains("artifacts/"),
+        has_path_component(&latest.nodes_path, "artifacts"),
         "latest_graph_artifacts path must be under .cih/artifacts/, not artifacts-community/"
     );
 
@@ -654,27 +890,15 @@ fn discover_outcome_source_artifacts_point_to_analyze_dir() {
         run_discover_core(&root, &cih_engine::discover::DiscoverOverrides::default()).unwrap();
 
     assert!(
-        discover
-            .source_artifacts
-            .nodes_path
-            .to_string_lossy()
-            .contains("artifacts/"),
+        has_path_component(&discover.source_artifacts.nodes_path, "artifacts"),
         "source_artifacts must be under .cih/artifacts/"
     );
     assert!(
-        !discover
-            .source_artifacts
-            .nodes_path
-            .to_string_lossy()
-            .contains("artifacts-community"),
+        !has_path_component(&discover.source_artifacts.nodes_path, "artifacts-community"),
         "source_artifacts must NOT be under .cih/artifacts-community/"
     );
     assert!(
-        discover
-            .artifacts
-            .nodes_path
-            .to_string_lossy()
-            .contains("artifacts-community"),
+        has_path_component(&discover.artifacts.nodes_path, "artifacts-community"),
         "discover.artifacts must be under .cih/artifacts-community/"
     );
     assert_ne!(
@@ -716,4 +940,146 @@ fn discover_load_artifacts_are_analyze_then_community() {
     assert_eq!(artifact_sets[1].version, discover.artifacts.version);
 
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_command_update_agents_md_writes_pointer_block() {
+    let root = repo_with_wiki_artifacts();
+
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        update_agents_md: true,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let agents_md = root.join("AGENTS.md");
+    assert!(
+        agents_md.exists(),
+        "AGENTS.md must be created by --update-agents-md"
+    );
+    let content = fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        content.contains("<!-- cih-wiki:start -->"),
+        "AGENTS.md must contain cih-wiki:start marker"
+    );
+    assert!(
+        content.contains("<!-- cih-wiki:end -->"),
+        "AGENTS.md must contain cih-wiki:end marker"
+    );
+    assert!(
+        content.contains("agent-index.json"),
+        "AGENTS.md must reference agent-index.json"
+    );
+
+    // Running again must not alter the file (idempotent second run).
+    let before = fs::read_to_string(&agents_md).unwrap();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        update_agents_md: true,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+    let after = fs::read_to_string(&agents_md).unwrap();
+    assert_eq!(before, after, "second run must not alter AGENTS.md");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_command_writes_agent_index_json() {
+    let root = repo_with_wiki_artifacts();
+
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let index_path = root.join(".cih/wiki/agent-index.json");
+    assert!(
+        index_path.exists(),
+        "agent-index.json must be written by wiki run"
+    );
+    let raw = fs::read_to_string(&index_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["schema_version"], 1, "schema_version must be 1");
+    assert!(
+        v["fqn_to_page"].is_object(),
+        "fqn_to_page must be an object"
+    );
+    assert!(
+        v["file_to_pages"].is_object(),
+        "file_to_pages must be an object"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn wiki_feature_index_links_resolve_to_existing_files() {
+    let root = repo_with_wiki_artifacts();
+    wiki_cmd::run_wiki(wiki_cmd::WikiConfig {
+        repo: root.clone(),
+        wiki_mode: wiki_cmd::WikiMode::Graph,
+        grouping: wiki_cmd::WikiGrouping::Graph,
+        ..wiki_cmd::WikiConfig::default()
+    })
+    .unwrap();
+
+    let wiki_dir = root.join(".cih/wiki");
+    let mut broken: Vec<String> = Vec::new();
+    collect_broken_links(&wiki_dir, &wiki_dir, &mut broken);
+
+    assert!(
+        broken.is_empty(),
+        "Found {} broken .md link(s) in generated wiki:\n  {}",
+        broken.len(),
+        broken.join("\n  ")
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// Recursively walk `dir`, check every relative *.md link in each .md file.
+fn collect_broken_links(dir: &Path, wiki_dir: &Path, broken: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_broken_links(&path, wiki_dir, broken);
+        } else if path.extension().map(|x| x == "md").unwrap_or(false) {
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let page_dir = path.parent().unwrap_or(dir);
+            let mut rest = content.as_str();
+            while let Some(start) = rest.find("](") {
+                rest = &rest[start + 2..];
+                let end = rest.find(')').unwrap_or(rest.len());
+                let target_raw = &rest[..end];
+                let target = target_raw.split('#').next().unwrap_or(target_raw);
+                if target.ends_with(".md") && !target.starts_with("http") {
+                    let resolved = page_dir.join(target);
+                    if !resolved.exists() {
+                        broken.push(format!(
+                            "{}: broken link [{target}]",
+                            path.strip_prefix(wiki_dir).unwrap_or(&path).display(),
+                        ));
+                    }
+                }
+                if end < rest.len() {
+                    rest = &rest[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
 }

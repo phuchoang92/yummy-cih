@@ -4,18 +4,12 @@
 // under the MIT License. See the project root LICENSE for full terms.
 
 import { Html, OrbitControls } from "@react-three/drei";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Canvas, useFrame } from "@react-three/fiber";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { edgeColor } from "./colors";
 import type { OverviewEdge, OverviewNode } from "./types";
-
-const EDGE_COLORS: Record<string, string> = {
-  CALLS: "#1da27e", HANDLES_ROUTE: "#eab308", IMPORTS: "#3b82f6",
-  EXTENDS: "#f97316", IMPLEMENTS: "#a855f7", EXTERNAL_CALL: "#e11d48",
-  PUBLISHES_EVENT: "#ec4899", LISTENS_TO: "#ec4899", INTEGRATION_LINK: "#06b6d4",
-  READS_TABLE: "#60a5fa", WRITES_TABLE: "#fb7185", TESTS: "#22d3ee",
-};
 
 export interface CameraTarget { position: THREE.Vector3; lookAt: THREE.Vector3 }
 
@@ -29,19 +23,7 @@ export function cameraTarget(nodes: OverviewNode[], selected: Set<number>): Came
   return { lookAt: center, position: center.clone().add(new THREE.Vector3(distance * .18, distance * .12, distance)) };
 }
 
-function CameraAnimator({ target, reducedMotion }: { target: CameraTarget | null; reducedMotion: boolean }) {
-  const { camera } = useThree();
-  const current = useRef<CameraTarget | null>(null);
-  useEffect(() => { current.current = target; }, [target]);
-  useFrame(() => {
-    if (!current.current) return;
-    const rate = reducedMotion ? 1 : .085;
-    camera.position.lerp(current.current.position, rate);
-    camera.lookAt(current.current.lookAt);
-    if (camera.position.distanceTo(current.current.position) < 1) current.current = null;
-  });
-  return null;
-}
+const ORIGIN = new THREE.Vector3();
 
 function NodeCloud({ nodes, selected, onSelect, onHover }: {
   nodes: OverviewNode[]; selected: Set<number> | null;
@@ -126,7 +108,7 @@ function EdgeCloud({ nodes, edges, selected }: { nodes: OverviewNode[]; edges: O
       const targetActive = !active || selected.has(target.index);
       if (active && !sourceActive && !targetActive) continue;
       const intensity = active ? (sourceActive && targetActive ? .72 : .08) : .2;
-      color.set(EDGE_COLORS[edge.kind] ?? "#1c8585").multiplyScalar(intensity);
+      color.set(edgeColor(edge.kind)).multiplyScalar(intensity);
       positions.push(source.x, source.y, source.z, target.x, target.y, target.z);
       colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
     }
@@ -152,21 +134,54 @@ function Labels({ nodes, selected }: { nodes: OverviewNode[]; selected: Set<numb
   ))}</>;
 }
 
-function SceneContent({ nodes, edges, selected, target, reducedMotion, onSelect, onHover }: {
+function SceneContent({ nodes, edges, selected, target, reducedMotion, autoRotate, showLabels, resetNonce, onSelect, onHover }: {
   nodes: OverviewNode[]; edges: OverviewEdge[]; selected: Set<number> | null; target: CameraTarget | null;
-  reducedMotion: boolean; onSelect: (node: OverviewNode) => void; onHover: (node: OverviewNode | null) => void;
+  reducedMotion: boolean; autoRotate: boolean; showLabels: boolean; resetNonce: number;
+  onSelect: (node: OverviewNode) => void; onHover: (node: OverviewNode | null) => void;
 }) {
   const controls = useRef<any>(null);
-  const lastInteraction = useRef(Date.now());
-  useFrame(() => { if (controls.current) controls.current.autoRotate = !reducedMotion && Date.now() - lastInteraction.current > 60_000; });
+  const animTarget = useRef<CameraTarget | null>(null);
+
+  // Begin a focus animation whenever a new camera target arrives.
+  useEffect(() => { animTarget.current = target; }, [target]);
+  // Reset view: cancel any focus animation and return to the initial framing.
+  useEffect(() => { if (resetNonce > 0) { animTarget.current = null; controls.current?.reset(); } }, [resetNonce]);
+
+  useFrame((state) => {
+    const orbit = controls.current;
+    // Auto-rotate is an explicit, opt-in toggle (reduced-motion always wins).
+    if (orbit) orbit.autoRotate = autoRotate && !reducedMotion;
+
+    // Keep point-picking tolerance ~constant in screen pixels. Points render at a
+    // fixed pixel size (sizeAttenuation off), so the world-space raycast threshold
+    // must scale with camera distance — otherwise a click almost never lands within
+    // the default 1-unit threshold. The distance term cancels world-per-pixel.
+    const cam = state.camera as THREE.PerspectiveCamera;
+    const pivot = orbit ? orbit.target : ORIGIN;
+    const dist = cam.position.distanceTo(pivot);
+    const worldPerPixel = (2 * dist * Math.tan((cam.fov * Math.PI) / 360)) / state.size.height;
+    const pointParams = state.raycaster.params.Points;
+    if (pointParams) pointParams.threshold = Math.max(2, 12 * worldPerPixel);
+
+    // Ease the camera and the orbit pivot to the focus target together, then let
+    // OrbitControls own the orientation (no camera.lookAt — it would fight update()).
+    const focus = animTarget.current;
+    if (focus && orbit) {
+      const rate = reducedMotion ? 1 : .1;
+      cam.position.lerp(focus.position, rate);
+      orbit.target.lerp(focus.lookAt, rate);
+      orbit.update();
+      if (cam.position.distanceTo(focus.position) < 1) animTarget.current = null;
+    }
+  });
+
   return <>
     <ambientLight intensity={.4} />
     <EdgeCloud nodes={nodes} edges={edges} selected={selected} />
     <NodeCloud nodes={nodes} selected={selected} onSelect={onSelect} onHover={onHover} />
-    <Labels nodes={nodes} selected={selected} />
-    <CameraAnimator target={target} reducedMotion={reducedMotion} />
+    {showLabels && <Labels nodes={nodes} selected={selected} />}
     <EffectComposer><Bloom luminanceThreshold={.22} luminanceSmoothing={.72} intensity={1.25} mipmapBlur radius={.65} /></EffectComposer>
-    <OrbitControls ref={controls} enableDamping dampingFactor={.08} rotateSpeed={.45} zoomSpeed={1.35} minDistance={20} maxDistance={20_000} onStart={() => { lastInteraction.current = Date.now(); }} />
+    <OrbitControls ref={controls} enableDamping dampingFactor={.08} rotateSpeed={.45} zoomSpeed={1.35} autoRotateSpeed={.6} minDistance={20} maxDistance={20_000} onStart={() => { animTarget.current = null; }} />
   </>;
 }
 
@@ -179,6 +194,7 @@ export function hasWebGl(): boolean {
 
 export function GalaxyScene(props: {
   nodes: OverviewNode[]; edges: OverviewEdge[]; selected: Set<number> | null; target: CameraTarget | null;
+  autoRotate: boolean; showLabels: boolean; resetNonce: number;
   onSelect: (node: OverviewNode) => void;
 }) {
   const [hovered, setHovered] = useState<OverviewNode | null>(null);

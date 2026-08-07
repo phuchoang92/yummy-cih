@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans">
+    <bean id="retailUserAdminRef" class="com.acme.user.UserImpl"/>
+    <bean id="customUserAdmin" class="com.acme.user.CustomUserImpl"/>
+</beans>

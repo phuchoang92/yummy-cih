@@ -137,6 +137,20 @@ fn db_id_helpers_use_locked_scheme() {
 }
 
 #[test]
+fn sql_detection_is_keyword_bounded_and_unicode_safe() {
+    assert!(cih_core::looks_like_sql("  select * from orders"));
+    assert!(cih_core::looks_like_sql(
+        "WITH rows AS (SELECT 1) SELECT * FROM rows"
+    ));
+    assert!(!cih_core::looks_like_sql("SELECTION_MODE"));
+    assert!(!cih_core::looks_like_sql("é€"));
+    assert!(!cih_core::looks_like_sql("用户 SELECT"));
+    // Real trigger from the OCB corpus: `SELECT`'s 6-byte length lands mid-`ò`
+    // (a 2-byte codepoint at bytes 5..7), which panicked the old `head[..kw.len()]`.
+    assert!(!cih_core::looks_like_sql("Vui lòng chọn"));
+}
+
+#[test]
 fn repo_map_round_trips_json() {
     let mut per_lang = std::collections::BTreeMap::new();
     per_lang.insert("java".into(), 3);
@@ -205,6 +219,7 @@ fn parsed_file_round_trips_json() {
             raw: "java.util.List".into(),
             is_static: false,
             is_wildcard: false,
+            alias: None,
             range: Range {
                 start_line: 3,
                 start_col: 0,
@@ -232,6 +247,7 @@ fn parsed_file_round_trips_json() {
             raw_type: "UserRepository".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.UserService".into(),
+            qualifier: None,
             range: Range {
                 start_line: 6,
                 start_col: 4,
@@ -245,6 +261,8 @@ fn parsed_file_round_trips_json() {
             topic: Some("user-saved".into()),
             http_method: None,
             messaging_framework: Some(cih_core::MessagingFramework::Spring),
+            url_parts: None,
+            via_wrapper: None,
             in_callable: method_id("com.acme.UserService", "save", 1),
             range: Range {
                 start_line: 12,
@@ -256,6 +274,7 @@ fn parsed_file_round_trips_json() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
 
     let encoded = serde_json::to_string(&parsed).unwrap();
@@ -298,6 +317,8 @@ fn contract_site_messaging_framework_roundtrips_and_defaults() {
         topic: Some("orders".into()),
         http_method: None,
         messaging_framework: Some(MessagingFramework::Spring),
+        url_parts: None,
+        via_wrapper: None,
         in_callable: NodeId::new("Method:com.acme.X#m/0"),
         range: Range::default(),
     };

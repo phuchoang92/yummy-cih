@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind, RepoMap, VersionId};
+use cih_core::{
+    graph_content_version, ArchitectureHint, EdgeKind, GraphArtifacts, NodeKind,
+    RegistryGraphReport, RepoMap, VersionId,
+};
 use cih_grouping::{
     apply_overrides, feature_artifact_dir, find_feature_artifact_dir, prune_feature_artifacts,
     read_feature_artifact, write_feature_artifacts, FeatureOverrides, FeatureStrategy,
@@ -54,9 +57,8 @@ impl std::str::FromStr for FeatureStrategyKind {
 }
 use serde::Serialize;
 
-use crate::db::{load_many_to_falkor, LoadOutcome};
+use crate::db::LoadOutcome;
 use crate::versioning::{discover_version, latest_graph_artifacts, prune_other_versions};
-use crate::{DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
 
 /// CLI overrides for community detection, process tracing, and feature grouping.
 #[derive(Default)]
@@ -84,8 +86,9 @@ pub struct DiscoverOverrides {
 
 pub fn run_discover(
     repo: PathBuf,
+    backend: Option<String>,
     falkor_url: Option<String>,
-    graph_key: Option<String>,
+    _graph_key: Option<String>,
     no_load: bool,
     json: bool,
     overrides: DiscoverOverrides,
@@ -97,25 +100,34 @@ pub fn run_discover(
 
     let emit = run_discover_core(&repo, &overrides)?;
 
-    let load = if no_load {
-        tracing::info!("Skipping FalkorDB load (--no-load)");
-        LoadOutcome::Skipped
+    let (load, publication) = if no_load {
+        tracing::info!("Skipping graph load (--no-load)");
+        (LoadOutcome::Skipped, None)
     } else {
-        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
-        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        let artifact_sets = emit.artifact_sets_for_load();
-        match load_many_to_falkor(url, key, &artifact_sets) {
-            Ok(stats) => {
+        let be = backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
+        let resolved_url = falkor_url
+            .clone()
+            .unwrap_or_else(|| crate::default_db_url(be));
+        let url = resolved_url.as_str();
+        let overlays = [("community", &emit.artifacts)];
+        match crate::publication::publish_complete_graph(
+            &repo,
+            be,
+            url,
+            &emit.source_artifacts,
+            &overlays,
+        ) {
+            Ok(published) => {
                 tracing::info!(
-                    nodes = stats.nodes,
-                    edges = stats.edges,
-                    "FalkorDB discover load complete"
+                    nodes = published.stats.nodes,
+                    edges = published.stats.edges,
+                    "graph discover load complete"
                 );
-                LoadOutcome::Loaded(stats)
+                (LoadOutcome::Loaded(published.stats), Some(published.record))
             }
             Err(err) => {
-                tracing::warn!(error = %err, "FalkorDB discover load failed");
-                LoadOutcome::Failed(format!("{err:#}"))
+                tracing::warn!(error = %err, "graph discover load failed");
+                (LoadOutcome::Failed(format!("{err:#}")), None)
             }
         }
     };
@@ -126,12 +138,54 @@ pub fn run_discover(
         emit.print_styled(&load);
     }
 
-    crate::registry::persist_discover(&repo, &emit);
+    if let Some(publication) = publication.as_ref() {
+        crate::registry::persist_discover(&repo, &emit, publication)?;
+        prune_published_discover_artifacts(&repo, &emit);
+    }
 
     if matches!(load, LoadOutcome::Failed(_)) {
         process::exit(3);
     }
     Ok(())
+}
+
+/// Build the optional feature-enrichment LLM caller from CLI config, loading the
+/// prior artifact for incremental caching. Returns `None` when no LLM is
+/// configured or the adapter fails to build (grouping then degrades to non-LLM).
+fn build_feature_llm_options(
+    overrides: &DiscoverOverrides,
+    repo: &Path,
+    source_version: &str,
+) -> Option<FeatureLlmOptions> {
+    let llm_cfg = overrides.feature_llm.as_ref()?;
+    match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
+        Ok(adapter) => {
+            // Load prior artifact for incremental cache.
+            let prior_artifact = find_feature_artifact_dir(repo, source_version)
+                .and_then(|dir| read_feature_artifact(&dir).ok())
+                .unwrap_or_default();
+            let prior_artifact = prior_artifact
+                .iter()
+                .filter(|e| e.strategy == "llm")
+                .cloned()
+                .collect();
+            let api_key = crate::llm::resolve_api_key(llm_cfg.api_key_env.as_deref())
+                .ok()
+                .flatten();
+            Some(FeatureLlmOptions {
+                adapter,
+                api_key,
+                model: llm_cfg.model.clone(),
+                max_tokens: llm_cfg.max_tokens,
+                timeout_secs: llm_cfg.timeout_secs,
+                prior_artifact,
+            })
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "feature LLM adapter failed to build — LLM stage disabled");
+            None
+        }
+    }
 }
 
 pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<DiscoverOutcome> {
@@ -309,8 +363,6 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
             artifacts_dir.display()
         )
     })?;
-    prune_other_versions(&repo.join(".cih").join("artifacts-community"), &version)?;
-
     tracing::info!(
         version = %version,
         path = %artifacts_dir.display(),
@@ -331,38 +383,7 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     let pkg_cfg = PackageConfig::load_or_default(repo);
 
     // Build optional LLM caller from CLI config.
-    let llm_opts: Option<FeatureLlmOptions> = if let Some(llm_cfg) = &overrides.feature_llm {
-        match crate::llm::make_adapter(&llm_cfg.provider, &llm_cfg.base_url, None) {
-            Ok(adapter) => {
-                // Load prior artifact for incremental cache.
-                let prior_artifact = find_feature_artifact_dir(repo, source.version.as_str())
-                    .and_then(|dir| read_feature_artifact(&dir).ok())
-                    .unwrap_or_default();
-                let prior_artifact = prior_artifact
-                    .iter()
-                    .filter(|e| e.strategy == "llm")
-                    .cloned()
-                    .collect();
-                let api_key = crate::llm::resolve_api_key(llm_cfg.api_key_env.as_deref())
-                    .ok()
-                    .flatten();
-                Some(FeatureLlmOptions {
-                    adapter,
-                    api_key,
-                    model: llm_cfg.model.clone(),
-                    max_tokens: llm_cfg.max_tokens,
-                    timeout_secs: llm_cfg.timeout_secs,
-                    prior_artifact,
-                })
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "feature LLM adapter failed to build — LLM stage disabled");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let llm_opts = build_feature_llm_options(overrides, repo, source.version.as_str());
 
     let feature_strategy = if feature_strategy_kind == FeatureStrategyKind::Embed {
         // Embedding clusterer: owns the Postgres + Leiden work, then hands assignments to the
@@ -429,10 +450,6 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
             feat_dir.display()
         )
     })?;
-    prune_feature_artifacts(
-        &repo.join(".cih").join("artifacts-features"),
-        source.version.as_str(),
-    )?;
     tracing::info!(
         features = feature_count,
         entries = merged_entries.len(),
@@ -441,6 +458,19 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
     ui.finish_with(format!("{} features", crate::ui::fmt_count(feature_count)));
 
     let route_count = nodes.iter().filter(|n| n.kind == NodeKind::Route).count();
+    let published_graph_report = RegistryGraphReport::try_build(
+        graph_content_version(source.version.as_str(), &[("community", version.as_str())]),
+        &[&nodes, &output_nodes],
+        &[&edges, &output_edges],
+    )
+    .map(Some)
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            error,
+            "graph reporting metadata omitted because composed artifact uniqueness was not proven"
+        );
+        None
+    });
 
     Ok(DiscoverOutcome {
         source_artifacts: source,
@@ -467,11 +497,40 @@ pub fn run_discover_core(repo: &Path, overrides: &DiscoverOverrides) -> Result<D
         node_count: output_nodes.len(),
         edge_count: output_edges.len(),
         feature_count,
+        published_graph_report,
     })
+}
+
+/// Retire superseded discover artifacts only after their base+overlay graph has
+/// been published. Cleanup failures are warnings because publication already
+/// succeeded and older immutable artifacts are safe to retain.
+fn prune_published_discover_artifacts(repo: &Path, emit: &DiscoverOutcome) {
+    let community_root = repo.join(".cih").join("artifacts-community");
+    if let Err(error) = prune_other_versions(&community_root, &emit.version) {
+        tracing::warn!(
+            path = %community_root.display(),
+            version = %emit.version,
+            error = %error,
+            "failed to prune superseded community artifacts after graph publication"
+        );
+    }
+
+    let feature_root = repo.join(".cih").join("artifacts-features");
+    if let Err(error) =
+        prune_feature_artifacts(&feature_root, emit.source_artifacts.version.as_str())
+    {
+        tracing::warn!(
+            path = %feature_root.display(),
+            source_version = %emit.source_artifacts.version,
+            error = %error,
+            "failed to prune superseded feature artifacts after graph publication"
+        );
+    }
 }
 
 /// A node eligible for embed feature clustering: first-party (not from a jar / not `external`) and
 /// not a test source. Third-party and test nodes are excluded so they don't form junk features.
+#[cfg(feature = "semantic")]
 fn is_project_node(n: &cih_core::Node) -> bool {
     let is_external = n
         .props
@@ -481,12 +540,41 @@ fn is_project_node(n: &cih_core::Node) -> bool {
                 || p.get("fromJar").and_then(|v| v.as_bool()).unwrap_or(false)
         })
         .unwrap_or(false);
-    let f = n.file.as_str();
-    let is_test = f.ends_with(".jar")
-        || f.contains("src/test/")
-        || f.contains("/test/java/")
-        || f.contains("/test/kotlin/");
-    !is_external && !is_test
+    !is_external && !is_test_source(n.file.as_str())
+}
+
+/// Language-agnostic test-source detection (drives embed cluster exclusion).
+/// Covers the common directory and filename conventions across the supported
+/// languages — kept conservative on bare `test`/`spec` segments so a `test`
+/// *package* (e.g. Java `com/test/…`) is not mistaken for a test source.
+#[cfg(any(feature = "semantic", test))]
+fn is_test_source(f: &str) -> bool {
+    // Third-party JVM artifact.
+    if f.ends_with(".jar") {
+        return true;
+    }
+    // Test-source directory roots.
+    if f.contains("src/test/")        // Maven/Gradle (java/kotlin/scala/groovy)
+        || f.contains("/test/java/")  // non-standard JVM layouts (retained)
+        || f.contains("/test/kotlin/")
+        || f.contains("__tests__/")   // JS/TS
+        || f.contains("__mocks__/")
+        || f.starts_with("tests/")    // Python / others
+        || f.contains("/tests/")
+    {
+        return true;
+    }
+    // Filename conventions (unambiguous across languages).
+    let base = f.rsplit('/').next().unwrap_or(f);
+    base.ends_with("_test.go")                       // Go
+        || base.ends_with("_spec.rb")                // Ruby
+        || base.ends_with("_test.rb")
+        || base.contains(".test.")                   // JS/TS  foo.test.ts
+        || base.contains(".spec.")                   // JS/TS  foo.spec.tsx
+        || (base.ends_with(".py")                    // Python
+            && (base.starts_with("test_")
+                || base.ends_with("_test.py")
+                || base == "conftest.py"))
 }
 
 /// Build the embedding clusterer: connect to pgvector, fetch per-node vectors + k-NN edges, run
@@ -494,22 +582,17 @@ fn is_project_node(n: &cih_core::Node) -> bool {
 /// `EmbedClusterStrategy`. All async DB work runs on `crate::runtime::block_on` — the codebase's
 /// single shared Tokio runtime — which sidesteps the nested-runtime panics a fresh
 /// `Runtime::new().block_on()` would cause if discover were ever driven from within a runtime.
+#[cfg(feature = "semantic")]
 fn build_embed_cluster_strategy(
     nodes: &[cih_core::Node],
     overrides: &DiscoverOverrides,
     repo: &Path,
     source_version: &str,
 ) -> Result<Box<dyn FeatureStrategy>> {
-    use std::collections::{HashMap, HashSet};
-
-    let pg_url = overrides
-        .pg_url
-        .clone()
-        .or_else(|| std::env::var("CIH_PG_URL").ok())
-        .context(
-            "--feature-strategy embed requires Postgres: pass --pg-url or set CIH_PG_URL, \
-             and run `cih embed` first",
-        )?;
+    let pg_url = crate::resolve_pg_url(overrides.pg_url.clone()).context(
+        "--feature-strategy embed requires Postgres: pass --pg-url or set CIH_PG_URL, \
+         and run `cih embed` first",
+    )?;
 
     let mut cfg = cih_grouping::EmbedClusterConfig::default();
     if let Some(v) = overrides.embed_similarity_threshold {
@@ -546,9 +629,6 @@ fn build_embed_cluster_strategy(
     }
     let project_vec: Vec<String> = project_ids.iter().cloned().collect();
 
-    let knn = cfg.knn;
-    let thr = cfg.similarity_threshold;
-
     // Intern project node ids to compact u32 indices: at 600k-node scale the k-NN edge list is
     // ~9M edges, which as `(NodeId,NodeId,f32)` would be ~1.3 GB of heap strings but as
     // `(u32,u32,f32)` is ~100 MB. `idx_to_id` is index→id; `id_to_idx` is id→index.
@@ -559,84 +639,9 @@ fn build_embed_cluster_strategy(
         .map(|(i, s)| (s.clone(), i as u32))
         .collect();
 
-    let (clusters, sims, meta) = crate::runtime::block_on(async {
-        let store =
-            cih_embed::EmbedStore::connect(&pg_url, cih_embed::EmbedModelKind::MiniLm).await?;
-        store.ensure_schema().await?;
-        // Self-heal: an older `cih embed` may predate cih_node_vectors — backfill if empty.
-        if store.node_vector_count().await? == 0 {
-            tracing::info!("cih_node_vectors empty — backfilling from cih_embeddings");
-            store.upsert_node_vectors(&node_ids).await?;
-            store.prune_node_vectors(&node_ids).await?;
-        }
-
-        // Stream the k-NN edges, interning + filtering to the project subset inline. Endpoints not
-        // in the interner (external/test types) are dropped here — no post-fetch retain, and the
-        // full 9M-row Postgres result is never materialized.
-        let mut edges: Vec<(u32, u32, f32)> = Vec::new();
-        let mut dropped: u64 = 0;
-        store
-            .knn_edges_streamed(knn, thr, |src, dst, sim| {
-                match (id_to_idx.get(src), id_to_idx.get(dst)) {
-                    (Some(&a), Some(&b)) => edges.push((a, b, sim)),
-                    _ => dropped += 1,
-                }
-            })
-            .await?;
-        tracing::info!(
-            project = idx_to_id.len(),
-            embeddable = node_ids.len(),
-            edges = edges.len(),
-            edges_dropped = dropped,
-            "embed clustering: streamed + interned k-NN edges (project subset)"
-        );
-        if edges.is_empty() {
-            tracing::warn!(
-                threshold = thr,
-                "no k-NN edges above similarity threshold — lower --embed-similarity-threshold; \
-                 all nodes will be unclustered (shared)"
-            );
-        }
-
-        // Weighted Leiden over the interned semantic k-NN graph.
-        let leiden_out = cih_community::cluster_indexed_edges(
-            &edges,
-            cfg.leiden_resolution,
-            cfg.leiden_seed,
-            10,
-        );
-        drop(edges);
-        let cluster_count = leiden_out
-            .iter()
-            .map(|(_, c)| *c)
-            .collect::<HashSet<_>>()
-            .len();
-        tracing::info!(
-            clusters = cluster_count,
-            assigned = leiden_out.len(),
-            "embed clustering: Leiden produced clusters"
-        );
-
-        // Map compact indices back to node ids.
-        let clusters: Vec<(String, usize)> = leiden_out
-            .iter()
-            .map(|&(u, c)| (idx_to_id[u as usize].clone(), c))
-            .collect();
-
-        // Compute per-node centroid confidence + fetch metadata **in Postgres** — the 600k vectors
-        // never enter Rust. Returns (id, kind, name, file, sim) for each clustered node.
-        let asn_ids: Vec<String> = clusters.iter().map(|(id, _)| id.clone()).collect();
-        let asn_clusters: Vec<i32> = clusters.iter().map(|(_, c)| *c as i32).collect();
-        let rows = store.node_confidences(&asn_ids, &asn_clusters).await?;
-        let mut sims: HashMap<String, f32> = HashMap::with_capacity(rows.len());
-        let mut meta: HashMap<String, cih_grouping::NodeMeta> = HashMap::with_capacity(rows.len());
-        for (id, kind, name, file, sim) in rows {
-            sims.insert(id.clone(), sim);
-            meta.insert(id, cih_grouping::NodeMeta { kind, name, file });
-        }
-
-        anyhow::Ok((clusters, sims, meta))
-    })?;
+    let (clusters, sims, meta) = crate::runtime::block_on(compute_embed_clusters(
+        &pg_url, &node_ids, &id_to_idx, &idx_to_id, &cfg,
+    ))?;
 
     if clusters.is_empty() {
         anyhow::bail!(
@@ -684,6 +689,114 @@ fn build_embed_cluster_strategy(
     )))
 }
 
+#[cfg(not(feature = "semantic"))]
+fn build_embed_cluster_strategy(
+    _nodes: &[cih_core::Node],
+    _overrides: &DiscoverOverrides,
+    _repo: &Path,
+    _source_version: &str,
+) -> Result<Box<dyn FeatureStrategy>> {
+    anyhow::bail!(
+        "this CIH build omits semantic embeddings; use package, structural, hybrid, or llm feature grouping"
+    )
+}
+
+/// Embed-clustering result: (cluster assignments as `(node_id, cluster)`,
+/// per-node centroid confidence, per-node display metadata).
+#[cfg(feature = "semantic")]
+type EmbedClusterResult = (
+    Vec<(String, usize)>,
+    std::collections::HashMap<String, f32>,
+    std::collections::HashMap<String, cih_grouping::NodeMeta>,
+);
+
+/// The Postgres + Leiden clustering core of the embed strategy: connect (self-
+/// healing the `cih_node_vectors` backfill), stream the k-NN edges interning them
+/// to compact indices over the project subset, run weighted Leiden, then fetch
+/// per-node confidence + metadata in Postgres. The 600k vectors never enter Rust.
+#[cfg(feature = "semantic")]
+async fn compute_embed_clusters(
+    pg_url: &str,
+    node_ids: &[String],
+    id_to_idx: &std::collections::HashMap<String, u32>,
+    idx_to_id: &[String],
+    cfg: &cih_grouping::EmbedClusterConfig,
+) -> Result<EmbedClusterResult> {
+    use std::collections::{HashMap, HashSet};
+    let knn = cfg.knn;
+    let thr = cfg.similarity_threshold;
+    let store = cih_embed::EmbedStore::connect(pg_url, cih_embed::EmbedModelKind::MiniLm).await?;
+    store.ensure_schema().await?;
+    // Self-heal: an older `cih embed` may predate cih_node_vectors — backfill if empty.
+    if store.node_vector_count().await? == 0 {
+        tracing::info!("cih_node_vectors empty — backfilling from cih_embeddings");
+        store.upsert_node_vectors(node_ids).await?;
+        store.prune_node_vectors(node_ids).await?;
+    }
+
+    // Stream the k-NN edges, interning + filtering to the project subset inline. Endpoints not
+    // in the interner (external/test types) are dropped here — no post-fetch retain, and the
+    // full 9M-row Postgres result is never materialized.
+    let mut edges: Vec<(u32, u32, f32)> = Vec::new();
+    let mut dropped: u64 = 0;
+    store
+        .knn_edges_streamed(knn, thr, |src, dst, sim| {
+            match (id_to_idx.get(src), id_to_idx.get(dst)) {
+                (Some(&a), Some(&b)) => edges.push((a, b, sim)),
+                _ => dropped += 1,
+            }
+        })
+        .await?;
+    tracing::info!(
+        project = idx_to_id.len(),
+        embeddable = node_ids.len(),
+        edges = edges.len(),
+        edges_dropped = dropped,
+        "embed clustering: streamed + interned k-NN edges (project subset)"
+    );
+    if edges.is_empty() {
+        tracing::warn!(
+            threshold = thr,
+            "no k-NN edges above similarity threshold — lower --embed-similarity-threshold; \
+             all nodes will be unclustered (shared)"
+        );
+    }
+
+    // Weighted Leiden over the interned semantic k-NN graph.
+    let leiden_out =
+        cih_community::cluster_indexed_edges(&edges, cfg.leiden_resolution, cfg.leiden_seed, 10);
+    drop(edges);
+    let cluster_count = leiden_out
+        .iter()
+        .map(|(_, c)| *c)
+        .collect::<HashSet<_>>()
+        .len();
+    tracing::info!(
+        clusters = cluster_count,
+        assigned = leiden_out.len(),
+        "embed clustering: Leiden produced clusters"
+    );
+
+    // Map compact indices back to node ids.
+    let clusters: Vec<(String, usize)> = leiden_out
+        .iter()
+        .map(|&(u, c)| (idx_to_id[u as usize].clone(), c))
+        .collect();
+
+    // Compute per-node centroid confidence + fetch metadata **in Postgres** — the 600k vectors
+    // never enter Rust. Returns (id, kind, name, file, sim) for each clustered node.
+    let asn_ids: Vec<String> = clusters.iter().map(|(id, _)| id.clone()).collect();
+    let asn_clusters: Vec<i32> = clusters.iter().map(|(_, c)| *c as i32).collect();
+    let rows = store.node_confidences(&asn_ids, &asn_clusters).await?;
+    let mut sims: HashMap<String, f32> = HashMap::with_capacity(rows.len());
+    let mut meta: HashMap<String, cih_grouping::NodeMeta> = HashMap::with_capacity(rows.len());
+    for (id, kind, name, file, sim) in rows {
+        sims.insert(id.clone(), sim);
+        meta.insert(id, cih_grouping::NodeMeta { kind, name, file });
+    }
+    Ok((clusters, sims, meta))
+}
+
 /// Everything `run_discover_core` produced (DB-free), used to load + report.
 pub struct DiscoverOutcome {
     pub source_artifacts: GraphArtifacts,
@@ -698,6 +811,8 @@ pub struct DiscoverOutcome {
     pub node_count: usize,
     pub edge_count: usize,
     pub feature_count: usize,
+    /// Exact count/kind/hub projection for the published base+community graph.
+    pub published_graph_report: Option<RegistryGraphReport>,
 }
 
 impl DiscoverOutcome {
@@ -749,7 +864,7 @@ impl DiscoverOutcome {
             LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
             LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
         };
-        crate::ui::print_row("FalkorDB", &falkor_str);
+        crate::ui::print_row("Graph DB", &falkor_str);
         eprintln!();
     }
 }
@@ -833,4 +948,45 @@ fn read_architecture_hint(repo: &Path) -> ArchitectureHint {
     serde_json::from_str::<RepoMap>(&raw)
         .map(|rm| rm.architecture_hint)
         .unwrap_or(ArchitectureHint::Unknown)
+}
+
+#[cfg(test)]
+mod test_source_tests {
+    use super::is_test_source;
+
+    #[test]
+    fn excludes_test_sources_across_languages() {
+        // Test sources — every supported language's convention.
+        for f in [
+            "target/deps/commons-lang3.jar",
+            "src/test/java/com/acme/OrderTest.java",
+            "src/test/kotlin/com/acme/PingTest.kt",
+            "web/__tests__/App.test.tsx",
+            "web/src/Button.test.ts",
+            "web/src/Button.spec.tsx",
+            "cmd/server/handler_test.go",
+            "svc/tests/test_api.py",
+            "svc/utils_test.py",
+            "svc/conftest.py",
+            "app/models/user_spec.rb",
+        ] {
+            assert!(is_test_source(f), "should be a test source: {f}");
+        }
+    }
+
+    #[test]
+    fn keeps_first_party_sources() {
+        // Production sources — including a legit `test` *package* (not a test dir).
+        for f in [
+            "src/main/java/com/acme/OrderService.java",
+            "src/main/java/com/acme/test/TestHarnessConfig.java", // `test` package
+            "web/src/components/Button.tsx",
+            "web/src/latest.ts",
+            "cmd/server/main.go",
+            "svc/api_client.py",
+            "app/models/user.rb",
+        ] {
+            assert!(!is_test_source(f), "should NOT be a test source: {f}");
+        }
+    }
 }

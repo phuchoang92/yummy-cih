@@ -1,5 +1,3 @@
-use cih_core::ImportBinding;
-
 use crate::index::ResolveIndex;
 use crate::lang::{InheritanceModel, LanguageResolver};
 use crate::types::class_of;
@@ -34,28 +32,5 @@ impl LanguageResolver for KotlinResolver {
 
     fn inheritance_model(&self) -> InheritanceModel {
         InheritanceModel::JavaNominal
-    }
-
-    fn resolve_import(
-        &self,
-        binding: &ImportBinding,
-        from_file: &str,
-        index: &ResolveIndex,
-    ) -> Option<String> {
-        use cih_core::ImportBindingKind;
-        // Kotlin imports are fully qualified — try direct lookup then simple-name fallback
-        let module = &binding.module;
-        match binding.kind {
-            ImportBindingKind::Named | ImportBindingKind::StaticMember => {
-                if index.is_known_type(module) {
-                    return Some(module.clone());
-                }
-                // Strip last segment as simple name, try workspace lookup
-                let simple = module.rsplit('.').next().unwrap_or(module.as_str());
-                index.resolve_type_in_language(simple, from_file, "kotlin")
-            }
-            ImportBindingKind::Wildcard => None,
-            _ => None,
-        }
     }
 }

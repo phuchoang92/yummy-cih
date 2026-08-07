@@ -20,7 +20,6 @@ const DEFAULT_PG_URL: &str = "postgres://cih:cih@localhost:5433/cih";
 /// - `POSTGRES_PASSWORD=<password>` (required by docker-compose.yml:${POSTGRES_PASSWORD:?...})
 /// - `CIH_PG_URL=<host postgres url>` (for native dev; compose services override)
 /// - Optional LLM key line (if `llm_key_line` is Some)
-#[allow(dead_code)]
 pub fn render_env(
     repo_path: &Path,
     repo_name: &str,
@@ -48,7 +47,6 @@ pub fn render_env(
 ///
 /// Returns Vec of raw line strings (including comments and blanks).
 /// Returns Ok(vec![]) if the file does not exist.
-#[allow(dead_code)]
 pub fn load_env_file(path: &Path) -> Result<Vec<String>> {
     match fs::read_to_string(path) {
         Ok(content) => Ok(content.lines().map(|s| s.to_string()).collect()),
@@ -67,7 +65,6 @@ pub fn load_env_file(path: &Path) -> Result<Vec<String>> {
 /// - Appends optional LLM key line if it wasn't already replaced
 ///
 /// LLM key env var names recognized: DEEPSEEK_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY
-#[allow(dead_code)]
 pub fn merge_env_values(
     existing_lines: &[String],
     repo_path: &Path,
@@ -162,7 +159,6 @@ pub fn merge_env_values(
 /// - Uses `SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()` for timestamp
 ///
 /// Then writes `content` to `<workspace>/.env` and returns the path string.
-#[allow(dead_code)]
 pub fn write_env_file(workspace: &Path, content: &str, dry_run: bool) -> Result<String> {
     let env_path = workspace.join(".env");
 

@@ -4,13 +4,11 @@ use std::collections::BTreeMap;
 
 #[test]
 fn html_viewer_escapes_script_end_tags() {
-    let dir = std::env::temp_dir().join(format!(
-        "cih-wiki-html-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // pid is unique per test process and this prefix is used by only this test,
+    // so no wall-clock timestamp (which can collide) is needed; clear any stale
+    // leftover from a prior run first.
+    let dir = std::env::temp_dir().join(format!("cih-wiki-html-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("pages")).unwrap();
     std::fs::write(dir.join("pages/index.md"), "# Hi\n</script>").unwrap();
     let manifest = WikiManifest {

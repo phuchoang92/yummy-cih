@@ -1,7 +1,48 @@
 use cih_core::{ComplexityRecord, NodeKind, StructuralProfile};
 use tree_sitter::Node as TsNode;
 
-use super::{FileBuilder, annotation_name, annotations, first_named_child, text};
+use super::{
+    annotation_name, annotations, first_named_child, modifiers, parameter_count, text, FileBuilder,
+};
+
+#[derive(Clone, Debug)]
+pub(in crate::java) struct AccessorField {
+    name: String,
+    is_static_final: bool,
+}
+
+/// Direct fields declared by one Java type, captured before its methods are
+/// classified so accessor detection does not confuse constants or arbitrary
+/// identifiers with instance state.
+pub(super) fn accessor_fields(type_node: TsNode<'_>, src: &str) -> Vec<AccessorField> {
+    let Some(body) = type_node.child_by_field_name("body") else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    let mut body_cursor = body.walk();
+    for declaration in body.named_children(&mut body_cursor) {
+        if declaration.kind() != "field_declaration" {
+            continue;
+        }
+        let field_modifiers = modifiers(declaration, src);
+        let is_static_final = field_modifiers.iter().any(|modifier| modifier == "static")
+            && field_modifiers.iter().any(|modifier| modifier == "final");
+        let mut declaration_cursor = declaration.walk();
+        for declarator in declaration.named_children(&mut declaration_cursor) {
+            if declarator.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(name) = declarator.child_by_field_name("name") else {
+                continue;
+            };
+            fields.push(AccessorField {
+                name: text(name, src),
+                is_static_final,
+            });
+        }
+    }
+    fields
+}
 
 pub(super) fn class_stereotype(
     node: TsNode<'_>,
@@ -56,6 +97,132 @@ pub(super) fn is_bean_method(node: TsNode<'_>, src: &str) -> bool {
     annotations(node)
         .into_iter()
         .any(|ann| annotation_name(ann, src).as_deref() == Some("Bean"))
+}
+
+/// True only for an exact bean accessor AST: a zero-argument `get`/`is`/`has`
+/// method returning a field, or a one-argument `set` method assigning that
+/// parameter directly to `this.field`. Prefixes alone are never sufficient.
+pub(super) fn is_trivial_accessor(
+    node: TsNode<'_>,
+    name: &str,
+    src: &str,
+    fields: &[AccessorField],
+) -> bool {
+    let getter = ["get", "is", "has"]
+        .iter()
+        .any(|prefix| has_accessor_suffix(name, prefix));
+    let setter = has_accessor_suffix(name, "set");
+    let Some(body) = node.child_by_field_name("body") else {
+        return false;
+    };
+    let Some(statement) = sole_semantic_child(body) else {
+        return false;
+    };
+
+    if getter && parameter_count(node) == 0 {
+        return is_direct_field_return(statement, src, fields);
+    }
+    if setter && parameter_count(node) == 1 {
+        let Some(parameter) = sole_parameter_name(node, src) else {
+            return false;
+        };
+        return is_direct_field_assignment(statement, &parameter, src, fields);
+    }
+    false
+}
+
+fn has_accessor_suffix(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|first| first.is_ascii_uppercase())
+}
+
+fn sole_semantic_child(node: TsNode<'_>) -> Option<TsNode<'_>> {
+    let mut cursor = node.walk();
+    let mut children = node
+        .named_children(&mut cursor)
+        .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"));
+    let only = children.next()?;
+    if children.next().is_some() {
+        return None;
+    }
+    Some(only)
+}
+
+fn is_direct_field_return(statement: TsNode<'_>, src: &str, fields: &[AccessorField]) -> bool {
+    if statement.kind() != "return_statement" {
+        return false;
+    }
+    let Some(value) = sole_semantic_child(statement) else {
+        return false;
+    };
+    let field_name = match value.kind() {
+        "identifier" => text(value, src),
+        "field_access" => this_field_name(value, src).unwrap_or_default(),
+        _ => return false,
+    };
+    fields
+        .iter()
+        .find(|field| field.name == field_name)
+        .is_some_and(|field| !field.is_static_final)
+}
+
+fn sole_parameter_name(node: TsNode<'_>, src: &str) -> Option<String> {
+    let parameters = node.child_by_field_name("parameters")?;
+    let parameter = sole_semantic_child(parameters)?;
+    if !matches!(parameter.kind(), "formal_parameter" | "spread_parameter") {
+        return None;
+    }
+    parameter
+        .child_by_field_name("name")
+        .map(|name| text(name, src))
+        .filter(|name| !name.is_empty())
+}
+
+fn is_direct_field_assignment(
+    statement: TsNode<'_>,
+    parameter: &str,
+    src: &str,
+    fields: &[AccessorField],
+) -> bool {
+    if statement.kind() != "expression_statement" {
+        return false;
+    }
+    let Some(assignment) = sole_semantic_child(statement) else {
+        return false;
+    };
+    if assignment.kind() != "assignment_expression"
+        || assignment
+            .child_by_field_name("operator")
+            .is_none_or(|operator| text(operator, src) != "=")
+    {
+        return false;
+    }
+    let Some(left) = assignment.child_by_field_name("left") else {
+        return false;
+    };
+    let Some(right) = assignment.child_by_field_name("right") else {
+        return false;
+    };
+    let Some(field_name) = this_field_name(left, src) else {
+        return false;
+    };
+    fields.iter().any(|field| field.name == field_name)
+        && right.kind() == "identifier"
+        && text(right, src) == parameter
+}
+
+fn this_field_name(node: TsNode<'_>, src: &str) -> Option<String> {
+    if node.kind() != "field_access"
+        || node
+            .child_by_field_name("object")
+            .is_none_or(|object| object.kind() != "this")
+    {
+        return None;
+    }
+    node.child_by_field_name("field")
+        .filter(|field| field.kind() == "identifier")
+        .map(|field| text(field, src))
 }
 
 pub(super) fn is_test_method(node: TsNode<'_>, src: &str) -> bool {
@@ -147,21 +314,39 @@ pub(super) fn build_class_props(
 
     let table_name: Option<String> = if effective_stereotype == Some("entity") {
         let start = node.start_byte();
-        let header = &src[start..src.len().min(start + 512)];
+        // Clamp the 512-byte window down to a char boundary: `start + 512` is an
+        // arbitrary byte offset that can land inside a multibyte UTF-8 char (a
+        // non-ASCII identifier/comment), and slicing there would panic — which,
+        // under the rayon per-file parse, aborts the whole analyze.
+        let mut end = (start + 512).min(src.len());
+        while end > start && !src.is_char_boundary(end) {
+            end -= 1;
+        }
+        let header = &src[start..end];
         extract_table_annotation_name(header)
     } else {
         None
     };
 
     let mut obj = serde_json::Map::new();
-    if let Some(s) = effective_stereotype { obj.insert("stereotype".into(), s.into()); }
-    if let Some(e) = entity_opt           { obj.insert("entityType".into(), e.into()); }
-    if let Some(t) = table_name           { obj.insert("tableName".into(), t.into()); }
+    if let Some(s) = effective_stereotype {
+        obj.insert("stereotype".into(), s.into());
+    }
+    if let Some(e) = entity_opt {
+        obj.insert("entityType".into(), e.into());
+    }
+    if let Some(t) = table_name {
+        obj.insert("tableName".into(), t.into());
+    }
     let annotations = super::annotation_metadata(node, src);
     if !annotations.is_empty() {
         obj.insert("annotations".into(), serde_json::Value::Array(annotations));
     }
-    if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
 }
 
 fn extract_table_annotation_name(text: &str) -> Option<String> {
@@ -196,8 +381,7 @@ fn extract_table_annotation_name(text: &str) -> Option<String> {
 }
 
 pub(super) fn attach_structural_profiles(builder: &mut FileBuilder) {
-    let mut extends_count: std::collections::HashMap<&str, u16> =
-        std::collections::HashMap::new();
+    let mut extends_count: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
     let mut implements_count: std::collections::HashMap<&str, u16> =
         std::collections::HashMap::new();
     for site in &builder.reference_sites {
@@ -252,14 +436,17 @@ pub(super) fn attach_structural_profiles(builder: &mut FileBuilder) {
         let n = cxs.len() as f32;
 
         let avg_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
-            if n == 0.0 { 0.0 } else { cxs.iter().map(|c| f(c)).sum::<f32>() / n }
+            if n == 0.0 {
+                0.0
+            } else {
+                cxs.iter().map(|c| f(c)).sum::<f32>() / n
+            }
         };
         let max_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
             cxs.iter().map(|c| f(c)).fold(0f32, f32::max)
         };
-        let sum_of = |f: fn(&ComplexityRecord) -> f32| -> f32 {
-            cxs.iter().map(|c| f(c)).sum::<f32>()
-        };
+        let sum_of =
+            |f: fn(&ComplexityRecord) -> f32| -> f32 { cxs.iter().map(|c| f(c)).sum::<f32>() };
 
         let loc = (def.range.end_line.saturating_sub(def.range.start_line)) as f32 / 1000.0;
 
@@ -305,4 +492,3 @@ pub(super) fn attach_structural_profiles(builder: &mut FileBuilder) {
         }
     }
 }
-

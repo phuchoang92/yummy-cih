@@ -8,9 +8,9 @@ use cih_core::{
 use cih_lang::constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
 
 use crate::contracts::resolve_contract_edges;
-use crate::index::ResolveIndex;
+use crate::index::{ResolveIndex, ResolvedReceiver};
 use crate::inheritance::build_mro_map;
-use crate::lang::{InheritanceModel, ResolverRegistry};
+use crate::lang::{DiSite, InheritanceModel, ResolverRegistry};
 use crate::types::{
     call_name, class_of, is_simple_ident, split_last_dot_outside_parens, starts_uppercase,
 };
@@ -115,10 +115,13 @@ impl<'a> EdgeEmitter<'a> {
             RefKind::Call => {
                 if let Some(recv) = site.receiver.as_deref() {
                     match self.resolve_receiver_expr_type(pf, site, recv) {
-                        Some(rt) if rt.contains('.') && !self.index.is_known_type(&rt) => {
-                            ("receiver_external", None, Some(rt))
+                        Some(resolved)
+                            if resolved.fqcn.contains('.')
+                                && !self.index.is_known_type(&resolved.fqcn) =>
+                        {
+                            ("receiver_external", None, Some(resolved.fqcn))
                         }
-                        Some(rt) => ("member_not_found", Some(rt), None),
+                        Some(resolved) => ("member_not_found", Some(resolved.fqcn), None),
                         None => ("receiver_type_unknown", None, None),
                     }
                 } else {
@@ -141,7 +144,8 @@ impl<'a> EdgeEmitter<'a> {
                 let recv_type = site
                     .receiver
                     .as_deref()
-                    .and_then(|r| self.resolve_receiver_expr_type(pf, site, r));
+                    .and_then(|r| self.resolve_receiver_expr_type(pf, site, r))
+                    .map(|resolved| resolved.fqcn);
                 ("field_not_found", recv_type, None)
             }
             _ => ("unresolved", None, None),
@@ -155,7 +159,8 @@ impl<'a> EdgeEmitter<'a> {
         self.emit_import_edges();
         self.emit_heritage_edges();
         self.emit_mro_edges();
-        let (contract_nodes, contract_edges) = resolve_contract_edges(self.parsed);
+        let (contract_nodes, contract_edges) =
+            resolve_contract_edges(self.parsed, self.constant_resolver.as_ref());
         self.nodes.extend(contract_nodes);
         self.edges.extend(contract_edges);
         self.finish()
@@ -412,29 +417,41 @@ impl<'a> EdgeEmitter<'a> {
             return None;
         }
 
-        if let Some(owner) = self.resolve_receiver_expr_type(pf, site, receiver) {
-            // DI redirect: interface receiver with exactly one @Service impl → use the impl.
-            let effective_owner = if self.index.is_interface_type(&owner) {
-                self.registry
-                    .for_language(lang)
-                    .di_redirect(&owner, &self.index)
-                    .unwrap_or_else(|| owner.clone())
-            } else {
-                owner.clone()
-            };
+        if let Some(resolved) = self.resolve_receiver_expr_type(pf, site, receiver) {
+            let bare_receiver = !receiver.contains('.') && !receiver.contains('(');
+            let owner = resolved.fqcn;
 
-            if let Some(dst) =
-                self.index
-                    .find_member_in_hierarchy(&effective_owner, &site.name, site.arity)
-            {
-                let (confidence, reason) = if effective_owner != owner {
-                    (0.9, "di-resolved")
-                } else if receiver.contains('.') || receiver.contains('(') {
-                    (0.7, "receiver-bound")
-                } else {
-                    (1.0, "receiver-bound")
+            // DI redirect: interface receiver → the impl the container would inject
+            // (qualifier/bean-id, unique bean, or sole implementor — see di_redirect).
+            if self.index.is_interface_type(&owner) {
+                let enclosing = class_of(&site.in_fqcn).to_string();
+                let di_site = DiSite {
+                    qualifier: resolved.qualifier.as_deref(),
+                    enclosing_class: &enclosing,
                 };
-                return Some((dst, confidence, reason.to_string()));
+                if let Some(redirect) =
+                    self.registry
+                        .for_language(lang)
+                        .di_redirect(&owner, &di_site, &self.index)
+                {
+                    if let Some(dst) = self.index.find_member_in_hierarchy(
+                        &redirect.target,
+                        &site.name,
+                        site.arity,
+                    ) {
+                        return Some((dst, redirect.confidence, redirect.reason.to_string()));
+                    }
+                }
+                // No (usable) redirect: fall through to the interface method below —
+                // a truthful interface-level edge, never a fabricated impl guess.
+            }
+
+            if let Some(dst) = self
+                .index
+                .find_member_in_hierarchy(&owner, &site.name, site.arity)
+            {
+                let confidence = if bare_receiver { 1.0 } else { 0.7 };
+                return Some((dst, confidence, "receiver-bound".to_string()));
             }
             if owner.contains('.') && !self.index.is_known_type(&owner) {
                 self.unresolved_external_fqcns.insert(owner);
@@ -467,7 +484,7 @@ impl<'a> EdgeEmitter<'a> {
 
     fn resolve_field_access(&mut self, pf: &ParsedFile, site: &ReferenceSite) -> Option<NodeId> {
         let owner = match site.receiver.as_deref() {
-            Some(receiver) => self.resolve_receiver_expr_type(pf, site, receiver)?,
+            Some(receiver) => self.resolve_receiver_expr_type(pf, site, receiver)?.fqcn,
             None => class_of(&site.in_fqcn).to_string(),
         };
         self.index.find_field_in_hierarchy(&owner, &site.name)
@@ -516,6 +533,13 @@ impl<'a> EdgeEmitter<'a> {
                     if let Some(dst) = self.index.find_member(owner, name, arity) {
                         return Some(dst);
                     }
+                    // `require('./services')` names a directory — the module is
+                    // actually `./services/index`.
+                    if let Some(owner) = self.index.normalize_module_path(owner) {
+                        if let Some(dst) = self.index.find_member(&owner, name, arity) {
+                            return Some(dst);
+                        }
+                    }
                 }
             }
         }
@@ -527,7 +551,7 @@ impl<'a> EdgeEmitter<'a> {
         pf: &ParsedFile,
         site: &ReferenceSite,
         receiver: &str,
-    ) -> Option<String> {
+    ) -> Option<ResolvedReceiver> {
         let receiver = receiver.trim();
         if receiver.is_empty() {
             return None;
@@ -540,16 +564,19 @@ impl<'a> EdgeEmitter<'a> {
                 .for_language(effective_lang(pf))
                 .is_self_receiver(receiver)
             {
-                return self.index.receiver_type(&site.in_fqcn, receiver);
+                return self.index.receiver(&site.in_fqcn, receiver, &pf.file);
             }
             if starts_uppercase(receiver) {
                 if let Some(fqcn) = self.resolve_type_cached(receiver, &pf.file) {
                     if self.index.is_known_type(&fqcn) {
-                        return Some(fqcn);
+                        return Some(ResolvedReceiver {
+                            fqcn,
+                            qualifier: None,
+                        });
                     }
                 }
             }
-            return self.index.receiver_type(&site.in_fqcn, receiver);
+            return self.index.receiver(&site.in_fqcn, receiver, &pf.file);
         }
 
         if !receiver.contains('.') && receiver.ends_with(')') {
@@ -557,12 +584,19 @@ impl<'a> EdgeEmitter<'a> {
             let owner = class_of(&site.in_fqcn);
             return self
                 .index
-                .member_return_type_in_hierarchy(owner, call, None);
+                .member_return_type_in_hierarchy(owner, call, None)
+                .map(|fqcn| ResolvedReceiver {
+                    fqcn,
+                    qualifier: None,
+                });
         }
 
         if let Some(fqcn) = self.resolve_type_cached(receiver, &pf.file) {
             if self.index.is_known_type(&fqcn) {
-                return Some(fqcn);
+                return Some(ResolvedReceiver {
+                    fqcn,
+                    qualifier: None,
+                });
             }
         }
 
@@ -574,21 +608,29 @@ impl<'a> EdgeEmitter<'a> {
                             let name = call_name(right)?;
                             return self
                                 .index
-                                .member_return_type_in_hierarchy(&fqcn, name, None);
+                                .member_return_type_in_hierarchy(&fqcn, name, None)
+                                .map(|fqcn| ResolvedReceiver {
+                                    fqcn,
+                                    qualifier: None,
+                                });
                         }
-                        return self.index.field_type_in_hierarchy(&fqcn, right);
+                        return self.index.field_receiver_in_hierarchy(&fqcn, right);
                     }
                 }
             }
 
-            let owner = self.resolve_receiver_expr_type(pf, site, left)?;
+            let owner = self.resolve_receiver_expr_type(pf, site, left)?.fqcn;
             if right.ends_with(')') {
                 let name = call_name(right)?;
                 return self
                     .index
-                    .member_return_type_in_hierarchy(&owner, name, None);
+                    .member_return_type_in_hierarchy(&owner, name, None)
+                    .map(|fqcn| ResolvedReceiver {
+                        fqcn,
+                        qualifier: None,
+                    });
             }
-            return self.index.field_type_in_hierarchy(&owner, right);
+            return self.index.field_receiver_in_hierarchy(&owner, right);
         }
 
         None
@@ -612,8 +654,9 @@ impl<'a> EdgeEmitter<'a> {
             return;
         }
         let strategy: Option<&str> = match (&kind, reason.as_str()) {
+            (EdgeKind::Calls, "di-qualifier") => Some("di_bean_id"),
             (EdgeKind::Calls, "di-resolved") => Some("di_xml"),
-            (EdgeKind::Calls, "interface_single_impl") => Some("iface_single"),
+            (EdgeKind::Calls, "di-single-impl") => Some("iface_single"),
             (EdgeKind::Calls, "receiver-bound") => Some("type_inferred"),
             (EdgeKind::Calls, "self-receiver") => Some("self_recv"),
             (EdgeKind::Calls, "free-call-fallback") => Some("free_call"),
@@ -653,6 +696,8 @@ impl<'a> EdgeEmitter<'a> {
                 file: Path::new(&pf.file),
                 owner_fqcn: &site.in_fqcn,
                 imports: &pf.imports,
+                // Java/Kotlin arg folding never widens beyond class scoping.
+                allow_unique_fallback: false,
             };
             let resolved_args: Vec<String> = site
                 .arg_texts
@@ -660,6 +705,7 @@ impl<'a> EdgeEmitter<'a> {
                 .map(|arg| {
                     self.constant_resolver
                         .resolve(arg, &ctx)
+                        .map(|resolved| resolved.value)
                         .unwrap_or_else(|| arg.clone())
                 })
                 .collect();

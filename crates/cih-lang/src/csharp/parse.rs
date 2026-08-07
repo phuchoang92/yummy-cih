@@ -53,6 +53,7 @@ fn walk(
                     imports.push(cih_core::RawImport {
                         raw: raw.trim_end_matches(".*").to_string(),
                         is_static: false, is_wildcard,
+                        alias: None,
                         range: range_of(child),
                     });
                 }

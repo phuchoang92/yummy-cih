@@ -1,24 +1,8 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use cih_core::{now_rfc3339, GroupEntry, GroupRegistry, Registry};
 
-fn validate_group_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        bail!("group name cannot be empty");
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!(
-            "invalid group name '{}': only alphanumeric, '-', and '_' are allowed",
-            name
-        );
-    }
-    Ok(())
-}
-
 pub fn run_group_create(name: &str) -> Result<()> {
-    validate_group_name(name)?;
+    cih_core::validate_group_name(name)?;
     let mut registry = GroupRegistry::load();
     if registry.find(name).is_some() {
         println!("Group '{name}' already exists.");
@@ -35,6 +19,7 @@ pub fn run_group_create(name: &str) -> Result<()> {
 }
 
 pub fn run_group_add(name: &str, repo: &str) -> Result<()> {
+    cih_core::validate_group_name(name)?;
     let repo_registry = Registry::load();
     let repo_name = repo_registry
         .find(repo)
@@ -55,6 +40,7 @@ pub fn run_group_add(name: &str, repo: &str) -> Result<()> {
 }
 
 pub fn run_group_remove(name: &str, repo: &str) -> Result<()> {
+    cih_core::validate_group_name(name)?;
     let repo_registry = Registry::load();
     let repo_name = repo_registry
         .find(repo)
@@ -97,7 +83,7 @@ pub fn run_group_list(json: bool) -> Result<()> {
 }
 
 pub fn run_group_sync(name: &str, json: bool) -> Result<()> {
-    validate_group_name(name)?;
+    cih_core::validate_group_name(name)?;
     let summary = super::group_sync::sync_group(name)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -107,5 +93,56 @@ pub fn run_group_sync(name: &str, json: bool) -> Result<()> {
             summary.group, summary.repo_count, summary.contract_count, summary.output_path
         );
     }
+    Ok(())
+}
+
+pub fn run_group_status(name: &str, json: bool) -> Result<()> {
+    cih_core::validate_group_name(name)?;
+    let group_registry = GroupRegistry::load();
+    let group = group_registry
+        .find(name)
+        .ok_or_else(|| anyhow!("group '{name}' does not exist"))?;
+    let registry = Registry::load();
+    let dir =
+        cih_core::group_dir(name).ok_or_else(|| anyhow!("cannot determine HOME for group path"))?;
+    let state = cih_core::SyncState::load(&dir);
+    let contracts_exist = dir.join("contracts.jsonl").exists();
+    let stale = cih_core::group_contracts_stale(group, &registry, state.as_ref(), contracts_exist);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "group": group.name,
+                "repos": group.repos,
+                "contracts_exist": contracts_exist,
+                "contracts_synced_at": state.as_ref().map(|s| s.synced_at.clone()),
+                "generation": state.as_ref().map(|s| s.generation),
+                "stale": stale,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("group:      {}", group.name);
+    println!("repos:      {}", group.repos.join(", "));
+    match &state {
+        Some(state) => println!(
+            "last sync:  {} (generation {})",
+            state.synced_at, state.generation
+        ),
+        None if contracts_exist => println!("last sync:  unknown (contracts exist but unstamped)"),
+        None => println!("last sync:  never"),
+    }
+    println!(
+        "contracts:  {}",
+        if stale {
+            "STALE — run `cih-engine group sync`"
+        } else if contracts_exist {
+            "fresh"
+        } else {
+            "not synced yet"
+        }
+    );
     Ok(())
 }

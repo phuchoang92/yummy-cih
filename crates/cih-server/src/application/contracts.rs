@@ -1,0 +1,1419 @@
+//! Typed cross-repository application use cases.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use cih_core::{ContractMatch, ContractMatchKind, EdgeKind, NodeKind};
+use serde::Serialize;
+
+use crate::application::cross_repo_graph as xflow;
+use crate::domain::error::AppError;
+use crate::domain::repository::{RepoCatalogSnapshot, RepoSelector};
+use crate::ports::artifact_repository::{ArtifactRepository, ArtifactSnapshot};
+use crate::ports::blocking_runtime::{blocking_timeout, run_blocking_heavy, BlockingError};
+use crate::ports::cross_repo_graph_provider::{CrossRepoGraph, CrossRepoGraphProvider};
+use crate::ports::repo_context_provider::RepoContextProvider;
+
+#[derive(Clone)]
+pub(crate) struct ContractService {
+    repo_contexts: Arc<dyn RepoContextProvider>,
+    xflow: Arc<dyn CrossRepoGraphProvider>,
+    artifacts: Arc<dyn ArtifactRepository>,
+}
+
+impl ContractService {
+    pub(crate) fn new(
+        repo_contexts: Arc<dyn RepoContextProvider>,
+        xflow: Arc<dyn CrossRepoGraphProvider>,
+        artifacts: Arc<dyn ArtifactRepository>,
+    ) -> Self {
+        Self {
+            repo_contexts,
+            xflow,
+            artifacts,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GroupContractsCommand {
+    group: String,
+    kind: Option<ContractMatchKind>,
+}
+
+impl GroupContractsCommand {
+    pub(crate) fn try_new(group: String, kind: String) -> Result<Self, AppError> {
+        let group = required_group(group)?;
+        let kind = parse_contract_kind(&kind).map_err(|message| AppError::InvalidInput {
+            field: "kind",
+            message,
+        })?;
+        Ok(Self { group, kind })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct GroupContractsOutput {
+    group: String,
+    contracts_synced_at: Option<String>,
+    contracts_stale: bool,
+    matches: Vec<ContractMatch>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ApiImpactCommand {
+    group: String,
+    method: String,
+    path: String,
+    include_callers: bool,
+    caller_depth: u32,
+}
+
+impl ApiImpactCommand {
+    pub(crate) fn try_new(
+        group: String,
+        method: String,
+        path: String,
+        include_callers: bool,
+        caller_depth: u32,
+    ) -> Result<Self, AppError> {
+        let group = required_group(group)?;
+        let method = required("method", method)?.to_ascii_uppercase();
+        if !matches!(
+            method.as_str(),
+            "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+        ) {
+            return Err(AppError::InvalidInput {
+                field: "method",
+                message: format!("unsupported HTTP method '{method}'"),
+            });
+        }
+        let path = required("path", path)?;
+        let caller_depth = (if caller_depth == 0 { 3 } else { caller_depth }).clamp(1, 6);
+        Ok(Self {
+            group,
+            method,
+            path,
+            include_callers,
+            caller_depth,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ApiImpactOutput {
+    method: String,
+    path: String,
+    match_key: String,
+    consumers: Vec<ApiConsumerImpact>,
+    contracts_synced_at: Option<String>,
+    contracts_stale: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiConsumerImpact {
+    provider_repo: String,
+    provider_route: String,
+    consumer_repo: String,
+    consumer_endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consumer_callers: Option<ConsumerCallers>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ConsumerCallers {
+    Found(Vec<ConsumerCaller>),
+    Unavailable { error: String },
+}
+
+fn required(field: &'static str, value: String) -> Result<String, AppError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err(AppError::InvalidInput {
+            field,
+            message: "must not be empty".into(),
+        })
+    } else {
+        Ok(value)
+    }
+}
+
+fn required_group(value: String) -> Result<String, AppError> {
+    let group = required("group", value)?;
+    cih_core::validate_group_name(&group).map_err(|error| AppError::InvalidInput {
+        field: "group",
+        message: error.to_string(),
+    })?;
+    Ok(group)
+}
+
+fn parse_contract_kind(kind: &str) -> Result<Option<ContractMatchKind>, String> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "" | "all" => Ok(None),
+        "http" | "http_route" | "http-route" => Ok(Some(ContractMatchKind::HttpRoute)),
+        "kafka" | "kafka_topic" | "kafka-topic" => Ok(Some(ContractMatchKind::KafkaTopic)),
+        "spring" | "spring_event" | "spring-event" => Ok(Some(ContractMatchKind::SpringEvent)),
+        other => Err(format!(
+            "unknown contract kind '{other}'; expected all, http, kafka, or spring"
+        )),
+    }
+}
+
+fn node_prop_str_owned(node: &cih_core::Node, key: &str) -> Option<String> {
+    node.props.as_ref()?.get(key)?.as_str().map(str::to_owned)
+}
+
+fn strip_response_wrapper(raw: &str) -> &str {
+    raw.find('<')
+        .and_then(|start| raw.rfind('>').map(|end| &raw[start + 1..end]))
+        .unwrap_or(raw)
+}
+
+fn short_class_name(fqcn: &str) -> &str {
+    fqcn.rsplit('.').next().unwrap_or(fqcn)
+}
+
+fn blocking_error(error: BlockingError) -> AppError {
+    AppError::Unavailable {
+        dependency: "contract computation",
+        message: error.to_string(),
+        retryable: true,
+    }
+}
+
+fn malformed_contract(error: serde_json::Error) -> AppError {
+    AppError::Unavailable {
+        dependency: "contracts artifact",
+        message: format!("malformed contracts artifact: {error}"),
+        retryable: false,
+    }
+}
+
+/// Read and parse a group's synced contracts, with the canonical
+/// "run group sync first" error when they don't exist yet.
+fn load_group_contracts(group: &str) -> Result<Vec<ContractMatch>, AppError> {
+    let path = cih_core::contracts_path(group).ok_or_else(|| AppError::Unavailable {
+        dependency: "contracts path",
+        message: "cannot determine HOME for group contracts path".into(),
+        retryable: false,
+    })?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| AppError::InvalidInput {
+        field: "group",
+        message: format!(
+            "cannot read contracts for group '{group}': {e}. \
+                 Run `cih group sync {group}` first"
+        ),
+    })?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<ContractMatch>(line).map_err(malformed_contract))
+        .collect()
+}
+
+/// Hard bounds on the doc-pack contract scan: a malformed or enormous
+/// contracts artifact must not make one `doc_pack` call unbounded.
+const CONTRACT_SCAN_MAX_ROWS: usize = 50_000;
+const CONTRACT_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Provider-scoped consumer lookup for one exact route (doc_pack's contracts
+/// section — internal, not a tool surface).
+#[derive(Clone, Debug)]
+pub(crate) struct RouteConsumersQuery {
+    pub(crate) group: String,
+    pub(crate) provider_repo: String,
+    /// Canonical provider Route NodeId string (`Route:METHOD /path`) — the
+    /// exact value group sync writes as `ContractMatch.provider_id`.
+    pub(crate) provider_route: String,
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) limit: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RouteConsumersProjection {
+    pub(crate) consumers: Vec<RouteConsumer>,
+    /// False when the consumer list was cut by `limit` or the scan stopped at
+    /// a row/byte cap before EOF — an empty incomplete list proves nothing.
+    pub(crate) complete: bool,
+    pub(crate) contracts_synced_at: Option<String>,
+    pub(crate) contracts_stale: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RouteConsumer {
+    pub(crate) consumer_repo: String,
+    pub(crate) consumer_endpoint: String,
+}
+
+impl ContractService {
+    /// Stream the group's contracts JSONL through a byte/row-capped reader and
+    /// return the consumers of exactly `(provider_repo, provider_route)`.
+    /// Deliberately not built on [`load_group_contracts`] (unbounded
+    /// `read_to_string`) or [`api_impact_sync`] (its filter ignores provider
+    /// identity, so two providers exposing the same method/path would leak
+    /// each other's consumers).
+    pub(crate) async fn route_consumers(
+        &self,
+        query: RouteConsumersQuery,
+    ) -> Result<RouteConsumersProjection, AppError> {
+        let repo_contexts = self.repo_contexts.clone();
+        run_blocking_heavy(blocking_timeout(), "doc_pack contract scan", move || {
+            let catalog = repo_contexts.catalog_snapshot();
+            route_consumers_sync(&query, &catalog)
+        })
+        .await
+        .map_err(blocking_error)?
+    }
+}
+
+fn route_consumers_sync(
+    query: &RouteConsumersQuery,
+    catalog: &RepoCatalogSnapshot,
+) -> Result<RouteConsumersProjection, AppError> {
+    cih_core::validate_group_name(&query.group).map_err(|error| AppError::InvalidInput {
+        field: "group",
+        message: error.to_string(),
+    })?;
+    let path = cih_core::contracts_path(&query.group).ok_or_else(|| AppError::Unavailable {
+        dependency: "contracts path",
+        message: "cannot determine HOME for group contracts path".into(),
+        retryable: false,
+    })?;
+    let file = std::fs::File::open(&path).map_err(|e| AppError::InvalidInput {
+        field: "group",
+        message: format!(
+            "cannot read contracts for group '{group}': {e}. \
+             Run `cih group sync {group}` first",
+            group = query.group
+        ),
+    })?;
+    let (consumers, complete) = scan_route_consumers(
+        file,
+        query,
+        ScanCaps {
+            max_rows: CONTRACT_SCAN_MAX_ROWS,
+            max_bytes: CONTRACT_SCAN_MAX_BYTES,
+        },
+    )?;
+    let (contracts_synced_at, contracts_stale) = group_freshness(&query.group, catalog);
+    Ok(RouteConsumersProjection {
+        consumers,
+        complete,
+        contracts_synced_at,
+        contracts_stale,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ScanCaps {
+    max_rows: usize,
+    max_bytes: u64,
+}
+
+/// Streaming provider-scoped scan over a contracts JSONL source. Returns the
+/// matching consumers (sorted, at most `query.limit`) and whether the scan was
+/// complete — false when the consumer list was cut by `limit` or a row/byte
+/// cap stopped the scan before EOF.
+fn scan_route_consumers(
+    source: impl std::io::Read,
+    query: &RouteConsumersQuery,
+    caps: ScanCaps,
+) -> Result<(Vec<RouteConsumer>, bool), AppError> {
+    use std::io::{BufRead, Read};
+
+    let target_key = format!(
+        "{} {}",
+        query.method.to_ascii_uppercase(),
+        cih_core::normalize_contract_path(&query.path)
+    );
+    let mut reader = std::io::BufReader::new(source).take(caps.max_bytes);
+    let mut consumers = Vec::new();
+    let mut rows = 0usize;
+    let mut scan_capped = false;
+    let mut consumers_capped = false;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|e| AppError::Unavailable {
+                dependency: "contracts artifact",
+                message: format!("cannot read contracts for group '{}': {e}", query.group),
+                retryable: true,
+            })?;
+        if read == 0 {
+            // EOF of the capped reader. `limit() == 0` here means the byte cap
+            // was consumed — conservatively incomplete even at exact EOF.
+            scan_capped = reader.limit() == 0;
+            break;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if reader.limit() == 0 && !line.ends_with('\n') {
+            // The byte cap sliced this line mid-row: never parse a truncated
+            // record, and never call the scan complete.
+            scan_capped = true;
+            break;
+        }
+        rows += 1;
+        if rows > caps.max_rows {
+            scan_capped = true;
+            break;
+        }
+        let item: ContractMatch = serde_json::from_str(&line).map_err(malformed_contract)?;
+        if item.kind != ContractMatchKind::HttpRoute
+            || item.provider_repo != query.provider_repo
+            || item.match_key != target_key
+        {
+            continue;
+        }
+        if item.provider_id != query.provider_route {
+            if item.provider_id.starts_with("Route:") {
+                // A different canonical route in the same repo sharing the
+                // normalized match key (e.g. `/orders/{id}` vs `/orders/{code}`).
+                continue;
+            }
+            // Same provider repo + match key but a provider_id that is not a
+            // canonical Route NodeId: the artifact's format has drifted from
+            // what group sync writes. Surface that loudly — an equality filter
+            // over drifted ids would masquerade as "no consumers".
+            return Err(AppError::Unavailable {
+                dependency: "contracts artifact",
+                message: format!(
+                    "contract for {} {} in provider '{}' carries non-canonical \
+                     provider_id '{}' (expected a `Route:METHOD /path` NodeId); \
+                     re-run `cih group sync {}`",
+                    query.method, query.path, query.provider_repo, item.provider_id, query.group
+                ),
+                retryable: false,
+            });
+        }
+        if consumers.len() == query.limit {
+            // The `limit + 1`-th match proves more exist; stop scanning.
+            consumers_capped = true;
+            break;
+        }
+        consumers.push(RouteConsumer {
+            consumer_repo: item.consumer_repo,
+            consumer_endpoint: item.consumer_id,
+        });
+    }
+    consumers.sort_by(|a, b| {
+        (a.consumer_repo.as_str(), a.consumer_endpoint.as_str())
+            .cmp(&(b.consumer_repo.as_str(), b.consumer_endpoint.as_str()))
+    });
+    Ok((consumers, !scan_capped && !consumers_capped))
+}
+
+/// Contract-sync freshness for a group: `(contracts_synced_at, contracts_stale)`.
+/// Conservative on missing data: an unstamped or unregistered group reads as stale.
+fn group_freshness(group_name: &str, catalog: &RepoCatalogSnapshot) -> (Option<String>, bool) {
+    let state = cih_core::group_dir(group_name).and_then(|dir| cih_core::SyncState::load(&dir));
+    let synced_at = state.as_ref().map(|s| s.synced_at.clone());
+    let Some(group) = catalog.groups().find(group_name) else {
+        // Contracts were readable but the group is gone from groups.json —
+        // freshness can't be verified against members, so flag it.
+        return (synced_at, true);
+    };
+    let contracts_exist = cih_core::contracts_path(group_name).is_some_and(|path| path.exists());
+    let stale =
+        cih_core::group_contracts_stale(group, catalog.registry(), state.as_ref(), contracts_exist);
+    (synced_at, stale)
+}
+
+/// The handlers below are thin async shims: each body is synchronous cold I/O
+/// (contracts file reads, artifact graph loads) plus pure compute, so one
+/// `run_blocking` closure owns the whole phase — a cold multi-thousand-node
+/// artifact parse must never run on a Tokio worker.
+impl ContractService {
+    pub(crate) async fn group_contracts(
+        &self,
+        command: GroupContractsCommand,
+    ) -> Result<GroupContractsOutput, AppError> {
+        let repo_contexts = self.repo_contexts.clone();
+        run_blocking_heavy(blocking_timeout(), "group_contracts load", move || {
+            let catalog = repo_contexts.catalog_snapshot();
+            group_contracts_sync(command, &catalog)
+        })
+        .await
+        .map_err(blocking_error)?
+    }
+}
+
+fn group_contracts_sync(
+    command: GroupContractsCommand,
+    catalog: &RepoCatalogSnapshot,
+) -> Result<GroupContractsOutput, AppError> {
+    let path = cih_core::contracts_path(&command.group).ok_or_else(|| AppError::Unavailable {
+        dependency: "contracts path",
+        message: "cannot determine HOME for group contracts path".into(),
+        retryable: false,
+    })?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| AppError::InvalidInput {
+        field: "group",
+        message: format!(
+            "cannot read contracts for group '{}' at {}: {e}. Run `cih group sync {}` first",
+            command.group,
+            path.display(),
+            command.group
+        ),
+    })?;
+    let mut matches = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let item: ContractMatch = serde_json::from_str(line).map_err(malformed_contract)?;
+        if command.kind.is_none() || command.kind == Some(item.kind) {
+            matches.push(item);
+        }
+    }
+    let (contracts_synced_at, contracts_stale) = group_freshness(&command.group, catalog);
+    Ok(GroupContractsOutput {
+        group: command.group,
+        contracts_synced_at,
+        contracts_stale,
+        matches,
+    })
+}
+
+impl ContractService {
+    pub(crate) async fn api_impact(
+        &self,
+        command: ApiImpactCommand,
+    ) -> Result<ApiImpactOutput, AppError> {
+        let group = command.group.clone();
+        let repo_contexts = self.repo_contexts.clone();
+        let (catalog, contracts) =
+            run_blocking_heavy(blocking_timeout(), "api_impact contract load", move || {
+                let catalog = repo_contexts.catalog_snapshot();
+                let contracts = load_group_contracts(&group)?;
+                Ok::<_, AppError>((catalog, contracts))
+            })
+            .await
+            .map_err(blocking_error)??;
+        let target_key = format!(
+            "{} {}",
+            command.method,
+            cih_core::normalize_contract_path(&command.path)
+        );
+        let mut graphs = HashMap::new();
+        if command.include_callers {
+            for consumer in contracts
+                .iter()
+                .filter(|item| {
+                    item.kind == ContractMatchKind::HttpRoute && item.match_key == target_key
+                })
+                .map(|item| item.consumer_repo.clone())
+                .collect::<HashSet<_>>()
+            {
+                let loaded = match catalog.resolve(RepoSelector::NameOrPath(consumer.clone())) {
+                    Ok(repo) => self
+                        .xflow
+                        .graph_for(&repo)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                graphs.insert(consumer, loaded);
+            }
+        }
+        run_blocking_heavy(blocking_timeout(), "api_impact analysis", move || {
+            api_impact_sync(command, &catalog, &contracts, &graphs)
+        })
+        .await
+        .map_err(blocking_error)
+    }
+}
+
+fn api_impact_sync(
+    command: ApiImpactCommand,
+    catalog: &RepoCatalogSnapshot,
+    contracts: &[ContractMatch],
+    graphs: &HashMap<String, Result<Arc<CrossRepoGraph>, String>>,
+) -> ApiImpactOutput {
+    let target_key = format!(
+        "{} {}",
+        command.method,
+        cih_core::normalize_contract_path(&command.path)
+    );
+    let mut consumers = Vec::new();
+    for item in contracts {
+        if item.kind != ContractMatchKind::HttpRoute || item.match_key != target_key {
+            continue;
+        }
+        let consumer_callers = if command.include_callers {
+            Some(
+                match consumer_callers(
+                    graphs.get(&item.consumer_repo),
+                    &item.consumer_repo,
+                    &item.consumer_id,
+                    command.caller_depth,
+                ) {
+                    Ok(callers) => ConsumerCallers::Found(callers),
+                    Err(error) => ConsumerCallers::Unavailable { error },
+                },
+            )
+        } else {
+            None
+        };
+        consumers.push(ApiConsumerImpact {
+            provider_repo: item.provider_repo.clone(),
+            provider_route: item.provider_id.clone(),
+            consumer_repo: item.consumer_repo.clone(),
+            consumer_endpoint: item.consumer_id.clone(),
+            consumer_callers,
+        });
+    }
+    let (contracts_synced_at, contracts_stale) = group_freshness(&command.group, catalog);
+    ApiImpactOutput {
+        method: command.method,
+        path: command.path,
+        match_key: target_key,
+        consumers,
+        contracts_synced_at,
+        contracts_stale,
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ConsumerCaller {
+    method_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+}
+
+/// Reverse-CALLS walk in the consumer repo: methods that (transitively) reach
+/// the `ExternalCall` site, each with its enclosing route when one handles it.
+fn consumer_callers(
+    graph: Option<&Result<Arc<CrossRepoGraph>, String>>,
+    consumer_repo: &str,
+    consumer_endpoint: &str,
+    depth_limit: u32,
+) -> Result<Vec<ConsumerCaller>, String> {
+    let graph = graph
+        .ok_or_else(|| format!("consumer '{consumer_repo}' graph was not loaded"))?
+        .as_ref()
+        .map_err(|error| format!("consumer artifacts unreadable: {error}"))?;
+
+    // Direct callers: ExternalCall edges into the endpoint node.
+    let mut queue: VecDeque<(String, u32)> = graph
+        .incoming(consumer_endpoint)
+        .filter(|edge| edge.kind == EdgeKind::ExternalCall)
+        .map(|edge| (edge.src.as_str().to_string(), 0))
+        .collect();
+    let mut seen: HashSet<String> = queue.iter().map(|(id, _)| id.clone()).collect();
+    let mut callers = Vec::new();
+
+    while let Some((method_id, depth)) = queue.pop_front() {
+        let route = graph
+            .out(&method_id)
+            .find(|edge| edge.kind == EdgeKind::HandlesRoute)
+            .map(|edge| edge.dst.as_str().to_string());
+        callers.push(ConsumerCaller {
+            method_id: method_id.clone(),
+            route,
+        });
+        if depth >= depth_limit {
+            continue;
+        }
+        for edge in graph.incoming(&method_id) {
+            if edge.kind != EdgeKind::Calls {
+                continue;
+            }
+            let src = edge.src.as_str().to_string();
+            if seen.insert(src.clone()) {
+                queue.push_back((src, depth + 1));
+            }
+        }
+    }
+    Ok(callers)
+}
+
+#[derive(Debug)]
+pub(crate) struct TraceFlowXCommand {
+    entry_point: String,
+    repo: RepoSelector,
+    group: String,
+    max_depth: u32,
+    max_hops: u32,
+}
+
+impl TraceFlowXCommand {
+    pub(crate) fn try_new(
+        entry_point: String,
+        repo: String,
+        group: String,
+        max_depth: u32,
+        max_hops: u32,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            entry_point: required("entry_point", entry_point)?,
+            repo: RepoSelector::from_wire(&repo),
+            group: required_group(group)?,
+            max_depth: (if max_depth == 0 {
+                xflow::DEFAULT_DEPTH
+            } else {
+                max_depth
+            })
+            .clamp(1, xflow::MAX_DEPTH),
+            max_hops: (if max_hops == 0 {
+                xflow::DEFAULT_HOPS
+            } else {
+                max_hops
+            })
+            .clamp(1, 5),
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum TraceFlowXOutput {
+    Ambiguous(AmbiguousCandidates),
+    Trace(Box<TraceFlowOutput>),
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AmbiguousCandidates {
+    status: &'static str,
+    candidates: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TraceFlowOutput {
+    entry_point: String,
+    repo: String,
+    group: String,
+    max_depth: u32,
+    max_hops: u32,
+    contracts_synced_at: Option<String>,
+    contracts_stale: bool,
+    step_count: usize,
+    completeness: crate::domain::completeness::ResultBounds,
+    steps: Vec<xflow::XStep>,
+    truncated: Vec<xflow::Truncation>,
+}
+
+/// `Err` naming the group's members when `repo_name` is not one of them.
+pub(crate) fn validate_group_member(
+    group: &str,
+    members: &[String],
+    repo_name: &str,
+) -> Result<(), AppError> {
+    if members.iter().any(|member| member == repo_name) {
+        return Ok(());
+    }
+    Err(AppError::InvalidInput {
+        field: "repo",
+        message: format!(
+            "repo '{repo_name}' is not a member of group '{group}' (members: {}) — \
+             pass `repo` naming one of them or add it with `cih group add`",
+            members.join(", ")
+        ),
+    })
+}
+
+/// Cross-repo downstream trace: walk the start repo's artifacts, hop through
+/// the group's contract matches into provider/consumer repos, continue there.
+/// The start repo is `args.repo` (registry name/path) or, when empty, the
+/// first registry entry bound to the server's graph key.
+impl ContractService {
+    pub(crate) async fn trace_flow_x(
+        &self,
+        command: TraceFlowXCommand,
+    ) -> Result<TraceFlowXOutput, AppError> {
+        let group = command.group.clone();
+        let repo_contexts = self.repo_contexts.clone();
+        let (catalog, contracts) = run_blocking_heavy(
+            blocking_timeout(),
+            "trace_flow_x contract load",
+            move || {
+                let catalog = repo_contexts.catalog_snapshot();
+                let contracts = load_group_contracts(&group)?;
+                Ok::<_, AppError>((catalog, contracts))
+            },
+        )
+        .await
+        .map_err(blocking_error)??;
+        let repo = catalog.resolve(command.repo.clone())?;
+        let start_repo = repo.registry_entry.name.clone();
+
+        let group_entry =
+            catalog
+                .groups()
+                .find(&command.group)
+                .ok_or_else(|| AppError::NotFound {
+                    entity: "group",
+                    key: command.group.clone(),
+                })?;
+        validate_group_member(&command.group, &group_entry.repos, &start_repo)?;
+        let group_members = group_entry.repos.clone();
+
+        let start_graph = self
+        .xflow
+        .graph_for(&repo)
+        .await
+        .map_err(|error| AppError::InvalidInput {
+            field: "repo",
+            message: format!(
+                    "cannot load artifacts for '{start_repo}': {e} — re-run `cih analyze {start_repo}`"
+                , e = error
+            ),
+        })?;
+
+        let entry_id = match xflow::resolve_entry(&start_graph, &command.entry_point) {
+            Ok(id) => id,
+            Err(candidates) if candidates.is_empty() => {
+                return Err(AppError::InvalidInput {
+                    field: "entry_point",
+                    message: format!(
+                        "entry point '{}' not found in repo '{start_repo}'",
+                        command.entry_point
+                    ),
+                });
+            }
+            Err(candidates) => {
+                return Ok(TraceFlowXOutput::Ambiguous(AmbiguousCandidates {
+                    status: "ambiguous",
+                    candidates,
+                }));
+            }
+        };
+
+        let mut graphs = HashMap::from([(start_repo.clone(), start_graph)]);
+        for name in &group_members {
+            if graphs.contains_key(name) {
+                continue;
+            }
+            let Ok(repo) = catalog.resolve(RepoSelector::NameOrPath(name.clone())) else {
+                continue;
+            };
+            if let Ok(graph) = self.xflow.graph_for(&repo).await {
+                graphs.insert(repo.registry_entry.name, graph);
+            }
+        }
+        run_blocking_heavy(blocking_timeout(), "trace_flow_x analysis", move || {
+            let mut source = |repo: &str| graphs.get(repo).cloned();
+            let trace = xflow::trace_across(
+                &mut source,
+                &contracts,
+                &start_repo,
+                &entry_id,
+                command.max_depth,
+                command.max_hops,
+            );
+            let (contracts_synced_at, contracts_stale) = group_freshness(&command.group, &catalog);
+            TraceFlowXOutput::Trace(Box::new(TraceFlowOutput {
+                entry_point: entry_id,
+                repo: start_repo,
+                group: command.group,
+                max_depth: command.max_depth,
+                max_hops: command.max_hops,
+                contracts_synced_at,
+                contracts_stale,
+                step_count: trace.steps.len(),
+                completeness: trace.completeness,
+                steps: trace.steps,
+                truncated: trace.truncated,
+            }))
+        })
+        .await
+        .map_err(blocking_error)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ShapeCheckCommand {
+    group: String,
+    provider: String,
+    consumer: String,
+}
+
+impl ShapeCheckCommand {
+    pub(crate) fn try_new(
+        group: String,
+        provider: String,
+        consumer: String,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            group: required_group(group)?,
+            provider: required("provider", provider)?,
+            consumer: required("consumer", consumer)?,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ShapeCheckOutput {
+    Empty(EmptyShapeCheckOutput),
+    Compared(ComparedShapeCheckOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct EmptyShapeCheckOutput {
+    provider: String,
+    consumer: String,
+    contracts: Vec<ShapeContract>,
+    note: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ComparedShapeCheckOutput {
+    provider: String,
+    consumer: String,
+    contracts: Vec<ShapeContract>,
+    contracts_synced_at: Option<String>,
+    contracts_stale: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ShapeContract {
+    provider_route: String,
+    consumer_endpoint: String,
+    provider_handler: Option<String>,
+    provider_return_type: Option<String>,
+    provider_dto: Option<String>,
+    provider_fields: Vec<String>,
+    consumer_accessed_fields: Vec<String>,
+    matched: Vec<String>,
+    provider_only: Vec<String>,
+    consumer_only: Vec<String>,
+    note: Option<&'static str>,
+}
+
+impl ContractService {
+    pub(crate) async fn shape_check(
+        &self,
+        command: ShapeCheckCommand,
+    ) -> Result<ShapeCheckOutput, AppError> {
+        let group = command.group.clone();
+        let provider_name = command.provider.clone();
+        let consumer_name = command.consumer.clone();
+        let repo_contexts = self.repo_contexts.clone();
+        let (catalog, contracts) =
+            run_blocking_heavy(blocking_timeout(), "shape_check contract load", move || {
+                let catalog = repo_contexts.catalog_snapshot();
+                let contracts = load_group_contracts(&group)?
+                    .into_iter()
+                    .filter(|contract| {
+                        contract.kind == ContractMatchKind::HttpRoute
+                            && contract.provider_repo == provider_name
+                            && contract.consumer_repo == consumer_name
+                    })
+                    .collect::<Vec<_>>();
+                Ok::<_, AppError>((catalog, contracts))
+            })
+            .await
+            .map_err(blocking_error)??;
+        if contracts.is_empty() {
+            return Ok(ShapeCheckOutput::Empty(EmptyShapeCheckOutput {
+                provider: command.provider,
+                consumer: command.consumer,
+                contracts: Vec::new(),
+                note: "No HTTP contracts found between these repos in the group.",
+            }));
+        }
+
+        let provider_repo = catalog.resolve(RepoSelector::NameOrPath(command.provider.clone()))?;
+        let consumer_repo = catalog.resolve(RepoSelector::NameOrPath(command.consumer.clone()))?;
+        let provider_snapshot = self.artifacts.snapshot(&provider_repo).await?;
+        let consumer_snapshot = self.artifacts.snapshot(&consumer_repo).await?;
+        run_blocking_heavy(blocking_timeout(), "shape_check analysis", move || {
+            shape_check_loaded(
+                command,
+                catalog,
+                contracts,
+                provider_snapshot,
+                consumer_snapshot,
+            )
+        })
+        .await
+        .map_err(blocking_error)
+    }
+}
+
+fn shape_check_loaded(
+    command: ShapeCheckCommand,
+    catalog: RepoCatalogSnapshot,
+    contracts: Vec<ContractMatch>,
+    provider_snapshot: Arc<ArtifactSnapshot>,
+    consumer_snapshot: Arc<ArtifactSnapshot>,
+) -> ShapeCheckOutput {
+    let provider_nodes = provider_snapshot.nodes.as_ref();
+    let consumer_nodes = consumer_snapshot.nodes.as_ref();
+    let consumer_edges = consumer_snapshot.edges.as_ref();
+
+    let provider_by_id: std::collections::BTreeMap<String, &cih_core::Node> = provider_nodes
+        .iter()
+        .map(|n| (n.id.as_str().to_string(), n))
+        .collect();
+    let consumer_by_id: std::collections::BTreeMap<String, &cih_core::Node> = consumer_nodes
+        .iter()
+        .map(|n| (n.id.as_str().to_string(), n))
+        .collect();
+
+    let mut ext_call_callers: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut method_accesses: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for edge in consumer_edges {
+        match edge.kind {
+            EdgeKind::ExternalCall => {
+                ext_call_callers
+                    .entry(edge.dst.as_str().to_string())
+                    .or_default()
+                    .push(edge.src.as_str().to_string());
+            }
+            EdgeKind::Accesses => {
+                method_accesses
+                    .entry(edge.src.as_str().to_string())
+                    .or_default()
+                    .push(edge.dst.as_str().to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let mut results = Vec::new();
+    for contract in &contracts {
+        let route_node = provider_by_id.get(&contract.provider_id);
+        let handler_sig = route_node.and_then(|n| node_prop_str_owned(n, "handler"));
+        let method_node = handler_sig
+            .as_ref()
+            .and_then(|sig| provider_by_id.get(&format!("Method:{sig}")));
+        let return_type_raw = method_node.and_then(|n| node_prop_str_owned(n, "returnType"));
+        let dto_short = return_type_raw
+            .as_deref()
+            .map(strip_response_wrapper)
+            .unwrap_or("");
+
+        let provider_fields: Vec<String> = if dto_short.is_empty() {
+            vec![]
+        } else {
+            let dto_fqcns: Vec<String> = provider_nodes
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Record))
+                .filter(|n| short_class_name(&n.name) == dto_short)
+                .filter_map(|n| n.qualified_name.clone().or_else(|| Some(n.name.clone())))
+                .collect();
+            provider_nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Field)
+                .filter(|n| {
+                    n.qualified_name
+                        .as_deref()
+                        .map(|qn| {
+                            dto_fqcns
+                                .iter()
+                                .any(|fqcn| qn.starts_with(&format!("{fqcn}#")))
+                        })
+                        .unwrap_or(false)
+                })
+                .map(|n| n.name.clone())
+                .collect()
+        };
+
+        let caller_ids: Vec<String> = ext_call_callers
+            .get(&contract.consumer_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut consumer_accessed: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for caller_id in &caller_ids {
+            if let Some(field_ids) = method_accesses.get(caller_id) {
+                for fid in field_ids {
+                    if let Some(fn_node) = consumer_by_id.get(fid) {
+                        consumer_accessed.insert(fn_node.name.clone());
+                    }
+                }
+            }
+        }
+
+        let provider_set: std::collections::BTreeSet<String> =
+            provider_fields.iter().cloned().collect();
+        let provider_only: Vec<String> = provider_fields
+            .iter()
+            .filter(|f| !consumer_accessed.contains(*f))
+            .cloned()
+            .collect();
+        let consumer_only: Vec<String> = consumer_accessed
+            .iter()
+            .filter(|f| !provider_set.contains(*f))
+            .cloned()
+            .collect();
+        let matched: Vec<String> = provider_fields
+            .iter()
+            .filter(|f| consumer_accessed.contains(*f))
+            .cloned()
+            .collect();
+
+        results.push(ShapeContract {
+            provider_route: contract.provider_id.clone(),
+            consumer_endpoint: contract.consumer_id.clone(),
+            provider_handler: handler_sig,
+            provider_return_type: return_type_raw.clone(),
+            provider_dto: if dto_short.is_empty() {
+                None
+            } else {
+                Some(dto_short.to_string())
+            },
+            provider_fields,
+            consumer_accessed_fields: consumer_accessed.into_iter().collect(),
+            matched,
+            provider_only,
+            consumer_only,
+            note: if return_type_raw.is_none() {
+                Some("returnType not available — re-run `cih analyze` to populate it")
+            } else {
+                None
+            },
+        });
+    }
+
+    let (contracts_synced_at, contracts_stale) = group_freshness(&command.group, &catalog);
+    ShapeCheckOutput::Compared(ComparedShapeCheckOutput {
+        provider: command.provider,
+        consumer: command.consumer,
+        contracts: results,
+        contracts_synced_at,
+        contracts_stale,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Coverage moved here from `tests/args.rs`, which was exercising a
+    /// duplicate of this parser in `utils.rs` that no production path called —
+    /// so the alias table could have drifted without any test noticing.
+    #[test]
+    fn contract_kind_accepts_aliases_and_rejects_unknown() {
+        assert_eq!(parse_contract_kind("").unwrap(), None);
+        assert_eq!(parse_contract_kind("all").unwrap(), None);
+        for alias in ["http", "http_route", "http-route", "HTTP"] {
+            assert_eq!(
+                parse_contract_kind(alias).unwrap(),
+                Some(ContractMatchKind::HttpRoute),
+                "alias {alias}"
+            );
+        }
+        for alias in ["kafka", "kafka_topic", "kafka-topic"] {
+            assert_eq!(
+                parse_contract_kind(alias).unwrap(),
+                Some(ContractMatchKind::KafkaTopic),
+                "alias {alias}"
+            );
+        }
+        for alias in ["spring", "spring_event", "spring-event"] {
+            assert_eq!(
+                parse_contract_kind(alias).unwrap(),
+                Some(ContractMatchKind::SpringEvent),
+                "alias {alias}"
+            );
+        }
+        assert!(parse_contract_kind("queue").is_err());
+    }
+
+    #[test]
+    fn group_member_accepted() {
+        let members = vec!["212ecom-be".to_string(), "212ecom-fe".to_string()];
+        assert!(validate_group_member("shop", &members, "212ecom-fe").is_ok());
+    }
+
+    #[test]
+    fn non_member_rejected_naming_members() {
+        let members = vec!["212ecom-be".to_string(), "212ecom-fe".to_string()];
+        let err = validate_group_member("shop", &members, "yummy-cih").unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("yummy-cih"));
+        assert!(err.contains("shop"));
+        assert!(err.contains("212ecom-be") && err.contains("212ecom-fe"));
+    }
+
+    #[test]
+    fn commands_validate_and_normalize_wire_values() {
+        let group = GroupContractsCommand::try_new(" shop ".into(), "HTTP".into()).unwrap();
+        assert_eq!(group.group, "shop");
+        assert_eq!(group.kind, Some(ContractMatchKind::HttpRoute));
+
+        let impact =
+            ApiImpactCommand::try_new("shop".into(), "get".into(), "/orders/{id}".into(), true, 0)
+                .unwrap();
+        assert_eq!(impact.method, "GET");
+        assert_eq!(impact.caller_depth, 3);
+
+        let error =
+            ApiImpactCommand::try_new("shop".into(), "CONNECT".into(), "/orders".into(), false, 0)
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::InvalidInput {
+                field: "method",
+                ..
+            }
+        ));
+
+        for unsafe_group in ["..", "../shop", "/tmp/shop", "shop/team", "shop\\team"] {
+            let error =
+                GroupContractsCommand::try_new(unsafe_group.into(), String::new()).unwrap_err();
+            assert!(matches!(
+                error,
+                AppError::InvalidInput { field: "group", .. }
+            ));
+            assert!(ApiImpactCommand::try_new(
+                unsafe_group.into(),
+                "GET".into(),
+                "/orders".into(),
+                false,
+                0,
+            )
+            .is_err());
+            assert!(TraceFlowXCommand::try_new(
+                "Route:GET /orders".into(),
+                String::new(),
+                unsafe_group.into(),
+                0,
+                0,
+            )
+            .is_err());
+            assert!(ShapeCheckCommand::try_new(
+                unsafe_group.into(),
+                "orders".into(),
+                "checkout".into(),
+            )
+            .is_err());
+        }
+    }
+
+    fn contract_line(provider_repo: &str, provider_id: &str, consumer_repo: &str) -> String {
+        serde_json::to_string(&ContractMatch {
+            kind: ContractMatchKind::HttpRoute,
+            provider_repo: provider_repo.into(),
+            provider_id: provider_id.into(),
+            consumer_repo: consumer_repo.into(),
+            consumer_id: format!("ExternalEndpoint:GET /orders ({consumer_repo})"),
+            match_key: "GET /orders".into(),
+        })
+        .unwrap()
+    }
+
+    fn route_query(provider_repo: &str, limit: usize) -> RouteConsumersQuery {
+        RouteConsumersQuery {
+            group: "shop".into(),
+            provider_repo: provider_repo.into(),
+            provider_route: "Route:GET /orders".into(),
+            method: "GET".into(),
+            path: "/orders".into(),
+            limit,
+        }
+    }
+
+    fn wide_caps() -> ScanCaps {
+        ScanCaps {
+            max_rows: 1000,
+            max_bytes: 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn route_scan_filters_by_provider_repo_and_exact_route() {
+        // Two providers expose the same method/path (same match_key); the scan
+        // must return only the queried provider's consumers — the exact leak
+        // api_impact_sync's match-key-only filter cannot prevent.
+        let input = [
+            contract_line("orders-a", "Route:GET /orders", "checkout"),
+            contract_line("orders-b", "Route:GET /orders", "mobile"),
+            // Same repo, different canonical route sharing the normalized key.
+            contract_line("orders-a", "Route:GET /orders/{code}", "batch"),
+        ]
+        .join("\n");
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders-a", 10),
+            wide_caps(),
+        )
+        .unwrap();
+        assert!(complete);
+        assert_eq!(
+            consumers,
+            vec![RouteConsumer {
+                consumer_repo: "checkout".into(),
+                consumer_endpoint: "ExternalEndpoint:GET /orders (checkout)".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn route_scan_normalizes_provider_method_case_like_group_sync() {
+        let input = contract_line("orders", "Route:GET /orders", "checkout");
+        let mut query = route_query("orders", 10);
+        query.method = "get".into();
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &query,
+            wide_caps(),
+        )
+        .unwrap();
+        assert!(complete);
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(consumers[0].consumer_repo, "checkout");
+    }
+
+    #[test]
+    fn route_scan_over_fetch_reports_incomplete() {
+        let input = [
+            contract_line("orders", "Route:GET /orders", "a"),
+            contract_line("orders", "Route:GET /orders", "b"),
+            contract_line("orders", "Route:GET /orders", "c"),
+        ]
+        .join("\n");
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders", 2),
+            wide_caps(),
+        )
+        .unwrap();
+        assert_eq!(consumers.len(), 2, "over-fetched row is never returned");
+        assert!(!complete);
+    }
+
+    #[test]
+    fn route_scan_non_canonical_provider_id_is_a_format_error_not_no_consumers() {
+        let input = contract_line("orders", "GET /orders", "checkout");
+        let error = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders", 10),
+            wide_caps(),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("non-canonical") && message.contains("group sync"),
+            "format drift must be loud: {message}"
+        );
+    }
+
+    #[test]
+    fn route_scan_row_cap_stops_before_eof_and_reports_incomplete() {
+        let input = [
+            contract_line("orders", "Route:GET /orders", "a"),
+            contract_line("orders", "Route:GET /orders", "b"),
+        ]
+        .join("\n");
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(format!("{input}\n")),
+            &route_query("orders", 10),
+            ScanCaps {
+                max_rows: 1,
+                max_bytes: 1024 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(consumers.len(), 1);
+        assert!(!complete, "hitting the row cap before EOF is incomplete");
+    }
+
+    #[test]
+    fn route_scan_byte_cap_never_parses_a_truncated_row() {
+        let line = contract_line("orders", "Route:GET /orders", "checkout");
+        let input = format!("{line}\n{line}\n");
+        // Cap mid-way through the second row: the sliced record must not be
+        // parsed (it would be malformed JSON) and the scan must be incomplete.
+        let cap = (line.len() + 1 + line.len() / 2) as u64;
+        let (consumers, complete) = scan_route_consumers(
+            std::io::Cursor::new(input),
+            &route_query("orders", 10),
+            ScanCaps {
+                max_rows: 1000,
+                max_bytes: cap,
+            },
+        )
+        .unwrap();
+        assert_eq!(consumers.len(), 1, "rows before the cap are still counted");
+        assert!(!complete);
+    }
+
+    #[test]
+    fn route_scan_malformed_full_row_is_an_error() {
+        let error = scan_route_consumers(
+            std::io::Cursor::new("not-json\n"),
+            &route_query("orders", 10),
+            wide_caps(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("malformed contracts artifact"));
+    }
+
+    #[test]
+    fn typed_outputs_preserve_existing_json_shapes() {
+        let group = GroupContractsOutput {
+            group: "shop".into(),
+            contracts_synced_at: None,
+            contracts_stale: true,
+            matches: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(group).unwrap(),
+            serde_json::json!({
+                "group": "shop",
+                "contracts_synced_at": null,
+                "contracts_stale": true,
+                "matches": [],
+            })
+        );
+
+        let impact = ApiImpactOutput {
+            method: "GET".into(),
+            path: "/orders/{id}".into(),
+            match_key: "GET /orders/{*}".into(),
+            consumers: vec![ApiConsumerImpact {
+                provider_repo: "orders".into(),
+                provider_route: "Route:GET /orders/{id}".into(),
+                consumer_repo: "checkout".into(),
+                consumer_endpoint: "ExternalEndpoint:GET /orders/{id}".into(),
+                consumer_callers: None,
+            }],
+            contracts_synced_at: Some("2026-07-20T00:00:00Z".into()),
+            contracts_stale: false,
+        };
+        let impact = serde_json::to_value(impact).unwrap();
+        assert!(
+            impact["consumers"][0]
+                .as_object()
+                .unwrap()
+                .get("consumer_callers")
+                .is_none(),
+            "consumer_callers must remain absent unless requested"
+        );
+
+        let ambiguous = TraceFlowXOutput::Ambiguous(AmbiguousCandidates {
+            status: "ambiguous",
+            candidates: vec!["Method:a#run/0".into(), "Method:b#run/0".into()],
+        });
+        assert_eq!(
+            serde_json::to_value(ambiguous).unwrap(),
+            serde_json::json!({
+                "status": "ambiguous",
+                "candidates": ["Method:a#run/0", "Method:b#run/0"],
+            })
+        );
+
+        let empty = ShapeCheckOutput::Empty(EmptyShapeCheckOutput {
+            provider: "orders".into(),
+            consumer: "checkout".into(),
+            contracts: Vec::new(),
+            note: "No HTTP contracts found between these repos in the group.",
+        });
+        assert_eq!(
+            serde_json::to_value(empty).unwrap(),
+            serde_json::json!({
+                "provider": "orders",
+                "consumer": "checkout",
+                "contracts": [],
+                "note": "No HTTP contracts found between these repos in the group.",
+            })
+        );
+    }
+}

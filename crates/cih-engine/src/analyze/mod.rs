@@ -2,13 +2,19 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result};
-use cih_core::{GraphArtifacts, JarInfo, VersionId};
+use cih_core::{
+    graph_content_version, GraphArtifacts, JarInfo, Node, NodeKind, RegistryGraphReport, VersionId,
+};
+use cih_search::{
+    inspect_search_index, persist_search_index, search_index_path, search_schema_fingerprint,
+    SearchIndex, SearchIndexInspection, SearchIndexSource, SEARCH_INDEX_FORMAT_VERSION,
+};
 use serde::Serialize;
 
-use crate::db::{load_to_falkor, LoadOutcome};
+use crate::db::LoadOutcome;
 use crate::scope::{self, ScopeFile, ScopeRequest};
 use crate::versioning::{content_version, prune_other_versions};
-use crate::{scan, DEFAULT_FALKOR_URL, DEFAULT_GRAPH_KEY};
+use crate::{scan, DEFAULT_GRAPH_KEY};
 
 use cache::{parse_scope, ParseScopeOutcome};
 use extract::{build_scope_request, load_jars_from_repo_map};
@@ -18,7 +24,7 @@ mod cache;
 mod extract;
 mod merge;
 
-pub use extract::{extract_integration_xml_in_repo, extract_jar_api};
+pub use extract::extract_jar_api;
 
 #[derive(Debug)]
 pub struct AnalyzeFlags {
@@ -29,6 +35,7 @@ pub struct AnalyzeFlags {
     pub include_decompiled: bool,
     pub scope: Option<PathBuf>,
     pub json: bool,
+    pub backend: Option<String>,
     pub falkor_url: Option<String>,
     pub graph_key: Option<String>,
     pub no_load: bool,
@@ -37,8 +44,13 @@ pub struct AnalyzeFlags {
     pub skip_xml_integration: bool,
     /// Language filter: only include files for these languages (empty = all).
     pub languages: Vec<String>,
-    /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
-    pub cxf_base_path: Option<String>,
+    /// Explicit HTTP route base path (e.g. `/rest`) prepended to framework routes
+    /// (e.g. CXF `<jaxrs:server>`). Framework-agnostic at the core; the resolver
+    /// that owns the framework interprets it.
+    pub route_base_path: Option<String>,
+    /// Extra SQL execution APIs (`"Receiver.method"`) the Java parser should treat
+    /// as DbQuery sites (resolved flag > `cih.toml` > home config).
+    pub sql_apis: Vec<String>,
 }
 
 pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
@@ -72,37 +84,53 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
             use_cache: !flags.no_cache,
             allow_noop: !flags.no_cache,
             skip_xml_integration: flags.skip_xml_integration,
-            cxf_base_path: flags.cxf_base_path.clone(),
+            route_base_path: flags.route_base_path.clone(),
+            quiet: flags.json,
+            sql_apis: flags.sql_apis.clone(),
         },
     )?;
 
-    let load = if emit.reused_artifacts {
-        tracing::info!("No source changes detected; reusing existing artifacts and live graph");
-        LoadOutcome::Reused
-    } else if flags.no_load {
-        tracing::info!("Skipping FalkorDB load (--no-load)");
-        LoadOutcome::Skipped
+    let (load, publication) = if flags.no_load {
+        tracing::info!("Skipping graph load (--no-load)");
+        (LoadOutcome::Skipped, None)
     } else {
-        let falkor_url = flags.falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
-        let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_to_falkor(falkor_url, graph_key, &emit.artifacts) {
-            Ok(stats) => {
+        if emit.reused_artifacts {
+            tracing::info!(
+                "No source changes detected; republishing existing artifacts to verify the live graph"
+            );
+        }
+        let backend = flags.backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
+        let resolved_url = flags
+            .falkor_url
+            .clone()
+            .unwrap_or_else(|| crate::default_db_url(backend));
+        let falkor_url = resolved_url.as_str();
+        match crate::publication::publish_complete_graph(
+            Path::new(&emit.scope_file.repo_root),
+            backend,
+            falkor_url,
+            &emit.artifacts,
+            &[],
+        ) {
+            Ok(published) => {
                 tracing::info!(
-                    nodes = stats.nodes,
-                    edges = stats.edges,
+                    nodes = published.stats.nodes,
+                    edges = published.stats.edges,
+                    backend,
                     url = falkor_url,
-                    graph = graph_key,
-                    "FalkorDB bulk load complete"
+                    graph = published.record.physical_graph_key,
+                    "graph bulk load complete"
                 );
-                LoadOutcome::Loaded(stats)
+                (LoadOutcome::Loaded(published.stats), Some(published.record))
             }
             Err(err) => {
                 tracing::warn!(
                     error = %err,
+                    backend,
                     url = falkor_url,
-                    "FalkorDB bulk load failed — artifacts are on disk, re-run or load manually"
+                    "graph bulk load failed — artifacts are on disk, re-run or load manually"
                 );
-                LoadOutcome::Failed(format!("{err:#}"))
+                (LoadOutcome::Failed(format!("{err:#}")), None)
             }
         }
     };
@@ -113,8 +141,11 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
         emit.print_styled(&load);
     }
 
-    let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-    crate::registry::persist_analyze(&emit, graph_key);
+    if let Some(publication) = publication.as_ref() {
+        let graph_key = flags.graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        crate::registry::persist_analyze(&emit, graph_key, publication)?;
+        prune_published_analyze_artifacts(&emit);
+    }
 
     if matches!(load, LoadOutcome::Failed(_)) {
         process::exit(3);
@@ -124,6 +155,7 @@ pub fn run_analyze(repo: PathBuf, flags: AnalyzeFlags) -> Result<()> {
 
 pub fn run_resolve(
     repo: PathBuf,
+    backend: Option<String>,
     falkor_url: Option<String>,
     graph_key: Option<String>,
     no_load: bool,
@@ -143,7 +175,7 @@ pub fn run_resolve(
 
     let jars = load_jars_from_repo_map(&repo);
     // No CLI flags on `resolve`; honor the repo/home cih.toml layers for the base path.
-    let cxf_base_path = {
+    let route_base_path = {
         let layers = crate::settings::Layers::load(&repo);
         layers
             .repo
@@ -160,28 +192,39 @@ pub fn run_resolve(
             use_cache: true,
             allow_noop: false,
             skip_xml_integration: false,
-            cxf_base_path,
+            route_base_path,
+            quiet: json,
+            sql_apis: Vec::new(),
         },
     )?;
 
-    let load = if no_load {
-        tracing::info!("Skipping FalkorDB load (--no-load)");
-        LoadOutcome::Skipped
+    let (load, publication) = if no_load {
+        tracing::info!("Skipping graph load (--no-load)");
+        (LoadOutcome::Skipped, None)
     } else {
-        let url = falkor_url.as_deref().unwrap_or(DEFAULT_FALKOR_URL);
-        let key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
-        match load_to_falkor(url, key, &emit.artifacts) {
-            Ok(stats) => {
+        let be = backend.as_deref().unwrap_or(crate::DEFAULT_BACKEND);
+        let resolved_url = falkor_url
+            .clone()
+            .unwrap_or_else(|| crate::default_db_url(be));
+        let url = resolved_url.as_str();
+        match crate::publication::publish_complete_graph(
+            Path::new(&emit.scope_file.repo_root),
+            be,
+            url,
+            &emit.artifacts,
+            &[],
+        ) {
+            Ok(published) => {
                 tracing::info!(
-                    nodes = stats.nodes,
-                    edges = stats.edges,
-                    "FalkorDB resolve load complete"
+                    nodes = published.stats.nodes,
+                    edges = published.stats.edges,
+                    "graph resolve load complete"
                 );
-                LoadOutcome::Loaded(stats)
+                (LoadOutcome::Loaded(published.stats), Some(published.record))
             }
             Err(err) => {
-                tracing::warn!(error = %err, "FalkorDB load failed after resolve");
-                LoadOutcome::Failed(format!("{err:#}"))
+                tracing::warn!(error = %err, "graph load failed after resolve");
+                (LoadOutcome::Failed(format!("{err:#}")), None)
             }
         }
     };
@@ -190,6 +233,12 @@ pub fn run_resolve(
         println!("{}", serde_json::to_string_pretty(&emit.summary(&load))?);
     } else {
         emit.print_styled(&load);
+    }
+
+    if let Some(publication) = publication.as_ref() {
+        let graph_key = graph_key.as_deref().unwrap_or(DEFAULT_GRAPH_KEY);
+        crate::registry::persist_analyze(&emit, graph_key, publication)?;
+        prune_published_analyze_artifacts(&emit);
     }
 
     if matches!(load, LoadOutcome::Failed(_)) {
@@ -207,7 +256,9 @@ pub fn analyze_emit(scan: &scan::ScanResult, request: ScopeRequest) -> Result<Em
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
-            cxf_base_path: None,
+            route_base_path: None,
+            quiet: false,
+            sql_apis: Vec::new(),
         },
     )
 }
@@ -236,9 +287,85 @@ pub fn analyze_from_scope(
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: false,
-            cxf_base_path: None,
+            route_base_path: None,
+            quiet: false,
+            sql_apis: Vec::new(),
         },
     )
+}
+
+/// JVM-only JAR API-surface extraction phase. Returns `(nodes, edges, node_count,
+/// failed_count)`; a no-op (all zeros) when the scope has no JARs. Owns the JAR
+/// summary metadata (`node_count`/`failed`) the caller records.
+fn run_jar_api_phase(
+    jars: &[JarInfo],
+    unresolved_external_fqcns: &[String],
+    ui: &mut crate::ui::PhaseProgress,
+) -> (Vec<cih_core::Node>, Vec<cih_core::Edge>, usize, usize) {
+    if jars.is_empty() {
+        return (Vec::new(), Vec::new(), 0, 0);
+    }
+    ui.spin(format!("JAR API ({} JARs)", jars.len()));
+    tracing::info!(
+        jars = jars.len(),
+        unresolved_fqcns = unresolved_external_fqcns.len(),
+        "starting JAR API extraction"
+    );
+    let (jar_nodes, jar_edges, jar_failed) = extract_jar_api(jars, unresolved_external_fqcns);
+    let jar_node_count = jar_nodes.len();
+    tracing::info!(
+        jar_nodes = jar_node_count,
+        jar_edges = jar_edges.len(),
+        jar_failed,
+        "JAR API extraction complete"
+    );
+    ui.finish_with(format!("{} nodes", crate::ui::fmt_count(jar_node_count)));
+    (jar_nodes, jar_edges, jar_node_count, jar_failed)
+}
+
+/// Language/framework graph augmentation (DB access + JPA, integration XML, DI),
+/// driven by the language-agnostic augmentor registry — each augmentor self-gates
+/// via `applies`, so a non-JVM scope skips the Java/Spring phases automatically.
+/// `order()` reproduces the historical concat order (db → integration-xml → di),
+/// which `content_version` hashes. Returns the augmentation nodes + edges.
+fn run_graph_augmentation(
+    repo_root: &std::path::Path,
+    scope_files: &[String],
+    parse_output: &cih_parse::ParseOutput,
+    unresolved_external_fqcns: &[String],
+    skip_xml_integration: bool,
+    resolvers: &cih_resolve::ResolverRegistry,
+    di_wiring: Option<&cih_resolve::di_xml::DiWiring>,
+) -> (Vec<cih_core::Node>, Vec<cih_core::Edge>) {
+    let languages_in_scope = cih_lang::language_ids_for_paths(scope_files);
+    let ctx = cih_resolve::AugmentCtx {
+        repo_root: Some(repo_root),
+        parsed: &parse_output.parsed_files,
+        nodes: &parse_output.nodes,
+        unresolved_external_fqcns,
+        languages_in_scope: &languages_in_scope,
+        skip_xml_integration,
+        resolvers,
+        di_wiring,
+    };
+    let mut augs = cih_resolve::language_augmentors();
+    augs.sort_by_key(|a| a.order());
+    let mut aug_nodes: Vec<cih_core::Node> = Vec::new();
+    let mut aug_edges: Vec<cih_core::Edge> = Vec::new();
+    for aug in &augs {
+        if aug.applies(&ctx) {
+            let out = aug.augment(&ctx);
+            tracing::info!(
+                phase = aug.id(),
+                nodes = out.nodes.len(),
+                edges = out.edges.len(),
+                "graph augmentation phase complete"
+            );
+            aug_nodes.extend(out.nodes);
+            aug_edges.extend(out.edges);
+        }
+    }
+    (aug_nodes, aug_edges)
 }
 
 pub fn analyze_from_scope_with_options(
@@ -250,6 +377,9 @@ pub fn analyze_from_scope_with_options(
     let repo_root = PathBuf::from(&scope_file.repo_root);
     let cih_dir = repo_root.join(".cih");
     let mut ui = crate::ui::PhaseProgress::new();
+    if cache.quiet {
+        ui.hide();
+    }
 
     let bundle_path = cih_dir.join("graph.db.zst");
     let hashes_path = cih_dir.join("file-hashes.json");
@@ -313,6 +443,7 @@ pub fn analyze_from_scope_with_options(
         cache_stats,
     } = incremental
     {
+        ensure_reused_search_sidecar(&artifacts);
         ui.finish_with(format!(
             "{} nodes, {} edges  \x1b[2m(no changes — reused)\x1b[0m",
             crate::ui::fmt_count(node_count),
@@ -338,11 +469,17 @@ pub fn analyze_from_scope_with_options(
             jar_failed: 0,
             reused_artifacts: true,
             cache_stats,
+            // A reused no-op run re-measures nothing; 0/0 reports coverage as
+            // `None` ("unknown") rather than falsely claiming zero coverage.
+            syntactic_callables: 0,
+            callable_node_count: 0,
+            route_node_count: 0,
+            published_graph_report: None,
         });
     }
 
     let ParseScopeOutcome::Parsed {
-        parse_output,
+        mut parse_output,
         current_hashes,
         cache_stats,
     } = incremental
@@ -370,13 +507,21 @@ pub fn analyze_from_scope_with_options(
 
     let java_const_resolver = cih_resolve::build_java_constant_resolver(&parse_output.parsed_files);
 
-    let resolve_output = cih_resolve::resolve_with_registry(
+    // Collect Spring/Blueprint DI XML wiring once, ahead of resolve: the emitter
+    // needs bean id → class for qualifier-aware DI redirect, and the DI augmentor
+    // reuses the same walk afterwards.
+    let di_wiring = (!cache.skip_xml_integration
+        && cih_lang::language_ids_for_paths(&scope_file.files).contains("java"))
+    .then(|| cih_resolve::di_xml::collect_di_wiring(&repo_root));
+
+    let mut resolve_output = cih_resolve::resolve_with_registry(
         &parse_output.parsed_files,
         &resolvers,
         cih_resolve::ResolveOptions {
             repo_root: Some(&repo_root),
             enable_xml_integrations: !cache.skip_xml_integration,
             constant_resolver: Some(Box::new(java_const_resolver)),
+            di_wiring: di_wiring.as_ref(),
         },
     );
     tracing::info!(
@@ -391,96 +536,48 @@ pub fn analyze_from_scope_with_options(
         crate::ui::fmt_count(resolve_output.skipped as usize)
     ));
 
-    if !jars.is_empty() {
-        ui.spin(format!("JAR API ({} JARs)", jars.len()));
-    }
-    tracing::info!(
-        jars = jars.len(),
-        unresolved_fqcns = resolve_output.unresolved_external_fqcns.len(),
-        "starting JAR API extraction"
-    );
-    let (jar_nodes, jar_edges, jar_failed) =
-        extract_jar_api(jars, &resolve_output.unresolved_external_fqcns);
-    let jar_node_count = jar_nodes.len();
-    tracing::info!(
-        jar_nodes = jar_node_count,
-        jar_edges = jar_edges.len(),
-        jar_failed,
-        "JAR API extraction complete"
-    );
-    if !jars.is_empty() {
-        ui.finish_with(format!("{} nodes", crate::ui::fmt_count(jar_node_count)));
-    }
+    // JAR API extraction is JVM-only: JARs come solely from Maven/Gradle repo-maps.
+    // A non-JVM repo (JS/TS/Python) has no JARs, so skip the phase and its logs
+    // entirely rather than running/logging a no-op.
+    let (jar_nodes, jar_edges, jar_node_count, jar_failed) =
+        run_jar_api_phase(jars, &resolve_output.unresolved_external_fqcns, &mut ui);
 
     ui.spin("Writing artifacts");
 
-    let (mut db_nodes, mut db_edges) = cih_resolve::emit_db_access(&parse_output.parsed_files);
-    let (jpa_nodes, jpa_edges) = cih_resolve::emit_jpa_tables(&parse_output.nodes);
-    db_nodes.extend(jpa_nodes);
-    db_edges.extend(jpa_edges);
-    tracing::info!(
-        db_query_nodes = db_nodes
-            .iter()
-            .filter(|n| n.kind == cih_core::NodeKind::DbQuery)
-            .count(),
-        db_table_nodes = db_nodes
-            .iter()
-            .filter(|n| n.kind == cih_core::NodeKind::DbTable)
-            .count(),
-        "DB access emit complete"
+    // Graph augmentation runs behind the augmentor registry; the JAR phase above
+    // stays a dedicated helper because it owns summary metadata (jar_node_count /
+    // jar_failed) that feeds the analyze outcome.
+    let (aug_nodes, aug_edges) = run_graph_augmentation(
+        &repo_root,
+        &scope_file.files,
+        &parse_output,
+        &resolve_output.unresolved_external_fqcns,
+        cache.skip_xml_integration,
+        &resolvers,
+        di_wiring.as_ref(),
     );
 
-    let has_java = scope_file.files.iter().any(|f| f.ends_with(".java"));
-    let (xml_nodes, xml_edges) = if cache.skip_xml_integration || !has_java {
-        if !has_java {
-            tracing::info!("Skipping XML integration + DI extraction (no Java files in scope)");
-        } else {
-            tracing::info!("Skipping XML integration + DI extraction (--skip-xml-integration)");
-        }
-        (Vec::new(), Vec::new())
-    } else {
-        let (mut xml_nodes, mut xml_edges) = extract_integration_xml_in_repo(&repo_root);
-        tracing::info!(
-            integration_route_nodes = xml_nodes
-                .iter()
-                .filter(|n| n.kind == cih_core::NodeKind::IntegrationRoute)
-                .count(),
-            message_destination_nodes = xml_nodes
-                .iter()
-                .filter(|n| n.kind == cih_core::NodeKind::MessageDestination)
-                .count(),
-            integration_edges = xml_edges.len(),
-            "integration XML extraction complete"
-        );
-
-        let (di_nodes, di_edges) =
-            resolvers.extra_edges(Some(&repo_root), &parse_output.parsed_files);
-        tracing::info!(
-            di_bean_nodes = di_nodes.len(),
-            di_calls_edges = di_edges.len(),
-            "DI XML extraction complete"
-        );
-        xml_nodes.extend(di_nodes);
-        xml_edges.extend(di_edges);
-        (xml_nodes, xml_edges)
-    };
-
-    let mut edges = combined_edges(&parse_output.edges, &resolve_output.edges);
+    // Capture the raw resolved-edge count before the merge consumes the vectors.
+    let resolved_edge_count = resolve_output.edges.len();
+    // Move both raw edge vectors into the merge so they are freed here rather than
+    // held (a full extra copy) through the write phase; deduped output is identical.
+    let mut edges = combined_edges(
+        std::mem::take(&mut parse_output.edges),
+        std::mem::take(&mut resolve_output.edges),
+    );
     edges.extend(jar_edges);
-    edges.extend(db_edges);
-    edges.extend(xml_edges);
+    edges.extend(aug_edges);
 
     let mut all_nodes = parse_output.nodes;
     all_nodes.extend(resolve_output.nodes);
     all_nodes.extend(jar_nodes);
-    all_nodes.extend(db_nodes);
-    all_nodes.extend(xml_nodes);
+    all_nodes.extend(aug_nodes);
 
     // Language-specific post-processing over the assembled graph (e.g. the Java resolver
     // rewrites HTTP route paths from framework config). The base-path override is resolved
     // at the dispatch arm (flag > cih.toml > home) and passed through generically.
     let post_opts = cih_resolve::PostProcessOptions {
-        route_base_path: cache.cxf_base_path.clone(),
+        route_base_path: cache.route_base_path.clone(),
     };
     resolvers.post_process(
         Some(&repo_root),
@@ -515,6 +612,19 @@ pub fn analyze_from_scope_with_options(
     }
 
     let version = content_version(&all_nodes, &edges, &parse_output.parsed_files);
+    let published_graph_report = RegistryGraphReport::try_build(
+        graph_content_version(&version, &[]),
+        &[&all_nodes],
+        &[&edges],
+    )
+    .map(Some)
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            error,
+            "graph reporting metadata omitted because artifact uniqueness was not proven"
+        );
+        None
+    });
 
     let parsed_dir = cih_dir.join("parsed").join(&version);
     let parse_artifacts = cih_parse::write_parsed_files(&parsed_dir, &parse_output.parsed_files)?;
@@ -536,8 +646,31 @@ pub fn analyze_from_scope_with_options(
     cih_resolve::write_unresolved_reports(&resolve_output.unresolved_refs, &artifacts_dir)
         .with_context(|| "failed to write unresolved-refs reports")?;
 
-    prune_other_versions(&cih_dir.join("parsed"), &version)?;
-    prune_other_versions(&cih_dir.join("artifacts"), &version)?;
+    // Capture outcome values before transferring node ownership to the search
+    // index. Dropping the edge vector first keeps the sidecar build from
+    // overlapping with the two largest assembled graph collections.
+    let node_count = all_nodes.len();
+    let edge_count = edges.len();
+    let unresolved_reference_count = resolve_output.skipped;
+    let unresolved_external_fqcns = std::mem::take(&mut resolve_output.unresolved_external_fqcns);
+    let parsed_file_count = parse_output.parsed_files.len();
+    let skipped_count = parse_output.skipped.len();
+    let syntactic_callables = parse_output.syntactic_callables;
+    let callable_node_count = all_nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .count();
+    let route_node_count = all_nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Route)
+        .count();
+    // The raw edge vectors were already moved into `combined_edges`; only the
+    // merged `edges` and the remaining parse/resolve scratch need releasing here.
+    drop(edges);
+    drop(std::mem::take(&mut resolve_output.unresolved_refs));
+    drop(parse_output.parsed_files);
+    drop(parse_output.skipped);
+
     crate::file_cache::FileHashIndex::from_map(current_hashes).save(&cih_dir)?;
     // Persist the config fingerprint alongside the file hashes so the next run's no-op gate can
     // detect a config-only change (e.g. a new --cxf-base-path or edited cih.patterns.toml).
@@ -545,11 +678,12 @@ pub fn analyze_from_scope_with_options(
         fingerprint: analyze_config_fingerprint(&repo_root, &cache),
     }
     .save(&cih_dir)?;
+    publish_search_sidecar(&artifacts, all_nodes);
 
     tracing::info!(
-        nodes = all_nodes.len(),
-        edges = edges.len(),
-        resolved_edges = resolve_output.edges.len(),
+        nodes = node_count,
+        edges = edge_count,
+        resolved_edges = resolved_edge_count,
         jar_nodes = jar_node_count,
         unresolved_refs = resolve_output.skipped,
         version = %version,
@@ -558,8 +692,8 @@ pub fn analyze_from_scope_with_options(
     );
     ui.finish_with(format!(
         "{} nodes, {} edges  \x1b[2m(v{})\x1b[0m",
-        crate::ui::fmt_count(all_nodes.len()),
-        crate::ui::fmt_count(edges.len()),
+        crate::ui::fmt_count(node_count),
+        crate::ui::fmt_count(edge_count),
         &version[..8.min(version.len())]
     ));
 
@@ -572,18 +706,159 @@ pub fn analyze_from_scope_with_options(
         parsed_files_path: parse_artifacts.parsed_files_path,
         artifacts_dir: artifacts_dir.clone(),
         version,
-        node_count: all_nodes.len(),
-        edge_count: edges.len(),
-        resolved_edge_count: resolve_output.edges.len(),
-        unresolved_reference_count: resolve_output.skipped,
-        unresolved_external_fqcns: resolve_output.unresolved_external_fqcns,
-        parsed_file_count: parse_output.parsed_files.len(),
-        skipped_count: parse_output.skipped.len(),
+        node_count,
+        edge_count,
+        resolved_edge_count,
+        unresolved_reference_count,
+        unresolved_external_fqcns,
+        parsed_file_count,
+        skipped_count,
         jar_node_count,
         jar_failed,
         reused_artifacts: false,
         cache_stats,
+        syntactic_callables,
+        callable_node_count,
+        route_node_count,
+        published_graph_report,
     })
+}
+
+/// Remove superseded analyze artifacts only after the corresponding graph has
+/// been published successfully. Cleanup is best-effort: a published graph must
+/// not be reported as failed merely because an old artifact directory could not
+/// be removed.
+fn prune_published_analyze_artifacts(emit: &EmitOutcome) {
+    let Some(cih_dir) = emit.artifacts_dir.parent().and_then(Path::parent) else {
+        tracing::warn!(
+            artifacts = %emit.artifacts_dir.display(),
+            "cannot determine .cih directory for post-publication cleanup"
+        );
+        return;
+    };
+
+    for root in [cih_dir.join("parsed"), cih_dir.join("artifacts")] {
+        if let Err(error) = prune_other_versions(&root, &emit.version) {
+            tracing::warn!(
+                path = %root.display(),
+                version = %emit.version,
+                error = %error,
+                "failed to prune superseded artifacts after graph publication"
+            );
+        }
+    }
+}
+
+fn search_sidecar_enabled() -> bool {
+    std::env::var("CIH_SEARCH_SIDECAR_ENABLED")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn publish_search_sidecar(artifacts: &GraphArtifacts, nodes: Vec<Node>) {
+    if !search_sidecar_enabled() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let source = match SearchIndexSource::from_nodes_file(
+        &artifacts.nodes_path,
+        artifacts.version.to_string(),
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar source metadata unavailable");
+            return;
+        }
+    };
+    let Some(artifacts_dir) = artifacts.nodes_path.parent() else {
+        tracing::warn!("search sidecar artifact directory unavailable");
+        return;
+    };
+    let index = SearchIndex::build_owned(nodes);
+    let documents = index.len();
+    let retained_bytes = index.estimated_size_bytes();
+    match persist_search_index(&search_index_path(artifacts_dir), &source, &index) {
+        Ok(metadata) => tracing::info!(
+            documents,
+            retained_bytes,
+            sidecar_bytes = metadata.payload_len,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar published"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar publication failed; runtime fallback remains available"
+        ),
+    }
+}
+
+fn ensure_reused_search_sidecar(artifacts: &GraphArtifacts) {
+    if !search_sidecar_enabled() {
+        return;
+    }
+    let source = match SearchIndexSource::from_nodes_file(
+        &artifacts.nodes_path,
+        artifacts.version.to_string(),
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar source metadata unavailable");
+            return;
+        }
+    };
+    let Some(artifacts_dir) = artifacts.nodes_path.parent() else {
+        tracing::warn!("search sidecar artifact directory unavailable");
+        return;
+    };
+    let path = search_index_path(artifacts_dir);
+    let current = matches!(
+        inspect_search_index(&path),
+        Ok(SearchIndexInspection::Present(metadata))
+            if metadata.format_version == SEARCH_INDEX_FORMAT_VERSION
+                && metadata.schema_fingerprint == search_schema_fingerprint()
+                && metadata.source == source
+    );
+    if current {
+        return;
+    }
+
+    let started = std::time::Instant::now();
+    let nodes = match artifacts.stream_nodes() {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar backfill could not stream nodes");
+            return;
+        }
+    };
+    let index = match SearchIndex::try_build(nodes) {
+        Ok(index) => index,
+        Err(error) => {
+            tracing::warn!(error = %error, "search sidecar backfill could not decode nodes");
+            return;
+        }
+    };
+    let documents = index.len();
+    let retained_bytes = index.estimated_size_bytes();
+    match persist_search_index(&path, &source, &index) {
+        Ok(metadata) => tracing::info!(
+            documents,
+            retained_bytes,
+            sidecar_bytes = metadata.payload_len,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar backfilled for reused artifacts"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            elapsed_ms = started.elapsed().as_millis(),
+            "search sidecar backfill failed; runtime fallback remains available"
+        ),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -593,23 +868,50 @@ pub struct AnalyzeCacheOptions {
     /// Skip the integration + DI XML walk (faster on large repos).
     pub skip_xml_integration: bool,
     /// Explicit CXF servlet base path (e.g. `/rest`) for `<jaxrs:server>` routes.
-    /// Resolved at the dispatch arm (flag > `cih.toml` > `~/.cih/config.toml`); `None`
-    /// falls back to auto-detection.
-    pub cxf_base_path: Option<String>,
+    /// HTTP route base path, resolved at the dispatch arm (flag > `cih.toml` >
+    /// `~/.cih/config.toml`); `None` falls back to auto-detection. Flows into
+    /// `PostProcessOptions.route_base_path` for the framework resolver to apply.
+    pub route_base_path: Option<String>,
+    /// Suppress the interactive `PhaseProgress` UI (spinner + `◆` phase lines).
+    /// Set under `--json` so machine-readable stdout isn't shadowed by a live bar
+    /// on stderr — matching `wiki`/`taint`. Display-only: intentionally excluded
+    /// from `analyze_config_fingerprint`, so it never affects the no-op cache.
+    pub quiet: bool,
+    /// Extra SQL execution APIs (`"Receiver.method"`). Parser output depends on
+    /// these, so they feed both `analyze_config_fingerprint` (no-op gate) and the
+    /// per-file parse-cache namespace (stale-IR guard).
+    pub sql_apis: Vec<String>,
 }
 
 /// Fingerprint of the analyze inputs that affect graph output but are **not** source-file
-/// hashes: the resolved `cxf_base_path`, `skip_xml_integration`, and the effective
+/// hashes: the resolved `route_base_path`, `skip_xml_integration`, and the effective
 /// `cih.patterns.toml` rules. The incremental no-op reuse gate compares this against the value
 /// stored from the last run so a config-only change (e.g. a new `--cxf-base-path`) re-runs the
 /// resolve/post-process/emit path instead of silently reusing stale artifacts. Cache-control
 /// fields (`use_cache`/`allow_noop`) are intentionally excluded — they don't change output.
 pub(super) fn analyze_config_fingerprint(repo_root: &Path, cache: &AnalyzeCacheOptions) -> String {
+    analyze_config_fingerprint_with(repo_root, cache, cih_lang::PARSE_CACHE_SCHEMA)
+}
+
+/// Schema-parameterized inner so tests can prove a bump changes the fingerprint
+/// without bumping the real const.
+fn analyze_config_fingerprint_with(
+    repo_root: &Path,
+    cache: &AnalyzeCacheOptions,
+    parse_schema: u32,
+) -> String {
     let patterns = cih_patterns::load_patterns(repo_root);
+    let mut sql_apis = cache.sql_apis.clone();
+    sql_apis.sort();
+    sql_apis.dedup();
     let material = format!(
-        "cxf_base_path={:?}\nskip_xml_integration={}\npatterns=\n{}",
-        cache.cxf_base_path,
+        // Key string kept as `cxf_base_path` deliberately: it's the persisted
+        // fingerprint material — renaming it would bust every repo's analyze cache.
+        "cxf_base_path={:?}\nskip_xml_integration={}\nparse_cache_schema={}\nsql_apis={:?}\npatterns=\n{}",
+        cache.route_base_path,
         cache.skip_xml_integration,
+        parse_schema,
+        sql_apis,
         cih_patterns::to_toml(&patterns),
     );
     blake3::hash(material.as_bytes()).to_hex()[..16].to_string()
@@ -678,6 +980,29 @@ pub struct EmitOutcome {
     pub skipped_count: usize,
     pub reused_artifacts: bool,
     pub cache_stats: CacheStats,
+    /// Callables present in the source ASTs (denominator of extraction coverage).
+    pub syntactic_callables: u32,
+    /// `Function`/`Method` nodes we actually emitted (numerator).
+    pub callable_node_count: usize,
+    /// `Route` nodes in the emitted graph — analyze owns the registry route
+    /// stat now (discover may later overwrite it with its richer count).
+    pub route_node_count: usize,
+    /// Exact count/kind/hub projection bound to the base-only graph content.
+    /// `None` for legacy no-op reuse or when artifact uniqueness cannot be
+    /// proven; registry persistence may carry a matching prior report forward.
+    pub published_graph_report: Option<RegistryGraphReport>,
+}
+
+/// Extraction coverage: emitted callable nodes ÷ callables the AST contains.
+///
+/// `None` when nothing in scope measures it (no provider opted into
+/// `callable_kinds`). The ratio never reaches 1.0 on real code — anonymous inline
+/// callbacks (`arr.map(x => x * 2)`) are callables that rightly never become nodes
+/// — so read it as a floor/regression signal: a near-zero value means an idiom is
+/// being silently dropped, which is exactly how the CommonJS blind spot survived a
+/// green test suite.
+pub fn callable_coverage(callable_nodes: usize, syntactic_callables: u32) -> Option<f64> {
+    (syntactic_callables > 0).then(|| callable_nodes as f64 / syntactic_callables as f64)
 }
 
 impl EmitOutcome {
@@ -697,6 +1022,12 @@ impl EmitOutcome {
             skipped_count: self.skipped_count,
             jar_node_count: self.jar_node_count,
             jar_failed: self.jar_failed,
+            syntactic_callables: self.syntactic_callables,
+            callable_node_count: self.callable_node_count,
+            callable_coverage: callable_coverage(
+                self.callable_node_count,
+                self.syntactic_callables,
+            ),
             reused_artifacts: self.reused_artifacts,
             cache: &self.cache_stats,
             falkor_status: load.status(),
@@ -736,7 +1067,37 @@ impl EmitOutcome {
         if self.resolved_edge_count > 0 {
             crate::ui::print_row(
                 "Resolve",
-                &format!("{}  edges", crate::ui::fmt_count(self.resolved_edge_count)),
+                &format!(
+                    "{}  edges{}",
+                    crate::ui::fmt_count(self.resolved_edge_count),
+                    if self.unresolved_reference_count > 0 {
+                        format!(
+                            "  \x1b[2m({} unresolved refs)\x1b[0m",
+                            crate::ui::fmt_count(self.unresolved_reference_count as usize)
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }
+        // Extraction coverage: what the ASTs contained vs. what we pulled out of
+        // them. Printing it makes a parser blind spot visible on every run instead
+        // of only when someone thinks to go looking for it.
+        if let Some(cov) = callable_coverage(self.callable_node_count, self.syntactic_callables) {
+            let warn = cov < 0.4;
+            crate::ui::print_row(
+                "Coverage",
+                &format!(
+                    "{:.0}%  \x1b[2mof {} callables extracted\x1b[0m{}",
+                    cov * 100.0,
+                    crate::ui::fmt_count(self.syntactic_callables as usize),
+                    if warn {
+                        "  \x1b[33m← low: an idiom may be unparsed\x1b[0m"
+                    } else {
+                        ""
+                    }
+                ),
             );
         }
         if self.jar_node_count > 0 {
@@ -758,7 +1119,7 @@ impl EmitOutcome {
             LoadOutcome::Reused => "\x1b[2mreused (no changes)\x1b[0m".to_string(),
             LoadOutcome::Failed(e) => format!("\x1b[31mfailed\x1b[0m  \x1b[2m{e}\x1b[0m"),
         };
-        crate::ui::print_row("FalkorDB", &falkor_str);
+        crate::ui::print_row("Graph DB", &falkor_str);
         eprintln!();
     }
 }
@@ -779,6 +1140,13 @@ pub struct AnalyzeSummary<'a> {
     pub skipped_count: usize,
     pub jar_node_count: usize,
     pub jar_failed: usize,
+    /// Callables the ASTs contain vs. `Function`/`Method` nodes emitted, plus the
+    /// ratio (absent when no provider in scope measures it). A near-zero ratio means
+    /// the parser is silently skipping a real idiom.
+    pub syntactic_callables: u32,
+    pub callable_node_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callable_coverage: Option<f64>,
     pub reused_artifacts: bool,
     pub cache: &'a CacheStats,
     pub falkor_status: &'static str,
@@ -788,4 +1156,30 @@ pub struct AnalyzeSummary<'a> {
     pub falkor_edges: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub falkor_error: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_varies_with_parse_schema() {
+        let dir = std::env::temp_dir().join(format!("cih-fp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = AnalyzeCacheOptions {
+            use_cache: true,
+            allow_noop: true,
+            skip_xml_integration: false,
+            route_base_path: None,
+            quiet: false,
+            sql_apis: Vec::new(),
+        };
+
+        let v1 = analyze_config_fingerprint_with(&dir, &cache, 1);
+        let v2 = analyze_config_fingerprint_with(&dir, &cache, 2);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_ne!(v1, v2, "a schema bump must invalidate the no-op gate");
+        assert_eq!(v1, analyze_config_fingerprint_with(&dir, &cache, 1));
+    }
 }

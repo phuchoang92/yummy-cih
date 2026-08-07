@@ -136,13 +136,6 @@ impl PhaseProgress {
         self.failed.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Combined tick + outcome tracking.
-    #[allow(dead_code)]
-    pub fn tick_ok(&self, label: impl Into<String>) {
-        self.tick(label);
-        self.inc_ok();
-    }
-
     pub fn tick_skipped(&self, label: impl Into<String>) {
         // cached/skipped counts as ok for summary purposes
         self.tick(label);
@@ -171,24 +164,6 @@ impl PhaseProgress {
             g.rail, g.phase_done, self.phase_name, detail,
         ));
         self.bar.finish_and_clear();
-    }
-
-    /// Finish with an explicit total count (for phases without ok/failed tracking).
-    #[allow(dead_code)]
-    pub fn finish_phase_with_count(&self, count: u64, unit: &str) {
-        let g = glyphs();
-        self.bar.println(format!(
-            "\x1b[2m{}\x1b[0m  \x1b[32m{}\x1b[0m  {}  {} {} {}",
-            g.rail, g.phase_done, self.phase_name, g.dash, count, unit,
-        ));
-        self.bar.finish_and_clear();
-    }
-
-    /// Suspend the bar while printing a raw line to stderr (so the two don't interleave).
-    /// Equivalent to codegraph writing a `\n` before the phase-done line.
-    #[allow(dead_code)]
-    pub fn println(&self, msg: impl AsRef<str>) {
-        self.bar.println(msg.as_ref());
     }
 
     /// Completely hide the bar (e.g., non-TTY or `--json` mode).
@@ -264,12 +239,6 @@ pub fn print_row(label: &str, value: &str) {
         value,
         width = LABEL_WIDTH,
     );
-}
-
-/// Print a blank line in the summary block.
-#[allow(dead_code)]
-pub fn print_blank() {
-    eprintln!();
 }
 
 /// Format a count with thousands separators, e.g. `1234567` → `"1,234,567"`.

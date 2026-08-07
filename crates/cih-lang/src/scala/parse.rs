@@ -50,7 +50,7 @@ fn walk(
                 if let Some(expr) = child.child_by_field_name("path") {
                     let raw = text(expr, src).to_string();
                     let is_wildcard = raw.ends_with("._") || raw.ends_with(".*");
-                    imports.push(RawImport { raw, is_static: false, is_wildcard, range: range_of(child) });
+                    imports.push(RawImport { raw, is_static: false, is_wildcard, alias: None, range: range_of(child) });
                 }
             }
             "class_definition" | "object_definition" | "case_class_definition" => {

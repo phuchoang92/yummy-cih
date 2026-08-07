@@ -1,0 +1,48 @@
+name: CIH server soak
+
+on:
+  schedule:
+    - cron: "17 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      duration_secs:
+        description: Soak duration in seconds
+        required: false
+        default: "1800"
+
+concurrency:
+  group: cih-server-soak
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: ten-services
+            repositories: "10"
+            small_nodes: "50000"
+          - scenario: fifty-registry-entries
+            repositories: "50"
+            small_nodes: "10000"
+    env:
+      CIH_SOAK_DURATION_SECS: ${{ inputs.duration_secs || '1800' }}
+      CIH_SOAK_REPOSITORIES: ${{ matrix.repositories }}
+      CIH_SOAK_LARGE_NODES: "500000"
+      CIH_SOAK_SMALL_NODES: ${{ matrix.small_nodes }}
+      CIH_SOAK_OUTPUT: target/cih-soak-${{ matrix.scenario }}.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Run release soak
+        run: cargo run --release -p cih-server --example soak_bench
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cih-server-soak-${{ matrix.scenario }}
+          path: target/cih-soak-${{ matrix.scenario }}.json
+          if-no-files-found: warn

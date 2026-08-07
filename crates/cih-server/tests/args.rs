@@ -1,17 +1,43 @@
-use cih_core::ContractMatchKind;
 use cih_graph_store::Direction;
 use cih_server::args::{
-    DetectChangesArgs, FeatureMapArgs, ImpactArgs, RegressionScopeArgs, RouteMapArgs,
-    TraceFlowArgs, UntestedPathsArgs,
+    ContextArgs, DetectChangesArgs, DiffScope, DirectionArg, FeatureMapArgs, ImpactArgs,
+    ImpactFormat, ReachesArgs, RegressionScopeArgs, RouteMapArgs, RouteMapFormat, TraceFlowArgs,
+    TraceFlowFormat, UntestedPathsArgs,
 };
-use cih_server::utils::{parse_contract_kind_filter, parse_direction};
 
 #[test]
-fn direction_parse_unknown_falls_back_to_upstream() {
-    assert_eq!(parse_direction(Some("downstream")), Direction::Downstream);
-    assert_eq!(parse_direction(Some("both")), Direction::Both);
-    assert_eq!(parse_direction(Some("sideways")), Direction::Upstream);
-    assert_eq!(parse_direction(None), Direction::Upstream);
+fn direction_arg_is_typed_and_rejects_unknown_values() {
+    // Valid values deserialize; omitted defaults to upstream.
+    let args: ImpactArgs =
+        serde_json::from_str(r#"{"name":"X","direction":"downstream"}"#).unwrap();
+    assert_eq!(args.direction, DirectionArg::Downstream);
+    let args: ImpactArgs = serde_json::from_str(r#"{"name":"X"}"#).unwrap();
+    assert_eq!(args.direction, DirectionArg::Upstream);
+    assert_eq!(Direction::from(DirectionArg::Both), Direction::Both);
+    assert_eq!(
+        Direction::from(DirectionArg::Downstream),
+        Direction::Downstream
+    );
+    assert_eq!(Direction::from(DirectionArg::Upstream), Direction::Upstream);
+    // A typo is an error now — it used to silently run `upstream`.
+    assert!(serde_json::from_str::<ImpactArgs>(r#"{"name":"X","direction":"sideways"}"#).is_err());
+    assert!(serde_json::from_str::<ImpactArgs>(r#"{"name":"X","direction":""}"#).is_err());
+}
+
+#[test]
+fn diff_scope_is_typed_and_rejects_unknown_values() {
+    for (raw, want) in [
+        ("working", DiffScope::Working),
+        ("staged", DiffScope::Staged),
+        ("base_ref", DiffScope::BaseRef),
+    ] {
+        let args: DetectChangesArgs =
+            serde_json::from_str(&format!(r#"{{"scope":"{raw}"}}"#)).unwrap();
+        assert_eq!(args.scope, want);
+    }
+    // A typo is an error now — it used to silently run the `working` diff.
+    assert!(serde_json::from_str::<DetectChangesArgs>(r#"{"scope":"stagd"}"#).is_err());
+    assert!(serde_json::from_str::<DetectChangesArgs>(r#"{}"#).is_err());
 }
 
 #[test]
@@ -24,27 +50,9 @@ fn route_map_args_default_limit_is_zero() {
 #[test]
 fn detect_changes_args_defaults() {
     let args: DetectChangesArgs = serde_json::from_str(r#"{"scope":"working"}"#).unwrap();
-    assert_eq!(args.scope, "working");
+    assert_eq!(args.scope, DiffScope::Working);
     assert!(args.base_ref.is_empty());
     assert!(args.repo.is_empty());
-}
-
-#[test]
-fn contract_kind_filter_accepts_aliases() {
-    assert_eq!(parse_contract_kind_filter(None).unwrap(), None);
-    assert_eq!(
-        parse_contract_kind_filter(Some("http")).unwrap(),
-        Some(ContractMatchKind::HttpRoute)
-    );
-    assert_eq!(
-        parse_contract_kind_filter(Some("kafka_topic")).unwrap(),
-        Some(ContractMatchKind::KafkaTopic)
-    );
-    assert_eq!(
-        parse_contract_kind_filter(Some("spring-event")).unwrap(),
-        Some(ContractMatchKind::SpringEvent)
-    );
-    assert!(parse_contract_kind_filter(Some("queue")).is_err());
 }
 
 #[test]
@@ -52,7 +60,24 @@ fn trace_flow_args_defaults() {
     let args: TraceFlowArgs = serde_json::from_str(r#"{"entry_point":"Route:GET /"}"#).unwrap();
     assert_eq!(args.entry_point, "Route:GET /");
     assert_eq!(args.max_depth, 0);
-    assert!(args.format.is_empty());
+    assert_eq!(args.format, TraceFlowFormat::Json);
+    assert!(args.exclude_kinds.is_empty());
+    assert!(!args.business_only);
+    assert_eq!(args.max_nodes, 0);
+    assert_eq!(args.offset, 0);
+}
+
+#[test]
+fn trace_flow_args_accepts_filters_and_paging() {
+    let args: TraceFlowArgs = serde_json::from_str(
+        r#"{"entry_point":"Route:GET /","exclude_kinds":["Constructor"],
+            "business_only":true,"max_nodes":50,"offset":100}"#,
+    )
+    .unwrap();
+    assert_eq!(args.exclude_kinds, vec!["Constructor"]);
+    assert!(args.business_only);
+    assert_eq!(args.max_nodes, 50);
+    assert_eq!(args.offset, 100);
 }
 
 #[test]
@@ -60,7 +85,29 @@ fn impact_args_accepts_format_diagram() {
     let args: ImpactArgs =
         serde_json::from_str(r#"{"name":"OrderService","format":"diagram"}"#).unwrap();
     assert_eq!(args.name, "OrderService");
-    assert_eq!(args.format, "diagram");
+    assert_eq!(args.format, ImpactFormat::Diagram);
+}
+
+#[test]
+fn context_args_keep_independent_page_state() {
+    let defaults: ContextArgs = serde_json::from_str(r#"{"name":"OrderService"}"#).unwrap();
+    assert_eq!(defaults.caller_limit, 0);
+    assert_eq!(defaults.callee_limit, 0);
+    assert_eq!(defaults.process_limit, 0);
+    assert!(defaults.caller_cursor.is_none());
+
+    let paged: ContextArgs = serde_json::from_str(
+        r#"{"name":"OrderService","caller_limit":50,"callee_limit":25,
+            "process_limit":10,"caller_cursor":"caller-page",
+            "callee_cursor":"callee-page","process_cursor":"process-page"}"#,
+    )
+    .unwrap();
+    assert_eq!(paged.caller_limit, 50);
+    assert_eq!(paged.callee_limit, 25);
+    assert_eq!(paged.process_limit, 10);
+    assert_eq!(paged.caller_cursor.as_deref(), Some("caller-page"));
+    assert_eq!(paged.callee_cursor.as_deref(), Some("callee-page"));
+    assert_eq!(paged.process_cursor.as_deref(), Some("process-page"));
 }
 
 #[test]
@@ -69,7 +116,24 @@ fn trace_flow_args_accepts_format_mermaid() {
         serde_json::from_str(r#"{"entry_point":"Route:GET /api/checkout","format":"mermaid"}"#)
             .unwrap();
     assert_eq!(args.entry_point, "Route:GET /api/checkout");
-    assert_eq!(args.format, "mermaid");
+    assert_eq!(args.format, TraceFlowFormat::Mermaid);
+}
+
+#[test]
+fn format_args_keep_the_empty_string_default_but_reject_typos() {
+    // The docs long said "pass empty for default" — the empty string must keep
+    // deserializing to JSON even though format is an enum now.
+    let args: ImpactArgs = serde_json::from_str(r#"{"name":"X","format":""}"#).unwrap();
+    assert_eq!(args.format, ImpactFormat::Json);
+    let args: RouteMapArgs = serde_json::from_str(r#"{"format":""}"#).unwrap();
+    assert_eq!(args.format, RouteMapFormat::Json);
+    // A typo is an error now — it used to silently produce default JSON.
+    assert!(serde_json::from_str::<ImpactArgs>(r#"{"name":"X","format":"diagam"}"#).is_err());
+    assert!(serde_json::from_str::<RouteMapArgs>(r#"{"format":"mermaid"}"#).is_err());
+    assert!(serde_json::from_str::<TraceFlowArgs>(
+        r#"{"entry_point":"Route:GET /","format":"openapi"}"#
+    )
+    .is_err());
 }
 
 #[test]
@@ -96,24 +160,47 @@ fn untested_paths_args_defaults() {
 }
 
 #[test]
-// Mirrors the production `git diff` arg match in changes.rs; base_ref is a
-// literal None here because the test pins scope="staged".
-#[allow(clippy::unnecessary_literal_unwrap)]
-fn git_diff_staged_args_are_correct() {
-    let scope = "staged";
-    let base_ref: Option<&str> = None;
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("diff").arg("--name-only");
-    match scope {
-        "staged" => {
-            cmd.arg("--cached").arg("HEAD");
-        }
-        "base_ref" => {
-            cmd.arg(base_ref.unwrap_or("main"));
-        }
-        _ => {
-            cmd.arg("HEAD");
-        }
-    }
-    // structural test only — verifies no panic in argument setup
+fn index_repo_args_graph_key_defaults_empty() {
+    let args: cih_server::args::IndexRepoArgs =
+        serde_json::from_str(r#"{"repo_path":"/tmp/x"}"#).unwrap();
+    assert!(args.graph_key.is_empty());
+    let args: cih_server::args::IndexRepoArgs =
+        serde_json::from_str(r#"{"repo_path":"/tmp/x","graph_key":"svc"}"#).unwrap();
+    assert_eq!(args.graph_key, "svc");
+}
+
+#[test]
+fn trace_flow_x_args_repo_defaults_empty() {
+    let args: cih_server::args::TraceFlowXArgs =
+        serde_json::from_str(r#"{"entry_point":"Route:GET /x","group":"g"}"#).unwrap();
+    assert!(args.repo.is_empty());
+    assert_eq!(args.max_depth, 0);
+}
+
+#[test]
+fn reaches_args_defaults() {
+    let args: ReachesArgs =
+        serde_json::from_str(r#"{"from":"confirmChangePassword","to":"AUDIT_LOG"}"#).unwrap();
+    assert_eq!(args.from, "confirmChangePassword");
+    assert_eq!(args.to, "AUDIT_LOG");
+    assert_eq!(args.max_depth, 0, "0 = server default (8)");
+    assert_eq!(args.max_paths, 0, "0 = server default (3)");
+    assert_eq!(
+        args.access,
+        cih_server::args::ReachesAccessArg::Any,
+        "any is the compatibility default"
+    );
+    assert!(args.repo.is_empty());
+}
+
+#[test]
+fn reaches_args_accepts_table_access_filter() {
+    let args: ReachesArgs =
+        serde_json::from_str(r#"{"from":"Route:POST /x","to":"AUDIT_LOG","access":"write"}"#)
+            .unwrap();
+    assert_eq!(args.access, cih_server::args::ReachesAccessArg::Write);
+    assert!(
+        serde_json::from_str::<ReachesArgs>(r#"{"from":"x","to":"T","access":"mutation"}"#)
+            .is_err()
+    );
 }

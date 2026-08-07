@@ -1,0 +1,32 @@
+FROM debian:bookworm-slim
+
+ARG BUNDLE_DIR
+ARG CIH_VERSION=dev
+ARG SOURCE_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="CIH portable" \
+      org.opencontainers.image.description="Offline CIH CLI with embedded LadybugDB" \
+      org.opencontainers.image.version="$CIH_VERSION" \
+      org.opencontainers.image.revision="$SOURCE_COMMIT" \
+      org.opencontainers.image.source="https://github.com/phuchoang92/yummy-cih"
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1001 cih \
+    && mkdir -p /opt/cih/bin /opt/cih/lib /data /repo \
+    && chown -R cih:cih /data /repo
+
+COPY ${BUNDLE_DIR}/bin/cih /opt/cih/bin/cih
+COPY ${BUNDLE_DIR}/lib/ /opt/cih/lib/
+COPY ${BUNDLE_DIR}/LICENSE /opt/cih/LICENSE
+COPY ${BUNDLE_DIR}/BUILD_INFO.txt /opt/cih/BUILD_INFO.txt
+
+ENV PATH=/opt/cih/bin:$PATH \
+    CIH_HOME=/data \
+    RUST_LOG=warn
+
+VOLUME ["/data", "/repo"]
+WORKDIR /repo
+EXPOSE 8080
+USER cih
+ENTRYPOINT ["cih"]

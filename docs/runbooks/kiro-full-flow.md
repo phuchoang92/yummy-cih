@@ -56,8 +56,7 @@ docker volume create ${KEY}-repo
 docker run -d --name ${KEY}-box --network yummy-cih_default \
   -e FALKOR_URL=redis://falkordb:6379 -e CIH_GRAPH_KEY=$KEY \
   -e CIH_PG_URL="postgres://cih:${PGPW}@postgres:5432/$DB" \
-  -e HF_HOME=/data/hf-cache \
-  -v ${KEY}-repo:/repo -v yummy-cih_cih-data:/data -v ${KEY}-home:/home/cih/.cih \
+  -v ${KEY}-repo:/repo -v ${KEY}-home:/home/cih/.cih \
   --entrypoint sleep yummy-cih:local infinity
 
 # copy source in + fix ownership (engine runs as uid 1001)
@@ -66,7 +65,7 @@ docker exec -u 0 ${KEY}-box chown -R 1001:1001 /repo /home/cih/.cih
 
 # the pipeline
 docker exec ${KEY}-box cih-engine analyze /repo --all                        # graph → FalkorDB
-docker exec ${KEY}-box cih-engine embed   /repo                              # vectors → Postgres (1st run downloads model)
+docker exec ${KEY}-box cih-engine embed   /repo                              # vectors → Postgres (model baked into the image, no download)
 docker exec ${KEY}-box cih-engine discover /repo --feature-strategy embed \
                                             --embed-leiden-resolution 1.2     # communities + embedding clusters
 ```
@@ -117,8 +116,8 @@ docker run -d --name ${KEY}-server --network yummy-cih_default -p ${PORT}:8080 \
   -e FALKOR_URL=redis://falkordb:6379 -e CIH_GRAPH_KEY=$KEY -e CIH_BIND=0.0.0.0:8080 \
   -e CIH_ARTIFACTS_DIR=/repo/.cih/artifacts \
   -e CIH_PG_URL="postgres://cih:${PGPW}@postgres:5432/$DB" \
-  -e HF_HOME=/data/hf-cache -e CIH_ALLOW_INSECURE=1 \
-  -v ${KEY}-repo:/repo -v yummy-cih_cih-data:/data -v ${KEY}-home:/home/cih/.cih \
+  -e CIH_ALLOW_INSECURE=1 \
+  -v ${KEY}-repo:/repo -v ${KEY}-home:/home/cih/.cih \
   yummy-cih:local
 
 curl -s localhost:${PORT}/health            # → {"status":"ok"}
@@ -141,7 +140,7 @@ entry per repo — **always with `--transport http-only`**:
       "command": "npx",
       "args": ["-y", "mcp-remote", "http://localhost:8081/mcp", "--transport", "http-only"],
       "disabled": false,
-      "autoApprove": ["context","impact","trace_flow","search_code","query",
+      "autoApprove": ["context","impact","trace_flow","reaches","search_code","query",
                       "communities","feature_map","route_map","read_file",
                       "test_coverage","regression_scope","list_repos","status"]
     }
@@ -166,6 +165,7 @@ by intent — Kiro picks the tools:
 - *"list_repos, then use feature_map to find where loan disbursement is implemented."*
 - *"Run impact upstream on `LoanWritePlatformService` — what's the blast radius before I change it?"*
 - *"trace_flow from the POST /loans route end-to-end."*
+- *"Does the POST /loans route reach a write to DbTable:M_LOAN? Use reaches with access=write."*
 - *"Show the communities and summarize the loan-related ones."*
 - *"search_code for 'interest recalculation' and read_file the top hit."*
 

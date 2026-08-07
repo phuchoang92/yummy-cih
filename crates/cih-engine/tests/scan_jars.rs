@@ -3,11 +3,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn tmp_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let p = std::env::temp_dir().join(format!("cih-jars-{tag}-{unique}"));
+    // Collision-proof under parallel tests: pid + a monotonic counter rather than
+    // a wall-clock timestamp (two tests can observe the same nanos).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("cih-jars-{tag}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&p).unwrap();
     p
 }

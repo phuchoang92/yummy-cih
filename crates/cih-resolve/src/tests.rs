@@ -88,6 +88,7 @@ fn binding(name: &str, raw: &str, kind: BindingKind, in_fqcn: &str, line: u32) -
         raw_type: raw.into(),
         kind,
         in_fqcn: in_fqcn.into(),
+        qualifier: None,
         range: Range {
             start_line: line,
             ..Range::default()
@@ -100,6 +101,7 @@ fn import(raw: &str) -> RawImport {
         raw: raw.into(),
         is_static: false,
         is_wildcard: raw.ends_with(".*"),
+        alias: None,
         range: Range::default(),
     }
 }
@@ -133,6 +135,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let service = ParsedFile {
         file: "com/acme/OwnerService.java".into(),
@@ -154,6 +157,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let controller = ParsedFile {
         file: "com/acme/OwnerController.java".into(),
@@ -184,6 +188,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let thing = ParsedFile {
         file: "com/other/Thing.java".into(),
@@ -197,6 +202,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![repo, service, controller, thing]
 }
@@ -246,23 +252,38 @@ fn receiver_type_param_field_and_this() {
     let idx = ResolveIndex::build(&workspace(), &default_registry());
     let scope = "com.acme.OwnerController#handle/1";
     assert_eq!(
-        idx.receiver_type(scope, "svc").as_deref(),
+        idx.receiver_type(scope, "svc", "com/acme/OwnerController.java")
+            .as_deref(),
         Some("com.acme.OwnerService")
     );
     assert_eq!(
-        idx.receiver_type(scope, "service").as_deref(),
+        idx.receiver_type(scope, "service", "com/acme/OwnerController.java")
+            .as_deref(),
         Some("com.acme.OwnerService")
     );
     assert_eq!(
-        idx.receiver_type(scope, "this").as_deref(),
+        idx.receiver_type(scope, "this", "com/acme/OwnerController.java")
+            .as_deref(),
         Some("com.acme.OwnerController")
     );
-    assert_eq!(idx.receiver_type(scope, "unknown"), None);
+    assert_eq!(
+        idx.receiver_type(scope, "unknown", "com/acme/OwnerController.java"),
+        None
+    );
 }
 
 #[test]
 fn local_param_shadows_field() {
     let mut files = workspace();
+    let mut qualified_field = binding(
+        "service",
+        "OwnerService",
+        BindingKind::Field,
+        "com.acme.OwnerController",
+        3,
+    );
+    qualified_field.qualifier = Some("fieldBean".into());
+    files[2].type_bindings.push(qualified_field);
     files[2].type_bindings.push(binding(
         "service",
         "Owner",
@@ -272,10 +293,69 @@ fn local_param_shadows_field() {
     ));
     let idx = ResolveIndex::build(&files, &default_registry());
     assert_eq!(
-        idx.receiver_type("com.acme.OwnerController#handle/1", "service")
-            .as_deref(),
+        idx.receiver_type(
+            "com.acme.OwnerController#handle/1",
+            "service",
+            "com/acme/OwnerController.java"
+        )
+        .as_deref(),
         Some("com.acme.Owner"),
         "a local must shadow the field of the same name"
+    );
+    assert_eq!(
+        idx.receiver(
+            "com.acme.OwnerController#handle/1",
+            "service",
+            "com/acme/OwnerController.java"
+        )
+        .and_then(|resolved| resolved.qualifier),
+        None,
+        "an unqualified local must also shadow the field qualifier"
+    );
+}
+
+#[test]
+fn receiver_qualifier_comes_from_the_selected_parameter_or_field_binding() {
+    let mut files = workspace();
+    let mut field = binding(
+        "service",
+        "OwnerService",
+        BindingKind::Field,
+        "com.acme.OwnerController",
+        3,
+    );
+    field.qualifier = Some("fieldBean".into());
+    let mut param = binding(
+        "svc",
+        "OwnerService",
+        BindingKind::Param,
+        "com.acme.OwnerController#handle/1",
+        5,
+    );
+    param.qualifier = Some("paramBean".into());
+    files[2]
+        .type_bindings
+        .retain(|binding| binding.name != "svc");
+    files[2].type_bindings.extend([field, param]);
+
+    let idx = ResolveIndex::build(&files, &default_registry());
+    assert_eq!(
+        idx.receiver(
+            "com.acme.OwnerController#handle/1",
+            "svc",
+            "com/acme/OwnerController.java"
+        )
+        .and_then(|resolved| resolved.qualifier),
+        Some("paramBean".into())
+    );
+    assert_eq!(
+        idx.receiver(
+            "com.acme.OwnerController#handle/1",
+            "service",
+            "com/acme/OwnerController.java"
+        )
+        .and_then(|resolved| resolved.qualifier),
+        Some("fieldBean".into())
     );
 }
 

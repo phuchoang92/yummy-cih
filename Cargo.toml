@@ -14,13 +14,16 @@
 #               cih-search        BM25, RRF, tokenizer
 #               cih-embed         fastembed/ort embeddings + pgvector store
 #
-#  Storage      cih-graph-store   GraphStore + BulkLoader ports  (traits only — no impl)
+#  Storage      cih-graph-store   GraphStore port  (traits only — no impl)
 #               cih-falkor        FalkorDB adapter  (openCypher over redis protocol)
+#               cih-ladybug       LadybugDB adapter (embedded Kùzu fork; versioned dirs)
+#               cih-store-factory backend name → adapter construction (feature-gated)
 #
 #  Product      cih-engine        CLI orchestrator: scan/analyze/discover/embed/wiki/group
 #               cih-wiki          wiki page generation library
 #               cih-grouping      feature grouping strategies (package, LLM, embed, hybrid)
 #               cih-server        rmcp+axum MCP server; exposes all tools over Streamable HTTP
+#               cih-cli           unified portable executable
 
 [workspace]
 resolver = "2"
@@ -35,12 +38,15 @@ members = [
   "crates/cih-embed",
   "crates/cih-graph-store",
   "crates/cih-falkor",
+  "crates/cih-ladybug",
+  "crates/cih-store-factory",
   "crates/cih-taint",
   "crates/cih-patterns",
   "crates/cih-engine",
   "crates/cih-wiki",
   "crates/cih-server",
   "crates/cih-grouping",
+  "crates/cih-cli",
 ]
 
 [workspace.package]
@@ -59,6 +65,7 @@ clap = { version = "4", features = ["derive", "env"] }
 blake3 = "1"
 globset = "0.4"
 ignore = "0.4"
+regex = "1"
 once_cell = "1"
 quick-xml = "0.38"
 rayon = "1"
@@ -69,8 +76,12 @@ tree-sitter-java = "0.23.5"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-kotlin-updated = "0.1.0"
-tree-sitter-go      = "0.25.0"
-tree-sitter-rust    = "0.24.0"
+# Pinned to the 0.23 line: 0.25.0 ships language ABI 15, which the
+# tree-sitter 0.24 runtime rejects at `set_language` — every Go parse panicked.
+tree-sitter-go      = "0.23.4"
+# tree-sitter-rust 0.24.x regenerated with ABI 15 — the 0.24 runtime rejects it
+# at set_language and every Rust parse panicked (same failure as the go pin).
+tree-sitter-rust    = "0.23.2"
 tree-sitter-c-sharp = "0.23.0"
 tree-sitter-ruby    = "0.23.0"
 tree-sitter-php     = "0.24.0"
@@ -100,7 +111,8 @@ cih-core = { path = "crates/cih-core" }
 cih-taint = { path = "crates/cih-taint" }
 cih-patterns = { path = "crates/cih-patterns" }
 cih-grouping = { path = "crates/cih-grouping" }
-cih-engine = { path = "crates/cih-engine" }
+cih-engine = { path = "crates/cih-engine", default-features = false }
+cih-server = { path = "crates/cih-server", default-features = false }
 cih-lang = { path = "crates/cih-lang" }
 cih-parse = { path = "crates/cih-parse" }
 cih-resolve = { path = "crates/cih-resolve" }
@@ -110,10 +122,23 @@ cih-search = { path = "crates/cih-search" }
 cih-embed = { path = "crates/cih-embed" }
 cih-graph-store = { path = "crates/cih-graph-store" }
 cih-falkor = { path = "crates/cih-falkor" }
+cih-ladybug = { path = "crates/cih-ladybug" }
+cih-store-factory = { path = "crates/cih-store-factory", default-features = false }
 cih-wiki = { path = "crates/cih-wiki" }
+
+# Full debuginfo balloons target/ into tens of GB across builds; line tables
+# keep backtraces usable. Set debug = true locally if you need to step in a debugger.
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# lbug 0.18.2's static prebuilt force-links a private Zstd copy and collides
+# with cih-core's zstd-sys on Linux and Windows. This pinned fork adds
+# checksumable shared-prebuilt support and avoids emitting Unix rpaths to MSVC.
+[patch.crates-io]
+lbug = { git = "https://github.com/phuchoang92/ladybug-rust", rev = "fcb0ab258e4e3135563a0754a4395ed3b3977a10" }

@@ -16,8 +16,8 @@ fn edge(src: &str, dst: &str, kind: EdgeKind, confidence: f32) -> Edge {
 fn deterministic_order_regardless_of_input_order() {
     let a = edge("A", "B", EdgeKind::Calls, 1.0);
     let b = edge("C", "D", EdgeKind::Calls, 1.0);
-    let forward = combined_edges(&[a.clone(), b.clone()], &[]);
-    let backward = combined_edges(&[b.clone(), a.clone()], &[]);
+    let forward = combined_edges(vec![a.clone(), b.clone()], vec![]);
+    let backward = combined_edges(vec![b.clone(), a.clone()], vec![]);
     let keys = |v: &[Edge]| {
         v.iter()
             .map(|e| (e.src.as_str().to_string(), e.dst.as_str().to_string()))
@@ -30,7 +30,7 @@ fn deterministic_order_regardless_of_input_order() {
 fn highest_confidence_wins() {
     let low = edge("A", "B", EdgeKind::Calls, 0.5);
     let high = edge("A", "B", EdgeKind::Calls, 0.9);
-    let result = combined_edges(&[low], &[high]);
+    let result = combined_edges(vec![low], vec![high]);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].confidence, 0.9);
 }
@@ -53,9 +53,56 @@ fn equal_confidence_retains_first() {
         reason: "second".into(),
         props: None,
     };
-    let result = combined_edges(&[first], &[second]);
+    let result = combined_edges(vec![first], vec![second]);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].reason, "first");
+}
+
+fn edge_with_sites(confidence: f32, sites: &[&str]) -> Edge {
+    let arr: Vec<serde_json::Value> = sites.iter().map(|s| serde_json::json!(s)).collect();
+    Edge {
+        src: NodeId::new("A"),
+        dst: NodeId::new("B"),
+        kind: EdgeKind::Calls,
+        confidence,
+        reason: String::new(),
+        props: Some(serde_json::json!({ "call_sites": arr })),
+    }
+}
+
+fn call_sites_of(edge: &Edge) -> Vec<String> {
+    edge.props.as_ref().unwrap()["call_sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn call_sites_accumulate_and_props_survive_confidence_promotion() {
+    // Lower-confidence structure edge first, higher-confidence resolved edge second:
+    // the winner takes the higher-confidence scalar fields but keeps the call_sites
+    // accumulated (in order) from both edges.
+    let low = edge_with_sites(0.4, &["s1", "s2"]);
+    let high = edge_with_sites(0.9, &["s3"]);
+    let result = combined_edges(vec![low], vec![high]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].confidence, 0.9);
+    assert_eq!(call_sites_of(&result[0]), vec!["s1", "s2", "s3"]);
+}
+
+#[test]
+fn merged_call_sites_are_capped_at_twenty() {
+    let a = edge_with_sites(0.5, &(0..15).map(|_| "a").collect::<Vec<_>>());
+    let b = edge_with_sites(0.5, &(0..15).map(|_| "b").collect::<Vec<_>>());
+    let result = combined_edges(vec![a], vec![b]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        call_sites_of(&result[0]).len(),
+        20,
+        "call_sites capped at 20"
+    );
 }
 
 fn btreemap_combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
@@ -107,12 +154,12 @@ fn bench_combined_edges() {
 
     const ITERS: u32 = 5;
 
-    let _ = combined_edges(structure, resolved);
+    let _ = combined_edges(structure.to_vec(), resolved.to_vec());
     let _ = btreemap_combined_edges(structure, resolved);
 
     let t0 = std::time::Instant::now();
     for _ in 0..ITERS {
-        std::hint::black_box(combined_edges(structure, resolved));
+        std::hint::black_box(combined_edges(structure.to_vec(), resolved.to_vec()));
     }
     let hashmap_ms = t0.elapsed().as_millis() / ITERS as u128;
 
@@ -122,7 +169,7 @@ fn bench_combined_edges() {
     }
     let btreemap_ms = t1.elapsed().as_millis() / ITERS as u128;
 
-    let hm = combined_edges(structure, resolved);
+    let hm = combined_edges(structure.to_vec(), resolved.to_vec());
     let bt = btreemap_combined_edges(structure, resolved);
     assert_eq!(hm.len(), bt.len(), "output length mismatch");
     for (h, b) in hm.iter().zip(bt.iter()) {

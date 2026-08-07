@@ -1,8 +1,7 @@
 # Runbook: Exercising `--feature-strategy embed` against local Postgres
 
 Operational steps to run and verify the embedding-based feature clusterer end-to-end on a
-developer machine. Design/rationale live in [`../plans/embed-feature-clustering.md`](../plans/embed-feature-clustering.md);
-this doc is the "how do I actually run it" companion.
+developer machine.
 
 The path is: **`analyze` → `embed` → `discover --feature-strategy embed`**. `embed` populates
 pgvector (per-chunk vectors *and* the per-node `cih_node_vectors` table); `discover` reads those

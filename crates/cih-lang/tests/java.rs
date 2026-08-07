@@ -397,3 +397,404 @@ fn retains_generic_annotation_metadata_on_methods() {
         .expect("Audited");
     assert_eq!(au["attrs"]["level"], "high");
 }
+
+// ── Dynamic-URL parts (Phase B: constants + concat → url_parts) ─────────────
+
+#[test]
+fn concat_url_yields_url_parts() {
+    use cih_core::UrlPart;
+    let src = r#"
+        package com.acme;
+        class Client {
+            private final RestTemplate restTemplate;
+            void fetch(String id) {
+                restTemplate.getForObject(BASE + "/" + id, String.class);
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(sites.len(), 1, "expected one site, got {sites:?}");
+    let site = &sites[0];
+    assert_eq!(site.url_template, None);
+    assert_eq!(
+        site.url_parts.as_deref(),
+        Some(
+            &[
+                UrlPart::ConstRef("BASE".into()),
+                UrlPart::Lit("/".into()),
+                UrlPart::ConstRef("id".into()),
+            ][..]
+        )
+    );
+}
+
+#[test]
+fn qualified_constant_and_call_in_url_parts() {
+    use cih_core::UrlPart;
+    let src = r#"
+        package com.acme;
+        class Client {
+            private final RestTemplate restTemplate;
+            void fetch() {
+                restTemplate.getForObject(Constants.BASE + suffix(), String.class);
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(&[UrlPart::ConstRef("Constants.BASE".into()), UrlPart::Dynamic][..])
+    );
+}
+
+#[test]
+fn literal_url_has_no_parts() {
+    let src = r#"
+        package com.acme;
+        class Client {
+            private final RestTemplate restTemplate;
+            void fetch() {
+                restTemplate.getForObject("/api/orders", String.class);
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(sites[0].url_template.as_deref(), Some("/api/orders"));
+    assert_eq!(sites[0].url_parts, None);
+}
+
+#[test]
+fn dynamic_kafka_topic_yields_parts() {
+    use cih_core::UrlPart;
+    let src = r#"
+        package com.acme;
+        class Producer {
+            private final KafkaTemplate kafkaTemplate;
+            void send() {
+                kafkaTemplate.send(TOPIC, "payload");
+            }
+        }
+    "#;
+    let sites = contract_sites(src);
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].topic, None);
+    assert_eq!(
+        sites[0].url_parts.as_deref(),
+        Some(&[UrlPart::ConstRef("TOPIC".into())][..])
+    );
+}
+
+/// Regression: a JPA `@Entity` whose 512-byte class-props header window ends
+/// inside a multibyte UTF-8 char must not panic — it previously sliced at a
+/// non-char-boundary, and under the rayon per-file parse that aborts the whole
+/// analyze. The `@Table` name is still extracted from the clamped window.
+#[test]
+fn entity_header_slice_clamps_to_char_boundary() {
+    let mut src = String::from("@Entity\n@Table(name = \"orders\")\npublic class Order {\n    // ");
+    // Pad (inside a line comment) so a 2-byte 'é' straddles byte 512 counted from
+    // the class-declaration start (byte 0): the old slice `src[0..512]` panics there.
+    while src.len() < 511 {
+        src.push('x');
+    }
+    src.push('é');
+    src.push_str("\n}\n");
+
+    let unit = JavaProvider::new()
+        .parse_file("Order.java", &src)
+        .expect("entity should parse");
+    let class = unit
+        .nodes
+        .iter()
+        .find(|n| n.kind == cih_core::NodeKind::Class)
+        .expect("class node");
+    assert_eq!(
+        class
+            .props
+            .as_ref()
+            .and_then(|p| p.get("tableName"))
+            .and_then(|v| v.as_str()),
+        Some("orders"),
+    );
+}
+
+#[test]
+fn field_qualifier_lands_on_type_binding() {
+    let src = r#"
+        package com.acme;
+
+        class CustomUserImpl implements UserAdmin {
+            @Autowired
+            @Qualifier("retailUserAdminRef")
+            private UserAdmin retailUserAdminRef;
+
+            @Resource(name = "auditLogSvc")
+            private AuditLogService auditLogService;
+
+            private UserAdmin unqualified;
+
+            public void run(@Qualifier("other") UserAdmin param) {}
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/CustomUserImpl.java", src)
+        .expect("parse");
+    let bindings = &unit.parsed_file.type_bindings;
+    let by_name = |name: &str| {
+        bindings
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("binding {name}"))
+    };
+    assert_eq!(
+        by_name("retailUserAdminRef").qualifier.as_deref(),
+        Some("retailUserAdminRef")
+    );
+    assert_eq!(
+        by_name("auditLogService").qualifier.as_deref(),
+        Some("auditLogSvc")
+    );
+    assert_eq!(by_name("unqualified").qualifier, None);
+    assert_eq!(by_name("param").qualifier.as_deref(), Some("other"));
+}
+
+#[test]
+fn parameter_qualifier_propagates_only_through_direct_field_assignment() {
+    let src = r#"
+        package com.acme;
+
+        class Facade {
+            private UserAdmin constructorInjected;
+            private UserAdmin methodInjected;
+            private UserAdmin transformed;
+
+            Facade(@Qualifier("constructorBean") UserAdmin selected) {
+                this.constructorInjected = selected;
+                this.transformed = decorate(selected);
+            }
+
+            void install(@Resource(name = "methodBean") UserAdmin selected) {
+                this.methodInjected = selected;
+            }
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/Facade.java", src)
+        .expect("parse");
+    let field = |name: &str| {
+        unit.parsed_file
+            .type_bindings
+            .iter()
+            .find(|binding| binding.kind == cih_core::BindingKind::Field && binding.name == name)
+            .unwrap_or_else(|| panic!("field binding {name}"))
+    };
+
+    assert_eq!(
+        field("constructorInjected").qualifier.as_deref(),
+        Some("constructorBean")
+    );
+    assert_eq!(
+        field("methodInjected").qualifier.as_deref(),
+        Some("methodBean")
+    );
+    assert_eq!(field("transformed").qualifier, None);
+}
+
+#[test]
+fn conflicting_direct_and_inferred_field_qualifiers_are_discarded() {
+    let src = r#"
+        package com.acme;
+
+        class Facade {
+            @Qualifier("directBean")
+            private UserAdmin service;
+
+            Facade(@Qualifier("constructorBean") UserAdmin selected) {
+                this.service = selected;
+            }
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/Facade.java", src)
+        .expect("parse");
+    let field = unit
+        .parsed_file
+        .type_bindings
+        .iter()
+        .find(|binding| binding.kind == cih_core::BindingKind::Field && binding.name == "service")
+        .expect("field binding");
+
+    assert_eq!(field.qualifier, None);
+}
+
+#[test]
+fn sql_value_shaped_constants_are_captured_without_upper_snake_names() {
+    let src = r#"
+        package com.acme;
+
+        class UserDao {
+            private static final String insertAuditLog =
+                "INSERT INTO AUDIT_LOG (ID, ACTION) VALUES (?, ?)";
+            private static final String greetingText = "hello world";
+            static final String LEGACY_UPPER = "not sql but captured by name";
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/UserDao.java", src)
+        .expect("parse");
+    let names: Vec<&str> = unit
+        .parsed_file
+        .sql_constants
+        .iter()
+        .map(|c| c.const_name.as_str())
+        .collect();
+    assert!(names.contains(&"insertAuditLog"), "{names:?}");
+    assert!(names.contains(&"LEGACY_UPPER"), "{names:?}");
+    assert!(!names.contains(&"greetingText"), "{names:?}");
+}
+
+#[test]
+fn configured_sql_api_and_const_flow_heuristic_emit_execution_sites() {
+    let src = r#"
+        package com.acme;
+
+        class AuditAdapter {
+            private static final String INSERT_AUDIT =
+                "INSERT INTO AUDIT_LOG (ID) VALUES (?)";
+            private static final String NOT_SQL = "plain text";
+            private AuditQueue auditQueue;
+
+            void record() {
+                auditQueue.enqueue(INSERT_AUDIT, 1);
+            }
+
+            void trace() {
+                logger.info(INSERT_AUDIT);
+            }
+
+            void custom() {
+                CustomRunner.run(INSERT_AUDIT);
+            }
+
+            void inheritedWrapper() {
+                enqueue(INSERT_AUDIT);
+            }
+
+            void noise() {
+                CustomRunner.run(NOT_SQL);
+            }
+        }
+    "#;
+    let provider =
+        cih_lang::java::JavaProvider::with_sql_apis(vec![cih_lang::java::SqlApi::parse(
+            "AuditQueue.enqueue",
+        )
+        .expect("valid spec")]);
+    let unit = provider
+        .parse_file("com/acme/AuditAdapter.java", src)
+        .expect("parse");
+    let sites = &unit.parsed_file.sql_execution_sites;
+
+    let configured = sites
+        .iter()
+        .find(|s| s.api_name == "AuditQueue.enqueue")
+        .expect("configured API site");
+    assert_eq!(configured.const_ref.as_deref(), Some("INSERT_AUDIT"));
+    assert!(!configured.heuristic, "configured APIs are trusted");
+
+    let heuristic = sites
+        .iter()
+        .find(|s| s.api_name == "run")
+        .expect("heuristic site for SQL constant flowing into a custom call");
+    assert_eq!(heuristic.const_ref.as_deref(), Some("INSERT_AUDIT"));
+    assert!(heuristic.heuristic);
+
+    let objectless = sites
+        .iter()
+        .find(|s| s.api_name == "enqueue" && s.heuristic)
+        .expect("objectless call should retain the SQL-constant heuristic");
+    assert_eq!(objectless.const_ref.as_deref(), Some("INSERT_AUDIT"));
+
+    assert!(
+        !sites.iter().any(|s| s.api_name == "info"),
+        "logger receivers must not become execution sites"
+    );
+    assert_eq!(
+        sites.len(),
+        3,
+        "non-SQL constants must not create heuristic sites: {sites:?}"
+    );
+}
+
+#[test]
+fn trivial_accessors_get_the_is_accessor_prop() {
+    let src = r#"
+        package com.acme;
+
+        class User {
+            private String name;
+            private boolean active;
+            private final String id = "user-id";
+            private static final String DEFAULT = "fallback";
+
+            public String getName() { return name; }
+            public void setName(String name) { this.name = name; }
+            public boolean isActive() { return this.active; }
+            public boolean hasName() { return name; }
+            public String getId() { return id; }
+
+            // Accessor-shaped names with non-accessor bodies.
+            public boolean isConstant() { return true; }
+            public String getDefault() { return DEFAULT; }
+            public String getDefaultViaThis() { return this.DEFAULT; }
+            public String getCalculated() { return name + "!"; }
+            public String getConditional() { if (active) return name; return ""; }
+            public String getWithArg(String fallback) { return name; }
+            public void setCalculated(String name) { this.name = normalize(name); }
+            public void setWrong(String value) { this.name = name; }
+            public void setMissing() { this.name = "x"; }
+            public void setGhost(String ghost) { this.ghost = ghost; }
+
+            // Same prefix, but real logic — must NOT be flagged.
+            public String getDisplayName() { return format(name); }
+            public void process() { name = "x"; }
+        }
+    "#;
+    let unit = JavaProvider::new()
+        .parse_file("com/acme/User.java", src)
+        .expect("parse");
+    let accessor_flag = |name: &str| {
+        unit.nodes
+            .iter()
+            .find(|n| n.kind == cih_core::NodeKind::Method && n.name == name)
+            .unwrap_or_else(|| panic!("method {name}"))
+            .props
+            .as_ref()
+            .and_then(|p| p.get("isAccessor"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    assert!(accessor_flag("getName"));
+    assert!(accessor_flag("setName"));
+    assert!(accessor_flag("isActive"));
+    assert!(accessor_flag("hasName"));
+    assert!(accessor_flag("getId"), "instance-final fields are state");
+    for name in [
+        "isConstant",
+        "getDefault",
+        "getDefaultViaThis",
+        "getCalculated",
+        "getConditional",
+        "getWithArg",
+        "setCalculated",
+        "setWrong",
+        "setMissing",
+        "setGhost",
+    ] {
+        assert!(!accessor_flag(name), "{name} is not an exact accessor");
+    }
+    assert!(
+        !accessor_flag("getDisplayName"),
+        "calls format() — not trivial"
+    );
+    assert!(!accessor_flag("process"), "no accessor prefix");
+}

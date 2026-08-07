@@ -1,3 +1,13 @@
+//! Cross-repo feature grouping — organizes a multi-repo system into feature
+//! groups and matches producer↔consumer contracts across services.
+//!
+//! Where [`cih-community`](../cih_community/index.html) groups symbols *within* a
+//! repo, this crate groups *repos* and their surfaces: it applies a grouping
+//! strategy (package, embedding, or embedding-cluster) to assign features, honors
+//! user overrides, and writes the group artifacts the cross-repo tools
+//! (`group_contracts`, `api_impact`, `trace_flow_x`) read. Operates over
+//! `cih-core` group/contract types.
+
 pub mod artifact;
 pub mod config;
 pub mod entry;

@@ -1,40 +1,50 @@
-use std::collections::HashMap;
-
 use cih_core::Edge;
 
-pub(super) fn combined_edges(structure: &[Edge], resolved: &[Edge]) -> Vec<Edge> {
-    let mut map: HashMap<(String, String, &'static str), Edge> =
-        HashMap::with_capacity(structure.len() + resolved.len());
-    for edge in structure.iter().chain(resolved.iter()) {
-        let key = (
-            edge.src.as_str().to_string(),
-            edge.dst.as_str().to_string(),
-            edge.kind.cypher_label(),
-        );
-        match map.entry(key) {
-            std::collections::hash_map::Entry::Occupied(mut slot) => {
-                let winner = slot.get_mut();
-                merge_call_sites(winner, edge);
-                if edge.confidence > winner.confidence {
-                    let merged_props = winner.props.take();
-                    *winner = edge.clone();
-                    winner.props = merged_props;
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(edge.clone());
-            }
+/// Deduplicate structure + resolved edges by `(src, dst, kind)`, keeping the
+/// highest-confidence edge and merging `call_sites`, ordered deterministically.
+///
+/// Takes both inputs **by value** and merges them in place — no per-edge clone,
+/// no side `HashMap` (which also allocated two key `String`s per entry), and no
+/// second collected Vec. Peak memory is one moved buffer instead of
+/// `inputs + cloned map + result`, and the caller's raw edge vectors are freed
+/// here rather than lingering through the whole write phase.
+pub(super) fn combined_edges(mut structure: Vec<Edge>, resolved: Vec<Edge>) -> Vec<Edge> {
+    // `structure` first, then `resolved`, matching the order the previous
+    // implementation fed the map (`structure.iter().chain(resolved.iter())`).
+    structure.extend(resolved);
+    let mut edges = structure;
+
+    // Stable sort groups duplicate keys while preserving structure-before-resolved
+    // order (and original order within each), so a run folds in the same sequence
+    // the map processed it — required for the stateful call-sites/confidence merge.
+    edges.sort_by(|a, b| edge_key(a).cmp(&edge_key(b)));
+
+    // Fold each run of equal keys into its first (retained) element in place.
+    // `dedup_by` passes the later element and the retained winner; it always
+    // compares subsequent elements against that same evolving winner.
+    edges.dedup_by(|later, winner| {
+        if edge_key(later) != edge_key(winner) {
+            return false;
         }
-    }
-    let mut result: Vec<Edge> = map.into_values().collect();
-    result.sort_unstable_by(|a, b| {
-        a.src
-            .as_str()
-            .cmp(b.src.as_str())
-            .then_with(|| a.dst.as_str().cmp(b.dst.as_str()))
-            .then_with(|| a.kind.cypher_label().cmp(b.kind.cypher_label()))
+        merge_call_sites(winner, later);
+        if later.confidence > winner.confidence {
+            // Promote the higher-confidence edge but keep the accumulated props.
+            let merged_props = winner.props.take();
+            std::mem::swap(winner, later);
+            winner.props = merged_props;
+        }
+        true
     });
-    result
+
+    edges
+}
+
+fn edge_key(edge: &Edge) -> (&str, &str, &'static str) {
+    (
+        edge.src.as_str(),
+        edge.dst.as_str(),
+        edge.kind.cypher_label(),
+    )
 }
 
 /// Merge `call_sites` from `incoming` into `winner` (Gap 3). Caps total at 20 per edge.

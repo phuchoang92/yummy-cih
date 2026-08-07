@@ -11,10 +11,27 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 pub mod constant_resolver;
+pub(crate) mod contracts_common;
 pub mod fingerprint;
 pub mod generic_parse;
 
-pub use constant_resolver::{ConstantResolver, NullConstantResolver, ResolutionContext};
+pub use constant_resolver::{
+    resolve_relative_module, strip_source_extension, ConstantResolver, NullConstantResolver,
+    ResolutionContext,
+};
+pub use contracts_common::normalize_external_url;
+
+/// Version of the on-disk parse cache (`.cih/parse-cache/v<N>/`).
+///
+/// **BUMP THIS whenever any parser/extractor changes the shape OR content of
+/// `ParsedUnit` output** — new node/edge kinds, new extraction passes (routes,
+/// contract sites, constants), changed folding or normalization. Cached units
+/// from an older schema must never be served to a newer engine: that silently
+/// suppresses the new extraction on every unchanged file. The
+/// `parse_schema_guard` test in cih-engine fails when parser output changes
+/// without a bump. Starts at 2: the flat pre-versioning cache layout is
+/// implicitly v1 and is pruned on first contact.
+pub const PARSE_CACHE_SCHEMA: u32 = 27;
 
 /// Declares all language modules and generates `all_providers()`.
 /// To add a new language: add one line here (plus the implementation files).
@@ -44,6 +61,27 @@ languages! {
     elixir: ElixirProvider,
 }
 
+/// [`all_providers`] with the Java provider configured for repo-specific SQL
+/// execution APIs (`[analyze] sql_apis` in `cih.toml` / `--sql-api`).
+pub fn all_providers_with_java_sql_apis(
+    sql_apis: Vec<java::SqlApi>,
+) -> Vec<Box<dyn LanguageProvider>> {
+    if sql_apis.is_empty() {
+        return all_providers();
+    }
+    all_providers()
+        .into_iter()
+        .map(|provider| {
+            if provider.language_id() == "java" {
+                Box::new(java::JavaProvider::with_sql_apis(sql_apis.clone()))
+                    as Box<dyn LanguageProvider>
+            } else {
+                provider
+            }
+        })
+        .collect()
+}
+
 /// Maps a file path to its syntax-highlight language tag via the provider registry.
 /// Returns `""` for unrecognized extensions.
 pub fn lang_for_path(path: &str) -> &'static str {
@@ -60,6 +98,34 @@ pub fn lang_for_path(path: &str) -> &'static str {
     });
     let ext = path.rfind('.').map(|i| &path[i..]).unwrap_or("");
     map.get(ext).copied().unwrap_or("")
+}
+
+/// The set of language ids ([`LanguageProvider::language_id`]) present among
+/// `paths`, derived from file extensions via the provider registry. The single
+/// source of truth for "which languages are in scope" — drives
+/// language-conditional analysis phases so the core never hardcodes a language
+/// (e.g. `f.ends_with(".java")`).
+pub fn language_ids_for_paths<S: AsRef<str>>(paths: &[S]) -> BTreeSet<&'static str> {
+    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        let mut m = HashMap::new();
+        for p in all_providers() {
+            let id = p.language_id();
+            for &ext in p.extensions() {
+                m.insert(ext, id);
+            }
+        }
+        m
+    });
+    let mut out = BTreeSet::new();
+    for path in paths {
+        let path = path.as_ref();
+        let ext = path.rfind('.').map(|i| &path[i..]).unwrap_or("");
+        if let Some(&id) = map.get(ext) {
+            out.insert(id);
+        }
+    }
+    out
 }
 
 /// Returns the single-line comment prefix for a language id (e.g. `"#"` for python, `"//"` for java).
@@ -102,6 +168,17 @@ pub trait LanguageProvider: Send + Sync {
     /// Called during the scan phase — no tree-sitter, just string matching.
     fn scan_file(&self, rel: &str, src: &str) -> anyhow::Result<SourceScan>;
 
+    /// Tree-sitter node kinds that represent a callable in this language
+    /// (`function_declaration`, `arrow_function`, `method_definition`, …).
+    ///
+    /// Used to count what the AST *contains* so it can be compared against the
+    /// `Function`/`Method` nodes we actually emitted — the extraction-coverage
+    /// signal that catches idioms nobody thought to enumerate. Opt-in: the default
+    /// is empty, which reports coverage as "unknown" rather than as zero.
+    fn callable_kinds(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Single-line comment prefix. Default: `"//"`. Override for `"#"` languages.
     fn comment_prefix(&self) -> &'static str {
         "//"
@@ -120,4 +197,27 @@ pub enum Stereotype {
     NestJs,
     Flask,
     FastApi,
+}
+
+#[cfg(test)]
+mod scope_lang_tests {
+    use super::language_ids_for_paths;
+
+    #[test]
+    fn language_ids_derived_from_extensions() {
+        let ids = language_ids_for_paths(&[
+            "src/A.java".to_string(),
+            "src/b.ts".to_string(),
+            "src/c.js".to_string(), // JS is handled by the typescript provider
+            "svc/d.py".to_string(),
+            "README.md".to_string(), // unknown ext → ignored
+            "Makefile".to_string(),  // no ext → ignored
+        ]);
+        assert!(ids.contains("java"));
+        assert!(ids.contains("typescript")); // both .ts and .js
+        assert!(ids.contains("python"));
+        assert!(!ids.contains("go"));
+        // Empty / unknown-only inputs yield an empty set.
+        assert!(language_ids_for_paths(&["x.md".to_string(), "y".to_string()]).is_empty());
+    }
 }

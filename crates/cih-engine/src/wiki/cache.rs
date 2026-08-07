@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use cih_wiki::{
-    CommunityLlmSummary, FeatureLlmSummary, FeatureMetaEntry, FlowCacheEntry, FlowLlmSummary,
-    WikiMeta, WikiModuleCacheEntry,
+    CommunityFullCacheEntry, CommunityLlmFull, CommunityLlmSummary, FeatureLlmSummary,
+    FeatureMetaEntry, FlowCacheEntry, FlowLlmSummary, WikiMeta, WikiModuleCacheEntry,
 };
 
 pub(super) fn persist_wiki_meta_caches(
@@ -11,8 +11,13 @@ pub(super) fn persist_wiki_meta_caches(
     community_updates: &[(String, String, CommunityLlmSummary)],
     feature_updates: &[(String, String, FeatureLlmSummary)],
     flow_updates: &[(String, String, FlowLlmSummary)],
+    full_updates: &[(String, String, CommunityLlmFull)],
 ) -> Result<()> {
-    if community_updates.is_empty() && feature_updates.is_empty() && flow_updates.is_empty() {
+    if community_updates.is_empty()
+        && feature_updates.is_empty()
+        && flow_updates.is_empty()
+        && full_updates.is_empty()
+    {
         return Ok(());
     }
 
@@ -59,6 +64,25 @@ pub(super) fn persist_wiki_meta_caches(
             FlowCacheEntry {
                 evidence_hash: ev_hash.clone(),
                 summary: summary.clone(),
+            },
+        );
+    }
+
+    for (comm_id, ev_hash, full) in full_updates {
+        meta.full_cache.insert(
+            comm_id.clone(),
+            CommunityFullCacheEntry {
+                evidence_hash: ev_hash.clone(),
+                po_summary: full.po_summary.clone(),
+                po_capabilities: full.po_capabilities.clone(),
+                po_workflows: full.po_workflows.clone(),
+                po_open_questions: full.po_open_questions.clone(),
+                ba_process_overview: full.ba_process_overview.clone(),
+                ba_contracts: full.ba_contracts.clone(),
+                ba_business_rules: full.ba_business_rules.clone(),
+                dev_responsibility: full.dev_responsibility.clone(),
+                dev_key_classes: full.dev_key_classes.clone(),
+                dev_entry_points: full.dev_entry_points.clone(),
             },
         );
     }

@@ -24,6 +24,12 @@ fn is_integration_xml(content: &str) -> Option<&'static str> {
     if content.contains("http://www.osgi.org/xmlns/blueprint") {
         return Some("blueprint");
     }
+    // Spring-DM (OSGi service registry wiring, e.g. SAP-OCB bundle-context-*-osgi.xml).
+    // Checked without the `<bean` gate: these files often hold only
+    // `<osgi:reference>` / `<osgi:service>` elements.
+    if content.contains("http://www.springframework.org/schema/osgi") {
+        return Some("spring");
+    }
     if content.contains("http://www.springframework.org/schema/beans") && content.contains("<bean")
     {
         return Some("spring");
@@ -390,8 +396,16 @@ fn extract_structured_xml(
                             if let (Some(iface), Some(refer)) =
                                 (attr_val(e, b"interface"), attr_val(e, b"ref"))
                             {
+                                // Spring keys the node as `service:{ref}` so it can't collide
+                                // with a same-file `<bean id={ref}>` (blueprint already
+                                // namespaces its beans as `bean:{id}` — keep its ids stable).
+                                let key = if source_label == "blueprint_xml" {
+                                    refer.clone()
+                                } else {
+                                    format!("service:{refer}")
+                                };
                                 nodes.push(Node {
-                                    id: cih_core::integration_route_id(rel_path, &refer),
+                                    id: cih_core::integration_route_id(rel_path, &key),
                                     kind: NodeKind::IntegrationRoute,
                                     name: refer.clone(),
                                     qualified_name: Some(format!("{rel_path}#service:{refer}")),
@@ -400,7 +414,7 @@ fn extract_structured_xml(
                                     props: Some(serde_json::json!({
                                         "interface": iface,
                                         "ref": refer,
-                                        "source": "blueprint_xml",
+                                        "source": source_label,
                                     })),
                                 });
                             }
@@ -492,4 +506,83 @@ fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Walk `repo_root` for `*.xml` files and run [`extract_integration_xml`] on each,
+/// de-duplicating nodes by id across files. Best-effort: unreadable files and walk
+/// errors are skipped with a warning, never fatal.
+pub fn extract_integration_xml_in_repo(repo_root: &std::path::Path) -> (Vec<Node>, Vec<Edge>) {
+    use rayon::prelude::*;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let xml_files: Vec<PathBuf> = {
+        let walker = ignore::WalkBuilder::new(repo_root)
+            .hidden(false)
+            .git_ignore(true)
+            .git_exclude(true)
+            .git_global(true)
+            .build();
+
+        walker
+            .filter_map(|result| match result {
+                Ok(entry) if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) => {
+                    let path = entry.into_path();
+                    let is_xml = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("xml"))
+                        .unwrap_or(false);
+                    if is_xml {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "integration-xml: walk error — skipping");
+                    None
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let per_file: Vec<_> = xml_files
+        .par_iter()
+        .filter_map(|path| {
+            let rel = path
+                .strip_prefix(repo_root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(err) => {
+                    tracing::warn!(file = %rel, error = %err, "integration-xml: read failed — skipping");
+                    return None;
+                }
+            };
+            let output = extract_integration_xml(&rel, &content);
+            if output.nodes.is_empty() && output.edges.is_empty() {
+                None
+            } else {
+                Some(output)
+            }
+        })
+        .collect();
+
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut seen_node_ids: HashSet<String> = HashSet::new();
+    for output in per_file {
+        for node in output.nodes {
+            if seen_node_ids.insert(node.id.as_str().to_string()) {
+                nodes.push(node);
+            }
+        }
+        edges.extend(output.edges);
+    }
+
+    (nodes, edges)
 }

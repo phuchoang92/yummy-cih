@@ -14,6 +14,7 @@ output shape to return to the user, and tips.
 | [product-owner.md](product-owner.md) | PO, BA | Business view — API surface, named processes, module breakdown |
 | [tester.md](tester.md) | Tester, QA | Regression scope for a diff — test suites to run, E2E coverage |
 | [security.md](security.md) | Developer, Security Reviewer | Source→sink taint paths — SQL injection, command exec, file write, XSS |
+| [documenting.md](documenting.md) | Documentation agent | Generate/refresh per-endpoint and per-symbol pages from evidence packs |
 
 ## Quick tool reference
 
@@ -29,6 +30,7 @@ output shape to return to the user, and tips.
 | `trace_flow()` | debugging |
 | `feature_map()` | exploring, product-owner |
 | `taint_paths()` | security |
+| `doc_pack()` / `doc_status()` | documenting |
 | `cih://repo/{name}/processes` | exploring, product-owner, debugging, tester |
 | `cih://repo/{name}/communities` | product-owner |
 
@@ -45,4 +47,5 @@ User question                              → Workflow
 "Where is this exception thrown from?"    → debugging
 "Which tests should I run for this PR?"   → tester
 "Any injection risks in this service?"    → security
+"Document these endpoints / refresh docs" → documenting
 ```

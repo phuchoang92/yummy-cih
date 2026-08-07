@@ -6,9 +6,12 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// Shared FalkorDB connection + load options, used by Analyze, Resolve, and Discover.
+/// Shared graph-DB connection + load options, used by Analyze, Resolve, and Discover.
 #[derive(Debug, clap::Args)]
 pub struct DbArgs {
+    /// Graph backend to load into. Defaults to $CIH_GRAPH_BACKEND or "falkor".
+    #[arg(long, env = "CIH_GRAPH_BACKEND")]
+    pub backend: Option<String>,
     /// FalkorDB URL. Defaults to $FALKOR_URL or redis://127.0.0.1:6380.
     #[arg(long, env = "FALKOR_URL")]
     pub falkor_url: Option<String>,
@@ -52,6 +55,7 @@ pub enum Command {
     },
     /// Detect communities and process traces from the latest analyzed artifacts.
     Discover(DiscoverArgs),
+    #[cfg(feature = "semantic")]
     /// Embed searchable graph nodes from the latest analyzed artifacts into pgvector.
     Embed {
         /// Repository root with `.cih/artifacts/<version>` from a prior analyze/resolve run.
@@ -87,6 +91,10 @@ pub enum Command {
     },
     /// Generate a role-based wiki bundle from existing graph artifacts.
     Wiki(WikiArgs),
+    /// Run analyze → discover → wiki in one shot with per-stage fingerprint skip.
+    /// Each stage is skipped when its inputs are unchanged since the last successful run.
+    /// Staleness warnings are printed when artifacts are behind the current git HEAD.
+    Refresh(RefreshArgs),
     /// Inspect and manage feature grouping assignments.
     Features {
         #[command(subcommand)]
@@ -141,6 +149,9 @@ pub enum ArtifactCommand {
         /// Bundle archive path.
         #[arg(long)]
         bundle: PathBuf,
+        /// Graph backend to load into. Defaults to $CIH_GRAPH_BACKEND or "falkor".
+        #[arg(long, env = "CIH_GRAPH_BACKEND")]
+        backend: Option<String>,
         /// FalkorDB URL.
         #[arg(long, env = "FALKOR_URL")]
         falkor_url: Option<String>,
@@ -217,6 +228,14 @@ pub enum GroupCommand {
         #[arg(long, env = "FALKOR_URL")]
         falkor_url: Option<String>,
         /// Print sync summary as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show contract sync freshness for a group (last sync + staleness).
+    Status {
+        /// Group name.
+        name: String,
+        /// Print status as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -303,8 +322,11 @@ pub struct AnalyzeArgs {
     #[arg(long)]
     pub exclude: Vec<String>,
     /// Include files under decompiled dirs such as .workspace-dependencies.
-    #[arg(long)]
+    #[arg(long, overrides_with = "no_include_decompiled")]
     pub include_decompiled: bool,
+    /// Exclude decompiled dirs even if cih.toml has include_decompiled = true.
+    #[arg(long = "no-include-decompiled", overrides_with = "include_decompiled")]
+    pub no_include_decompiled: bool,
     /// Scope TOML file. Defaults to `<repo>/cih.scope.toml` when present.
     #[arg(long)]
     pub scope: Option<PathBuf>,
@@ -317,8 +339,14 @@ pub struct AnalyzeArgs {
     #[arg(long)]
     pub no_cache: bool,
     /// Skip integration and DI XML extraction (faster on large repos).
-    #[arg(long)]
+    #[arg(long, overrides_with = "no_skip_xml_integration")]
     pub skip_xml_integration: bool,
+    /// Re-enable integration XML extraction even if cih.toml has skip_xml_integration = true.
+    #[arg(
+        long = "no-skip-xml-integration",
+        overrides_with = "skip_xml_integration"
+    )]
+    pub no_skip_xml_integration: bool,
     /// Limit analysis to these languages (comma-delimited or repeated). Default: all.
     /// Example: --language java,typescript
     #[arg(long = "language", value_delimiter = ',')]
@@ -327,6 +355,11 @@ pub struct AnalyzeArgs {
     /// Overrides auto-detection. Default: cih.toml `cxf_base_path`, else auto-detect.
     #[arg(long)]
     pub cxf_base_path: Option<String>,
+    /// Extra SQL execution API as Receiver.method (e.g. AuditQueue.enqueue) —
+    /// calls to it with a SQL constant/literal argument become DbQuery sites.
+    /// Repeatable / comma-delimited. Default: cih.toml `sql_apis`.
+    #[arg(long = "sql-api", value_delimiter = ',')]
+    pub sql_api: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -516,6 +549,75 @@ pub struct WikiArgs {
     /// Print outcome as JSON instead of the human summary.
     #[arg(long)]
     pub json: bool,
+    /// Check whether the wiki is up to date without regenerating.
+    /// Exits 0 if the wiki matches the current HEAD, graph version, and wiki flags.
+    /// Exits 2 if the wiki is stale or has never been generated.
+    /// Combine with --json for machine-readable output.
+    #[arg(long)]
+    pub check: bool,
+    /// Re-render only features affected by files changed since this git ref (commit SHA, branch,
+    /// or tag). Merges with the existing manifest.json for unchanged features. Requires a prior
+    /// full wiki run. Example: --since origin/main
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Generate pages into a sibling `.tmp` directory and rename it into place atomically.
+    /// Prevents readers from observing a partially-written wiki output during generation.
+    #[arg(long)]
+    pub stage_and_swap: bool,
+    /// After generating the wiki, write or update a CIH pointer block in AGENTS.md and
+    /// CLAUDE.md at the repo root so that AI agents can locate the wiki and agent-index.json.
+    #[arg(long)]
+    pub update_agents_md: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RefreshArgs {
+    /// Repository root to refresh (analyze → discover → wiki).
+    pub repo: PathBuf,
+    #[command(flatten)]
+    pub db: DbArgs,
+    /// Print per-stage outcome as JSON instead of the human summary.
+    #[arg(long)]
+    pub json: bool,
+    /// Force all stages to re-run, ignoring fingerprint state.
+    #[arg(long)]
+    pub force: bool,
+    /// Skip the analyze stage even if the graph is stale.
+    #[arg(long)]
+    pub no_analyze: bool,
+    /// Skip the discover stage even if communities are stale.
+    #[arg(long)]
+    pub no_discover: bool,
+    /// Skip the wiki stage even if the wiki is stale.
+    #[arg(long)]
+    pub no_wiki: bool,
+    /// Wiki generation mode: graph (default, no LLM), llm-summary, or llm-full.
+    #[arg(long)]
+    pub wiki_mode: Option<String>,
+    /// Community grouping strategy: package (default), graph, or llm.
+    #[arg(long)]
+    pub grouping: Option<String>,
+    /// Documentation language for LLM-generated wiki text (default: en).
+    #[arg(long)]
+    pub wiki_language: Option<String>,
+    /// Custom wiki output directory (default: <repo>/.cih/wiki).
+    #[arg(long)]
+    pub wiki_out: Option<PathBuf>,
+    /// Enable LLM enrichment for the wiki stage.
+    #[arg(long, env = "CIH_LLM")]
+    pub llm: bool,
+    /// LLM provider for wiki enrichment.
+    #[arg(long)]
+    pub llm_provider: Option<String>,
+    /// Override which env var holds the LLM API key.
+    #[arg(long)]
+    pub llm_api_key_env: Option<String>,
+    /// LLM model for wiki enrichment.
+    #[arg(long)]
+    pub llm_model: Option<String>,
+    /// Generate wiki into a sibling `.tmp` directory and rename it into place atomically.
+    #[arg(long)]
+    pub stage_and_swap: bool,
 }
 
 #[derive(Debug, clap::Args)]

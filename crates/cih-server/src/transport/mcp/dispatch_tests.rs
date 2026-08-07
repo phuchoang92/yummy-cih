@@ -1,0 +1,432 @@
+//! End-to-end MCP dispatch tests: drive real `call_tool` requests through the
+//! actual `ServerHandler` + tool router over an in-memory transport pair (rmcp's
+//! own test pattern, `rmcp/tests/test_tool_macros.rs`). This verifies the
+//! request → dispatch → response envelope that the registration guard in
+//! `server::tests` can't.
+//!
+//! Hermetic: store construction via `connect_store` is lazy (the adapter
+//! connects on first query), and none of the tools dispatched here reach a
+//! graph query — they fail at router/arg-validation, or `list_repos` only
+//! reads the registry — so no live DB is required and this runs in the normal
+//! suite.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use cih_graph_store::GraphStore;
+use rmcp::model::{CallToolRequestParam, ClientInfo};
+use rmcp::{ClientHandler, ServiceExt};
+
+use super::CihServer;
+use crate::application::files::{GrepRuntime, ReadFileLimits};
+use crate::bootstrap::assemble_services;
+use crate::infrastructure::search_provider::SearchCache;
+use crate::infrastructure::wiki_repository::WikiSearchState;
+
+#[derive(Clone, Default)]
+struct DummyClient;
+
+impl ClientHandler for DummyClient {
+    fn get_info(&self) -> ClientInfo {
+        ClientInfo::default()
+    }
+}
+
+type TestClient = rmcp::service::RunningService<rmcp::RoleClient, DummyClient>;
+
+/// Build a `CihServer` (lazy store connection — no live DB) and serve it over an
+/// in-memory duplex pair; return a connected client.
+async fn serve_test_server() -> TestClient {
+    let (backend, url) = if cfg!(feature = "falkor") {
+        ("falkor", "redis://127.0.0.1:6380".to_string())
+    } else {
+        (
+            "ladybug",
+            std::env::temp_dir()
+                .join("cih-dispatch-test-ladybug")
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    let store: Arc<dyn GraphStore> = cih_store_factory::connect_store(
+        backend,
+        &url,
+        "cih_dispatch_test",
+        &cih_store_factory::StoreOptions::default(),
+    )
+    .expect("lazy store construction");
+    let services = assemble_services(
+        store,
+        None,
+        None,
+        "cih_dispatch_test".into(),
+        None,
+        backend.into(),
+        url,
+        (4, Duration::from_secs(5)),
+        cih_store_factory::StoreRuntimeOptions::default(),
+        SearchCache::new(4, 16 * 1024 * 1024),
+        ReadFileLimits {
+            max_bytes: 1 << 20,
+            max_lines: 2000,
+        },
+        Arc::new(GrepRuntime::for_tests()),
+        WikiSearchState::new(),
+        crate::IndexProgram::legacy(),
+    );
+    let server = CihServer::new(services);
+    let (server_t, client_t) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        let _ = server.serve(server_t).await?.waiting().await;
+        anyhow::Ok(())
+    });
+    DummyClient
+        .serve(client_t)
+        .await
+        .expect("client serve over duplex")
+}
+
+fn empty_args() -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::new()
+}
+
+#[tokio::test]
+async fn tools_list_returns_full_surface_with_schemas() {
+    // Regression guard: the hand-expanded `call_tool` in `server.rs` must be paired
+    // with a `list_tools` override, or `tools/list` falls back to the trait
+    // default (an empty list) and discovery-based clients see zero tools.
+    let client = serve_test_server().await;
+    let tools = client
+        .list_all_tools()
+        .await
+        .expect("tools/list should dispatch");
+
+    let names: std::collections::HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    for expected in [
+        "list_repos",
+        "list_repos_page",
+        "search_code",
+        "read_file",
+        "search_wiki",
+        "architecture_overview",
+    ] {
+        assert!(
+            names.contains(expected),
+            "tools/list is missing {expected}; got {names:?}"
+        );
+    }
+    assert_eq!(
+        tools.len(),
+        35,
+        "tool count drifted from the registered surface"
+    );
+
+    // Schemas present, not just names — clients validate arguments against these.
+    for tool in &tools {
+        assert!(
+            !tool.input_schema.is_empty(),
+            "tool {} has an empty input schema",
+            tool.name
+        );
+    }
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_unknown_tool_returns_error() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "no_such_tool".into(),
+            arguments: None,
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unknown tool must dispatch to an error, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_call_that_cannot_resolve_returns_error() {
+    // `impact` with empty args can't proceed (missing symbol / unresolvable repo)
+    // — the error must come back as a well-formed envelope, not a panic or hang.
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "impact".into(),
+            arguments: Some(empty_args()),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unresolvable call must return an error, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_doc_pack_rejects_empty_name_before_resolution() {
+    // Command validation must fail before repo/symbol resolution — no live
+    // store is connected in this suite, so reaching the graph would hang/err
+    // differently.
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "doc_pack".into(),
+            arguments: Some(
+                serde_json::json!({ "name": "  " })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "doc_pack with an empty name must fail validation, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_doc_pack_rejects_explicit_empty_sections() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "doc_pack".into(),
+            arguments: Some(
+                serde_json::json!({ "name": "OrderService", "sections": [] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "an explicit empty sections list must be rejected, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_doc_status_rejects_escaping_docs_dir() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "doc_status".into(),
+            arguments: Some(
+                serde_json::json!({ "docs_dir": "../outside" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "a docs_dir with '..' must fail validation, got {res:?}"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_trace_flow_rejects_windows_beyond_shared_cap() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "trace_flow".into(),
+            arguments: Some(
+                serde_json::json!({
+                    "entry_point": "Route:GET /x",
+                    "offset": 4_999,
+                    "max_nodes": 2,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "offset + max_nodes beyond 5,000 must fail before graph resolution"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_context_rejects_oversize_independent_pages() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "context".into(),
+            arguments: Some(
+                serde_json::json!({
+                    "name": "Method:test.Context#root/0",
+                    "caller_limit": 501,
+                    "callee_limit": 1,
+                    "process_limit": 1,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "each context section must reject a page above the 500-item cap"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_crossrepo_validation_returns_error() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "api_impact".into(),
+            arguments: Some(
+                serde_json::json!({
+                    "group": "shop",
+                    "method": "CONNECT",
+                    "path": "/orders",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unsupported HTTP methods must fail at the MCP adapter"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_taint_validation_returns_error_before_repo_resolution() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "taint_paths".into(),
+            arguments: Some(
+                serde_json::json!({ "category": "network" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unknown taint categories must fail through MCP dispatch"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_detect_changes_validates_base_ref_before_repo_resolution() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "detect_changes".into(),
+            arguments: Some(
+                serde_json::json!({ "scope": "base_ref" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "base_ref scope without a ref must fail through MCP dispatch"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_architecture_overview_validates_sections_before_repo_resolution() {
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "architecture_overview".into(),
+            arguments: Some(
+                serde_json::json!({ "sections": ["not-a-section"] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        })
+        .await;
+    assert!(
+        res.is_err(),
+        "unknown overview sections must fail through MCP dispatch"
+    );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_indexing_commands_validate_typed_inputs() {
+    let client = serve_test_server().await;
+    for (name, arguments) in [
+        (
+            "index_repo",
+            serde_json::json!({ "repo_path": " " })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        (
+            "index_status",
+            serde_json::json!({ "job_id": " " })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        (
+            "index_cancel",
+            serde_json::json!({ "job_id": "" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    ] {
+        let result = client
+            .call_tool(CallToolRequestParam {
+                name: name.into(),
+                arguments: Some(arguments),
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "{name} must reject invalid input through MCP dispatch"
+        );
+    }
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn dispatch_list_repos_returns_success_envelope() {
+    // `list_repos` only reads the registry (read-only); assert the success
+    // envelope shape, independent of registry contents.
+    let client = serve_test_server().await;
+    let res = client
+        .call_tool(CallToolRequestParam {
+            name: "list_repos".into(),
+            arguments: Some(empty_args()),
+        })
+        .await
+        .expect("list_repos should dispatch successfully");
+    assert!(
+        !res.is_error.unwrap_or(false),
+        "list_repos should be a success result"
+    );
+    assert!(!res.content.is_empty(), "expected a JSON content payload");
+    client.cancel().await.ok();
+}

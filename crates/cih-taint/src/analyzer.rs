@@ -133,8 +133,7 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
         .map(|s| s.as_str())
         .collect();
 
-    // Snapshot Phase-0 baseline before Phase 1 modifies scores in place.
-    let baseline_confidence: Vec<f32> = paths.iter().map(|p| p.confidence).collect();
+    // Snapshot Phase-0 baseline for diagnostics/logging (no longer used for scoring).
 
     // ── Phase 1 ───────────────────────────────────────────────────────────────
     if phases.run_intra_proc && !paths.is_empty() {
@@ -210,7 +209,7 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
             .map(|s| s.node_id_pattern.as_str())
             .collect();
 
-        for (i, path) in paths.iter_mut().enumerate() {
+        for path in paths.iter_mut() {
             let Some(cfg) = cfg_cache.get(&path.source) else {
                 pdg_stats.ir_unavailable += 1;
                 continue;
@@ -240,11 +239,10 @@ pub fn run_taint_analysis(input: TaintAnalysisInput<'_>) -> TaintResult<TaintAna
                 pdg_stats.conditional_sinks += 1;
             }
 
-            // Apply Phase 3 multiplier against the Phase-0 baseline so the two
-            // refinement phases score independently — neither can silently amplify
-            // or cancel out the other's effect.
-            path.confidence =
-                (baseline_confidence[i] * result.confidence_multiplier).clamp(0.0, 1.0);
+            // Apply Phase 3 multiplier on top of Phase 1's adjusted confidence so
+            // both refinement phases compose: Phase 1 liveness evidence is not
+            // discarded when Phase 3 also runs.
+            path.confidence = (path.confidence * result.confidence_multiplier).clamp(0.0, 1.0);
         }
 
         tracing::debug!(

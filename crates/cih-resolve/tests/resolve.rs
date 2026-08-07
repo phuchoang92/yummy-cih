@@ -1,9 +1,13 @@
 use cih_core::{
     constructor_id, external_endpoint_id, field_id, file_id, function_id, kafka_topic_id,
     method_id, type_id, BindingKind, ContractKind, ContractSite, EdgeKind, MessagingFramework,
-    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, SymbolDef, TypeBinding,
+    NodeId, NodeKind, ParsedFile, Range, RawImport, RefKind, ReferenceSite, StringConstant,
+    SymbolDef, TypeBinding, UrlPart,
 };
-use cih_resolve::resolve_edges;
+use cih_resolve::{
+    build_java_constant_resolver, default_registry, resolve_edges, resolve_with_registry,
+    ResolveOptions,
+};
 
 fn simple_of(fqcn: &str) -> String {
     fqcn.rsplit('.').next().unwrap_or(fqcn).to_string()
@@ -91,6 +95,7 @@ fn binding(name: &str, raw: &str, kind: BindingKind, in_fqcn: &str, line: u32) -
         raw_type: raw.into(),
         kind,
         in_fqcn: in_fqcn.into(),
+        qualifier: None,
         range: Range {
             start_line: line,
             ..Range::default()
@@ -103,6 +108,7 @@ fn import(raw: &str) -> RawImport {
         raw: raw.into(),
         is_static: false,
         is_wildcard: raw.ends_with(".*"),
+        alias: None,
         range: Range::default(),
     }
 }
@@ -156,6 +162,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let service = ParsedFile {
         file: "com/acme/OwnerService.java".into(),
@@ -177,6 +184,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let controller = ParsedFile {
         file: "com/acme/OwnerController.java".into(),
@@ -207,6 +215,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let thing = ParsedFile {
         file: "com/other/Thing.java".into(),
@@ -220,6 +229,7 @@ fn workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![repo, service, controller, thing]
 }
@@ -243,6 +253,8 @@ fn contract_sites_emit_nodes_and_edges() {
                 topic: None,
                 http_method: Some("get".into()),
                 messaging_framework: None,
+                url_parts: None,
+                via_wrapper: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -252,6 +264,8 @@ fn contract_sites_emit_nodes_and_edges() {
                 topic: Some("orders.created".into()),
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Kafka),
+                url_parts: None,
+                via_wrapper: None,
                 in_callable: caller.clone(),
                 range: Range::default(),
             },
@@ -261,6 +275,8 @@ fn contract_sites_emit_nodes_and_edges() {
                 topic: Some("orders.created".into()),
                 http_method: None,
                 messaging_framework: Some(MessagingFramework::Spring),
+                url_parts: None,
+                via_wrapper: None,
                 in_callable: listener.clone(),
                 range: Range::default(),
             },
@@ -268,6 +284,7 @@ fn contract_sites_emit_nodes_and_edges() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
 
     let out = resolve_edges(&[file]);
@@ -332,6 +349,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let mammal = ParsedFile {
         file: "com/acme/Mammal.java".into(),
@@ -348,6 +366,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let dog = ParsedFile {
         file: "com/acme/Dog.java".into(),
@@ -368,6 +387,7 @@ fn mro_workspace() -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![animal, mammal, dog]
 }
@@ -549,6 +569,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let marker = ParsedFile {
         file: "com/acme/Marker.java".into(),
@@ -565,6 +586,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let child = ParsedFile {
         file: "com/acme/Child.java".into(),
@@ -584,6 +606,7 @@ fn phase_4_3_c3_order_superclass_before_interface() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[base, marker, child]);
     assert!(
@@ -641,6 +664,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let impl_def = SymbolDef {
         id: type_id(NodeKind::Class, "com.acme.UserServiceImpl"),
@@ -677,6 +701,7 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let caller = ParsedFile {
         file: "com/acme/OrderController.java".into(),
@@ -718,12 +743,14 @@ fn make_di_scenario(impl_stereotype: Option<&str>) -> Vec<ParsedFile> {
             raw_type: "UserService".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.OrderController".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     vec![iface, impl_file, caller]
 }
@@ -773,7 +800,340 @@ fn di_redirects_to_single_impl_even_without_stereotype() {
         .iter()
         .find(|e| e.dst == method_id("com.acme.UserServiceImpl", "save", 1))
         .expect("single un-stereotyped impl should still receive the DI redirect");
-    assert_eq!(di_edge.reason, "di-resolved");
+    // A stereotype-less sole implementor is a guess (the real impl may be out of
+    // scope), so it carries its own reason and demoted confidence.
+    assert_eq!(di_edge.reason, "di-single-impl");
+    assert_eq!(di_edge.confidence, 0.75);
+}
+
+/// OCB regression shape: `CustomUserImpl` implements `UserAdmin` and calls
+/// `retailUserAdminRef.modifyUserPassword(...)` through an injected `UserAdmin`
+/// field. `with_second_impl` puts `UserImpl` (the XML-wired real target) in scope.
+fn make_qualifier_scenario(with_second_impl: bool, qualifier: Option<&str>) -> Vec<ParsedFile> {
+    let iface = ParsedFile {
+        file: "com/acme/UserAdmin.java".into(),
+        language: String::new(),
+        package: Some("com.acme".into()),
+        defs: vec![
+            type_def(NodeKind::Interface, "com.acme.UserAdmin"),
+            method_def(
+                "com.acme.UserAdmin",
+                "modifyUserPassword",
+                &["Request"],
+                None,
+            ),
+        ],
+        imports: vec![],
+        reference_sites: vec![],
+        type_bindings: vec![],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: Vec::new(),
+    };
+    let caller = ParsedFile {
+        file: "com/acme/CustomUserImpl.java".into(),
+        language: String::new(),
+        package: Some("com.acme".into()),
+        defs: vec![
+            type_def(NodeKind::Class, "com.acme.CustomUserImpl"),
+            method_def(
+                "com.acme.CustomUserImpl",
+                "modifyUserPassword",
+                &["Request"],
+                None,
+            ),
+            field_def("com.acme.CustomUserImpl", "retailUserAdminRef", "UserAdmin"),
+        ],
+        imports: vec![],
+        reference_sites: vec![
+            heritage("com.acme.CustomUserImpl", "UserAdmin", RefKind::Implements),
+            ReferenceSite {
+                name: "modifyUserPassword".into(),
+                receiver: Some("retailUserAdminRef".into()),
+                kind: RefKind::Call,
+                arity: Some(1),
+                range: Range::default(),
+                in_fqcn: "com.acme.CustomUserImpl#modifyUserPassword/1".into(),
+                in_callable: method_id("com.acme.CustomUserImpl", "modifyUserPassword", 1),
+                arg_texts: vec![],
+            },
+        ],
+        type_bindings: vec![TypeBinding {
+            name: "retailUserAdminRef".into(),
+            raw_type: "UserAdmin".into(),
+            kind: BindingKind::Field,
+            in_fqcn: "com.acme.CustomUserImpl".into(),
+            qualifier: qualifier.map(str::to_string),
+            range: Range::default(),
+        }],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: Vec::new(),
+    };
+    let mut files = vec![iface, caller];
+    if with_second_impl {
+        files.push(ParsedFile {
+            file: "com/acme/UserImpl.java".into(),
+            language: String::new(),
+            package: Some("com.acme".into()),
+            defs: vec![
+                type_def(NodeKind::Class, "com.acme.UserImpl"),
+                method_def(
+                    "com.acme.UserImpl",
+                    "modifyUserPassword",
+                    &["Request"],
+                    None,
+                ),
+            ],
+            imports: vec![],
+            reference_sites: vec![heritage(
+                "com.acme.UserImpl",
+                "UserAdmin",
+                RefKind::Implements,
+            )],
+            type_bindings: vec![],
+            contract_sites: vec![],
+            sql_constants: vec![],
+            sql_execution_sites: vec![],
+            string_constants: vec![],
+            http_wrappers: Vec::new(),
+        });
+    }
+    files
+}
+
+/// `@Qualifier("retailUserAdminRef")` on the injected field + an XML bean id map
+/// must pick the XML-wired impl — not the caller's own class, and not fall to the
+/// interface — even though two implementors are in scope (ambiguous by count).
+#[test]
+fn qualifier_redirect_follows_xml_bean_id() {
+    let files = make_qualifier_scenario(true, Some("retailUserAdminRef"));
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("retailUserAdminRef".into(), "com.acme.UserImpl".into());
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let calls: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .collect();
+    let di_edge = calls
+        .iter()
+        .find(|e| e.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1))
+        .expect("qualifier should redirect to the XML-wired impl");
+    assert_eq!(di_edge.reason, "di-qualifier");
+    assert_eq!(di_edge.confidence, 0.95);
+    assert!(
+        !calls.iter().any(|e| e.src == e.dst),
+        "no fabricated self-recursion"
+    );
+}
+
+#[test]
+fn parameter_qualifier_redirect_uses_the_lexically_selected_binding() {
+    let mut files = make_qualifier_scenario(true, Some("wrongFieldBean"));
+    files[1].type_bindings.push(TypeBinding {
+        name: "retailUserAdminRef".into(),
+        raw_type: "UserAdmin".into(),
+        kind: BindingKind::Param,
+        in_fqcn: "com.acme.CustomUserImpl#modifyUserPassword/1".into(),
+        qualifier: Some("parameterBean".into()),
+        range: Range::default(),
+    });
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("parameterBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::Calls
+                && edge.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1)
+        })
+        .expect("parameter qualifier should redirect to its XML bean");
+    assert_eq!(edge.reason, "di-qualifier");
+}
+
+#[test]
+fn dotted_this_field_receiver_preserves_its_qualifier() {
+    let mut files = make_qualifier_scenario(true, Some("fieldBean"));
+    files[1]
+        .reference_sites
+        .iter_mut()
+        .find(|site| site.kind == RefKind::Call)
+        .expect("delegating call")
+        .receiver = Some("this.retailUserAdminRef".into());
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("fieldBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::Calls
+                && edge.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1)
+        })
+        .expect("this.field qualifier should redirect to its XML bean");
+    assert_eq!(edge.reason, "di-qualifier");
+}
+
+#[test]
+fn nested_holder_field_receiver_preserves_the_leaf_qualifier() {
+    let mut files = make_qualifier_scenario(true, None);
+    files[1]
+        .reference_sites
+        .iter_mut()
+        .find(|site| site.kind == RefKind::Call)
+        .expect("delegating call")
+        .receiver = Some("holder.service".into());
+    files[1].defs.extend([
+        type_def(NodeKind::Class, "com.acme.Holder"),
+        field_def("com.acme.Holder", "service", "UserAdmin"),
+        field_def("com.acme.CustomUserImpl", "holder", "Holder"),
+    ]);
+    files[1].type_bindings.extend([
+        TypeBinding {
+            name: "holder".into(),
+            raw_type: "Holder".into(),
+            kind: BindingKind::Field,
+            in_fqcn: "com.acme.CustomUserImpl".into(),
+            qualifier: None,
+            range: Range::default(),
+        },
+        TypeBinding {
+            name: "service".into(),
+            raw_type: "UserAdmin".into(),
+            kind: BindingKind::Field,
+            in_fqcn: "com.acme.Holder".into(),
+            qualifier: Some("nestedBean".into()),
+            range: Range::default(),
+        },
+    ]);
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("nestedBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::Calls
+                && edge.dst == method_id("com.acme.UserImpl", "modifyUserPassword", 1)
+        })
+        .expect("holder.service qualifier should redirect to its XML bean");
+    assert_eq!(edge.reason, "di-qualifier");
+}
+
+#[test]
+fn unqualified_local_shadows_a_qualified_field() {
+    let mut files = make_qualifier_scenario(true, Some("fieldBean"));
+    files[1].type_bindings.push(TypeBinding {
+        name: "retailUserAdminRef".into(),
+        raw_type: "UserAdmin".into(),
+        kind: BindingKind::Local,
+        in_fqcn: "com.acme.CustomUserImpl#modifyUserPassword/1".into(),
+        qualifier: None,
+        range: Range::default(),
+    });
+    let mut wiring = cih_resolve::di_xml::DiWiring::default();
+    wiring
+        .beans_by_id
+        .insert("fieldBean".into(), "com.acme.UserImpl".into());
+
+    let out = resolve_with_registry(
+        &files,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: None,
+            di_wiring: Some(&wiring),
+        },
+    );
+    let calls: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Calls)
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .any(|edge| { edge.dst == method_id("com.acme.UserAdmin", "modifyUserPassword", 1) }),
+        "ambiguous unqualified local should fall back to the interface method"
+    );
+    assert!(!calls.iter().any(|edge| edge.reason == "di-qualifier"));
+}
+
+/// The sole in-scope implementor being the caller's own class must NOT produce a
+/// `caller → caller` self-loop (the OCB false-recursion bug): the redirect skips
+/// the enclosing class and the call degrades to the interface method.
+#[test]
+fn programmatic_fallback_never_targets_enclosing_class() {
+    let files = make_qualifier_scenario(false, None);
+    let out = resolve_edges(&files);
+    let calls: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .collect();
+    assert!(
+        !calls.iter().any(|e| e.src == e.dst),
+        "must not fabricate self-recursion when the caller is the sole implementor"
+    );
+    let iface_edge = calls
+        .iter()
+        .find(|e| e.dst == method_id("com.acme.UserAdmin", "modifyUserPassword", 1))
+        .expect("call should degrade to the truthful interface-method edge");
+    assert_eq!(iface_edge.reason, "receiver-bound");
 }
 
 #[test]
@@ -808,6 +1168,7 @@ fn di_falls_back_when_multiple_service_impls() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let make_impl = |name: &str| -> ParsedFile {
         let fqcn = format!("com.acme.{name}");
@@ -841,6 +1202,7 @@ fn di_falls_back_when_multiple_service_impls() {
             sql_constants: vec![],
             sql_execution_sites: vec![],
             string_constants: vec![],
+            http_wrappers: Vec::new(),
         }
     };
     let caller = ParsedFile {
@@ -883,12 +1245,14 @@ fn di_falls_back_when_multiple_service_impls() {
             raw_type: "UserService".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.OrderController".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[
         iface,
@@ -946,6 +1310,7 @@ fn di_not_applied_to_concrete_class_receiver() {
             sql_constants: vec![],
             sql_execution_sites: vec![],
             string_constants: vec![],
+            http_wrappers: Vec::new(),
         };
         let caller = ParsedFile {
             file: "com/acme/OrderController.java".into(),
@@ -991,12 +1356,14 @@ fn di_not_applied_to_concrete_class_receiver() {
                 raw_type: "UserServiceImpl".into(),
                 kind: BindingKind::Field,
                 in_fqcn: "com.acme.OrderController".into(),
+                qualifier: None,
                 range: Range::default(),
             }],
             contract_sites: vec![],
             sql_constants: vec![],
             sql_execution_sites: vec![],
             string_constants: vec![],
+            http_wrappers: Vec::new(),
         };
         vec![concrete, caller]
     };
@@ -1059,6 +1426,7 @@ fn unresolved_ref_receiver_type_unknown() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[file]);
     assert_eq!(out.skipped, 1);
@@ -1087,6 +1455,7 @@ fn unresolved_ref_member_not_found() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let caller = ParsedFile {
         file: "com/acme/Caller.java".into(),
@@ -1111,12 +1480,14 @@ fn unresolved_ref_member_not_found() {
             raw_type: "MyService".into(),
             kind: BindingKind::Field,
             in_fqcn: "com.acme.Caller".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[service, caller]);
     assert_eq!(out.skipped, 1);
@@ -1146,6 +1517,7 @@ fn unresolved_ref_heritage_type_unknown() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[child]);
     assert_eq!(out.skipped, 1);
@@ -1171,6 +1543,7 @@ fn callresult_factory_pattern_resolved() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let order = ParsedFile {
         file: "com/acme/Order.java".into(),
@@ -1187,6 +1560,7 @@ fn callresult_factory_pattern_resolved() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let service = ParsedFile {
         file: "com/acme/OrderService.java".into(),
@@ -1212,6 +1586,7 @@ fn callresult_factory_pattern_resolved() {
                 raw_type: "OrderFactory".into(),
                 kind: BindingKind::Field,
                 in_fqcn: "com.acme.OrderService".into(),
+                qualifier: None,
                 range: Range::default(),
             },
             TypeBinding {
@@ -1219,6 +1594,7 @@ fn callresult_factory_pattern_resolved() {
                 raw_type: "create".into(),
                 kind: BindingKind::CallResult,
                 in_fqcn: "com.acme.OrderService#run/0".into(),
+                qualifier: None,
                 range: Range::default(),
             },
         ],
@@ -1226,6 +1602,7 @@ fn callresult_factory_pattern_resolved() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[order_factory, order, service]);
     let calls: Vec<_> = out
@@ -1269,12 +1646,14 @@ fn callresult_factory_pattern_unresolved_when_return_type_absent() {
             raw_type: "create".into(),
             kind: BindingKind::CallResult,
             in_fqcn: "com.acme.OrderService#run/0".into(),
+            qualifier: None,
             range: Range::default(),
         }],
         contract_sites: vec![],
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[service]);
     assert_eq!(out.skipped, 1);
@@ -1332,6 +1711,7 @@ fn python_free_function_call_resolves() {
         sql_constants: vec![],
         sql_execution_sites: vec![],
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     };
     let out = resolve_edges(&[file]);
     assert!(
@@ -1344,5 +1724,1279 @@ fn python_free_function_call_resolves() {
             .filter(|e| e.kind == EdgeKind::Calls)
             .map(|e| (e.src.as_str(), e.dst.as_str()))
             .collect::<Vec<_>>()
+    );
+}
+
+// ── Dynamic-URL folding (url_parts → constants + {*} wildcards) ─────────────
+
+fn empty_file(file: &str) -> ParsedFile {
+    ParsedFile {
+        file: file.into(),
+        language: String::new(),
+        package: Some("com.acme".into()),
+        defs: vec![],
+        imports: vec![],
+        reference_sites: vec![],
+        type_bindings: vec![],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: Vec::new(),
+    }
+}
+
+fn http_parts_site(in_callable: NodeId, parts: Vec<UrlPart>) -> ContractSite {
+    ContractSite {
+        kind: ContractKind::HttpCall,
+        url_template: None,
+        topic: None,
+        http_method: Some("GET".into()),
+        messaging_framework: None,
+        url_parts: Some(parts),
+        via_wrapper: None,
+        in_callable,
+        range: Range::default(),
+    }
+}
+
+fn resolve_with_constants(parsed: Vec<ParsedFile>) -> cih_resolve::ResolveOutput {
+    let resolver = build_java_constant_resolver(&parsed);
+    resolve_with_registry(
+        &parsed,
+        &default_registry(),
+        ResolveOptions {
+            repo_root: None,
+            enable_xml_integrations: false,
+            constant_resolver: Some(Box::new(resolver)),
+            di_wiring: None,
+        },
+    )
+}
+
+#[test]
+fn dynamic_url_parts_fold_constants_and_wildcards() {
+    // Two-file fold: the constant lives in another file; the trailing `id`
+    // identifier never resolves and wildcards its segment.
+    let mut constants = empty_file("com/acme/Constants.java");
+    constants.defs = vec![type_def(NodeKind::Class, "com.acme.Constants")];
+    constants.string_constants = vec![StringConstant {
+        const_name: "BASE".into(),
+        owner_fqcn: "com.acme.Constants".into(),
+        value: "/api/orders".into(),
+        env_default: false,
+        dynamic: false,
+        range: Range::default(),
+    }];
+
+    let caller = method_id("com.acme.Client", "call", 1);
+    let mut client = empty_file("com/acme/Client.java");
+    client.imports = vec![import("com.acme.Constants")];
+    client.contract_sites = vec![http_parts_site(
+        caller.clone(),
+        vec![
+            UrlPart::ConstRef("Constants.BASE".into()),
+            UrlPart::Lit("/".into()),
+            UrlPart::ConstRef("id".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![constants, client]);
+    let endpoint = external_endpoint_id("GET", "/api/orders/{*}");
+    let node = out
+        .nodes
+        .iter()
+        .find(|node| node.id == endpoint)
+        .expect("folded wildcard endpoint");
+    assert_eq!(
+        node.props.as_ref().and_then(|p| p.get("dynamic")),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let edge = out
+        .edges
+        .iter()
+        .find(|edge| edge.kind == EdgeKind::ExternalCall && edge.src == caller)
+        .expect("ExternalCall edge");
+    assert!(
+        edge.confidence < 0.75,
+        "dynamic endpoints carry a confidence discount, got {}",
+        edge.confidence
+    );
+}
+
+#[test]
+fn same_class_constant_resolves_without_qualifier() {
+    let caller = method_id("com.acme.Client", "call", 0);
+    let mut client = empty_file("com/acme/Client.java");
+    client.defs = vec![type_def(NodeKind::Class, "com.acme.Client")];
+    client.string_constants = vec![StringConstant {
+        const_name: "BASE".into(),
+        owner_fqcn: "com.acme.Client".into(),
+        value: "/api/items".into(),
+        env_default: false,
+        dynamic: false,
+        range: Range::default(),
+    }];
+    client.contract_sites = vec![http_parts_site(
+        caller,
+        vec![
+            UrlPart::ConstRef("BASE".into()),
+            UrlPart::Lit("/all".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![client]);
+    let endpoint = external_endpoint_id("GET", "/api/items/all");
+    assert!(out.nodes.iter().any(|node| node.id == endpoint));
+}
+
+#[test]
+fn all_wildcard_dynamic_url_is_skipped() {
+    let caller = method_id("com.acme.Client", "call", 0);
+    let mut client = empty_file("com/acme/Client.java");
+    client.contract_sites = vec![
+        http_parts_site(caller.clone(), vec![UrlPart::Dynamic]),
+        http_parts_site(
+            caller,
+            vec![UrlPart::ConstRef("nope".into()), UrlPart::Dynamic],
+        ),
+    ];
+
+    let out = resolve_with_constants(vec![client]);
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::ExternalEndpoint),
+        "uninformative all-wildcard URLs must not become endpoints"
+    );
+}
+
+#[test]
+fn dynamic_topic_folds_only_to_full_literal() {
+    let caller = method_id("com.acme.Producer", "send", 0);
+    let mut producer = empty_file("com/acme/Producer.java");
+    producer.defs = vec![type_def(NodeKind::Class, "com.acme.Producer")];
+    producer.string_constants = vec![StringConstant {
+        const_name: "TOPIC".into(),
+        owner_fqcn: "com.acme.Producer".into(),
+        value: "orders.created".into(),
+        env_default: false,
+        dynamic: false,
+        range: Range::default(),
+    }];
+    producer.contract_sites = vec![
+        ContractSite {
+            kind: ContractKind::EventPublish,
+            url_template: None,
+            topic: None,
+            http_method: None,
+            messaging_framework: Some(MessagingFramework::Kafka),
+            url_parts: Some(vec![UrlPart::ConstRef("TOPIC".into())]),
+            via_wrapper: None,
+            in_callable: caller.clone(),
+            range: Range::default(),
+        },
+        ContractSite {
+            kind: ContractKind::EventPublish,
+            url_template: None,
+            topic: None,
+            http_method: None,
+            messaging_framework: Some(MessagingFramework::Kafka),
+            url_parts: Some(vec![UrlPart::Lit("orders.".into()), UrlPart::Dynamic]),
+            via_wrapper: None,
+            in_callable: caller,
+            range: Range::default(),
+        },
+    ];
+
+    let out = resolve_with_constants(vec![producer]);
+    let topics: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::KafkaTopic)
+        .map(|node| node.name.as_str())
+        .collect();
+    assert_eq!(topics, vec!["orders.created"]);
+}
+
+// ── Script-language constant folding (review-finding F2) ────────────────────
+
+fn ts_const(file: &str, owner: &str, name: &str, value: &str, env_default: bool) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    pf.string_constants = vec![StringConstant {
+        const_name: name.into(),
+        owner_fqcn: owner.into(),
+        value: value.into(),
+        dynamic: false,
+        env_default,
+        range: Range::default(),
+    }];
+    pf
+}
+
+fn ts_site_file(file: &str, in_callable: &str, parts: Vec<UrlPart>) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    pf.contract_sites = vec![http_parts_site(NodeId::new(in_callable), parts)];
+    pf
+}
+
+fn endpoint_paths(out: &cih_resolve::ResolveOutput) -> Vec<String> {
+    out.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::ExternalEndpoint)
+        .filter_map(|n| {
+            n.props
+                .as_ref()?
+                .get("path")
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+#[test]
+fn ts_import_scoped_constant_resolves_across_files() {
+    let constants = ts_const(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "API_BASE_URL",
+        "/api/v1",
+        true,
+    );
+    let mut site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+    site.imports = vec![import("./apiClient")];
+
+    let out = resolve_with_constants(vec![constants, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/admin/x"]);
+    // env-default provenance surfaces on the endpoint.
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .unwrap();
+    assert_eq!(
+        endpoint
+            .props
+            .as_ref()
+            .and_then(|p| p.get("base_source"))
+            .and_then(|v| v.as_str()),
+        Some("env_default")
+    );
+}
+
+#[test]
+fn ts_import_scoped_beats_repo_wide_ambiguity() {
+    // Two same-named constants with different values; the site's file imports
+    // exactly one of them — THAT one resolves, no wildcard, no guess.
+    let imported = ts_const(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "API_BASE_URL",
+        "/api/v1",
+        false,
+    );
+    let unrelated = ts_const(
+        "src/legacy/oldClient.ts",
+        "src/legacy/oldClient",
+        "API_BASE_URL",
+        "/legacy",
+        false,
+    );
+    let mut site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+    site.imports = vec![import("./apiClient")];
+
+    let out = resolve_with_constants(vec![imported, unrelated, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/admin/x"]);
+}
+
+#[test]
+fn ts_unscoped_ambiguity_degrades_to_wildcard() {
+    let a = ts_const("src/a.ts", "src/a", "API_BASE_URL", "/api/v1", false);
+    let b = ts_const("src/b.ts", "src/b", "API_BASE_URL", "/legacy", false);
+    // No import connects the site to either constant.
+    let site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+
+    let out = resolve_with_constants(vec![a, b, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/{*}/admin/x"]);
+}
+
+#[test]
+fn ts_unique_repo_wide_constant_resolves_without_import() {
+    // Barrel re-export case: no direct import path, but the name is unique.
+    let constant = ts_const(
+        "src/config/constants.ts",
+        "src/config/constants",
+        "API_BASE_URL",
+        "/api/v1",
+        false,
+    );
+    let site = ts_site_file(
+        "src/services/svc.ts",
+        "Function:src/services/svc#load/1",
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    );
+
+    let out = resolve_with_constants(vec![constant, site]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/admin/x"]);
+}
+
+#[test]
+fn ts_module_scope_site_resolves_same_file_constant() {
+    // Module-scope sites carry `File:`-derived owners with the extension;
+    // the resolver strips it to reach the module owner scheme.
+    let mut pf = ts_const(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "API_BASE_URL",
+        "/api/v1",
+        false,
+    );
+    pf.contract_sites = vec![http_parts_site(
+        NodeId::new("File:src/services/apiClient.ts"),
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/ping".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![pf]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/ping"]);
+}
+
+#[test]
+fn java_bare_name_never_uses_cross_file_fallback() {
+    // Isolation pin: a java-language site with a bare ConstRef that misses
+    // class scoping must NOT pick up a unique repo-wide constant — behavior
+    // identical to before the fallback existed.
+    let mut constants = empty_file("com/acme/Other.java");
+    constants.defs = vec![type_def(NodeKind::Class, "com.acme.Other")];
+    constants.string_constants = vec![StringConstant {
+        const_name: "API_BASE_URL".into(),
+        owner_fqcn: "com.acme.Other".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: false,
+        range: Range::default(),
+    }];
+
+    let caller = method_id("com.acme.Client", "call", 1);
+    let mut client = empty_file("com/acme/Client.java");
+    client.language = "java".into();
+    client.contract_sites = vec![http_parts_site(
+        caller,
+        vec![
+            UrlPart::ConstRef("API_BASE_URL".into()),
+            UrlPart::Lit("/admin/x".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![constants, client]);
+    assert_eq!(endpoint_paths(&out), vec!["/{*}/admin/x"]);
+}
+
+// ── TS HTTP wrapper following ────────────────────────────────────────────────
+
+fn wrapper_file(file: &str, module: &str, name: &str, prefix: Vec<UrlPart>) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    pf.http_wrappers = vec![cih_core::HttpWrapperDef {
+        name: name.into(),
+        module: module.into(),
+        prefix_parts: prefix,
+        options_arg_index: 1,
+        fixed_method: None,
+        range: Range::default(),
+    }];
+    pf
+}
+
+fn wrapper_call_file(
+    file: &str,
+    in_callable: &str,
+    callee: &str,
+    method: &str,
+    parts: Vec<UrlPart>,
+) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "typescript".into();
+    pf.package = None;
+    let mut site = http_parts_site(NodeId::new(in_callable), parts);
+    site.via_wrapper = Some(callee.into());
+    site.http_method = Some(method.into());
+    pf.contract_sites = vec![site];
+    pf
+}
+
+#[test]
+fn wrapper_call_joins_with_two_context_fold() {
+    // The wrapper file owns API_BASE_URL (env-default). A SECOND same-named
+    // constant elsewhere kills the unique fallback, and the caller imports
+    // NOTHING — resolution must go through the wrapper file's own context.
+    let mut wrapper = wrapper_file(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "apiFetch",
+        vec![UrlPart::ConstRef("API_BASE_URL".into())],
+    );
+    wrapper.string_constants = vec![StringConstant {
+        const_name: "API_BASE_URL".into(),
+        owner_fqcn: "src/services/apiClient".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: true,
+        range: Range::default(),
+    }];
+    let decoy = ts_const(
+        "src/legacy/old.ts",
+        "src/legacy/old",
+        "API_BASE_URL",
+        "/legacy",
+        false,
+    );
+    let mut caller = wrapper_call_file(
+        "src/components/admin.ts",
+        "Function:src/components/admin#create/1",
+        "apiFetch",
+        "POST",
+        vec![UrlPart::Lit("/admin/llm/providers".into())],
+    );
+    caller.imports = vec![import("../services/apiClient")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/admin/llm/providers");
+    assert_eq!(props["httpMethod"], "POST");
+    assert_eq!(props["base_source"], "env_default");
+    assert_eq!(props["via_wrapper"], "src/services/apiClient#apiFetch");
+    assert!(out.edges.iter().any(|e| e.kind == EdgeKind::ExternalCall
+        && e.src.as_str() == "Function:src/components/admin#create/1"));
+}
+
+#[test]
+fn wrapper_call_template_suffix_wildcards() {
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api/v1".into())],
+    );
+    let mut caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#logs/1",
+        "apiFetch",
+        "GET",
+        vec![
+            UrlPart::Lit("/admin/activity-logs/".into()),
+            UrlPart::Dynamic,
+        ],
+    );
+    caller.imports = vec![import("./api")];
+
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    assert_eq!(
+        endpoint_paths(&out),
+        vec!["/api/v1/admin/activity-logs/{*}"]
+    );
+}
+
+#[test]
+fn unmatched_provisional_site_vanishes() {
+    // navigate('/somewhere') looks URL-ish at parse; with no wrapper def it
+    // must produce NO node and NO edge.
+    let caller = wrapper_call_file(
+        "src/nav.ts",
+        "Function:src/nav#go/0",
+        "navigate",
+        "GET",
+        vec![UrlPart::Lit("/somewhere".into())],
+    );
+    let out = resolve_with_constants(vec![caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+    assert!(out.edges.iter().all(|e| e.kind != EdgeKind::ExternalCall));
+}
+
+#[test]
+fn ambiguous_wrapper_name_without_import_is_dropped() {
+    let w1 = wrapper_file(
+        "src/a.ts",
+        "src/a",
+        "apiFetch",
+        vec![UrlPart::Lit("/a".into())],
+    );
+    let w2 = wrapper_file(
+        "src/b.ts",
+        "src/b",
+        "apiFetch",
+        vec![UrlPart::Lit("/b".into())],
+    );
+    // No import connects the caller to either.
+    let caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#f/0",
+        "apiFetch",
+        "GET",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    let out = resolve_with_constants(vec![w1, w2, caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}
+
+#[test]
+fn unique_wrapper_resolves_without_import() {
+    // Barrel/alias import case: no direct relative import, but the name is
+    // repo-unique.
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api".into())],
+    );
+    let caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#f/0",
+        "apiFetch",
+        "GET",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/x"]);
+}
+
+// ── Python dotted-import constant resolution (previously dead path) ─────────
+
+fn py_const(file: &str, owner: &str, name: &str, value: &str) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "python".into();
+    pf.package = None;
+    pf.string_constants = vec![StringConstant {
+        const_name: name.into(),
+        owner_fqcn: owner.into(),
+        value: value.into(),
+        dynamic: false,
+        env_default: false,
+        range: Range::default(),
+    }];
+    pf
+}
+
+#[test]
+fn python_constant_resolves_via_from_import() {
+    // The decoy kills the unique-name fallback; only the dotted-direct import
+    // lookup (dead before the import-recording fix) can resolve this.
+    let settings = py_const(
+        "services/settings.py",
+        "services.settings",
+        "API_BASE",
+        "/api/v1",
+    );
+    let decoy = py_const("legacy/old.py", "legacy.old", "API_BASE", "/legacy");
+    let mut caller = empty_file("app/main.py");
+    caller.language = "python".into();
+    caller.package = None;
+    caller.imports = vec![import("services.settings")];
+    caller.contract_sites = vec![http_parts_site(
+        NodeId::new("Function:app.main#load/0"),
+        vec![
+            UrlPart::ConstRef("API_BASE".into()),
+            UrlPart::Lit("/items".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![settings, decoy, caller]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/items"]);
+}
+
+#[test]
+fn python_module_level_site_resolves_same_file_constant() {
+    // Module-scope sites carry `File:src/app/client.py` owners (slashed);
+    // python constants own dotted modules — the dotted branch-(a) try.
+    let mut pf = py_const("src/app/client.py", "src.app.client", "API_BASE", "/api/v1");
+    pf.contract_sites = vec![http_parts_site(
+        NodeId::new("File:src/app/client.py"),
+        vec![
+            UrlPart::ConstRef("API_BASE".into()),
+            UrlPart::Lit("/ping".into()),
+        ],
+    )];
+
+    let out = resolve_with_constants(vec![pf]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/ping"]);
+}
+
+// ── Python wrapper joins ─────────────────────────────────────────────────────
+
+fn py_wrapper_file(
+    file: &str,
+    module: &str,
+    name: &str,
+    prefix: Vec<UrlPart>,
+    fixed_method: Option<&str>,
+) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "python".into();
+    pf.package = None;
+    pf.http_wrappers = vec![cih_core::HttpWrapperDef {
+        name: name.into(),
+        module: module.into(),
+        prefix_parts: prefix,
+        options_arg_index: 1,
+        fixed_method: fixed_method.map(str::to_string),
+        range: Range::default(),
+    }];
+    pf
+}
+
+fn py_wrapper_call_file(
+    file: &str,
+    in_callable: &str,
+    callee: &str,
+    parts: Vec<UrlPart>,
+) -> ParsedFile {
+    let mut pf = empty_file(file);
+    pf.language = "python".into();
+    pf.package = None;
+    let mut site = http_parts_site(NodeId::new(in_callable), parts);
+    site.via_wrapper = Some(callee.into());
+    site.http_method = Some("GET".into()); // parse-side placeholder
+    pf.contract_sites = vec![site];
+    pf
+}
+
+#[test]
+fn py_wrapper_dotted_same_module_join() {
+    // Caller sites live in the SAME file as the wrapper — the dotted
+    // same-module try must bridge slashed file paths to dotted modules.
+    let mut pf = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_get",
+        vec![UrlPart::Lit("/api/v1".into())],
+        Some("GET"),
+    );
+    let mut site = http_parts_site(
+        NodeId::new("Function:services.api_client#load/0"),
+        vec![UrlPart::Lit("/items".into())],
+    );
+    site.via_wrapper = Some("api_get".into());
+    pf.contract_sites = vec![site];
+
+    let out = resolve_with_constants(vec![pf]);
+    assert_eq!(endpoint_paths(&out), vec!["/api/v1/items"]);
+}
+
+#[test]
+fn py_wrapper_from_import_scoped_join_with_two_context_fold() {
+    // Decoy same-named wrapper kills the unique fallback; the caller's dotted
+    // import raw must key the wrapper index directly. The wrapper's own
+    // env-default constant resolves in the wrapper file's context.
+    let mut wrapper = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_get",
+        vec![UrlPart::ConstRef("API_BASE".into())],
+        Some("GET"),
+    );
+    wrapper.string_constants = vec![StringConstant {
+        const_name: "API_BASE".into(),
+        owner_fqcn: "services.api_client".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: true,
+        range: Range::default(),
+    }];
+    let decoy = py_wrapper_file(
+        "legacy/client.py",
+        "legacy.client",
+        "api_get",
+        vec![UrlPart::Lit("/legacy".into())],
+        Some("GET"),
+    );
+    let mut caller = py_wrapper_call_file(
+        "app/views.py",
+        "Function:app.views#load/1",
+        "api_get",
+        vec![UrlPart::Lit("/admin/items/".into()), UrlPart::Dynamic],
+    );
+    caller.imports = vec![import("services.api_client")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/admin/items/{*}");
+    assert_eq!(props["base_source"], "env_default");
+    assert_eq!(props["via_wrapper"], "services.api_client#api_get");
+}
+
+#[test]
+fn py_wrapper_fixed_method_overrides_site_placeholder() {
+    let wrapper = py_wrapper_file(
+        "services/api.py",
+        "services.api",
+        "api_post",
+        vec![UrlPart::Lit("/api".into())],
+        Some("POST"),
+    );
+    let mut caller = py_wrapper_call_file(
+        "app/views.py",
+        "Function:app.views#save/1",
+        "api_post",
+        vec![UrlPart::Lit("/items".into())],
+    );
+    caller.imports = vec![import("services.api")];
+
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    assert_eq!(
+        endpoint.props.as_ref().unwrap()["httpMethod"],
+        "POST",
+        "fixed_method must override the GET placeholder"
+    );
+}
+
+#[test]
+fn py_pass_through_wrapper_empty_prefix() {
+    let wrapper = py_wrapper_file(
+        "e2e/wrap/run.py",
+        "e2e.wrap.run",
+        "wait_for_http",
+        Vec::new(),
+        Some("GET"),
+    );
+    // Literal suffix folds bare.
+    let mut ok_caller = py_wrapper_call_file(
+        "e2e/wrap/run.py",
+        "Function:e2e.wrap.run#test/0",
+        "wait_for_http",
+        vec![UrlPart::Lit("/health".into())],
+    );
+    ok_caller.http_wrappers = wrapper.http_wrappers.clone();
+    let out = resolve_with_constants(vec![ok_caller]);
+    assert_eq!(endpoint_paths(&out), vec!["/health"]);
+
+    // All-dynamic suffix drops.
+    let mut drop_caller = py_wrapper_call_file(
+        "e2e/wrap/run.py",
+        "Function:e2e.wrap.run#test2/0",
+        "wait_for_http",
+        vec![UrlPart::Dynamic],
+    );
+    drop_caller.http_wrappers = wrapper.http_wrappers;
+    let out = resolve_with_constants(vec![drop_caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}
+
+#[test]
+fn ts_wrapper_method_still_from_options() {
+    // TS defs carry fixed_method: None — the site's options-derived method
+    // must survive unchanged (no-regression pin for the override).
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api".into())],
+    );
+    let mut caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#save/1",
+        "apiFetch",
+        "POST",
+        vec![UrlPart::Lit("/items".into())],
+    );
+    caller.imports = vec![import("./api")];
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    assert_eq!(endpoint.props.as_ref().unwrap()["httpMethod"], "POST");
+}
+
+#[test]
+fn unmatched_python_provisional_vanishes() {
+    // log("/msg") is URL-ish at parse; with no wrapper def it must vanish.
+    let caller = py_wrapper_call_file(
+        "app/log.py",
+        "Function:app.log#warn/1",
+        "log",
+        vec![UrlPart::Lit("/msg".into())],
+    );
+    let out = resolve_with_constants(vec![caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+    assert!(out.edges.iter().all(|e| e.kind != EdgeKind::ExternalCall));
+}
+
+// ── Module-attribute wrapper callees ─────────────────────────────────────────
+
+fn aliased_import(raw: &str, alias: &str) -> RawImport {
+    RawImport {
+        raw: raw.into(),
+        is_static: false,
+        is_wildcard: false,
+        alias: Some(alias.into()),
+        range: Range::default(),
+    }
+}
+
+#[test]
+fn ts_namespace_alias_call_joins() {
+    let wrapper = wrapper_file(
+        "src/services/apiClient.ts",
+        "src/services/apiClient",
+        "apiFetch",
+        vec![UrlPart::Lit("/api/v1".into())],
+    );
+    // Decoy same-named wrapper elsewhere: dotted callees never use the
+    // unique-name fallback, so this must not interfere either way.
+    let decoy = wrapper_file(
+        "src/legacy/old.ts",
+        "src/legacy/old",
+        "apiFetch",
+        vec![UrlPart::Lit("/legacy".into())],
+    );
+    let mut caller = wrapper_call_file(
+        "src/components/admin.ts",
+        "Function:src/components/admin#create/1",
+        "api.apiFetch",
+        "POST",
+        vec![UrlPart::Lit("/admin/x".into())],
+    );
+    caller.imports = vec![aliased_import("../services/apiClient", "api")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/admin/x");
+    assert_eq!(props["via_wrapper"], "src/services/apiClient#apiFetch");
+}
+
+#[test]
+fn py_module_alias_call_joins_with_fixed_method() {
+    let mut wrapper = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_post",
+        vec![UrlPart::ConstRef("API_BASE".into())],
+        Some("POST"),
+    );
+    wrapper.string_constants = vec![StringConstant {
+        const_name: "API_BASE".into(),
+        owner_fqcn: "services.api_client".into(),
+        value: "/api/v1".into(),
+        dynamic: false,
+        env_default: true,
+        range: Range::default(),
+    }];
+    let decoy = py_wrapper_file(
+        "legacy/client.py",
+        "legacy.client",
+        "api_post",
+        vec![UrlPart::Lit("/legacy".into())],
+        Some("POST"),
+    );
+    let mut caller = py_wrapper_call_file(
+        "app/views.py",
+        "Function:app.views#save/1",
+        "api.api_post",
+        vec![UrlPart::Lit("/items".into())],
+    );
+    caller.imports = vec![aliased_import("services.api_client", "api")];
+
+    let out = resolve_with_constants(vec![wrapper, decoy, caller]);
+    let endpoint = out
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ExternalEndpoint)
+        .expect("endpoint");
+    let props = endpoint.props.as_ref().unwrap();
+    assert_eq!(props["path"], "/api/v1/items");
+    assert_eq!(props["httpMethod"], "POST", "fixed_method override applies");
+    assert_eq!(props["base_source"], "env_default");
+}
+
+#[test]
+fn py_dotted_receiver_and_last_segment_join() {
+    let wrapper = py_wrapper_file(
+        "services/api_client.py",
+        "services.api_client",
+        "api_get",
+        vec![UrlPart::Lit("/api".into())],
+        Some("GET"),
+    );
+    // Full dotted receiver.
+    let mut full = py_wrapper_call_file(
+        "app/full.py",
+        "Function:app.full#f/0",
+        "services.api_client.api_get",
+        vec![UrlPart::Lit("/a".into())],
+    );
+    full.imports = vec![import("services.api_client")];
+    // Last-segment receiver.
+    let mut seg = py_wrapper_call_file(
+        "app/seg.py",
+        "Function:app.seg#g/0",
+        "api_client.api_get",
+        vec![UrlPart::Lit("/b".into())],
+    );
+    seg.imports = vec![import("services.api_client")];
+
+    let out = resolve_with_constants(vec![wrapper, full, seg]);
+    let mut paths = endpoint_paths(&out);
+    paths.sort();
+    assert_eq!(paths, vec!["/api/a", "/api/b"]);
+}
+
+#[test]
+fn dotted_callee_without_matching_import_drops() {
+    // The wrapper name is repo-UNIQUE, but dotted callees never use the
+    // unique-name fallback — no matching import binding means no endpoint.
+    let wrapper = wrapper_file(
+        "src/api.ts",
+        "src/api",
+        "apiFetch",
+        vec![UrlPart::Lit("/api".into())],
+    );
+    let caller = wrapper_call_file(
+        "src/svc.ts",
+        "Function:src/svc#f/0",
+        "api.apiFetch",
+        "GET",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    let out = resolve_with_constants(vec![wrapper, caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}
+
+#[test]
+fn aliased_requests_dotted_callee_drops() {
+    let mut caller = py_wrapper_call_file(
+        "app/r.py",
+        "Function:app.r#f/0",
+        "r.get",
+        vec![UrlPart::Lit("/x".into())],
+    );
+    caller.imports = vec![aliased_import("requests", "r")];
+    let out = resolve_with_constants(vec![caller]);
+    assert!(out
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::ExternalEndpoint));
+}
+
+// ── CommonJS `require()` resolution ───────────────────────────────────────────
+
+/// Build a JS `ParsedFile` mirroring what the TS/JS parser emits for a CommonJS
+/// module: top-level functions keyed by (module-path container, name).
+fn js_file(
+    rel: &str,
+    defs: Vec<SymbolDef>,
+    imports: Vec<RawImport>,
+    reference_sites: Vec<ReferenceSite>,
+    type_bindings: Vec<TypeBinding>,
+) -> ParsedFile {
+    ParsedFile {
+        file: rel.into(),
+        language: String::new(),
+        package: None,
+        defs,
+        imports,
+        reference_sites,
+        type_bindings,
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: Vec::new(),
+    }
+}
+
+fn static_import(raw: &str) -> RawImport {
+    RawImport {
+        raw: raw.into(),
+        is_static: true,
+        is_wildcard: false,
+        alias: None,
+        range: Range::default(),
+    }
+}
+
+#[test]
+fn commonjs_require_namespace_and_free_calls_emit_calls_edges() {
+    // Callee module `services/users` with two top-level functions.
+    let service = js_file(
+        "services/users.js",
+        vec![
+            method_def("services/users", "register", &["Object"], None),
+            method_def("services/users", "fetchUserBy", &["Object"], None),
+        ],
+        vec![],
+        vec![],
+        vec![],
+    );
+
+    let handle = method_id("controllers/userController", "handle", 1);
+    let controller = js_file(
+        "controllers/userController.js",
+        vec![method_def(
+            "controllers/userController",
+            "handle",
+            &["Object"],
+            None,
+        )],
+        // `const { fetchUserBy } = require('./users')` → static per-symbol import.
+        vec![static_import("services/users.fetchUserBy")],
+        vec![
+            // Form 1 — `const svc = require('./users'); svc.register(x)`.
+            ref_site(
+                "controllers/userController#handle/1",
+                handle.clone(),
+                RefKind::Call,
+                Some("svc"),
+                "register",
+                Some(1),
+            ),
+            // Form 2 free call — `fetchUserBy(x)`.
+            ref_site(
+                "controllers/userController#handle/1",
+                handle.clone(),
+                RefKind::Call,
+                None,
+                "fetchUserBy",
+                Some(1),
+            ),
+        ],
+        // Module-scoped `ModuleRef` binding — visible file-wide via the fallback.
+        vec![binding(
+            "svc",
+            "services/users",
+            BindingKind::ModuleRef,
+            "controllers/userController",
+            1,
+        )],
+    );
+
+    let out = resolve_edges(&[service, controller]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == handle
+            && e.dst == method_id("services/users", "register", 1)),
+        "svc.register(x) should resolve to services/users.register via the ModuleRef binding"
+    );
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == handle
+            && e.dst == method_id("services/users", "fetchUserBy", 1)),
+        "fetchUserBy(x) free call should resolve via the static per-symbol import"
+    );
+}
+
+#[test]
+fn es_named_import_free_call_resolves_via_static_twin() {
+    // ES `import { greet } from './lib'; greet()` — the free call resolves via the
+    // static-import twin that `emit_import` now synthesizes alongside the type copy.
+    let lib = js_file(
+        "src/lib.js",
+        vec![method_def("src/lib", "greet", &[], None)],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let caller = method_id("src/app", "main", 0);
+    let app = js_file(
+        "src/app.js",
+        vec![method_def("src/app", "main", &[], None)],
+        vec![static_import("src/lib.greet")],
+        vec![ref_site(
+            "src/app#main/0",
+            caller.clone(),
+            RefKind::Call,
+            None,
+            "greet",
+            Some(0),
+        )],
+        vec![],
+    );
+
+    let out = resolve_edges(&[lib, app]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == caller
+            && e.dst == method_id("src/lib", "greet", 0)),
+        "greet() should resolve to src/lib.greet via the static import twin"
+    );
+}
+
+#[test]
+fn barrel_reexport_destructure_resolves_through_index_module() {
+    // The full CommonJS chain a real Express app uses, and the one that produced
+    // zero edges before:
+    //   controllers/user.controller.js: const { userService } = require('../services')
+    //                                   userService.createUser(body)
+    //   services/index.js:              module.exports.userService = require('./user.service')
+    //   services/user.service.js:       const createUser = async (body) => {…}
+    // It needs all three: the ModuleMember binding, `../services` → `services/index`
+    // normalization, and the barrel chase to `services/user.service`.
+    let service = js_file(
+        "services/user.service.js",
+        vec![method_def(
+            "services/user.service",
+            "createUser",
+            &["Object"],
+            None,
+        )],
+        vec![],
+        vec![],
+        vec![],
+    );
+    // The barrel: its export IS the target module (a module-scope ModuleRef).
+    let barrel = js_file(
+        "services/index.js",
+        vec![],
+        vec![],
+        vec![],
+        vec![binding(
+            "userService",
+            "services/user.service",
+            BindingKind::ModuleRef,
+            "services/index",
+            1,
+        )],
+    );
+    let handler = method_id("controllers/user.controller", "createUser", 2);
+    let controller = js_file(
+        "controllers/user.controller.js",
+        vec![method_def(
+            "controllers/user.controller",
+            "createUser",
+            &["Req", "Res"],
+            None,
+        )],
+        vec![],
+        vec![ref_site(
+            "controllers/user.controller#createUser/2",
+            handler.clone(),
+            RefKind::Call,
+            Some("userService"),
+            "createUser",
+            Some(1),
+        )],
+        // `../services` — a directory; only the resolver knows it means `.../index`.
+        vec![binding(
+            "userService",
+            "services#userService",
+            BindingKind::ModuleMember,
+            "controllers/user.controller",
+            1,
+        )],
+    );
+
+    let out = resolve_edges(&[service, barrel, controller]);
+    assert!(
+        out.edges.iter().any(|e| e.kind == EdgeKind::Calls
+            && e.src == handler
+            && e.dst == method_id("services/user.service", "createUser", 1)),
+        "userService.createUser() should resolve through the barrel to services/user.service"
+    );
+}
+
+#[test]
+fn module_member_without_barrel_does_not_resolve_to_a_bogus_module() {
+    // `const { nope } = require('./m')` where `m` re-exports nothing by that name:
+    // the receiver must stay unresolved rather than inventing a module.
+    let m = js_file(
+        "m.js",
+        vec![method_def("m", "other", &[], None)],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let caller = method_id("app", "main", 0);
+    let app = js_file(
+        "app.js",
+        vec![method_def("app", "main", &[], None)],
+        vec![],
+        vec![ref_site(
+            "app#main/0",
+            caller.clone(),
+            RefKind::Call,
+            Some("nope"),
+            "whatever",
+            Some(0),
+        )],
+        vec![binding(
+            "nope",
+            "m#nope",
+            BindingKind::ModuleMember,
+            "app",
+            1,
+        )],
+    );
+    let out = resolve_edges(&[m, app]);
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::Calls && e.src == caller),
+        "unknown barrel member must not resolve"
     );
 }

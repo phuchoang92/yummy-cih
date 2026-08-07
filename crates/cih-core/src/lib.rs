@@ -11,6 +11,7 @@ mod artifacts; // JSONL read/write helpers on GraphArtifacts (Phase 2)
 pub mod entrypoints;
 pub mod group;
 pub mod ir;
+pub mod paths;
 pub mod registry;
 pub mod repo_map;
 
@@ -19,16 +20,24 @@ pub use entrypoints::{
     EntrypointKind, EntrypointRegistry, ScoredEntrypoint,
 };
 pub use group::{
-    contracts_path, group_dir, normalize_contract_path, ContractMatch, ContractMatchKind,
-    GroupEntry, GroupRegistry,
+    cih_home, contracts_path, group_contracts_stale, group_dir, normalize_contract_path,
+    sync_state_path, validate_group_name, ContractMatch, ContractMatchKind, GroupEntry,
+    GroupRegistry, SyncRepoSnapshot, SyncState,
 };
 pub use ir::{
-    BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind, ContractSite,
-    ImportBinding, ImportBindingKind, MessagingFramework, ParsedFile, ParsedUnit, RawImport,
-    RefKind, ReferenceSite, SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile,
-    SymbolDef, TypeBinding,
+    looks_like_sql, BindingKind, BodyFingerprint, CallSiteRecord, ComplexityRecord, ContractKind,
+    ContractSite, HttpWrapperDef, MessagingFramework, ParsedFile, ParsedUnit, RawImport, RefKind,
+    ReferenceSite, SqlConstant, SqlExecutionSite, StringConstant, StructuralProfile, SymbolDef,
+    TypeBinding, UrlPart,
 };
-pub use registry::{git_head, now_rfc3339, Registry, RegistryEntry, RegistryStats};
+pub use paths::CihPaths;
+pub use registry::{
+    ensure_repository_id, git_changed_files, git_head, graph_content_version, load_repository_id,
+    new_publication_epoch, now_rfc3339, unix_secs_to_rfc3339, Registry, RegistryEntry,
+    RegistryGraphHub, RegistryGraphReport, RegistryKindCount, RegistryRevision, RegistrySnapshot,
+    RegistryStats, RegistryStore, RegistryUpdate, RepositoryId, GRAPH_REPORT_HUB_LIMIT,
+    GRAPH_REPORT_MAX_BYTES,
+};
 pub use repo_map::{
     auto_detect_architecture, ArchitectureHint, BuildSystem, JarInfo, ModuleInfo, RepoMap,
 };
@@ -118,6 +127,24 @@ pub enum RouteSource {
     Flask,
     FastApi,
     Django,
+    /// net/http, gin, echo, chi, gorilla/mux (import-gated Go detection).
+    Go,
+    /// Fastify (`fastify.get(...)` / `fastify.route({method,url})`).
+    Fastify,
+    /// Koa via `@koa/router` (`router.get(...)`, import-gated to disambiguate from Express).
+    Koa,
+    /// hapi (`server.route({method,path})`).
+    Hapi,
+    /// Next.js file-based API routes (`pages/api/**`, App Router `app/**/route.ts`).
+    NextJs,
+    /// Remix route modules (`loader`/`action` exports).
+    Remix,
+    /// GraphQL resolver operation (`@Query`/`@Mutation`/`@Subscription`); the
+    /// `path` prop is the operation name and `httpMethod` is `QUERY`/`MUTATION`/`SUBSCRIPTION`.
+    GraphQl,
+    /// tRPC router procedure (`.query`/`.mutation`/`.subscription`); `path` is the
+    /// procedure name.
+    Trpc,
 }
 
 pub fn function_id(fqn: &str, name: &str, arity: u16) -> NodeId {
@@ -201,7 +228,18 @@ pub fn message_destination_id(dest_type: &str, name: &str) -> NodeId {
 /// Cypher labels are SCREAMING_SNAKE_CASE of the variant name (except `Other`
 /// → `REL`); they are stored in FalkorDB, so renaming a variant is a breaking
 /// schema change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, strum::IntoStaticStr)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EdgeKind {
     Contains,
@@ -230,6 +268,12 @@ pub enum EdgeKind {
     /// Inter-procedural taint flow from an entry-point method to a sink method.
     /// Emitted by `cih-taint` Phase 0. Props: `hops`, `sink_category`, `hop_count`.
     TaintFlow,
+    /// Spring AOP advice method → the method its pointcut matches.
+    /// Emitted by `cih-resolve` Java post-processing. Props: `advice_kind`
+    /// (`around`/`before`/…), `pointcut` (inlined expression), optional
+    /// `aspect_order` (from `@Order`) and `approximate` (an unsupported
+    /// designator was ignored while matching).
+    Advises,
     #[strum(serialize = "REL")]
     Other,
 }
@@ -315,8 +359,9 @@ impl std::fmt::Display for VersionId {
     }
 }
 
-/// Canonical bulk-load artifact the engine always emits; each `BulkLoader`
-/// transforms it into its backend's required format (S3 CSV, COPY, etc.).
+/// Canonical bulk-load artifact the engine always emits; each `GraphStore`
+/// adapter's `bulk_load` transforms it into its backend's required format
+/// (S3 CSV, COPY, etc.).
 #[derive(Clone, Debug)]
 pub struct GraphArtifacts {
     pub nodes_path: PathBuf,

@@ -42,7 +42,7 @@ fn walk(
                             for arg in args.named_children(&mut ac) {
                                 let raw = text(arg, src).trim_matches('"').trim_matches('\'').to_string();
                                 if !raw.is_empty() {
-                                    imports.push(RawImport { raw, is_static: false, is_wildcard: false, range: range_of(child) });
+                                    imports.push(RawImport { raw, is_static: false, is_wildcard: false, alias: None, range: range_of(child) });
                                 }
                             }
                         }

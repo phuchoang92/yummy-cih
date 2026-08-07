@@ -11,26 +11,142 @@
 //! generated `UNWIND` list literal (our own data, fully escaped).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind, Range};
+use cih_core::{Edge, EdgeKind, GraphArtifacts, Node, NodeId};
 use cih_graph_store::{
-    risk_from_fanout, BulkLoader, CallSiteArgs, CommunityEdge, CommunityInfo, Direction, FlowEdge,
-    FlowHop, FlowNode, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphStore,
-    GraphStoreError, GraphSummary, HotspotNode, Impact, ImpactNode, KindCount, LoadStats, Path,
-    Result, RouteInfo, SimilarMethod, Subgraph, SymbolContext,
+    BackendReadiness, ContextCursorKey, ContextSection, Direction, GraphStore, GraphStoreError,
+    LoadObserver, LoadStats, Result, RetryMetadata,
 };
 use redis::Value;
+
+use serialize::*;
+
+mod bulk;
+mod publication;
+mod query;
+mod serialize;
+
+pub use publication::FalkorPublicationStore;
 
 /// Rows per UNWIND batch during bulk load. Larger batches cut Redis round-trips on big graphs
 /// (~2M edges at 600k nodes) at the cost of bigger per-statement strings — 4000 is a good balance.
 const BATCH: usize = 4000;
 
+/// Required indexed lookups for every supported graph publication path.
+/// Schema setup, Cypher upsert completion, and native-bulk completion all use
+/// this one list so a new hot lookup cannot silently miss one loader.
+/// The numeric complexity properties back `complexity_hotspots`' range
+/// predicates — without them the tool degree-scans every Method/Constructor
+/// and times out on million-node graphs.
+const REQUIRED_SYMBOL_INDEXES: [&str; 7] = [
+    "id",
+    "kind",
+    "name",
+    "file",
+    "cyclomatic",
+    "cognitive",
+    "transitiveLoopDepth",
+];
+
 /// Default max wait for a query permit before shedding (used when no explicit
 /// limit is configured, e.g. the engine bulk-load path).
 const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+const TRANSIENT_RETRY_AFTER_MS: u64 = 1_000;
+/// After the client-facing driver deadline, retain admission until the Redis
+/// future observes FalkorDB's earlier server timeout. A stuck driver task is
+/// aborted after this grace so one lost socket cannot leak capacity forever.
+const READ_CLEANUP_GRACE: Duration = Duration::from_secs(2);
+const READ_LOAD_WAIT_SETTING: &str = "CIH_FALKOR_READ_LOAD_WAIT_SECS";
+const WRITE_LOAD_WAIT_SETTING: &str = "CIH_FALKOR_LOAD_WAIT_SECS";
+
+#[derive(Debug)]
+enum SupervisedReadError<E> {
+    Operation(E),
+    TimedOut,
+    TaskFailed(String),
+}
+
+/// Owns the detached backend task. Dropping the caller future—whether because
+/// its timeout fired or its client disconnected—moves the task into a bounded
+/// reaper instead of releasing its query permit immediately.
+struct ReadTaskGuard {
+    task: Option<tokio::task::JoinHandle<()>>,
+    cleanup_grace: Duration,
+}
+
+impl ReadTaskGuard {
+    async fn finish(mut self) -> std::result::Result<(), String> {
+        let task = self.task.take().expect("read task guard owns a task");
+        task.await.map_err(|error| error.to_string())
+    }
+}
+
+impl Drop for ReadTaskGuard {
+    fn drop(&mut self) {
+        let Some(mut task) = self.task.take() else {
+            return;
+        };
+        let cleanup_grace = self.cleanup_grace;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if tokio::time::timeout(cleanup_grace, &mut task)
+                    .await
+                    .is_err()
+                {
+                    task.abort();
+                    let _ = task.await;
+                }
+            });
+        } else {
+            task.abort();
+        }
+    }
+}
+
+async fn run_supervised_read<T, E, F>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    driver_timeout: Duration,
+    cleanup_grace: Duration,
+    operation: F,
+) -> std::result::Result<T, SupervisedReadError<E>>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: Future<Output = std::result::Result<T, E>> + Send + 'static,
+{
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _permit = permit;
+        let result = operation.await;
+        let _ = result_tx.send(result);
+    });
+    let guard = ReadTaskGuard {
+        task: Some(task),
+        cleanup_grace,
+    };
+
+    match tokio::time::timeout(driver_timeout, result_rx).await {
+        Ok(Ok(result)) => {
+            guard
+                .finish()
+                .await
+                .map_err(SupervisedReadError::TaskFailed)?;
+            result.map_err(SupervisedReadError::Operation)
+        }
+        Ok(Err(_)) => {
+            let message = guard
+                .finish()
+                .await
+                .err()
+                .unwrap_or_else(|| "result channel closed before completion".to_string());
+            Err(SupervisedReadError::TaskFailed(message))
+        }
+        Err(_) => Err(SupervisedReadError::TimedOut),
+    }
+}
 
 pub struct FalkorStore {
     client: redis::Client,
@@ -44,12 +160,21 @@ pub struct FalkorStore {
     query_limit: Arc<tokio::sync::Semaphore>,
     /// Max time to wait for a permit before shedding with an "overloaded" error.
     acquire_timeout: Duration,
+    /// FalkorDB's server-side limit for read-only `GRAPH.QUERY` execution.
+    /// Writes and bulk loads intentionally do not use this deadline.
+    read_backend_timeout: Option<Duration>,
+    /// Client-side deadline around the Redis read query future. This should be
+    /// longer than `read_backend_timeout` so FalkorDB can return its own timeout.
+    read_driver_timeout: Option<Duration>,
+    /// Optional composition-root override for the compatibility loading wait.
+    /// A zero duration makes server reads return typed `Loading` immediately;
+    /// CLI callers that do not inject it retain the legacy environment policy.
+    read_load_wait: Option<Duration>,
 }
 
 impl FalkorStore {
     pub fn connect(url: &str, graph_key: impl Into<String>) -> Result<Self> {
-        let client =
-            redis::Client::open(url).map_err(|e| GraphStoreError::Backend(e.to_string()))?;
+        let client = redis::Client::open(url).map_err(|e| Self::map_redis_error(e, None))?;
         Ok(Self {
             client,
             graph_key: graph_key.into(),
@@ -60,6 +185,9 @@ impl FalkorStore {
                 tokio::sync::Semaphore::MAX_PERMITS,
             )),
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+            read_backend_timeout: None,
+            read_driver_timeout: None,
+            read_load_wait: None,
         })
     }
 
@@ -72,13 +200,147 @@ impl FalkorStore {
         self
     }
 
+    /// Apply two independent deadlines to read queries only.
+    ///
+    /// `backend_timeout` is sent to FalkorDB as `GRAPH.QUERY ... TIMEOUT <ms>`;
+    /// `driver_timeout` bounds the Redis future and must be longer so the server
+    /// normally gets the first opportunity to cancel expensive graph work.
+    pub fn with_read_timeouts(
+        mut self,
+        backend_timeout: Duration,
+        driver_timeout: Duration,
+    ) -> Result<Self> {
+        if backend_timeout.is_zero() {
+            return Err(GraphStoreError::InvalidInput(
+                "FalkorDB read backend timeout must be greater than zero".into(),
+            ));
+        }
+        if driver_timeout <= backend_timeout {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "FalkorDB read driver timeout ({driver_timeout:?}) must be greater than the \
+                 backend timeout ({backend_timeout:?})"
+            )));
+        }
+        self.read_backend_timeout = Some(backend_timeout);
+        self.read_driver_timeout = Some(driver_timeout);
+        Ok(self)
+    }
+
+    /// Override the legacy per-read loading wait. Server composition roots use
+    /// zero and rely on their cached readiness monitor; CLI callers keep the
+    /// compatibility backstop when this is not set.
+    pub fn with_read_load_wait(mut self, wait: Duration) -> Self {
+        self.read_load_wait = Some(wait);
+        self
+    }
+
+    /// Per-connection-attempt timeout for establishing the FalkorDB connection,
+    /// overridable via `CIH_FALKOR_CONNECT_TIMEOUT_SECS` (default 5s). Bounds the
+    /// initial connect so a **down or firewalled** FalkorDB fails fast instead of
+    /// blocking on the OS TCP timeout; distinct from `load_wait_budget` (600s),
+    /// which waits out a reachable-but-still-loading instance at the query level.
+    fn connect_timeout() -> Duration {
+        Duration::from_secs(
+            std::env::var("CIH_FALKOR_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&s| s > 0)
+                .unwrap_or(5),
+        )
+    }
+
     /// A clone of the shared, reconnecting connection, building it on first use.
+    ///
+    /// A down/firewalled host would otherwise block for ~a minute: `new_with_config`
+    /// feeds redis's default retry `factor` (100) into an exponential backoff, so
+    /// even a couple of retries sleep far longer than the per-attempt
+    /// `connection_timeout`. We therefore (a) tighten the backoff (`factor`/`max_delay`)
+    /// and cap each attempt, and (b) wrap the **initial** establishment in a total
+    /// `connect_timeout()` so a truly-down instance surfaces an error in seconds.
+    /// Only the first connect is time-boxed here — the manager's later transparent
+    /// reconnects (which the long-running server depends on) keep their own logic.
+    /// A reachable-but-loading instance is unaffected: TCP connect succeeds while
+    /// queries return `BusyLoadingError`, which `wait_until_ready` handles.
     async fn conn(&self) -> Result<redis::aio::ConnectionManager> {
         self.conn
-            .get_or_try_init(|| redis::aio::ConnectionManager::new(self.client.clone()))
+            .get_or_try_init(|| async {
+                let budget = Self::connect_timeout();
+                let config = redis::aio::ConnectionManagerConfig::new()
+                    .set_connection_timeout(budget)
+                    .set_factor(2)
+                    .set_max_delay(500);
+                match tokio::time::timeout(
+                    budget,
+                    redis::aio::ConnectionManager::new_with_config(self.client.clone(), config),
+                )
+                .await
+                {
+                    Ok(res) => res,
+                    Err(_) => Err(redis::RedisError::from((
+                        redis::ErrorKind::IoError,
+                        "FalkorDB connection timed out",
+                        format!(
+                            "could not connect within {}s — is FalkorDB running? \
+                             (raise CIH_FALKOR_CONNECT_TIMEOUT_SECS to wait longer)",
+                            budget.as_secs()
+                        ),
+                    ))),
+                }
+            })
             .await
             .cloned()
-            .map_err(|e| GraphStoreError::Backend(e.to_string()))
+            .map_err(|e| Self::map_redis_error(e, None))
+    }
+
+    fn backend_readiness_command() -> redis::Cmd {
+        let mut command = redis::cmd("INFO");
+        command.arg("persistence");
+        command
+    }
+
+    /// Inspect Redis restore state on the metadata lane. This deliberately
+    /// bypasses the interactive GRAPH.QUERY semaphore and never touches the
+    /// configured graph key, so probing cannot create an empty graph or run
+    /// schema DDL.
+    async fn probe_backend_readiness(&self) -> Result<BackendReadiness> {
+        let mut connection = self.conn().await?;
+        let info = Self::backend_readiness_command()
+            .query_async::<String>(&mut connection)
+            .await
+            .map_err(|error| Self::map_redis_error(error, None))?;
+        Self::parse_backend_readiness(&info)
+    }
+
+    fn parse_backend_readiness(info: &str) -> Result<BackendReadiness> {
+        let field = |name: &str| {
+            info.lines().find_map(|line| {
+                let (key, value) = line.trim_end_matches('\r').split_once(':')?;
+                (key == name).then_some(value.trim())
+            })
+        };
+
+        match field("loading") {
+            Some("0") => Ok(BackendReadiness::ready()),
+            Some("1") => {
+                let detail = field("loading_loaded_perc").map_or_else(
+                    || "Redis/FalkorDB is restoring its persisted dataset".to_string(),
+                    |percentage| {
+                        format!(
+                            "Redis/FalkorDB is restoring its persisted dataset ({percentage}% loaded)"
+                        )
+                    },
+                );
+                Ok(BackendReadiness::loading(detail, TRANSIENT_RETRY_AFTER_MS))
+            }
+            Some(value) => Err(GraphStoreError::Unavailable {
+                message: format!("Redis INFO persistence returned invalid loading={value}"),
+                retry: RetryMetadata::non_retryable(),
+            }),
+            None => Err(GraphStoreError::Unavailable {
+                message: "Redis INFO persistence omitted the loading field".into(),
+                retry: RetryMetadata::non_retryable(),
+            }),
+        }
     }
 
     /// Acquire a query permit, shedding with an "overloaded" error if the
@@ -91,10 +353,19 @@ impl FalkorStore {
         .await
         {
             Ok(Ok(permit)) => Ok(permit),
-            // Elapsed timeout or a closed semaphore both mean we can't proceed.
-            _ => Err(GraphStoreError::Backend(
-                "graph store overloaded: concurrent query limit reached".into(),
-            )),
+            // Semaphore was closed — the store has been dropped; retrying is futile.
+            Ok(Err(_)) => Err(GraphStoreError::Unavailable {
+                message: "query semaphore closed".into(),
+                retry: RetryMetadata::non_retryable(),
+            }),
+            // Timeout elapsed — transient overload, caller may retry.
+            Err(_) => Err(GraphStoreError::Overloaded {
+                message: format!(
+                    "concurrent query limit remained saturated for {}ms",
+                    duration_millis(self.acquire_timeout)
+                ),
+                retry: RetryMetadata::retryable(Some(duration_millis(self.acquire_timeout))),
+            }),
         }
     }
 
@@ -106,7 +377,54 @@ impl FalkorStore {
             .arg(cypher)
             .query_async(&mut con)
             .await
-            .map_err(|e| GraphStoreError::Backend(e.to_string()))
+            .map_err(|e| Self::map_redis_error(e, None))
+    }
+
+    fn read_query_command(&self, cypher: &str) -> redis::Cmd {
+        let mut command = redis::cmd("GRAPH.QUERY");
+        command.arg(&self.graph_key).arg(cypher);
+        if let Some(timeout) = self.read_backend_timeout {
+            command.arg("TIMEOUT").arg(duration_millis(timeout));
+        }
+        command
+    }
+
+    /// Execute one read attempt. Unlike [`Self::run`], this injects both
+    /// server- and driver-side timeouts and is never used by writes/bulk load.
+    async fn run_read_once(&self, cypher: &str) -> Result<Value> {
+        let permit = self.acquire_permit().await?;
+        let mut con = self.conn().await?;
+        let command = self.read_query_command(cypher);
+        let backend_timeout = self.read_backend_timeout;
+
+        let result = if let Some(driver_timeout) = self.read_driver_timeout {
+            let operation = async move { command.query_async::<Value>(&mut con).await };
+            match run_supervised_read(permit, driver_timeout, READ_CLEANUP_GRACE, operation).await {
+                Ok(value) => Ok(value),
+                Err(SupervisedReadError::Operation(error)) => Err(error),
+                Err(SupervisedReadError::TimedOut) => {
+                    return Err(GraphStoreError::ExecutionTimeout {
+                        message: format!(
+                            "Redis driver deadline elapsed before FalkorDB replied; query capacity remains reserved for up to {}ms of cleanup",
+                            duration_millis(READ_CLEANUP_GRACE)
+                        ),
+                        timeout_ms: duration_millis(driver_timeout),
+                        retry: RetryMetadata::non_retryable(),
+                    });
+                }
+                Err(SupervisedReadError::TaskFailed(message)) => {
+                    return Err(GraphStoreError::Unavailable {
+                        message: format!("Redis read supervisor failed: {message}"),
+                        retry: RetryMetadata::retryable(Some(TRANSIENT_RETRY_AFTER_MS)),
+                    });
+                }
+            }
+        } else {
+            let _permit = permit;
+            command.query_async::<Value>(&mut con).await
+        };
+
+        result.map_err(|error| Self::map_redis_error(error, backend_timeout))
     }
 
     async fn graph_command(&self, command: &str, args: &[&str]) -> Result<Value> {
@@ -118,19 +436,45 @@ impl FalkorStore {
         }
         cmd.query_async(&mut con)
             .await
-            .map_err(|e| GraphStoreError::Backend(e.to_string()))
+            .map_err(|e| Self::map_redis_error(e, None))
     }
 
-    pub async fn drop_graph(&self) -> Result<()> {
-        self.graph_command("GRAPH.DELETE", &[&self.graph_key])
-            .await?;
-        Ok(())
+    /// Max time a READ waits out a loading FalkorDB before failing, from
+    /// `CIH_FALKOR_READ_LOAD_WAIT_SECS` (default 20s — bounded, unlike the
+    /// write budget: a read caller is interactive and can retry).
+    fn read_load_wait_budget() -> Duration {
+        Duration::from_secs(
+            std::env::var("CIH_FALKOR_READ_LOAD_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+        )
+    }
+
+    /// Run a read query, waiting out a `BusyLoadingError` once within the
+    /// (short) read budget. Without this, every read during a restart's
+    /// dataset load surfaced as "graph store unavailable" with no retry —
+    /// writes already waited (`run_write`), reads did not.
+    async fn run_read(&self, cypher: &str) -> Result<Value> {
+        match self.run_read_once(cypher).await {
+            Err(e) if Self::is_loading_error(&e) => {
+                let wait = self
+                    .read_load_wait
+                    .unwrap_or_else(Self::read_load_wait_budget);
+                if wait.is_zero() {
+                    return Err(e);
+                }
+                self.wait_until_ready(wait, READ_LOAD_WAIT_SETTING).await?;
+                self.run_read_once(cypher).await
+            }
+            other => other,
+        }
     }
 
     /// Result rows (the second element of a GRAPH.QUERY reply) as stringified
     /// cells. Good enough for scalar `RETURN` columns.
     async fn rows(&self, cypher: &str) -> Result<Vec<Vec<String>>> {
-        let reply = self.run(cypher).await?;
+        let reply = self.run_read(cypher).await?;
         let top = as_array(&reply);
         let Some(rows_val) = top.get(1) else {
             return Ok(vec![]);
@@ -142,16 +486,240 @@ impl FalkorStore {
         Ok(out)
     }
 
+    /// True when a backend error is FalkorDB/Redis reporting it is still loading
+    /// its persisted dataset into memory (`BusyLoadingError`). Transient at
+    /// startup — especially when one instance holds a large (multi-GB) AOF/RDB.
+    fn is_loading_error(e: &GraphStoreError) -> bool {
+        matches!(e, GraphStoreError::Loading { .. })
+    }
+
+    fn is_query_timeout_error(error: &redis::RedisError) -> bool {
+        let code = error.code();
+        let detail = error.detail();
+        code.is_some_and(|code| code.eq_ignore_ascii_case("TIMEOUT"))
+            // FalkorDB may emit `-Query timed out`; Redis then parses `Query`
+            // as the extension code and `timed out` as its detail.
+            || (code.is_some_and(|code| code.eq_ignore_ascii_case("QUERY"))
+                && detail.is_some_and(|detail| detail.eq_ignore_ascii_case("timed out")))
+            || detail.is_some_and(|detail| {
+                let detail = detail.trim();
+                detail.eq_ignore_ascii_case("query timed out")
+                    || detail.eq_ignore_ascii_case("query timeout")
+            })
+    }
+
+    /// Preserve Redis's structured error kind instead of flattening it into a
+    /// string. In particular, `BusyLoadingError` is the only condition mapped to
+    /// [`GraphStoreError::Loading`]; arbitrary messages containing "loading" do
+    /// not trigger readiness polling.
+    fn map_redis_error(
+        error: redis::RedisError,
+        execution_timeout: Option<Duration>,
+    ) -> GraphStoreError {
+        let kind = error.kind();
+        let message = error.to_string();
+
+        if kind == redis::ErrorKind::BusyLoadingError {
+            return GraphStoreError::Loading {
+                message,
+                retry: RetryMetadata::retryable(Some(TRANSIENT_RETRY_AFTER_MS)),
+            };
+        }
+        if Self::is_query_timeout_error(&error) {
+            return GraphStoreError::ExecutionTimeout {
+                message,
+                timeout_ms: execution_timeout.map(duration_millis).unwrap_or_default(),
+                // Re-running the same query under the same deadline usually
+                // repeats the timeout; the caller should narrow/degrade it.
+                retry: RetryMetadata::non_retryable(),
+            };
+        }
+
+        match kind {
+            redis::ErrorKind::TryAgain
+            | redis::ErrorKind::ClusterDown
+            | redis::ErrorKind::MasterDown
+            | redis::ErrorKind::IoError
+            | redis::ErrorKind::ClusterConnectionNotFound
+            | redis::ErrorKind::MasterNameNotFoundBySentinel
+            | redis::ErrorKind::NoValidReplicasFoundBySentinel => GraphStoreError::Unavailable {
+                message,
+                retry: RetryMetadata::retryable(Some(TRANSIENT_RETRY_AFTER_MS)),
+            },
+            redis::ErrorKind::AuthenticationFailed
+            | redis::ErrorKind::InvalidClientConfig
+            | redis::ErrorKind::ReadOnly
+            | redis::ErrorKind::EmptySentinelList => GraphStoreError::Unavailable {
+                message,
+                retry: RetryMetadata::non_retryable(),
+            },
+            _ => GraphStoreError::Backend(message),
+        }
+    }
+
+    /// Ensure one of the fixed `Symbol` indexes exists. A concurrent or
+    /// repeated CREATE is accepted only after `db.indexes()` confirms the exact
+    /// label/property pair; every other DDL failure is surfaced.
+    async fn ensure_symbol_index(&self, property: &'static str) -> Result<()> {
+        let ddl = format!("CREATE INDEX FOR (n:Symbol) ON (n.{property})");
+        match self.run(&ddl).await {
+            Ok(_) => Ok(()),
+            Err(error) if Self::is_possible_duplicate_index_error(&error) => {
+                match self.symbol_index_exists(property).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(Self::index_error(
+                        property,
+                        format!(
+                            "backend reported an existing index, but db.indexes() did not \
+                             contain :Symbol({property}): {error}"
+                        ),
+                        error.retry_metadata(),
+                    )),
+                    Err(verification_error) => Err(Self::index_error(
+                        property,
+                        format!(
+                            "could not verify a possible duplicate index after `{ddl}` failed: \
+                             create error: {error}; verification error: {verification_error}"
+                        ),
+                        verification_error
+                            .retry_metadata()
+                            .or_else(|| error.retry_metadata()),
+                    )),
+                }
+            }
+            // Preserve classified operational failures so callers retain their
+            // retry guidance. Unclassified DDL errors become typed index errors.
+            Err(error) if error.retry_metadata().is_some() => Err(error),
+            Err(error) => Err(Self::index_error(
+                property,
+                format!("`{ddl}` failed: {error}"),
+                None,
+            )),
+        }
+    }
+
+    async fn ensure_required_symbol_indexes(&self) -> Result<()> {
+        for property in REQUIRED_SYMBOL_INDEXES {
+            self.ensure_symbol_index(property).await?;
+        }
+        Ok(())
+    }
+
+    fn is_possible_duplicate_index_error(error: &GraphStoreError) -> bool {
+        let GraphStoreError::Backend(message) = error else {
+            return false;
+        };
+        let message = message.to_ascii_lowercase();
+        message.contains("index")
+            && (message.contains("already exists") || message.contains("already indexed"))
+    }
+
+    async fn symbol_index_exists(&self, property: &str) -> Result<bool> {
+        Ok(self.rows("CALL db.indexes()").await?.iter().any(|row| {
+            row.iter().any(|cell| cell_has_token(cell, "Symbol"))
+                && row.iter().any(|cell| cell_has_token(cell, property))
+        }))
+    }
+
+    fn index_error(
+        property: &str,
+        message: String,
+        retry: Option<RetryMetadata>,
+    ) -> GraphStoreError {
+        GraphStoreError::Index {
+            message: format!("failed to ensure :Symbol({property}) index: {message}"),
+            retry: retry.unwrap_or_else(RetryMetadata::non_retryable),
+        }
+    }
+
+    /// Max time to wait for a loading FalkorDB before giving up, from
+    /// `CIH_FALKOR_LOAD_WAIT_SECS` (default 600s — enough for a multi-GB reload).
+    fn load_wait_budget() -> Duration {
+        Duration::from_secs(
+            std::env::var("CIH_FALKOR_LOAD_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
+        )
+    }
+
+    /// Block until FalkorDB can serve a trivial query, tolerating the
+    /// `BusyLoadingError` window while it loads a large dataset. Polls with
+    /// exponential backoff (capped at 5s) up to `max_wait`, logging progress so a
+    /// multi-minute wait is visible. Any non-loading error fails fast.
+    async fn wait_until_ready(&self, max_wait: Duration, wait_setting: &'static str) -> Result<()> {
+        let start = std::time::Instant::now();
+        let mut delay = Duration::from_millis(200);
+        let mut next_log = Duration::from_secs(5);
+        loop {
+            match self.run("RETURN 1").await {
+                Ok(_) => return Ok(()),
+                Err(e) if Self::is_loading_error(&e) => {
+                    if start.elapsed() >= max_wait {
+                        return Err(GraphStoreError::Loading {
+                            message: format!(
+                                "FalkorDB still loading its dataset after {}s — artifacts are on \
+                                 disk; re-run once it is ready, or raise {wait_setting}",
+                                max_wait.as_secs()
+                            ),
+                            retry: RetryMetadata::retryable(Some(5_000)),
+                        });
+                    }
+                    if start.elapsed() >= next_log {
+                        tracing::info!(
+                            elapsed_s = start.elapsed().as_secs(),
+                            "waiting for FalkorDB to finish loading its dataset…"
+                        );
+                        next_log += Duration::from_secs(15);
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Run a write query, waiting out a `BusyLoadingError` (e.g. FalkorDB
+    /// restarted mid-load) once before retrying — so a batch never fails just
+    /// because the instance was momentarily loading.
+    async fn run_write(&self, cypher: &str) -> Result<Value> {
+        match self.run(cypher).await {
+            Err(e) if Self::is_loading_error(&e) => {
+                self.wait_until_ready(Self::load_wait_budget(), WRITE_LOAD_WAIT_SETTING)
+                    .await?;
+                self.run(cypher).await
+            }
+            other => other,
+        }
+    }
+
     /// Core write path: MERGE nodes then edges in UNWIND batches. Idempotent
     /// (re-running the same artifact is a no-op), so it doubles as upsert.
-    async fn load_nodes_edges(&self, nodes: &[Node], edges: &[Edge]) -> Result<LoadStats> {
-        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await; // idempotent
+    async fn load_nodes_edges(
+        &self,
+        nodes: &[Node],
+        edges: &[Edge],
+        obs: &dyn LoadObserver,
+    ) -> Result<LoadStats> {
+        // Index the MERGE key before the Cypher batches. Duplicate-index errors
+        // are accepted only after exact `db.indexes()` verification; loading and
+        // unexpected DDL failures invalidate staging.
+        self.ensure_symbol_index("id").await?;
 
-        for chunk in nodes.chunks(BATCH) {
+        let node_chunks: Vec<_> = nodes.chunks(BATCH).collect();
+        let total_node_batches = node_chunks.len();
+        for (batch_idx, chunk) in node_chunks.into_iter().enumerate() {
+            // ON CREATE SET only: the staging graph is always drop_graph()'d before
+            // bulk_load runs, and upsert_incremental DETACH-DELETEs changed-file nodes
+            // before calling load_nodes_edges. So every MERGE here creates a new node.
+            // In the retry case (partial batch failure), matched nodes already hold the
+            // correct values from the same artifact — skipping ON MATCH SET is safe and
+            // avoids re-writing ~18 properties per node for zero net change.
             let q = format!(
                 "UNWIND {arr} AS row \
                  MERGE (n:Symbol {{id: row.id}}) \
-                 SET n.name = row.name, n.kind = row.kind, n.file = row.file, \
+                 ON CREATE SET n.name = row.name, n.kind = row.kind, n.file = row.file, \
                      n.qualifiedName = row.qn, n.startLine = row.sl, n.endLine = row.el, \
                      n.props = row.props, n.stereotype = row.stereotype, \
                      n.httpMethod = row.httpMethod, n.path = row.path, \
@@ -159,11 +727,22 @@ impl FalkorStore {
                      n.symbolCount = row.symbolCount, n.cohesion = row.cohesion, \
                      n.processType = row.processType, \
                      n.cyclomatic = row.cyclomatic, n.cognitive = row.cognitive, \
-                     n.loopDepth = row.loopDepth, n.transitiveLoopDepth = row.transitiveLoopDepth",
+                     n.loopDepth = row.loopDepth, n.transitiveLoopDepth = row.transitiveLoopDepth, \
+                     n.isAccessor = row.isAccessor",
                 arr = nodes_to_list(chunk)
             );
-            self.run(&q).await?;
+            self.run_write(&q).await.inspect_err(|_| {
+                tracing::error!(
+                    batch = batch_idx,
+                    committed_batches = batch_idx,
+                    total_batches = total_node_batches,
+                    "node batch write failed — graph is partially written; \
+                     re-run bulk_load from scratch to restore consistency"
+                );
+            })?;
         }
+
+        obs.nodes_loaded(nodes.len() as u64);
 
         // Relationship types can't be parameterized in MERGE → one batch per kind.
         let mut by_kind: HashMap<EdgeKind, Vec<&Edge>> = HashMap::new();
@@ -172,1138 +751,215 @@ impl FalkorStore {
         }
         for (kind, es) in &by_kind {
             let label = kind.cypher_label();
-            for chunk in es.chunks(BATCH) {
+            let edge_chunks: Vec<_> = es.chunks(BATCH).collect();
+            let total_edge_batches = edge_chunks.len();
+            for (batch_idx, chunk) in edge_chunks.into_iter().enumerate() {
                 let q = format!(
                     "UNWIND {arr} AS row \
                      MATCH (a:Symbol {{id: row.src}}), (b:Symbol {{id: row.dst}}) \
                      MERGE (a)-[r:{label}]->(b) \
-                     SET r.confidence = row.conf, r.reason = row.reason, \
+                     ON CREATE SET r.confidence = row.conf, r.reason = row.reason, \
                          r.callSites = row.callSites",
                     arr = edges_to_list(chunk)
                 );
-                self.run(&q).await?;
+                self.run_write(&q).await.inspect_err(|_| {
+                    tracing::error!(
+                        kind = ?kind,
+                        batch = batch_idx,
+                        committed_batches = batch_idx,
+                        total_batches = total_edge_batches,
+                        "edge batch write failed — graph is partially written; \
+                         re-run bulk_load from scratch to restore consistency"
+                    );
+                })?;
             }
         }
+        obs.edges_loaded(edges.len() as u64);
+        self.ensure_required_symbol_indexes().await?;
+        obs.indexes_built();
 
         Ok(LoadStats {
             nodes: nodes.len() as u64,
             edges: edges.len() as u64,
         })
     }
-}
 
-#[async_trait]
-impl GraphStore for FalkorStore {
-    async fn ensure_schema(&self) -> Result<()> {
-        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.id)").await;
-        let _ = self.run("CREATE INDEX FOR (n:Symbol) ON (n.kind)").await;
-        Ok(())
+    /// True when the graph holds no nodes — either it does not exist, or it is an
+    /// empty graph key auto-created by a `GRAPH.QUERY` (e.g. the readiness probe
+    /// in `wait_until_ready`, which is why an `EXISTS` check is not enough). Used
+    /// to route `bulk_load` between the native `GRAPH.BULK` path and the Cypher
+    /// upsert.
+    async fn graph_is_empty(&self) -> Result<bool> {
+        let rows = self
+            .rows("MATCH (n) RETURN count(n) AS c")
+            .await
+            .unwrap_or_default();
+        let count: u64 = rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Ok(count == 0)
     }
 
-    async fn bulk_load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
-        let nodes = artifacts
-            .read_nodes()
-            .map_err(|e| GraphStoreError::Backend(format!("read nodes: {e}")))?;
-        let edges = artifacts
-            .read_edges()
-            .map_err(|e| GraphStoreError::Backend(format!("read edges: {e}")))?;
-        self.load_nodes_edges(&nodes, &edges).await
-    }
-
-    async fn upsert_incremental(&self, delta: &GraphDelta) -> Result<()> {
-        // Drop everything belonging to changed/removed files, then re-load the delta.
-        let mut files: Vec<&String> = delta.changed_files.iter().collect();
-        files.extend(delta.removed_files.iter());
-        if !files.is_empty() {
-            let list = format!(
-                "[{}]",
-                files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
-            );
-            self.run(&format!(
-                "MATCH (n:Symbol) WHERE n.file IN {list} DETACH DELETE n"
-            ))
-            .await?;
-        }
-        self.load_nodes_edges(&delta.nodes, &delta.edges).await?;
-        Ok(())
-    }
-
-    async fn publish_to(&self, dest_key: &str) -> Result<()> {
-        // Delete the destination first; ignore the error if it doesn't exist yet.
-        let _ = self.graph_command("GRAPH.DELETE", &[dest_key]).await;
-        self.graph_command("GRAPH.COPY", &[&self.graph_key, dest_key])
-            .await?;
-        Ok(())
-    }
-
-    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
-        let q = format!(
-            "CYPHER id={id} \
-             MATCH (n:Symbol {{id:$id}}) \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file LIMIT 1",
-            id = cstr(id.as_str())
-        );
-        let rows = self.rows(&q).await?;
-        Ok(rows.first().map(|r| node_from_row(r)))
-    }
-
-    async fn neighbors(
+    /// Load a fresh graph via FalkorDB's native binary bulk-insert protocol
+    /// (`GRAPH.BULK`). Skips the Cypher parser and per-edge `MATCH`; produces the
+    /// same graph as the Cypher path (see `bulk::build_node_batches` /
+    /// `build_edge_batches` for parity). Artifacts are **streamed** line-by-line
+    /// and encoded into byte-budgeted batches — the node pass is sent and freed
+    /// before the edge pass, so struct `Vec`s never exist and no single call
+    /// approaches the 512 MB / 1 GB limits. The `id`/`kind` indexes are created
+    /// *after* the insert — `BEGIN` requires an unused key.
+    async fn bulk_insert(
         &self,
-        id: &NodeId,
-        dir: Direction,
-        kinds: &[EdgeKind],
-    ) -> Result<Vec<Edge>> {
-        let rel = rel_filter(kinds);
-        let pat = match dir {
-            Direction::Upstream => format!("(n:Symbol {{id:$id}})<-[r{rel}]-(m:Symbol)"),
-            Direction::Downstream => format!("(n:Symbol {{id:$id}})-[r{rel}]->(m:Symbol)"),
-            Direction::Both => format!("(n:Symbol {{id:$id}})-[r{rel}]-(m:Symbol)"),
+        artifacts: &GraphArtifacts,
+        obs: &dyn LoadObserver,
+    ) -> Result<LoadStats> {
+        // `GRAPH.BULK BEGIN` requires an unused key. The readiness probe and the
+        // emptiness check both auto-create an empty graph key, so drop it first.
+        let _ = self.drop_graph().await;
+        let budget = bulk::batch_budget();
+        let read_err = |e: std::io::Error| GraphStoreError::Backend(format!("read artifacts: {e}"));
+
+        // Node pass: stream + encode, keeping only the id→ordinal map.
+        let t_load = std::time::Instant::now();
+        let node_stream = artifacts.stream_nodes().map_err(read_err)?;
+        let (node_batches, ordinal) =
+            bulk::build_node_batches(node_stream, budget).map_err(read_err)?;
+        let total_nodes = node_batches.iter().map(|(n, _)| n).sum::<u64>();
+        if total_nodes == 0 {
+            return Ok(LoadStats { nodes: 0, edges: 0 });
+        }
+        let mut payload_bytes: usize = node_batches.iter().map(|(_, b)| b.len()).sum();
+        let mut call_count = node_batches.len();
+
+        let mut con = {
+            let _permit = self.acquire_permit().await?;
+            let mut con = self.conn().await?;
+            // Node batches first — they assign ordinals 0..N in send order.
+            let mut first = true;
+            for (nc, blob) in &node_batches {
+                let mut cmd = redis::cmd("GRAPH.BULK");
+                cmd.arg(&self.graph_key);
+                if std::mem::take(&mut first) {
+                    cmd.arg("BEGIN");
+                }
+                cmd.arg(*nc).arg(0).arg(1).arg(0).arg(blob.as_slice());
+                let _reply: Value = cmd
+                    .query_async(&mut con)
+                    .await
+                    .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK nodes: {e}")))?;
+            }
+            con
         };
-        let q = format!(
-            "CYPHER id={id} MATCH {pat} RETURN type(r), n.id, m.id",
-            id = cstr(id.as_str())
-        );
-        let rows = self.rows(&q).await?;
-        Ok(rows
-            .into_iter()
-            .filter(|r| r.len() >= 3)
-            .map(|r| Edge {
-                kind: edge_from_label(&r[0]),
-                src: NodeId::new(r[1].clone()),
-                dst: NodeId::new(r[2].clone()),
-                confidence: 1.0,
-                reason: String::new(),
-                props: None,
-            })
-            .collect())
-    }
+        drop(node_batches); // free node payload before encoding edges
+        obs.nodes_loaded(total_nodes);
 
-    async fn impact(&self, id: &NodeId, dir: Direction, max_depth: u32) -> Result<Impact> {
-        let d = max_depth.clamp(1, 20);
-        // Var-length bounds can't be parameterized; d is a clamped integer (safe).
-        let arrow = match dir {
-            Direction::Upstream => format!("<-[:CALLS*1..{d}]-"),
-            Direction::Downstream => format!("-[:CALLS*1..{d}]->"),
-            Direction::Both => format!("-[:CALLS*1..{d}]-"),
-        };
-        // Two-step aggregation: order paths by length per node, then take the first
-        // (shortest) parent and the minimum depth. This gives accurate parent tracking
-        // for D3 diagram rendering without requiring a separate query.
-        let q = format!(
-            "CYPHER id={id} \
-             MATCH p=(n:Symbol {{id:$id}}){arrow}(m:Symbol) \
-             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode \
-             ORDER BY m.id, len \
-             WITH m, collect(pnode)[0] AS parent, min(len) AS depth \
-             RETURN m.id, depth, parent.id, m.name, m.kind \
-             LIMIT 200",
-            id = cstr(id.as_str())
+        // Edge pass: stream + encode against the ordinal map, then send.
+        let edge_stream = artifacts.stream_edges().map_err(read_err)?;
+        let edge_batches =
+            bulk::build_edge_batches(edge_stream, &ordinal, budget).map_err(read_err)?;
+        let total_edges = edge_batches.iter().map(|(n, _)| n).sum::<u64>();
+        payload_bytes += edge_batches.iter().map(|(_, b)| b.len()).sum::<usize>();
+        call_count += edge_batches.len();
+        {
+            let _permit = self.acquire_permit().await?;
+            for (ec, blob) in &edge_batches {
+                let mut cmd = redis::cmd("GRAPH.BULK");
+                cmd.arg(&self.graph_key)
+                    .arg(0)
+                    .arg(*ec)
+                    .arg(0)
+                    .arg(1)
+                    .arg(blob.as_slice());
+                let _reply: Value = cmd
+                    .query_async(&mut con)
+                    .await
+                    .map_err(|e| GraphStoreError::Backend(format!("GRAPH.BULK edges: {e}")))?;
+            }
+        }
+        let load_ms = t_load.elapsed().as_millis();
+        obs.edges_loaded(total_edges);
+
+        // Indexes must be built after the bulk insert (see doc above).
+        let t_idx = std::time::Instant::now();
+        self.ensure_required_symbol_indexes().await?;
+        obs.indexes_built();
+        tracing::info!(
+            nodes = total_nodes,
+            edges = total_edges,
+            payload_mb = payload_bytes / 1_048_576,
+            calls = call_count,
+            load_ms,
+            index_ms = t_idx.elapsed().as_millis(),
+            "falkor GRAPH.BULK load timings"
         );
-        let rows = self.rows(&q).await?;
-        let affected: Vec<ImpactNode> = rows
-            .into_iter()
-            .filter(|r| !r.is_empty())
-            .map(|r| ImpactNode {
-                id: NodeId::new(r[0].clone()),
-                depth: r.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
-                parent_id: r
-                    .get(2)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| NodeId::new(s.clone())),
-                name: r.get(3).cloned().unwrap_or_default(),
-                kind: r.get(4).cloned().unwrap_or_default(),
-                via: "CALLS".to_string(),
-            })
-            .collect();
-        let risk = risk_from_fanout(affected.len()).to_string();
-        Ok(Impact {
-            root: id.clone(),
-            direction: dir,
-            affected,
-            risk,
+        Ok(LoadStats {
+            nodes: total_nodes,
+            edges: total_edges,
         })
-    }
-
-    async fn call_chain(&self, from: &NodeId, to: &NodeId, max_depth: u32) -> Result<Vec<Path>> {
-        let d = max_depth.clamp(1, 12);
-        let q = format!(
-            "CYPHER from={from} to={to} \
-             MATCH p=(a:Symbol {{id:$from}})-[:CALLS*1..{d}]->(b:Symbol {{id:$to}}) \
-             RETURN [x IN nodes(p) | x.id] LIMIT 25",
-            from = cstr(from.as_str()),
-            to = cstr(to.as_str())
-        );
-        let rows = self.rows(&q).await?;
-        Ok(rows
-            .into_iter()
-            .filter(|r| !r.is_empty())
-            .map(|r| Path {
-                nodes: r[0]
-                    .trim_matches(|c| c == '[' || c == ']')
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| NodeId::new(s.trim().trim_matches('"').to_string()))
-                    .collect(),
-            })
-            .collect())
-    }
-
-    async fn subgraph(&self, seeds: &[NodeId], radius: u32) -> Result<Subgraph> {
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
-        let r = radius.clamp(1, 4);
-        for seed in seeds {
-            if let Some(n) = self.get_node(seed).await? {
-                nodes.push(n);
-            }
-            let q = format!(
-                "CYPHER id={id} \
-                 MATCH (n:Symbol {{id:$id}})-[*1..{r}]-(m:Symbol) \
-                 RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file LIMIT 200",
-                id = cstr(seed.as_str())
-            );
-            for row in self.rows(&q).await? {
-                nodes.push(node_from_row(&row));
-            }
-            edges.extend(self.neighbors(seed, Direction::Both, &[]).await?);
-        }
-        Ok(Subgraph { nodes, edges })
-    }
-
-    async fn graph_summary(&self) -> Result<GraphSummary> {
-        let total_nodes = self
-            .rows("MATCH (n:Symbol) RETURN count(n)")
-            .await?
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .unwrap_or(0);
-        let total_edges = self
-            .rows("MATCH (:Symbol)-[r]->(:Symbol) RETURN count(r)")
-            .await?
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .unwrap_or(0);
-        let kinds = self
-            .rows("MATCH (n:Symbol) RETURN n.kind, count(n) ORDER BY count(n) DESC")
-            .await?
-            .into_iter()
-            .filter_map(|row| {
-                if row.len() < 2 {
-                    return None;
-                }
-                let count = row[1].parse::<u64>().ok()?;
-                Some(KindCount {
-                    kind: row[0].clone(),
-                    count,
-                })
-            })
-            .collect();
-        Ok(GraphSummary {
-            kinds,
-            total_nodes,
-            total_edges,
-        })
-    }
-
-    async fn graph_overview(
-        &self,
-        max_nodes: usize,
-        max_edges: usize,
-        kinds: Option<&[String]>,
-    ) -> Result<GraphOverview> {
-        let max_nodes = max_nodes.max(1);
-        let max_edges = max_edges.max(1);
-
-        let total_nodes = self
-            .rows("MATCH (n:Symbol) RETURN count(n)")
-            .await?
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .unwrap_or(0);
-        let total_edges = self
-            .rows("MATCH (:Symbol)-[r]->(:Symbol) RETURN count(r)")
-            .await?
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        let mut internal_to_node = HashMap::<i64, NodeId>::with_capacity(max_nodes);
-        let mut nodes = Vec::with_capacity(max_nodes.min(total_nodes as usize));
-
-        if let Some(kind_list) = kinds {
-            // User-selected kinds: single filtered query with degree scan only on the subset.
-            let kind_literals = kind_list
-                .iter()
-                .map(|k| format!("'{k}'"))
-                .collect::<Vec<_>>()
-                .join(",");
-            let node_query = format!(
-                "MATCH (n:Symbol) \
-                 WHERE n.kind IN [{kind_literals}] \
-                 OPTIONAL MATCH (n)-[r]-(:Symbol) \
-                 WITH n, count(r) AS degree \
-                 ORDER BY degree DESC, n.id ASC \
-                 LIMIT {max_nodes} \
-                 RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
-            );
-            for row in self.rows(&node_query).await? {
-                if row.len() < 7 {
-                    continue;
-                }
-                let Ok(internal_id) = row[0].parse::<i64>() else {
-                    continue;
-                };
-                let id = NodeId::new(row[1].clone());
-                internal_to_node.insert(internal_id, id.clone());
-                nodes.push(GraphOverviewNode {
-                    node: Node {
-                        id,
-                        kind: NodeKind::from_label(&row[2]),
-                        name: row[3].clone(),
-                        qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
-                        file: row.get(5).cloned().unwrap_or_default(),
-                        range: Range::default(),
-                        props: None,
-                    },
-                    degree: row[6].parse::<u64>().unwrap_or(0),
-                });
-            }
-        } else {
-            // No filter: two-pass to avoid full-graph degree scan.
-            // Pass 1: architectural/runtime nodes — shown regardless of degree.
-            let structural_kinds = "['Community','Process','Route','IntegrationRoute',\
-                  'MessageDestination','KafkaTopic','ExternalEndpoint',\
-                  'DbTable','DbQuery']";
-            let pass1_limit = max_nodes.min(2_000);
-            let pass1_query = format!(
-                "MATCH (n:Symbol) \
-                 WHERE n.kind IN {structural_kinds} \
-                 RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file \
-                 LIMIT {pass1_limit}"
-            );
-            for row in self.rows(&pass1_query).await? {
-                if row.len() < 6 {
-                    continue;
-                }
-                let Ok(internal_id) = row[0].parse::<i64>() else {
-                    continue;
-                };
-                let id = NodeId::new(row[1].clone());
-                internal_to_node.insert(internal_id, id.clone());
-                nodes.push(GraphOverviewNode {
-                    node: Node {
-                        id,
-                        kind: NodeKind::from_label(&row[2]),
-                        name: row[3].clone(),
-                        qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
-                        file: row.get(5).cloned().unwrap_or_default(),
-                        range: Range::default(),
-                        props: None,
-                    },
-                    degree: 0,
-                });
-            }
-
-            // Pass 2: fill remaining budget with Class-family nodes ordered by degree.
-            let remaining = max_nodes.saturating_sub(nodes.len());
-            if remaining > 0 {
-                let class_kinds = "['Class','Interface','Enum','Record']";
-                let pass2_query = format!(
-                    "MATCH (n:Symbol) \
-                     WHERE n.kind IN {class_kinds} \
-                     OPTIONAL MATCH (n)-[r]-(:Symbol) \
-                     WITH n, count(r) AS degree \
-                     ORDER BY degree DESC, n.id ASC \
-                     LIMIT {remaining} \
-                     RETURN id(n), n.id, n.kind, n.name, n.qualifiedName, n.file, degree"
-                );
-                for row in self.rows(&pass2_query).await? {
-                    if row.len() < 7 {
-                        continue;
-                    }
-                    let Ok(internal_id) = row[0].parse::<i64>() else {
-                        continue;
-                    };
-                    if internal_to_node.contains_key(&internal_id) {
-                        continue;
-                    }
-                    let id = NodeId::new(row[1].clone());
-                    internal_to_node.insert(internal_id, id.clone());
-                    nodes.push(GraphOverviewNode {
-                        node: Node {
-                            id,
-                            kind: NodeKind::from_label(&row[2]),
-                            name: row[3].clone(),
-                            qualified_name: row.get(4).filter(|v| !v.is_empty()).cloned(),
-                            file: row.get(5).cloned().unwrap_or_default(),
-                            range: Range::default(),
-                            props: None,
-                        },
-                        degree: row[6].parse::<u64>().unwrap_or(0),
-                    });
-                }
-            }
-        }
-
-        let mut edges = Vec::new();
-        let selected_internal_ids = internal_to_node.keys().copied().collect::<Vec<_>>();
-        if !selected_internal_ids.is_empty() {
-            let ids = selected_internal_ids
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            let edge_limit = max_edges.saturating_add(1);
-            let edge_query = format!(
-                "MATCH (a:Symbol)-[r]->(b:Symbol) \
-                 WHERE id(a) IN [{ids}] AND id(b) IN [{ids}] \
-                 WITH a, b, r, CASE type(r) \
-                    WHEN 'CALLS' THEN 0 \
-                    WHEN 'HANDLES_ROUTE' THEN 1 \
-                    WHEN 'EXTERNAL_CALL' THEN 2 \
-                    WHEN 'PUBLISHES_EVENT' THEN 3 \
-                    WHEN 'LISTENS_TO' THEN 4 \
-                    WHEN 'INTEGRATION_LINK' THEN 5 \
-                    WHEN 'IMPLEMENTS' THEN 6 \
-                    WHEN 'EXTENDS' THEN 7 \
-                    WHEN 'IMPORTS' THEN 8 \
-                    ELSE 20 END AS priority \
-                 RETURN id(a), id(b), type(r) \
-                 ORDER BY priority ASC, a.id ASC, b.id ASC, type(r) ASC \
-                 LIMIT {edge_limit}"
-            );
-
-            for row in self.rows(&edge_query).await? {
-                if row.len() < 3 || edges.len() >= max_edges {
-                    break;
-                }
-                let (Ok(source_internal), Ok(target_internal)) =
-                    (row[0].parse::<i64>(), row[1].parse::<i64>())
-                else {
-                    continue;
-                };
-                let (Some(source), Some(target)) = (
-                    internal_to_node.get(&source_internal),
-                    internal_to_node.get(&target_internal),
-                ) else {
-                    continue;
-                };
-                edges.push(GraphOverviewEdge {
-                    source: source.clone(),
-                    target: target.clone(),
-                    kind: edge_from_label(&row[2]),
-                });
-            }
-        }
-
-        let truncated = nodes.len() < total_nodes as usize || edges.len() < total_edges as usize;
-        Ok(GraphOverview {
-            nodes,
-            edges,
-            total_nodes,
-            total_edges,
-            truncated,
-        })
-    }
-
-    async fn context(&self, id: &NodeId) -> Result<SymbolContext> {
-        let node = self
-            .get_node(id)
-            .await?
-            .ok_or_else(|| GraphStoreError::NotFound(id.to_string()))?;
-        let callers = neighbor_nodes(self, id, Direction::Upstream).await?;
-        let callees = neighbor_nodes(self, id, Direction::Downstream).await?;
-        let proc_query = format!(
-            "CYPHER id={id} \
-             MATCH (s:Symbol {{id:$id}})-[:STEP_IN_PROCESS]->(p:Symbol) \
-             WHERE p.kind = 'Process' \
-             RETURN p.id ORDER BY p.name",
-            id = cstr(id.as_str())
-        );
-        let processes = self
-            .rows(&proc_query)
-            .await?
-            .into_iter()
-            .filter_map(|row| row.first().cloned())
-            .collect();
-        let community = self
-            .symbol_communities(std::slice::from_ref(id))
-            .await?
-            .into_iter()
-            .find_map(|(nid, info)| if &nid == id { Some(info) } else { None });
-        Ok(SymbolContext {
-            node,
-            callers,
-            callees,
-            processes,
-            community,
-        })
-    }
-
-    async fn communities(&self) -> Result<Vec<CommunityInfo>> {
-        let q = "MATCH (c:Symbol) WHERE c.kind = 'Community' \
-                 RETURN c.id, c.name, c.symbolCount, c.cohesion \
-                 ORDER BY c.symbolCount DESC, c.name";
-        Ok(self
-            .rows(q)
-            .await?
-            .into_iter()
-            .filter(|row| row.len() >= 2)
-            .map(|row| CommunityInfo {
-                id: row.first().cloned().unwrap_or_default(),
-                name: row.get(1).cloned().unwrap_or_default(),
-                symbol_count: row.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
-                cohesion: row.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0),
-            })
-            .collect())
-    }
-
-    async fn route_map(&self, prefix: Option<&str>, limit: usize) -> Result<Vec<RouteInfo>> {
-        let prefix_val = prefix.unwrap_or("");
-        let q = format!(
-            "CYPHER prefix={prefix_lit} limit={limit} \
-             MATCH (m:Symbol)-[:HANDLES_ROUTE]->(r:Symbol) \
-             WHERE r.kind = 'Route' \
-               AND ($prefix = '' OR r.path STARTS WITH $prefix) \
-             RETURN r.path, r.httpMethod, r.decorator, r.handler, m.id, m.name, m.qualifiedName \
-             ORDER BY r.path, r.httpMethod \
-             LIMIT $limit",
-            prefix_lit = cstr(prefix_val),
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter(|row| row.len() >= 6)
-            .map(|row| RouteInfo {
-                path: row.first().cloned().unwrap_or_default(),
-                http_method: row.get(1).cloned().unwrap_or_default(),
-                decorator: row.get(2).cloned().unwrap_or_default(),
-                handler_id: NodeId::new(row.get(4).cloned().unwrap_or_default()),
-                handler_name: row.get(5).cloned().unwrap_or_default(),
-                handler_qualified: row.get(6).cloned().unwrap_or_default(),
-            })
-            .collect())
-    }
-
-    async fn candidates_by_name(&self, name: &str, limit: usize) -> Result<Vec<Node>> {
-        let lim = limit.clamp(1, 50);
-        // Use n.kind (stored property) not labels(n)[0] (always "Symbol") so
-        // node_from_row gets the real kind string.
-        let q = format!(
-            "CYPHER name={name_lit} \
-             MATCH (n:Symbol) WHERE n.name = $name \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
-             ORDER BY n.id LIMIT {lim}",
-            name_lit = cstr(name),
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect())
-    }
-
-    async fn nodes_in_files(&self, files: &[String]) -> Result<Vec<Node>> {
-        if files.is_empty() {
-            return Ok(vec![]);
-        }
-        let list = format!(
-            "[{}]",
-            files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
-        );
-        // Limit to callable/structural kinds most useful for change-impact analysis.
-        let q = format!(
-            "MATCH (n:Symbol) \
-             WHERE n.file IN {list} \
-               AND n.kind IN ['Method', 'Constructor', 'Function', 'Class', 'Interface', 'Enum'] \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
-             ORDER BY n.file, n.id"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect())
-    }
-
-    async fn processes_for_symbols(&self, symbol_ids: &[NodeId]) -> Result<Vec<String>> {
-        if symbol_ids.is_empty() {
-            return Ok(vec![]);
-        }
-        let list = format!(
-            "[{}]",
-            symbol_ids
-                .iter()
-                .map(|id| cstr(id.as_str()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let q = format!(
-            "MATCH (s:Symbol)-[:STEP_IN_PROCESS]->(p:Symbol) \
-             WHERE s.id IN {list} AND p.kind = 'Process' \
-             RETURN DISTINCT p.id \
-             ORDER BY p.id"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter_map(|row| row.into_iter().next())
-            .collect())
-    }
-
-    async fn flow_downstream(&self, entry: &NodeId, max_depth: u32) -> Result<Vec<FlowHop>> {
-        let d = max_depth.clamp(1, 10);
-        // Phase 1: BFS to get node order, depth, and parent relationships.
-        let q = format!(
-            "CYPHER id={id} \
-             MATCH p=(start:Symbol {{id:$id}})\
-             -[:CALLS|HANDLES_ROUTE|EXTERNAL_CALL|PUBLISHES_EVENT|LISTENS_TO*1..{d}]->(m:Symbol) \
-             WITH m, length(p) AS len, nodes(p)[length(p)-1] AS pnode \
-             ORDER BY m.id, len \
-             WITH m, collect(pnode)[0] AS parent, min(len) AS depth \
-             RETURN m.id, m.kind, m.name, m.qualifiedName, m.file, depth, parent.id \
-             ORDER BY depth, m.name LIMIT 100",
-            id = cstr(entry.as_str())
-        );
-        let rows = self.rows(&q).await?;
-        // Build FlowNode list and collect (parent_id, child_id) pairs.
-        let mut flow_nodes: Vec<FlowNode> = rows
-            .iter()
-            .filter(|r| r.len() >= 5)
-            .map(|r| FlowNode {
-                id: NodeId::new(r[0].clone()),
-                kind: NodeKind::from_label(r[1].as_str()),
-                name: r[2].clone(),
-                qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
-                file: r.get(4).cloned().unwrap_or_default(),
-                depth: r.get(5).and_then(|s| s.parse().ok()).unwrap_or(1),
-                parent_id: r
-                    .get(6)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| NodeId::new(s.clone())),
-            })
-            .collect();
-
-        // Phase 2: for each (parent, child) pair, fetch the CALLS edge callSites.
-        // We do a single batch query returning (src.id, dst.id, r.callSites).
-        let mut call_sites_map: HashMap<(String, String), Vec<CallSiteArgs>> = HashMap::new();
-        if !flow_nodes.is_empty() {
-            // Collect unique (parent_id, child_id) pairs that have a parent.
-            let pairs: Vec<(String, String)> = flow_nodes
-                .iter()
-                .filter_map(|n| {
-                    n.parent_id
-                        .as_ref()
-                        .map(|p| (p.as_str().to_string(), n.id.as_str().to_string()))
-                })
-                .collect();
-            if !pairs.is_empty() {
-                let pair_list = pairs
-                    .iter()
-                    .map(|(s, d)| format!("[{}, {}]", cstr(s), cstr(d)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let eq = format!(
-                    "UNWIND [{pairs}] AS pair \
-                     MATCH (a:Symbol {{id: pair[0]}})-[r:CALLS]->(b:Symbol {{id: pair[1]}}) \
-                     RETURN a.id, b.id, r.callSites",
-                    pairs = pair_list
-                );
-                if let Ok(edge_rows) = self.rows(&eq).await {
-                    for row in edge_rows.iter().filter(|r| r.len() >= 3) {
-                        let src_id = row[0].clone();
-                        let dst_id = row[1].clone();
-                        let cs_json = row[2].as_str();
-                        // callSites is stored as a JSON string
-                        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(cs_json) {
-                            let call_sites: Vec<CallSiteArgs> = arr
-                                .iter()
-                                .filter_map(|v| {
-                                    let args = v.get("args")?.as_array()?;
-                                    Some(CallSiteArgs {
-                                        args: args
-                                            .iter()
-                                            .filter_map(|a| a.as_str().map(|s| s.to_string()))
-                                            .collect(),
-                                    })
-                                })
-                                .collect();
-                            call_sites_map.insert((src_id, dst_id), call_sites);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Build root hop (no via edge).
-        let entry_node = FlowNode {
-            id: entry.clone(),
-            kind: NodeKind::Method,
-            name: entry.as_str().rsplit('#').next().unwrap_or("").to_string(),
-            qualified_name: None,
-            file: String::new(),
-            depth: 0,
-            parent_id: None,
-        };
-        let mut hops: Vec<FlowHop> = vec![FlowHop {
-            node: entry_node,
-            via: None,
-        }];
-        for node in flow_nodes.drain(..) {
-            let via = if let Some(ref parent_id) = node.parent_id {
-                let key = (parent_id.as_str().to_string(), node.id.as_str().to_string());
-                let call_sites = call_sites_map.remove(&key).unwrap_or_default();
-                Some(FlowEdge {
-                    kind: "CALLS".to_string(),
-                    call_sites,
-                })
-            } else {
-                None
-            };
-            hops.push(FlowHop { node, via });
-        }
-        Ok(hops)
-    }
-
-    async fn complexity_hotspots(
-        &self,
-        min_cyclomatic: Option<u16>,
-        min_cognitive: Option<u16>,
-        min_transitive_loop: Option<u8>,
-        limit: usize,
-    ) -> Result<Vec<HotspotNode>> {
-        let min_cc = min_cyclomatic.unwrap_or(5) as i64;
-        let min_cog = min_cognitive.unwrap_or(0) as i64;
-        let min_tl = min_transitive_loop.unwrap_or(1) as i64;
-        let lim = limit.clamp(1, 200) as i64;
-        let q = format!(
-            "MATCH (n:Symbol) WHERE n.kind IN ['Method', 'Constructor'] \
-             AND n.transitiveLoopDepth >= {min_tl} \
-             AND n.cyclomatic >= {min_cc} \
-             AND n.cognitive >= {min_cog} \
-             RETURN n.id, n.name, n.file, n.cyclomatic, n.cognitive, n.transitiveLoopDepth \
-             ORDER BY n.transitiveLoopDepth DESC, n.cyclomatic DESC LIMIT {lim}"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 6)
-            .map(|r| HotspotNode {
-                id: NodeId::new(r[0].clone()),
-                name: r[1].clone(),
-                file: r[2].clone(),
-                cyclomatic: r[3].parse().unwrap_or(0),
-                cognitive: r[4].parse().unwrap_or(0),
-                transitive_loop_depth: r[5].parse().unwrap_or(0),
-            })
-            .collect())
-    }
-
-    async fn similar_methods(
-        &self,
-        id: &NodeId,
-        _min_jaccard: f32,
-        limit: usize,
-    ) -> Result<Vec<SimilarMethod>> {
-        let _id_lit = cstr(id.as_str());
-        let lim = limit.clamp(1, 50) as i64;
-        // SIMILAR_TO edges carry confidence = Jaccard score.
-        let q = format!(
-            "CYPHER id={id_lit} \
-             MATCH (a:Symbol {{id:$id}})-[r:SIMILAR_TO]->(b:Symbol) \
-             RETURN b.id, b.name, b.file, r.confidence \
-             ORDER BY r.confidence DESC LIMIT {lim}",
-            id_lit = cstr(id.as_str())
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 4)
-            .map(|r| SimilarMethod {
-                id: NodeId::new(r[0].clone()),
-                name: r[1].clone(),
-                file: r[2].clone(),
-                jaccard: r[3].parse().unwrap_or(0.0),
-            })
-            .collect())
-    }
-
-    async fn symbol_communities(&self, ids: &[NodeId]) -> Result<Vec<(NodeId, CommunityInfo)>> {
-        if ids.is_empty() {
-            return Ok(vec![]);
-        }
-        let list = format!(
-            "[{}]",
-            ids.iter()
-                .map(|id| cstr(id.as_str()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let q = format!(
-            "MATCH (n:Symbol)-[:MEMBER_OF]->(c:Symbol) \
-             WHERE n.id IN {list} AND c.kind = 'Community' \
-             RETURN n.id, c.id, c.name, c.symbolCount, c.cohesion"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 5)
-            .map(|r| {
-                (
-                    NodeId::new(r[0].clone()),
-                    CommunityInfo {
-                        id: r[1].clone(),
-                        name: r[2].clone(),
-                        symbol_count: r[3].parse().unwrap_or(0),
-                        cohesion: r[4].parse().unwrap_or(0.0),
-                    },
-                )
-            })
-            .collect())
-    }
-
-    async fn test_coverage(&self, id: &NodeId) -> Result<Vec<Node>> {
-        let id_lit = cstr(id.as_str());
-        // Direct TESTS edges to this symbol, plus TESTS edges to its owner class.
-        let q = format!(
-            "MATCH (t:Symbol)-[:TESTS]->(target:Symbol) \
-             WHERE target.id = {id_lit} \
-                OR EXISTS {{ \
-                      MATCH (owner:Symbol)-[:HAS_METHOD]->(target2:Symbol) \
-                      WHERE target2.id = {id_lit} AND owner.id = target.id \
-                   }} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
-             ORDER BY t.file, t.name \
-             LIMIT 50"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect())
-    }
-
-    async fn tests_for_files(&self, files: &[String]) -> Result<Vec<Node>> {
-        if files.is_empty() {
-            return Ok(vec![]);
-        }
-        let list = format!(
-            "[{}]",
-            files.iter().map(|f| cstr(f)).collect::<Vec<_>>().join(", ")
-        );
-        // Direct TESTS edges where the production target is in the changed files.
-        let q = format!(
-            "MATCH (t:Symbol)-[:TESTS]->(prod:Symbol) \
-             WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
-             ORDER BY t.file, t.name \
-             LIMIT 200"
-        );
-        let mut results: Vec<Node> = self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect();
-
-        // Also catch test methods that CALL into the changed files (one-hop indirect).
-        let q2 = format!(
-            "MATCH (t:Symbol)-[:TESTS]->(:Symbol)-[:CALLS]->(prod:Symbol) \
-             WHERE prod.file IN {list} \
-             RETURN DISTINCT t.id, t.kind, t.name, t.qualifiedName, t.file \
-             ORDER BY t.file, t.name \
-             LIMIT 200"
-        );
-        let indirect: Vec<Node> = self
-            .rows(&q2)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect();
-
-        // Merge, dedup by id.
-        let mut seen = std::collections::HashSet::new();
-        results.retain(|n| seen.insert(n.id.clone()));
-        for n in indirect {
-            if seen.insert(n.id.clone()) {
-                results.push(n);
-            }
-        }
-        results.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
-        Ok(results)
-    }
-
-    async fn untested_symbols(&self, file_prefix: &str, limit: usize) -> Result<Vec<Node>> {
-        let lim = limit.clamp(1, 500);
-        let prefix_lit = cstr(file_prefix);
-        let q = format!(
-            "MATCH (n:Symbol) \
-             WHERE n.file STARTS WITH {prefix_lit} \
-               AND n.kind IN ['Method', 'Class', 'Interface'] \
-               AND NOT n.stereotype = 'test' \
-               AND NOT EXISTS {{ MATCH (:Symbol)-[:TESTS]->(n) }} \
-             RETURN n.id, n.kind, n.name, n.qualifiedName, n.file \
-             ORDER BY n.file, n.name \
-             LIMIT {lim}"
-        );
-        Ok(self
-            .rows(&q)
-            .await?
-            .iter()
-            .map(|r| node_from_row(r))
-            .collect())
-    }
-
-    async fn community_graph(&self) -> Result<Vec<CommunityEdge>> {
-        // Count CALLS edges that cross community boundaries. Each unit of weight
-        // represents one caller→callee pair where caller and callee belong to
-        // different communities. Capped at 500 pairs to avoid a mega-result.
-        let q = "MATCH (a:Symbol)-[:MEMBER_OF]->(ca:Symbol), \
-                       (b:Symbol)-[:MEMBER_OF]->(cb:Symbol) \
-                 WHERE ca.kind = 'Community' AND cb.kind = 'Community' \
-                   AND (a)-[:CALLS]->(b) AND ca.id <> cb.id \
-                 RETURN ca.id, cb.id, count(*) AS weight \
-                 LIMIT 500";
-        Ok(self
-            .rows(q)
-            .await?
-            .into_iter()
-            .filter(|r| r.len() >= 3)
-            .map(|r| CommunityEdge {
-                src: r[0].clone(),
-                dst: r[1].clone(),
-                weight: r[2].parse().unwrap_or(0),
-            })
-            .collect())
-    }
-}
-
-/// Thin `BulkLoader` over a `FalkorStore` (ports & adapters: the engine depends
-/// on the `BulkLoader` trait, not on FalkorDB).
-pub struct FalkorBulkLoader {
-    store: FalkorStore,
-}
-
-impl FalkorBulkLoader {
-    pub fn connect(url: &str, graph_key: impl Into<String>) -> Result<Self> {
-        Ok(Self {
-            store: FalkorStore::connect(url, graph_key)?,
-        })
-    }
-}
-
-#[async_trait]
-impl BulkLoader for FalkorBulkLoader {
-    async fn load(&self, artifacts: &GraphArtifacts) -> Result<LoadStats> {
-        self.store.bulk_load(artifacts).await
     }
 }
 
 // ---- helpers ----
 
-async fn neighbor_nodes(store: &FalkorStore, id: &NodeId, dir: Direction) -> Result<Vec<Node>> {
+fn duration_millis(duration: Duration) -> u64 {
+    let millis = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+    if duration.is_zero() {
+        0
+    } else {
+        millis.max(1)
+    }
+}
+
+fn cell_has_token(cell: &str, expected: &str) -> bool {
+    cell.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .any(|token| token == expected)
+}
+
+async fn neighbor_nodes(
+    store: &FalkorStore,
+    id: &NodeId,
+    dir: Direction,
+    limit: usize,
+    after: Option<&ContextCursorKey>,
+) -> Result<ContextSection<Node>> {
     let arrow = match dir {
         Direction::Upstream => "<-[:CALLS]-",
         Direction::Downstream => "-[:CALLS]->",
         Direction::Both => "-[:CALLS]-",
     };
+    let columns = node_columns("m");
+    let (cursor_params, cursor_predicate) = after.map_or_else(
+        || (String::new(), String::new()),
+        |after| {
+            (
+                format!(
+                    " after_name={} after_id={}",
+                    cstr(&after.name),
+                    cstr(&after.id)
+                ),
+                "WHERE m.name > $after_name OR (m.name = $after_name AND m.id > $after_id) "
+                    .to_string(),
+            )
+        },
+    );
+    let probe_limit = limit + 1;
     let q = format!(
-        "CYPHER id={id} \
+        "CYPHER id={id}{cursor_params} \
          MATCH (n:Symbol {{id:$id}}){arrow}(m:Symbol) \
-         RETURN DISTINCT m.id, m.kind, m.name, m.qualifiedName, m.file LIMIT 100",
+         {cursor_predicate}\
+         RETURN DISTINCT {columns} \
+         ORDER BY m.name, m.id LIMIT {probe_limit}",
         id = cstr(id.as_str())
     );
-    Ok(store
+    let nodes = store
         .rows(&q)
         .await?
         .iter()
         .map(|r| node_from_row(r))
-        .collect())
-}
-
-fn node_from_row(r: &[String]) -> Node {
-    Node {
-        id: NodeId::new(r.first().cloned().unwrap_or_default()),
-        kind: NodeKind::from_label(r.get(1).map(String::as_str).unwrap_or("")),
-        name: r.get(2).cloned().unwrap_or_default(),
-        qualified_name: r.get(3).filter(|s| !s.is_empty()).cloned(),
-        file: r.get(4).cloned().unwrap_or_default(),
-        range: Range::default(),
-        props: None,
-    }
-}
-
-fn nodes_to_list(nodes: &[Node]) -> String {
-    let items: Vec<String> = nodes
-        .iter()
-        .map(|n| {
-            let props_json = n.props.as_ref().map(serde_json::Value::to_string);
-            let id = cstr(n.id.as_str());
-            let name = cstr(&n.name);
-            let kind = cstr(n.kind.label());
-            let file = cstr(&n.file);
-            let qn = copt(n.qualified_name.as_deref());
-            let sl = n.range.start_line;
-            let el = n.range.end_line;
-            let props = copt(props_json.as_deref());
-            let stereotype = copt(prop_str(n, "stereotype"));
-            let http_method = copt(prop_str(n, "httpMethod"));
-            let path = copt(prop_str(n, "path"));
-            let decorator = copt(prop_str(n, "decorator"));
-            let handler = copt(prop_str(n, "handler"));
-            let symbol_count = cnum_u64(prop_u64(n, "symbolCount").or_else(|| prop_u64(n, "symbol_count")));
-            let cohesion = cnum_f64(prop_f64(n, "cohesion"));
-            let process_type = copt(prop_str(n, "process_type"));
-            // Gap 1: promoted complexity fields (queryable as first-class graph properties)
-            let cyclomatic = cnum_u64(prop_u64(n, "cyclomatic"));
-            let cognitive = cnum_u64(prop_u64(n, "cognitive"));
-            let loop_depth = cnum_u64(prop_u64(n, "loopDepth"));
-            let transitive_ld = cnum_u64(prop_u64(n, "transitiveLoopDepth"));
-            format!(
-                "{{id:{id}, name:{name}, kind:{kind}, file:{file}, qn:{qn}, sl:{sl}, el:{el}, props:{props}, stereotype:{stereotype}, httpMethod:{http_method}, path:{path}, decorator:{decorator}, handler:{handler}, symbolCount:{symbol_count}, cohesion:{cohesion}, processType:{process_type}, cyclomatic:{cyclomatic}, cognitive:{cognitive}, loopDepth:{loop_depth}, transitiveLoopDepth:{transitive_ld}}}"
-            )
-        })
         .collect();
-    format!("[{}]", items.join(", "))
-}
-
-fn prop_str<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
-    node.props.as_ref()?.get(key)?.as_str()
-}
-
-fn prop_u64(node: &Node, key: &str) -> Option<u64> {
-    node.props.as_ref()?.get(key)?.as_u64()
-}
-
-fn prop_f64(node: &Node, key: &str) -> Option<f64> {
-    node.props.as_ref()?.get(key)?.as_f64()
-}
-
-fn cnum_u64(v: Option<u64>) -> String {
-    v.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
-}
-
-fn cnum_f64(v: Option<f64>) -> String {
-    v.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
-}
-
-fn edges_to_list(edges: &[&Edge]) -> String {
-    let items: Vec<String> = edges
-        .iter()
-        .map(|e| {
-            // Gap 3: serialize call_sites array from props as a JSON string column.
-            let call_sites = e
-                .props
-                .as_ref()
-                .and_then(|p| p.get("call_sites"))
-                .map(|v| v.to_string());
-            let cs = copt(call_sites.as_deref());
-            format!(
-                "{{src:{}, dst:{}, conf:{}, reason:{}, callSites:{}}}",
-                cstr(e.src.as_str()),
-                cstr(e.dst.as_str()),
-                e.confidence,
-                cstr(&e.reason),
-                cs,
-            )
-        })
-        .collect();
-    format!("[{}]", items.join(", "))
-}
-
-fn rel_filter(kinds: &[EdgeKind]) -> String {
-    if kinds.is_empty() {
-        String::new()
-    } else {
-        let labels: Vec<&str> = kinds.iter().map(|k| k.cypher_label()).collect();
-        format!(":{}", labels.join("|"))
-    }
-}
-
-fn edge_from_label(label: &str) -> EdgeKind {
-    match label {
-        "CONTAINS" => EdgeKind::Contains,
-        "CALLS" => EdgeKind::Calls,
-        "EXTENDS" => EdgeKind::Extends,
-        "IMPLEMENTS" => EdgeKind::Implements,
-        "HAS_METHOD" => EdgeKind::HasMethod,
-        "HAS_FIELD" => EdgeKind::HasField,
-        "IMPORTS" => EdgeKind::Imports,
-        "ACCESSES" => EdgeKind::Accesses,
-        "USES" => EdgeKind::Uses,
-        "METHOD_OVERRIDES" => EdgeKind::MethodOverrides,
-        "METHOD_IMPLEMENTS" => EdgeKind::MethodImplements,
-        "MEMBER_OF" => EdgeKind::MemberOf,
-        "STEP_IN_PROCESS" => EdgeKind::StepInProcess,
-        "HANDLES_ROUTE" => EdgeKind::HandlesRoute,
-        "PUBLISHES_EVENT" => EdgeKind::PublishesEvent,
-        "LISTENS_TO" => EdgeKind::ListensTo,
-        "EXTERNAL_CALL" => EdgeKind::ExternalCall,
-        "TESTS" => EdgeKind::Tests,
-        "SIMILAR_TO" => EdgeKind::SimilarTo,
-        _ => EdgeKind::Other,
-    }
-}
-
-/// Cypher string literal with escaping (`'...'`). Used both in the `CYPHER`
-/// parameter preamble and inside generated UNWIND list literals.
-fn cstr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
-        }
-    }
-    out.push('\'');
-    out
-}
-
-/// Optional Cypher string literal → `'...'` or `null`.
-fn copt(s: Option<&str>) -> String {
-    match s {
-        Some(v) => cstr(v),
-        None => "null".to_string(),
-    }
-}
-
-fn as_array(v: &Value) -> Vec<&Value> {
-    match v {
-        Value::Array(items) => items.iter().collect(),
-        _ => vec![],
-    }
-}
-
-fn cell_to_string(v: &&Value) -> String {
-    match v {
-        Value::Nil => String::new(),
-        Value::Int(i) => i.to_string(),
-        Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
-        Value::SimpleString(s) => s.clone(),
-        Value::Double(d) => d.to_string(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(|x| cell_to_string(&x)).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        other => format!("{other:?}"),
-    }
+    Ok(ContextSection::from_node_probe(nodes, limit, after))
 }
 
 #[cfg(test)]

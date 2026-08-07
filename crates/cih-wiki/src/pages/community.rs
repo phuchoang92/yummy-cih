@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use cih_core::{Node, NodeKind};
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
+use crate::pages::mdx_safe;
 use crate::{CommunityLlmFull, CommunityLlmSummary};
 
 fn prop_str<'a>(node: &'a Node, key: &str) -> &'a str {
@@ -116,10 +117,10 @@ pub fn render_community_detail(
         if !llm.dev.is_empty() || !llm.po.is_empty() {
             md.push_str("> **Summary**\n>\n");
             if !llm.po.is_empty() {
-                md.push_str(&format!("> {}\n>\n", llm.po));
+                md.push_str(&format!("> {}\n>\n", mdx_safe(&llm.po)));
             }
             if !llm.dev.is_empty() {
-                md.push_str(&format!("> {}\n", llm.dev));
+                md.push_str(&format!("> {}\n", mdx_safe(&llm.dev)));
             }
             md.push_str("\n\n");
         }

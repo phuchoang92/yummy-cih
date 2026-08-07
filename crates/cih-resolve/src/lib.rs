@@ -28,6 +28,7 @@ pub(crate) mod inheritance;
 pub(crate) mod lang;
 pub(crate) mod similarity;
 
+pub mod augment;
 mod contracts;
 pub mod db_access;
 pub mod di_xml;
@@ -35,12 +36,15 @@ pub mod integration_xml;
 pub mod patterns;
 pub(crate) mod reports;
 mod types;
+pub use augment::{language_augmentors, AugmentCtx, AugmentOutput, GraphAugmentor};
 pub use complexity::propagate_loop_depths;
 pub use constant_propagation::build_java_constant_resolver;
 pub use contracts::resolve_contract_edges;
 pub use db_access::{emit_db_access, emit_jpa_tables};
 pub use di_xml::{extract_di_xml, DiXmlOutput};
-pub use integration_xml::{extract_integration_xml, IntegrationXmlOutput};
+pub use integration_xml::{
+    extract_integration_xml, extract_integration_xml_in_repo, IntegrationXmlOutput,
+};
 pub use lang::{all_resolvers, PostProcessOptions, ResolverRegistry};
 pub use patterns::apply_pattern_rules;
 pub use reports::write_unresolved_reports;
@@ -85,6 +89,9 @@ pub struct ResolveOptions<'a> {
     /// Optional constant resolver to enrich CALLS edge call-site args (Gap 3/4).
     /// Pass `None` to use the no-op `NullConstantResolver`.
     pub constant_resolver: Option<Box<dyn cih_lang::constant_resolver::ConstantResolver>>,
+    /// Pre-collected DI XML wiring (bean ids → classes). Enables qualifier-aware
+    /// DI redirect during edge emission; `None` keeps count-based redirect only.
+    pub di_wiring: Option<&'a di_xml::DiWiring>,
 }
 
 /// Build the default registry with all supported language resolvers.
@@ -107,6 +114,7 @@ pub fn resolve_edges(parsed: &[ParsedFile]) -> ResolveOutput {
             repo_root: None,
             enable_xml_integrations: false,
             constant_resolver: None,
+            di_wiring: None,
         },
     )
 }
@@ -117,7 +125,10 @@ pub fn resolve_with_registry(
     registry: &ResolverRegistry,
     options: ResolveOptions<'_>,
 ) -> ResolveOutput {
-    let index = ResolveIndex::build(parsed, registry);
+    let mut index = ResolveIndex::build(parsed, registry);
+    if let Some(wiring) = options.di_wiring {
+        index.set_di_wiring(wiring);
+    }
     let emitter = EdgeEmitter::new(parsed, index, registry);
     let emitter = if let Some(cr) = options.constant_resolver {
         emitter.with_constant_resolver_boxed(cr)

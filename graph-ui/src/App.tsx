@@ -1,5 +1,7 @@
-import { Activity, CircleDot, X } from "lucide-react";
+import { Activity, CircleDot, Moon, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
+
+type Theme = "light" | "dark";
 import { api } from "./api";
 import { ClassicViews } from "./ClassicViews";
 import { Overview } from "./Overview";
@@ -20,6 +22,11 @@ export function App() {
   const [active, setActive] = useState<TabId>("overview");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [context, setContext] = useState<SymbolContext | null>(null);
+  const [theme, setTheme] = useState<Theme>(() => (document.documentElement.dataset.theme === "light" ? "light" : "dark"));
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try { window.localStorage?.setItem("cih-theme", theme); } catch { /* storage optional */ }
+  }, [theme]);
   useEffect(() => {
     if (!selectedId || active === "overview") { setContext(null); return; }
     let current = true;
@@ -31,7 +38,7 @@ export function App() {
     <header className="app-header">
       <div className="brand"><span className="brand-orbit"><CircleDot size={14}/></span><div><b>CIH</b><span>Graph Explorer</span></div></div>
       <nav>{TABS.map((tab) => <button key={tab.id} className={active === tab.id ? "is-active" : ""} onClick={() => setActive(tab.id)}>{tab.label}</button>)}</nav>
-      <div className="header-status"><Activity size={13}/><span>read-only</span>{selectedId && <button onClick={() => setSelectedId(null)}><small>selected</small>{selectedId.split("#").pop()?.split(":").pop()}<X size={12}/></button>}</div>
+      <div className="header-status"><button className="theme-toggle" aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}>{theme === "dark" ? <Sun size={13}/> : <Moon size={13}/>}</button><Activity size={13}/><span>read-only</span>{selectedId && <button onClick={() => setSelectedId(null)}><small>selected</small>{selectedId.split("#").pop()?.split(":").pop()}<X size={12}/></button>}</div>
     </header>
     <main className="app-content">
       {active === "overview" ? <Overview selectedId={selectedId} onSelectedId={setSelectedId}/> : <ClassicViews tab={active} selectedId={selectedId} onSelectedId={setSelectedId}/>} 

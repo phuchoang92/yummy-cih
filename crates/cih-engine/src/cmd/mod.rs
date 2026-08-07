@@ -13,6 +13,7 @@ pub mod features;
 pub mod group;
 pub mod group_sync;
 pub mod list;
+pub mod refresh;
 pub mod start;
 pub mod start_env;
 pub mod status;
@@ -24,14 +25,67 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::runtime;
-use args::{Cli, Command, ConfigCommand, FeaturesCommand, GroupCommand};
+use args::{ArtifactCommand, Cli, Command, ConfigCommand, DbArgs, FeaturesCommand, GroupCommand};
+
+/// Product-level defaults injected before command dispatch. Explicit command
+/// values always win, so compatibility binaries retain their environment and
+/// CLI behavior while the portable product can select Ladybug deterministically.
+#[derive(Clone, Debug, Default)]
+pub struct ProductDefaults {
+    pub backend: Option<String>,
+    pub store_url: Option<String>,
+    pub graph_key: Option<String>,
+}
+
+impl ProductDefaults {
+    fn apply(&self, command: &mut Command) {
+        let apply_db = |db: &mut DbArgs| {
+            if db.backend.is_none() {
+                db.backend.clone_from(&self.backend);
+            }
+            if db.falkor_url.is_none() {
+                db.falkor_url.clone_from(&self.store_url);
+            }
+            if db.graph_key.is_none() {
+                db.graph_key.clone_from(&self.graph_key);
+            }
+        };
+        match command {
+            Command::Analyze(args) => apply_db(&mut args.db),
+            Command::Resolve { db, .. } => apply_db(db),
+            Command::Discover(args) => apply_db(&mut args.db),
+            Command::Refresh(args) => apply_db(&mut args.db),
+            Command::Taint(args) => apply_db(&mut args.db),
+            Command::Artifact {
+                command:
+                    ArtifactCommand::Bootstrap {
+                        backend,
+                        falkor_url,
+                        graph_key,
+                        ..
+                    },
+            } => {
+                if backend.is_none() {
+                    backend.clone_from(&self.backend);
+                }
+                if falkor_url.is_none() {
+                    falkor_url.clone_from(&self.store_url);
+                }
+                if graph_key.is_none() {
+                    graph_key.clone_from(&self.graph_key);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Binary entry point: tracing + runtime init, parse, dispatch.
 pub fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
 
@@ -58,13 +112,27 @@ pub fn main() -> Result<()> {
         return Ok(());
     }
 
-    match cli.command {
+    dispatch(cli.command, ProductDefaults::default())
+}
+
+/// Execute one already-parsed engine command. This entry point does not
+/// initialize tracing or create a Tokio runtime; the product binary owns those
+/// process-wide concerns.
+pub fn dispatch(mut command: Command, defaults: ProductDefaults) -> Result<()> {
+    defaults.apply(&mut command);
+    match command {
         Command::Scan { repo, json } => crate::scan::run_scan(&repo, json),
         Command::Analyze(a) => analyze::run(a),
-        Command::Resolve { repo, db, json } => {
-            crate::analyze::run_resolve(repo, db.falkor_url, db.graph_key, db.no_load, json)
-        }
+        Command::Resolve { repo, db, json } => crate::analyze::run_resolve(
+            repo,
+            db.backend,
+            db.falkor_url,
+            db.graph_key,
+            db.no_load,
+            json,
+        ),
         Command::Discover(a) => discover::run(a),
+        #[cfg(feature = "semantic")]
         Command::Embed {
             repo,
             pg_url,
@@ -83,8 +151,10 @@ pub fn main() -> Result<()> {
                 falkor_url: _,
                 json,
             } => group::run_group_sync(&name, json),
+            GroupCommand::Status { name, json } => group::run_group_status(&name, json),
         },
         Command::Wiki(a) => wiki::run(a),
+        Command::Refresh(a) => refresh::run(a),
         Command::Features { command } => match command {
             FeaturesCommand::Show { repo, json } => features::run_features_show(repo, json),
             FeaturesCommand::Override {
@@ -122,6 +192,7 @@ pub fn main() -> Result<()> {
         Command::Taint(a) => taint::run_taint(
             a.repo,
             taint::TaintFlags {
+                backend: a.db.backend,
                 falkor_url: a.db.falkor_url,
                 graph_key: a.db.graph_key,
                 no_load: a.db.no_load,

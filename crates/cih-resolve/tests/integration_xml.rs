@@ -462,3 +462,56 @@ fn namespaced_beans_prefix_and_entity_are_parsed() {
         .expect("namespaced <beans:bean> should parse");
     assert_eq!(bean.name, "a&b", "entity in attribute must be decoded");
 }
+
+#[test]
+fn spring_dm_service_uses_spring_source_label() {
+    // Spring-DM <osgi:service> in a spring beans file: the node's source must
+    // reflect the actual file kind, and a same-file <bean id> matching the
+    // service's ref must not collide on node id.
+    let xml = r#"<beans xmlns="http://www.springframework.org/schema/beans"
+        xmlns:osgi="http://www.springframework.org/schema/osgi">
+        <bean id="remittanceServiceImpl" class="com.acme.remit.RemittanceServiceImpl"/>
+        <osgi:service ref="remittanceServiceImpl" interface="com.acme.remit.RemittanceService"/>
+    </beans>"#;
+    let out = extract_integration_xml("META-INF/spring/bundle-context-rest-osgi.xml", xml);
+
+    let service = out
+        .nodes
+        .iter()
+        .find(|n| {
+            n.props
+                .as_ref()
+                .and_then(|p| p.get("interface"))
+                .and_then(|v| v.as_str())
+                == Some("com.acme.remit.RemittanceService")
+        })
+        .expect("service node");
+    assert_eq!(prop(service, "source"), Some("spring_xml"));
+
+    let bean = out
+        .nodes
+        .iter()
+        .find(|n| {
+            n.props
+                .as_ref()
+                .and_then(|p| p.get("class"))
+                .and_then(|v| v.as_str())
+                == Some("com.acme.remit.RemittanceServiceImpl")
+        })
+        .expect("bean node");
+    assert_ne!(bean.id, service.id, "bean and service ids must not collide");
+}
+
+#[test]
+fn spring_dm_only_file_is_detected() {
+    // A bundle-context-*-osgi.xml with ONLY osgi wiring (no <bean>, no CXF
+    // namespace) must still be recognized as integration XML.
+    let xml = r#"<beans xmlns="http://www.springframework.org/schema/beans"
+        xmlns:osgi="http://www.springframework.org/schema/osgi">
+        <osgi:service ref="remittanceBOImpl" interface="com.acme.remit.RemittanceBO"/>
+    </beans>"#;
+    let out = extract_integration_xml("META-INF/spring/bundle-context-osgi.xml", xml);
+    assert_eq!(out.nodes.len(), 1);
+    assert_eq!(prop(&out.nodes[0], "source"), Some("spring_xml"));
+    assert_eq!(prop(&out.nodes[0], "ref"), Some("remittanceBOImpl"));
+}

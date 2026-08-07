@@ -37,7 +37,7 @@
 //! - **Phase 3** (`pdg` + `flow_sensitive`): reaching-definitions data-flow → PDG → flow-sensitive,
 //!   kill-aware taint. Tracks which *definitions* are tainted (not just variables).
 //!
-//! See `docs/plans/cfg-pdg-taint-analysis.md` for the full design rationale.
+//! See `docs/agent-workflows/security.md` for the supported security workflow.
 
 pub(crate) mod confidence;
 pub(crate) mod java_ast;

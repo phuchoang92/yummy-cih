@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "repositories": [
+    {
+      "label": "service-01",
+      "repo": "registry-selector-01",
+      "artifacts_dir": "/workspace/service-01/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    },
+    {
+      "label": "service-02",
+      "repo": "registry-selector-02",
+      "artifacts_dir": "/workspace/service-02/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    },
+    {
+      "label": "service-03",
+      "repo": "registry-selector-03",
+      "artifacts_dir": "/workspace/service-03/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    },
+    {
+      "label": "service-04",
+      "repo": "registry-selector-04",
+      "artifacts_dir": "/workspace/service-04/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    },
+    {
+      "label": "service-05",
+      "repo": "registry-selector-05",
+      "artifacts_dir": "/workspace/service-05/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    },
+    {
+      "label": "service-06",
+      "repo": "registry-selector-06",
+      "artifacts_dir": "/workspace/service-06/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    },
+    {
+      "label": "service-07",
+      "repo": "registry-selector-07",
+      "artifacts_dir": "/workspace/service-07/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    },
+    {
+      "label": "service-08",
+      "repo": "registry-selector-08",
+      "artifacts_dir": "/workspace/service-08/.cih/artifacts",
+      "search_query": "known present service symbol",
+      "grep_pattern": "known present literal",
+      "grep_glob": ""
+    }
+  ]
+}

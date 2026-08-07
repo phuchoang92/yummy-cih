@@ -44,30 +44,13 @@ fn is_noise_line(line: &str) -> bool {
 }
 
 fn is_log_call(t: &str) -> bool {
-    let prefixes = [
-        "log.",
-        "logger.",
-        "LOG.",
-        "LOGGER.",
-        "log.debug",
-        "log.info",
-        "log.warn",
-        "log.error",
-        "log.trace",
-        "logger.debug",
-        "logger.info",
-        "logger.warn",
-        "logger.error",
-    ];
+    // Prefix-only check: a line is a log call only if it *starts with* a known
+    // logger variable. The old contains(".info(") && contains("log.") approach
+    // was unsound — any line calling .info() on a non-logger object that also
+    // happened to mention the string "log." (e.g. in a string literal) was
+    // incorrectly stripped.
+    let prefixes = ["log.", "logger.", "LOG.", "LOGGER."];
     prefixes.iter().any(|p| t.starts_with(p))
-        || (t.contains(".debug(")
-            || t.contains(".info(")
-            || t.contains(".warn(")
-            || t.contains(".error("))
-            && (t.contains("log.")
-                || t.contains("logger.")
-                || t.contains("LOG.")
-                || t.contains("LOGGER."))
 }
 
 fn is_null_guard(t: &str) -> bool {
@@ -76,9 +59,25 @@ fn is_null_guard(t: &str) -> bool {
 }
 
 fn is_trivial_getter_body(t: &str) -> bool {
-    // Only strip explicit this.field returns, not bare variable returns
-    // (bare variable returns can carry domain meaning like "return order").
-    (t.starts_with("return this.") && t.ends_with(';') && !t.contains('(')) || t == "return this;"
+    // Only strip an exact explicit field return. Prefix matches such as
+    // `return this.total + tax;` or `return this.items[0];` carry behavior and
+    // must remain in the embedding text.
+    let Some(expression) = t
+        .strip_prefix("return ")
+        .and_then(|value| value.strip_suffix(';'))
+        .map(str::trim)
+    else {
+        return false;
+    };
+    let Some(field) = expression.strip_prefix("this.") else {
+        return false;
+    };
+    let mut chars = field.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_alphanumeric())
 }
 
 #[cfg(test)]
@@ -101,13 +100,21 @@ mod tests {
     fn strips_trivial_this_getter_and_super_delegation() {
         assert_eq!(strip_java_body("super();"), "");
         assert_eq!(strip_java_body("return this.name;"), "");
-        assert_eq!(strip_java_body("return this;"), "");
     }
 
     #[test]
     fn preserves_domain_bearing_lines() {
         // A bare-variable return can carry meaning; a method call is not a getter.
         assert_eq!(strip_java_body("return order;"), "return order;");
+        assert_eq!(strip_java_body("return this;"), "return this;");
+        assert_eq!(
+            strip_java_body("return this.total + tax;"),
+            "return this.total + tax;"
+        );
+        assert_eq!(
+            strip_java_body("return this.items[0];"),
+            "return this.items[0];"
+        );
         assert_eq!(
             strip_java_body("return this.calculate();"),
             "return this.calculate();"

@@ -4,9 +4,9 @@ use anyhow::{bail, Context, Result};
 use cih_wiki::features::group_communities_by_feature;
 use cih_wiki::graph::route_path;
 use cih_wiki::{
-    generate_wiki, ClassEnrichmentStore, CommunityLlmFull, CommunityLlmSummary,
-    ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary, WikiGenerationInfo, WikiInput,
-    WikiLlmInfo, WikiModuleTree,
+    generate_wiki, ClassEnrichmentStore, CommunityFullCacheEntry, CommunityLlmFull,
+    CommunityLlmSummary, ControllerLlmSummary, FeatureLlmSummary, FlowLlmSummary,
+    WikiGenerationInfo, WikiInput, WikiLlmInfo, WikiModuleTree,
 };
 
 use crate::llm::evidence::EvidenceCorpus;
@@ -16,8 +16,8 @@ use super::cache::persist_wiki_meta_caches;
 use super::class_enrich::enrich_classes_for_chains;
 use super::community_enrich::{run_community_full_enrichment, run_process_flow_enrichment};
 use super::config::{
-    fnv64, load_class_enrichment, load_wiki_meta, save_class_enrichment, LlmRunParams, WikiConfig,
-    WikiGrouping, WikiMode,
+    fnv64, llm_cache_key, load_class_enrichment, load_wiki_meta, save_class_enrichment,
+    LlmRunParams, WikiConfig, WikiGrouping, WikiMode, PROMPT_VERSION,
 };
 use super::feature_enrich::{
     build_feature_citation_map, build_feature_evidence, cached_feature_summary, enrich_one_feature,
@@ -57,6 +57,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         filter_feature,
         filter_route,
         json,
+        check_only,
+        since_ref,
+        stage_and_swap,
+        update_agents_md,
     } = cfg;
     let repo = repo.as_path();
     let default_model = match llm_provider {
@@ -125,6 +129,66 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         feature_of,
     } = art;
     let repo_name_display = repo_name.clone();
+
+    // ── No-op gate (P1.1) ──────────────────────────────────────────────────────
+    // Read current HEAD and compute a hash of the flags that affect page content.
+    // If all three match the stored wiki_meta.json, the output is already up to date.
+    let repo_commit = cih_core::git_head(repo);
+    let flags_hash = fnv64(&format!(
+        "{}\x00{}\x00{}\x00{}\x00{}",
+        wiki_mode, grouping, wiki_language, llm_model, PROMPT_VERSION
+    ));
+    let existing_meta = load_wiki_meta(&out_dir);
+    let wiki_up_to_date =
+        is_wiki_up_to_date(&existing_meta, &repo_commit, &graph_version, &flags_hash);
+    if check_only {
+        if wiki_up_to_date {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "up_to_date",
+                        "head": repo_commit,
+                        "graph_version": graph_version,
+                    }))?
+                );
+            } else {
+                println!(
+                    "wiki is up to date (HEAD={}, graph={})",
+                    repo_commit.as_deref().unwrap_or("unknown"),
+                    graph_version
+                );
+            }
+            return Ok(());
+        } else {
+            let reason =
+                wiki_stale_reason(&existing_meta, &repo_commit, &graph_version, &flags_hash);
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "stale",
+                        "reason": reason,
+                    }))?
+                );
+            } else {
+                eprintln!("wiki is stale: {reason}");
+            }
+            std::process::exit(2);
+        }
+    }
+    if wiki_up_to_date {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"status": "up_to_date"}))?
+            );
+        } else {
+            println!("wiki is up to date — nothing to do");
+        }
+        return Ok(());
+    }
+    // ──────────────────────────────────────────────────────────────────────────
 
     let (adapter, api_key): (Option<Box<dyn crate::llm::LlmAdapter>>, Option<String>) =
         if effective_run_llm || grouping == WikiGrouping::Llm {
@@ -230,12 +294,20 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         (None, None)
     };
 
+    let prev_full_cache: BTreeMap<String, CommunityFullCacheEntry> = if incremental {
+        load_wiki_meta(&out_dir)
+            .map(|m| m.full_cache)
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+    let mut full_cache_updates: Vec<(String, String, CommunityLlmFull)> = Vec::new();
     let llm_full_map: Option<HashMap<String, CommunityLlmFull>> =
         if wiki_mode == WikiMode::LlmFull && llm_no_call {
             tracing::info!("skipping llm-full enrichment because dry-run/debug mode is enabled");
             None
         } else if wiki_mode == WikiMode::LlmFull {
-            run_community_full_enrichment(
+            let (map, updates) = run_community_full_enrichment(
                 &community_nodes,
                 &wiki_graph,
                 repo,
@@ -245,8 +317,11 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                 llm_params
                     .as_ref()
                     .expect("LLM params set when run_llm is active"),
+                &prev_full_cache,
                 json,
-            )
+            );
+            full_cache_updates = updates;
+            map
         } else {
             None
         };
@@ -328,7 +403,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                             repo,
                             &evidence_corpus,
                         );
-                        let ev_hash = fnv64(&merged_ev);
+                        let ev_hash = llm_cache_key(&merged_ev, llm_model, wiki_language);
                         let citation_map = build_feature_citation_map(
                             &group.community_ids,
                             &wiki_graph,
@@ -346,7 +421,7 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
                             ui_feat
                                 .lock()
                                 .expect("UI progress mutex poisoned")
-                                .tick_skipped(format!("{} (cached)", &group.feature));
+                                .tick_skipped(format!("{} (cached)", group.feature));
                             return Some((group.feature.clone(), cached, ev_hash));
                         }
 
@@ -461,17 +536,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             let (route_flows, updates) = enrich_route_flows(
                 &wiki_graph,
                 route_flow_scope.as_ref(),
-                adapter
+                llm_params
                     .as_ref()
-                    .expect("LLM adapter set when run_llm is active")
-                    .as_ref(),
-                api_key.as_deref(),
-                llm_model,
-                llm_max_tokens,
-                llm_timeout_secs,
-                llm_retries,
-                wiki_language,
-                llm_dry_run,
+                    .expect("LLM params set when run_llm is active"),
                 &prev_flow_cache,
                 pool.as_ref()
                     .expect("thread pool set when run_llm is active"),
@@ -484,17 +551,9 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         let (route_flows, updates) = enrich_route_flows(
             &wiki_graph,
             route_flow_scope.as_ref(),
-            adapter
+            llm_params
                 .as_ref()
-                .expect("LLM adapter set when run_llm is active")
-                .as_ref(),
-            api_key.as_deref(),
-            llm_model,
-            llm_max_tokens,
-            llm_timeout_secs,
-            llm_retries,
-            wiki_language,
-            llm_dry_run,
+                .expect("LLM params set when run_llm is active"),
             &prev_flow_cache,
             pool.as_ref()
                 .expect("thread pool set when run_llm is active"),
@@ -567,35 +626,147 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         flow_llm_summaries: flow_llm_map,
         grouping: grouping.to_string(),
         filter_feature,
-        bodies,
+        bodies: std::sync::Arc::new(bodies),
         feature_of,
         entrypoints,
+        repo_commit: repo_commit.clone(),
+        flags_hash: Some(flags_hash),
+        changed_files: since_ref.as_deref().map(|r| {
+            cih_core::git_changed_files(repo, r)
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        }),
     };
 
-    tracing::info!(out_dir = %out_dir.display(), "generating wiki pages");
+    // ── Stage-and-swap setup ───────────────────────────────────────────────────
+    // When --stage-and-swap is set, write all pages into a sibling `.tmp`
+    // directory so that the final rename into `out_dir` is atomic.  This
+    // prevents readers (Docusaurus dev server, rsync, CI) from observing a
+    // partially-written wiki during the generation pass.
+    let stage_dir = out_dir.with_extension("tmp");
+    let effective_out = if stage_and_swap {
+        // Wipe any leftover staging dir from a previous interrupted run.
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(&stage_dir).context("removing leftover staging dir")?;
+        }
+        stage_dir.clone()
+    } else {
+        out_dir.clone()
+    };
+
+    tracing::info!(out_dir = %effective_out.display(), "generating wiki pages");
     let mut ui_gen = crate::ui::PhaseProgress::new();
     if json {
         ui_gen.hide();
     }
     ui_gen.spin("Generating pages");
-    let outcome = generate_wiki(input, &out_dir)?;
+    let mut outcome = generate_wiki(input, &effective_out)?;
     ui_gen.finish_with(format!("{} pages", outcome.page_count));
 
     tracing::info!(
         pages = outcome.page_count,
+        pages_written = outcome.pages_written,
+        pages_unchanged = outcome.pages_unchanged,
         communities = outcome.community_count,
         routes = outcome.route_count,
         llm_enriched = outcome.llm_enriched,
-        out_dir = %outcome.out_dir.display(),
+        out_dir = %effective_out.display(),
         "wiki generation complete"
     );
 
-    persist_wiki_meta_caches(&out_dir, &[], &feature_cache_updates, &flow_cache_updates)?;
+    persist_wiki_meta_caches(
+        &effective_out,
+        &[],
+        &feature_cache_updates,
+        &flow_cache_updates,
+        &full_cache_updates,
+    )?;
 
     if let Some(store) = &class_enrichment_store {
         let cih_dir = repo.join(".cih");
         if let Err(e) = save_class_enrichment(&cih_dir, store) {
             tracing::warn!(error = %e, "failed to save class enrichment cache");
+        }
+    }
+
+    // ── Atomic swap ───────────────────────────────────────────────────────────
+    if stage_and_swap {
+        let bak_dir = out_dir.with_extension("bak");
+        // Rotate: old → .bak so we can restore on failure.
+        if out_dir.exists() {
+            if bak_dir.exists() {
+                std::fs::remove_dir_all(&bak_dir).context("removing stale .bak dir")?;
+            }
+            std::fs::rename(&out_dir, &bak_dir).context("rotating out_dir to .bak")?;
+        }
+        if let Err(e) = std::fs::rename(&stage_dir, &out_dir) {
+            // Restore the previous output so the site keeps serving.
+            if bak_dir.exists() {
+                let _ = std::fs::rename(&bak_dir, &out_dir);
+            }
+            return Err(e).context("swapping staging dir into out_dir");
+        }
+        // Swap succeeded — remove the backup and fix outcome paths.
+        if bak_dir.exists() {
+            let _ = std::fs::remove_dir_all(&bak_dir);
+        }
+        if let Ok(rel) = outcome.manifest_path.strip_prefix(&stage_dir) {
+            outcome.manifest_path = out_dir.join(rel);
+        }
+        if let Ok(rel) = outcome.agent_index_path.strip_prefix(&stage_dir) {
+            outcome.agent_index_path = out_dir.join(rel);
+        }
+        outcome.out_dir = out_dir.clone();
+    }
+
+    if update_agents_md {
+        let wiki_rel = outcome
+            .out_dir
+            .strip_prefix(repo)
+            .unwrap_or(&outcome.out_dir)
+            .display()
+            .to_string();
+        let index_rel = outcome
+            .agent_index_path
+            .strip_prefix(repo)
+            .unwrap_or(&outcome.agent_index_path)
+            .display()
+            .to_string();
+        // Core block (no leading newline — surrounding newlines are managed per-case below).
+        let block_core = format!(
+            "<!-- cih-wiki:start -->\n## CIH Wiki\n\
+             This repository's wiki is at `{wiki_rel}/`. \
+             Agent navigation index: `{index_rel}`.\n\
+             <!-- cih-wiki:end -->"
+        );
+        for filename in &["AGENTS.md", "CLAUDE.md"] {
+            let path = repo.join(filename);
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            let updated = if let (Some(start), Some(end)) = (
+                existing.find("<!-- cih-wiki:start -->"),
+                existing.find("<!-- cih-wiki:end -->"),
+            ) {
+                // Replace in-place: keep whatever surrounds the block as-is.
+                let end_pos = end + "<!-- cih-wiki:end -->".len();
+                format!(
+                    "{}{}{}",
+                    &existing[..start],
+                    block_core,
+                    &existing[end_pos..]
+                )
+            } else {
+                // Append: add a blank-line separator then a trailing newline.
+                let prefix = existing.trim_end_matches('\n');
+                if prefix.is_empty() {
+                    format!("\n{}\n", block_core)
+                } else {
+                    format!("{}\n\n{}\n", prefix, block_core)
+                }
+            };
+            if updated != existing {
+                std::fs::write(&path, &updated)
+                    .with_context(|| format!("writing pointer block to {}", path.display()))?;
+            }
         }
     }
 
@@ -605,7 +776,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "out_dir": outcome.out_dir.display().to_string(),
                 "manifest_path": outcome.manifest_path.display().to_string(),
+                "agent_index_path": outcome.agent_index_path.display().to_string(),
                 "page_count": outcome.page_count,
+                "pages_written": outcome.pages_written,
+                "pages_unchanged": outcome.pages_unchanged,
                 "community_count": outcome.community_count,
                 "route_count": outcome.route_count,
                 "llm_enriched": outcome.llm_enriched,
@@ -636,8 +810,179 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
         }
         crate::ui::print_row("Output", &outcome.out_dir.display().to_string());
         crate::ui::print_row("Manifest", &outcome.manifest_path.display().to_string());
+        crate::ui::print_row(
+            "Agent index",
+            &outcome.agent_index_path.display().to_string(),
+        );
         eprintln!();
     }
 
     Ok(())
+}
+
+/// Check whether the wiki needs regeneration without actually running it.
+///
+/// Returns `true` when regeneration is needed (HEAD, graph version, or flags changed).
+/// Used by `refresh` to decide whether to call `run_wiki`.
+pub(crate) fn wiki_needs_regen(
+    repo: &std::path::Path,
+    out_dir: &std::path::Path,
+    wiki_mode: super::config::WikiMode,
+    grouping: super::config::WikiGrouping,
+    wiki_language: &str,
+    llm_model: &str,
+) -> bool {
+    let repo_commit = cih_core::git_head(repo);
+    let graph_version = crate::versioning::latest_graph_artifacts(repo)
+        .map(|a| a.version.to_string())
+        .unwrap_or_default();
+    let flags_hash = super::config::fnv64(&format!(
+        "{}\x00{}\x00{}\x00{}\x00{}",
+        wiki_mode,
+        grouping,
+        wiki_language,
+        llm_model,
+        super::config::PROMPT_VERSION
+    ));
+    let existing_meta = super::config::load_wiki_meta(out_dir);
+    !is_wiki_up_to_date(&existing_meta, &repo_commit, &graph_version, &flags_hash)
+}
+
+/// Returns true when the existing wiki output is current and does not need regeneration.
+/// Requires all three signals to match: git HEAD, graph version, and effective wiki flags.
+/// For repos without git, HEAD is None and the gate never fires (safe conservative default).
+pub(super) fn is_wiki_up_to_date(
+    meta: &Option<cih_wiki::WikiMeta>,
+    head: &Option<String>,
+    graph_version: &str,
+    flags_hash: &str,
+) -> bool {
+    meta.as_ref().is_some_and(|m| {
+        m.repo_commit.is_some()
+            && m.repo_commit == *head
+            && m.graph_version == graph_version
+            && m.flags_hash.as_deref() == Some(flags_hash)
+    })
+}
+
+fn wiki_stale_reason(
+    meta: &Option<cih_wiki::WikiMeta>,
+    head: &Option<String>,
+    graph_version: &str,
+    flags_hash: &str,
+) -> String {
+    let Some(m) = meta else {
+        return "wiki has not been generated yet".to_string();
+    };
+    let mut reasons: Vec<&str> = Vec::new();
+    if m.repo_commit.as_deref() != head.as_deref() {
+        reasons.push("HEAD changed");
+    }
+    if m.graph_version != graph_version {
+        reasons.push("graph version changed");
+    }
+    if m.flags_hash.as_deref() != Some(flags_hash) {
+        reasons.push("wiki flags changed");
+    }
+    if reasons.is_empty() {
+        "repo_commit is not set in existing wiki_meta.json".to_string()
+    } else {
+        reasons.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cih_wiki::WikiMeta;
+    use std::collections::BTreeMap;
+
+    fn make_meta(commit: Option<&str>, graph: &str, flags: Option<&str>) -> WikiMeta {
+        WikiMeta {
+            schema_version: 1,
+            repo_commit: commit.map(str::to_string),
+            graph_version: graph.to_string(),
+            community_version: "v1".to_string(),
+            model: None,
+            language: None,
+            prompt_version: "1".to_string(),
+            module_cache: BTreeMap::new(),
+            feature_cache: BTreeMap::new(),
+            flow_cache: BTreeMap::new(),
+            full_cache: BTreeMap::new(),
+            flags_hash: flags.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn gate_fires_when_all_three_signals_match() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv1",
+            "fh1"
+        ));
+    }
+
+    #[test]
+    fn gate_misses_when_head_changes() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("def456".into()),
+            "gv1",
+            "fh1"
+        ));
+    }
+
+    #[test]
+    fn gate_misses_when_graph_version_changes() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv2",
+            "fh1"
+        ));
+    }
+
+    #[test]
+    fn gate_misses_when_flags_change() {
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv1",
+            "fh2"
+        ));
+    }
+
+    #[test]
+    fn gate_misses_when_no_existing_meta() {
+        assert!(!is_wiki_up_to_date(
+            &None,
+            &Some("abc123".into()),
+            "gv1",
+            "fh1"
+        ));
+    }
+
+    #[test]
+    fn gate_misses_for_non_git_repos() {
+        // When git_head() returns None, gate never fires even if other signals match.
+        let meta = Some(make_meta(Some("abc123"), "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(&meta, &None, "gv1", "fh1"));
+    }
+
+    #[test]
+    fn gate_misses_when_meta_has_no_commit() {
+        let meta = Some(make_meta(None, "gv1", Some("fh1")));
+        assert!(!is_wiki_up_to_date(
+            &meta,
+            &Some("abc123".into()),
+            "gv1",
+            "fh1"
+        ));
+    }
 }

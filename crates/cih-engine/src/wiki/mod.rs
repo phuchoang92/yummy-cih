@@ -17,6 +17,7 @@ pub use feature_enrich::{
 pub use flow_enrich::parse_flow_summary;
 pub use loader::community_matches_route_prefix;
 pub use run::run_wiki;
+pub(crate) use run::wiki_needs_regen;
 
 #[cfg(test)]
 mod tests;

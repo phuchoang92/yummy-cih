@@ -96,7 +96,7 @@ async fn run_burst(store: &Arc<FalkorStore>, n: usize) -> (u64, u64) {
                 Ok(_) => {
                     ok.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(GraphStoreError::Backend(m)) if m.contains("overloaded") => {
+                Err(GraphStoreError::Overloaded { .. }) => {
                     shed.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => panic!("unexpected error: {e:?}"),

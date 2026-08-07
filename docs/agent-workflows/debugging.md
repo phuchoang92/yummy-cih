@@ -84,6 +84,22 @@ impact({ name: "Method:com.acme.PaymentService#processPayment", direction: "down
 Downstream impact shows what repositories, external clients, and utilities this method
 reaches. Useful for understanding side effects (DB writes, event publishing, cache invalidation).
 
+When the question names a concrete destination, ask it directly instead of
+inferring from a broad impact list:
+
+```
+reaches({
+  from: "Route:POST /api/payments",
+  to: "DbTable:PAYMENT_AUDIT",
+  access: "write",
+  max_depth: 8
+})
+```
+
+For database targets, `access: "read"` or `"write"` requires the final edge to
+have that operation. Read the returned `status`: `inconclusive` means a traversal
+budget was exhausted and must not be reported as unreachable.
+
 ### Step 6 — Expand the local call neighbourhood
 
 ```

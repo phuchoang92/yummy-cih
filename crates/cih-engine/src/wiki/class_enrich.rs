@@ -8,7 +8,7 @@ use cih_wiki::{
 };
 use rayon::prelude::*;
 
-use super::config::fnv64;
+use super::config::llm_cache_key;
 use crate::llm::{backoff_ms, LlmAdapter, LlmRequest};
 use crate::ui::PhaseProgress;
 
@@ -34,33 +34,8 @@ pub fn enrich_classes_for_chains(
     HashMap<String, CommunityLlmSummary>,
     ClassEnrichmentStore,
 )> {
-    let mut class_methods: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for routes in wiki_graph.routes_by_controller.values() {
-        for (handler, route) in routes {
-            if !filter_route.is_empty() && {
-                let path = cih_wiki::graph::route_path(route);
-                !filter_route.iter().any(|f| path.contains(f.as_str()))
-            } {
-                continue;
-            }
-            let chain = wiki_graph.build_call_chain(handler.id.as_str(), 4);
-            for method_id in chain {
-                let fqcn = method_id
-                    .strip_prefix("Method:")
-                    .or_else(|| method_id.strip_prefix("Constructor:"))
-                    .and_then(|s| s.split('#').next())
-                    .unwrap_or("")
-                    .to_string();
-                if fqcn.is_empty() {
-                    continue;
-                }
-                let methods = class_methods.entry(fqcn).or_default();
-                if !methods.contains(&method_id) {
-                    methods.push(method_id);
-                }
-            }
-        }
-    }
+    // Shared, LLM-free traversal (also used by the live-serving read-only path).
+    let class_methods = cih_wiki::class_method_chains(wiki_graph, filter_route);
 
     let total = class_methods.len();
     tracing::info!(
@@ -113,7 +88,7 @@ pub fn enrich_classes_for_chains(
                         .map(|(_, b)| *b)
                         .collect::<Vec<_>>()
                         .join("\n---\n");
-                    let content_hash = fnv64(&combined);
+                    let content_hash = llm_cache_key(&combined, model, language);
 
                     if let Some(cached) = prev_entries.get(fqcn.as_str()) {
                         if cached.content_hash == content_hash {
@@ -186,11 +161,10 @@ pub fn enrich_classes_for_chains(
                                 }
                             }
                         }
-                        ok.unwrap_or_else(|| ClassCacheEntry {
-                            content_hash,
-                            method_descriptions: HashMap::new(),
-                            class_summary: String::new(),
-                        })
+                        // Do not cache failures — return None so the class is retried
+                        // on the next incremental run rather than permanently poisoning
+                        // the cache with an empty entry.
+                        ok?
                     };
 
                     Some(((*fqcn).clone(), entry))
@@ -208,64 +182,14 @@ pub fn enrich_classes_for_chains(
         .expect("UI progress mutex poisoned")
         .finish_phase();
 
-    let mut ctrl_map: HashMap<String, ControllerLlmSummary> = HashMap::new();
-    for fqcn in class_methods.keys() {
-        let simple_name = fqcn.rsplit('.').next().unwrap_or(fqcn.as_str()).to_string();
-        if let Some(entry) = updated_entries.get(fqcn.as_str()) {
-            ctrl_map.insert(
-                simple_name,
-                ControllerLlmSummary {
-                    description: entry.class_summary.clone(),
-                    feature: None,
-                    method_descriptions: entry.method_descriptions.clone(),
-                },
-            );
-        }
-    }
+    let store = ClassEnrichmentStore {
+        schema_version: 1,
+        entries: updated_entries,
+    };
+    // Shared, LLM-free aggregation (also used by the live-serving read-only path).
+    let (ctrl_map, comm_map) = cih_wiki::build_class_maps(wiki_graph, &class_methods, &store);
 
-    let mut comm_texts: HashMap<String, Vec<String>> = HashMap::new();
-    for (fqcn, method_ids) in &class_methods {
-        let Some(entry) = updated_entries.get(fqcn.as_str()) else {
-            continue;
-        };
-        if entry.class_summary.is_empty() {
-            continue;
-        }
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for mid in method_ids {
-            if let Some(comm_id) = wiki_graph.community_by_member.get(mid.as_str()) {
-                if seen.insert(comm_id.as_str()) {
-                    comm_texts
-                        .entry(comm_id.clone())
-                        .or_default()
-                        .push(entry.class_summary.clone());
-                }
-            }
-        }
-    }
-    let comm_map: HashMap<String, CommunityLlmSummary> = comm_texts
-        .into_iter()
-        .map(|(id, summaries)| {
-            let text = summaries.join(" ");
-            (
-                id,
-                CommunityLlmSummary {
-                    po: text.clone(),
-                    ba: text,
-                    dev: String::new(),
-                },
-            )
-        })
-        .collect();
-
-    Ok((
-        ctrl_map,
-        comm_map,
-        ClassEnrichmentStore {
-            schema_version: 1,
-            entries: updated_entries,
-        },
-    ))
+    Ok((ctrl_map, comm_map, store))
 }
 
 fn build_class_system_prompt(language: &str) -> String {
@@ -281,7 +205,7 @@ fn build_class_enrich_prompt(fqcn: &str, bodies: &[(&str, &str)]) -> String {
             .nth(1)
             .and_then(|x| x.split('/').next())
             .unwrap_or("unknown");
-        let truncated = if body.len() > 600 { &body[..600] } else { body };
+        let truncated = truncate_utf8(body, 600);
         s.push_str(&format!("{}. {}\n{}\n\n", i + 1, method_name, truncated));
     }
     s.push_str(
@@ -375,4 +299,16 @@ fn parse_class_enrich_response(text: &str) -> Result<(String, HashMap<String, St
         "failed to extract class JSON from LLM response: {:?}",
         &text[..text.len().min(200)]
     )
+}
+
+/// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8 char.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }

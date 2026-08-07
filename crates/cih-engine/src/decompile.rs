@@ -101,9 +101,13 @@ pub fn run_decompile_precheck(
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
+    // Size the slot bookkeeping to the pool's ACTUAL width: the fallback pool
+    // above may have more threads than `threads`, and there must be one display
+    // slot per worker or `slot_pool.pop_front()` underflows (panics) under load.
+    let slot_count = pool.current_num_threads().max(1);
     // N-slot live display: each rayon worker holds one slot while processing a JAR.
-    let slots: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![None; threads]));
-    let slot_pool: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..threads).collect()));
+    let slots: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![None; slot_count]));
+    let slot_pool: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..slot_count).collect()));
 
     let results: Vec<(PathBuf, Result<usize>, bool)> = pool.install(|| {
         jars.par_iter()
@@ -309,6 +313,15 @@ fn ensure_tool_jar(config: &DecompileConfig, tool: &str, cih_dir: &Path) -> Resu
     if dest.exists() {
         tracing::debug!(path = %dest.display(), "tool JAR already downloaded");
         return Ok(dest);
+    }
+
+    if std::env::var("CIH_OFFLINE").is_ok_and(|value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    }) {
+        bail!(
+            "decompiler tool {tool:?} is not installed and CIH_OFFLINE forbids downloading it; \
+             configure tool_jar/tool_bin to a local tool or disable decompilation"
+        );
     }
 
     download_tool(release.url, &dest, release.filename)?;

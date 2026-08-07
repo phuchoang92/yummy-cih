@@ -340,3 +340,93 @@ fn normalize(out: &mut JarApiOutput) {
         .dedup_by(|a, b| a.src == b.src && a.dst == b.dst && a.kind == b.kind);
     out.skipped.sort_by(|a, b| a.entry.cmp(&b.entry));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cafebabe::descriptors::ClassName;
+    use std::borrow::Cow;
+
+    fn class_name(internal: &str) -> ClassName<'_> {
+        ClassName::try_from(Cow::Borrowed(internal)).unwrap()
+    }
+
+    #[test]
+    fn internal_name_to_fqcn_maps_slashes_and_dollars() {
+        assert_eq!(internal_to_fqcn("com/acme/Sample"), "com.acme.Sample");
+        assert_eq!(
+            internal_to_fqcn("com/acme/Outer$Inner"),
+            "com.acme.Outer.Inner"
+        );
+        assert_eq!(internal_to_fqcn("Top"), "Top");
+    }
+
+    #[test]
+    fn anonymous_and_local_classes_detected() {
+        // Anonymous (`Outer$1`) and local (`Outer$1Local`) — a `$`-segment that
+        // starts with a digit.
+        assert!(is_anonymous_or_local("com/acme/Outer$1"));
+        assert!(is_anonymous_or_local("com/acme/Outer$1Local"));
+        // Named nested classes are NOT anonymous/local.
+        assert!(!is_anonymous_or_local("com/acme/Outer$Inner"));
+        assert!(!is_anonymous_or_local("com/acme/Sample"));
+        // A digit-starting segment anywhere in the nest chain still counts.
+        assert!(is_anonymous_or_local("com/acme/Outer$1$Deep"));
+    }
+
+    #[test]
+    fn info_classes_recognized_at_any_depth() {
+        assert!(is_info_class("module-info.class"));
+        assert!(is_info_class("com/acme/package-info.class"));
+        assert!(!is_info_class("com/acme/Sample.class"));
+        assert!(!is_info_class("com/acme/Infoish.class"));
+    }
+
+    #[test]
+    fn class_kind_from_access_flags() {
+        assert_eq!(class_kind(ClassAccessFlags::MODULE), None);
+        assert_eq!(
+            class_kind(ClassAccessFlags::INTERFACE),
+            Some(NodeKind::Interface)
+        );
+        assert_eq!(class_kind(ClassAccessFlags::ENUM), Some(NodeKind::Enum));
+        assert_eq!(
+            class_kind(ClassAccessFlags::ANNOTATION),
+            Some(NodeKind::Annotation)
+        );
+        // A plain class (no special flag) — and records land here too.
+        assert_eq!(class_kind(ClassAccessFlags::PUBLIC), Some(NodeKind::Class));
+    }
+
+    fn fd(field_type: FieldType<'_>, dimensions: u8) -> FieldDescriptor<'_> {
+        FieldDescriptor {
+            field_type,
+            dimensions,
+        }
+    }
+
+    #[test]
+    fn render_field_primitives_objects_and_arrays() {
+        assert_eq!(render_field(&fd(FieldType::Integer, 0)), "int");
+        assert_eq!(render_field(&fd(FieldType::Boolean, 0)), "boolean");
+        assert_eq!(
+            render_field(&fd(FieldType::Object(class_name("java/lang/String")), 0)),
+            "java.lang.String"
+        );
+        // Dimensions render as trailing `[]` pairs.
+        assert_eq!(render_field(&fd(FieldType::Long, 2)), "long[][]");
+        assert_eq!(
+            render_field(&fd(FieldType::Object(class_name("java/util/List")), 1)),
+            "java.util.List[]"
+        );
+    }
+
+    #[test]
+    fn render_return_void_and_value() {
+        assert_eq!(render_return(&ReturnDescriptor::Void), "void");
+        assert_eq!(
+            render_return(&ReturnDescriptor::Return(fd(FieldType::Double, 0))),
+            "double"
+        );
+    }
+}

@@ -1,7 +1,8 @@
 //! Canonical bulk-load artifacts (JSONL v1) and bundle archive (Gap 5).
 //!
-//! The engine emits `nodes.jsonl` + `edges.jsonl`; each `BulkLoader` reads these
-//! and transforms them into its backend's load format. JSONL keeps Phase 2
+//! The engine emits `nodes.jsonl` + `edges.jsonl`; each `GraphStore` adapter's
+//! `bulk_load` reads these and transforms them into its backend's load format.
+//! JSONL keeps Phase 2
 //! dependency-free (serde_json only); swap to Parquet when the Neptune S3 loader
 //! path needs columnar input (Phase 11).
 //!
@@ -42,6 +43,17 @@ impl GraphArtifacts {
 
     pub fn read_edges(&self) -> std::io::Result<Vec<Edge>> {
         read_jsonl(&self.edges_path)
+    }
+
+    /// Stream `nodes.jsonl` one `Node` per line without holding the whole file —
+    /// used by the bulk loader to keep peak memory low on very large graphs.
+    pub fn stream_nodes(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<Node>>> {
+        stream_jsonl(&self.nodes_path)
+    }
+
+    /// Stream `edges.jsonl` one `Edge` per line. See [`Self::stream_nodes`].
+    pub fn stream_edges(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<Edge>>> {
+        stream_jsonl(&self.edges_path)
     }
 
     /// Return the most-recent `GraphArtifacts` found directly under `parent`.
@@ -131,17 +143,22 @@ fn serialize_jsonl<T: Serialize + Sync>(items: &[T]) -> std::io::Result<Vec<u8>>
     Ok(out)
 }
 
-fn read_jsonl<T: DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
+/// Lazily deserialize a JSONL file, one `T` per non-blank line. Opens the file
+/// eagerly (so an open error surfaces immediately), then yields items without
+/// holding the whole file in memory.
+fn stream_jsonl<T: DeserializeOwned>(
+    path: &Path,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<T>>> {
     let r = BufReader::new(File::open(path)?);
-    let mut out = Vec::new();
-    for line in r.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        out.push(serde_json::from_str(&line).map_err(io_err)?);
-    }
-    Ok(out)
+    Ok(r.lines().filter_map(|line| match line {
+        Ok(l) if l.trim().is_empty() => None,
+        Ok(l) => Some(serde_json::from_str(&l).map_err(io_err)),
+        Err(e) => Some(Err(e)),
+    }))
+}
+
+fn read_jsonl<T: DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
+    stream_jsonl(path)?.collect()
 }
 
 fn io_err(e: serde_json::Error) -> std::io::Error {
@@ -155,7 +172,11 @@ const BUNDLE_MAGIC: &[u8; 8] = b"CIHPACK1";
 /// Write one entry to a bundle: 4-byte LE length + zstd-compressed content.
 fn write_bundle_entry(w: &mut impl Write, content: &[u8]) -> io::Result<()> {
     let compressed = zstd::encode_all(content, 3).map_err(io::Error::other)?;
-    let len = compressed.len() as u32;
+    // The entry length prefix is 4 bytes — refuse rather than silently truncate a
+    // compressed entry that does not fit in u32 (> 4 GiB).
+    let len = u32::try_from(compressed.len()).map_err(|_| {
+        io::Error::other("bundle entry exceeds 4 GiB compressed; cannot encode length")
+    })?;
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&compressed)?;
     Ok(())
@@ -193,6 +214,7 @@ impl GraphArtifacts {
     /// 6. `file-hashes.json`
     /// 7. `scope.json`
     /// 8. `repo-map.json`
+    /// 9. `search-index.bin` (optional derived sidecar)
     pub fn export_bundle(
         &self,
         community: Option<&GraphArtifacts>,
@@ -277,6 +299,14 @@ impl GraphArtifacts {
         write_bundle_entry(&mut w, &read_file_opt(file_hashes)?)?;
         write_bundle_entry(&mut w, &read_file_opt(scope_json)?)?;
         write_bundle_entry(&mut w, &read_file_opt(repo_map_json)?)?;
+        let search_index = self
+            .nodes_path
+            .parent()
+            .map(|dir| dir.join("search-index.bin"))
+            .map(|path| read_file_opt(&path))
+            .transpose()?
+            .unwrap_or_default();
+        write_bundle_entry(&mut w, &search_index)?;
 
         w.flush()?;
         Ok(manifest)
@@ -310,6 +340,11 @@ impl GraphArtifacts {
         let file_hashes_bytes = read_bundle_entry(&mut r)?;
         let scope_bytes = read_bundle_entry(&mut r)?;
         let repo_map_bytes = read_bundle_entry(&mut r)?;
+        let search_index_bytes = match read_bundle_entry(&mut r) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Vec::new(),
+            Err(error) => return Err(error),
+        };
 
         // Restore into cih_dir.
         let art_dir = cih_dir.join("artifacts").join(&manifest.artifact_version);
@@ -319,6 +354,9 @@ impl GraphArtifacts {
         let edges_path = art_dir.join("edges.jsonl");
         fs::write(&nodes_path, &nodes_bytes)?;
         fs::write(&edges_path, &edges_bytes)?;
+        if !search_index_bytes.is_empty() {
+            fs::write(art_dir.join("search-index.bin"), &search_index_bytes)?;
+        }
 
         let main_artifacts = GraphArtifacts {
             nodes_path,
@@ -355,5 +393,44 @@ impl GraphArtifacts {
         }
 
         Ok((main_artifacts, community_artifacts, manifest))
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    #[test]
+    fn bundle_round_trip_preserves_optional_search_sidecar() {
+        let source = tempfile::tempdir().unwrap();
+        let artifact_dir = source.path().join(".cih/artifacts/v1");
+        let artifacts =
+            GraphArtifacts::write(&artifact_dir, VersionId::new("v1"), &[], &[]).unwrap();
+        let sidecar = b"derived-search-sidecar";
+        fs::write(artifact_dir.join("search-index.bin"), sidecar).unwrap();
+        let bundle = source.path().join("repo.cihpack");
+        artifacts
+            .export_bundle(
+                None,
+                &source.path().join("missing-hashes.json"),
+                &source.path().join("missing-scope.json"),
+                &source.path().join("missing-map.json"),
+                &bundle,
+            )
+            .unwrap();
+
+        let destination = tempfile::tempdir().unwrap();
+        let (imported, _, _) = GraphArtifacts::import_bundle(&bundle, destination.path()).unwrap();
+        assert_eq!(
+            fs::read(
+                imported
+                    .nodes_path
+                    .parent()
+                    .unwrap()
+                    .join("search-index.bin")
+            )
+            .unwrap(),
+            sidecar
+        );
     }
 }

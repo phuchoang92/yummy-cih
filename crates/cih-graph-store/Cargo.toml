@@ -10,3 +10,13 @@ serde.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, optional = true }
+
+[features]
+# Backend contract suite (`contract::run_contract_suite`) — adapter test code,
+# not for production builds.
+test-support = ["dep:tokio"]
+
+[dev-dependencies]
+tokio.workspace = true

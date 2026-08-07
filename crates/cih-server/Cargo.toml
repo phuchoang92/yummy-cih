@@ -13,11 +13,12 @@ path = "src/lib.rs"
 
 [dependencies]
 cih-core.workspace = true
-cih-embed.workspace = true
+cih-embed = { workspace = true, optional = true }
 cih-grouping.workspace = true
 cih-graph-store.workspace = true
-cih-falkor.workspace = true
+cih-store-factory = { workspace = true, default-features = false }
 cih-search.workspace = true
+cih-wiki.workspace = true
 cih-taint.workspace = true
 cih-patterns.workspace = true
 tokio.workspace = true
@@ -27,13 +28,38 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 async-trait.workspace = true
+globset.workspace = true
+ignore.workspace = true
+regex.workspace = true
+rayon.workspace = true
+blake3.workspace = true
+rand.workspace = true
 
 axum = { version = "0.8", features = ["macros"] }
-tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "trace", "timeout"] }
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "trace", "timeout", "catch-panic", "limit"] }
 # NOTE: rmcp iterates fast. Pin and verify the macro/transport API against
 # https://docs.rs/rmcp for the exact version you resolve. The tool LOGIC in
 # main.rs is SDK-agnostic; only the #[tool]/ServerHandler wiring is version-sensitive.
 rmcp = { version = "0.7", features = ["server", "macros", "transport-streamable-http-server"] }
 # Must match rmcp's schemars major (rmcp 0.7 → schemars 1.x) or JsonSchema derives the wrong trait.
 schemars = "1"
-reqwest.workspace = true
+constant_time_eq = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+# Client + in-memory transport for the end-to-end MCP dispatch test (dispatch_tests.rs).
+# `server` (a normal-dep feature) already enables transport-async-rw; only `client`
+# is added here, and only for test builds — production `cargo build` stays lean.
+rmcp = { version = "0.7", features = ["client"] }
+# Embedded LadybugDB for the hermetic architecture_overview end-to-end test
+# (overview.rs) — dev-only, so the release binary keeps ladybug opt-in via the
+# feature below. The workspace already builds cih-ladybug for its own contract
+# test, so this adds link time, not a new native build.
+cih-ladybug = { workspace = true }
+
+[features]
+default = ["falkor", "semantic"]
+falkor = ["cih-store-factory/falkor"]
+# Opt-in embedded LadybugDB backend (adds the cih-ladybug adapter to the factory).
+ladybug = ["cih-store-factory/ladybug"]
+semantic = ["dep:cih-embed"]

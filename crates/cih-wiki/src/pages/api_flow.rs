@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::graph::{route_http_method, route_path, WikiGraph};
 use crate::mermaid;
+use crate::pages::{escape_table_cell, mdx_safe};
 use crate::FlowLlmSummary;
 
 /// camelCase method name from a handler node ID → "Title Case Words"
@@ -146,14 +147,14 @@ pub fn render_api_flow_page(
     // Business impact (LLM).
     if let Some(fs) = flow_summary {
         if !fs.business_impact.is_empty() {
-            md.push_str(&fs.business_impact);
+            md.push_str(&mdx_safe(&fs.business_impact));
             md.push_str("\n\n");
         }
     }
     // Handler-level description from method_desc (controller LLM enrichment).
     if let Some(desc) = method_desc.get(handler.id.as_str()) {
         if !desc.is_empty() {
-            md.push_str(desc);
+            md.push_str(&mdx_safe(desc));
             md.push_str("\n\n");
         }
     }
@@ -177,7 +178,7 @@ pub fn render_api_flow_page(
         // LLM narrative if available.
         if let Some(fs) = flow_summary {
             if !fs.narrative.is_empty() {
-                md.push_str(&fs.narrative);
+                md.push_str(&mdx_safe(&fs.narrative));
                 md.push_str("\n\n");
             }
         }
@@ -266,18 +267,18 @@ pub fn render_api_flow_page(
                 md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} | {} |\n",
                     i + 1,
-                    cls,
-                    meth,
-                    desc,
+                    escape_table_cell(cls),
+                    escape_table_cell(meth),
+                    escape_table_cell(&mdx_safe(desc)),
                     db_str
                 ));
             } else if has_desc {
                 md.push_str(&format!(
                     "| {} | `{}` | `{}` | {} |\n",
                     i + 1,
-                    cls,
-                    meth,
-                    desc
+                    escape_table_cell(cls),
+                    escape_table_cell(meth),
+                    escape_table_cell(&mdx_safe(desc))
                 ));
             } else if has_db {
                 let db_str = if step_dbs[i].is_empty() {

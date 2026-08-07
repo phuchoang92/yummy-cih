@@ -1,0 +1,29 @@
+[package]
+name = "cih-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cih"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cih-core.workspace = true
+cih-engine = { workspace = true, default-features = false, features = ["ladybug"] }
+cih-graph-store.workspace = true
+cih-server = { workspace = true, default-features = false, features = ["ladybug"] }
+cih-store-factory = { workspace = true, default-features = false, features = ["ladybug"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

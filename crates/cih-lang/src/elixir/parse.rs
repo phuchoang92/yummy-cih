@@ -78,7 +78,7 @@ fn walk(
                     if let Some(args) = child.child_by_field_name("arguments") {
                         let raw = text(args, src).to_string();
                         if !raw.is_empty() {
-                            imports.push(RawImport { raw, is_static: false, is_wildcard: false, range: range_of(child) });
+                            imports.push(RawImport { raw, is_static: false, is_wildcard: false, alias: None, range: range_of(child) });
                         }
                     }
                 }

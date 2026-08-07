@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use cih_core::{Edge, JarInfo, Node, RepoMap};
@@ -33,83 +33,6 @@ pub fn extract_jar_api(jars: &[JarInfo], fqcns: &[String]) -> (Vec<Node>, Vec<Ed
         }
     }
     (all_nodes, all_edges, failed)
-}
-
-/// Scan the repo for `*.xml` files and run the integration-XML extractor on each.
-/// Best-effort: unreadable files are skipped with a warning, never fatal.
-pub fn extract_integration_xml_in_repo(repo_root: &Path) -> (Vec<Node>, Vec<Edge>) {
-    use rayon::prelude::*;
-    use std::collections::HashSet;
-
-    let xml_files: Vec<PathBuf> = {
-        let walker = ignore::WalkBuilder::new(repo_root)
-            .hidden(false)
-            .git_ignore(true)
-            .git_exclude(true)
-            .git_global(true)
-            .build();
-
-        walker
-            .filter_map(|result| match result {
-                Ok(entry) if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) => {
-                    let path = entry.into_path();
-                    let is_xml = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.eq_ignore_ascii_case("xml"))
-                        .unwrap_or(false);
-                    if is_xml {
-                        Some(path)
-                    } else {
-                        None
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(error = %err, "integration-xml: walk error — skipping");
-                    None
-                }
-                _ => None,
-            })
-            .collect()
-    };
-
-    let per_file: Vec<_> = xml_files
-        .par_iter()
-        .filter_map(|path| {
-            let rel = path
-                .strip_prefix(repo_root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(err) => {
-                    tracing::warn!(file = %rel, error = %err, "integration-xml: read failed — skipping");
-                    return None;
-                }
-            };
-            let output = cih_resolve::extract_integration_xml(&rel, &content);
-            if output.nodes.is_empty() && output.edges.is_empty() {
-                None
-            } else {
-                Some(output)
-            }
-        })
-        .collect();
-
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut edges: Vec<Edge> = Vec::new();
-    let mut seen_node_ids: HashSet<String> = HashSet::new();
-    for output in per_file {
-        for node in output.nodes {
-            if seen_node_ids.insert(node.id.as_str().to_string()) {
-                nodes.push(node);
-            }
-        }
-        edges.extend(output.edges);
-    }
-
-    (nodes, edges)
 }
 
 /// Read `.cih/repo-map.json` and return its JAR catalog. Returns empty on missing/malformed.

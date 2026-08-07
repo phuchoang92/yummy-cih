@@ -15,6 +15,49 @@ pub(crate) fn is_spring_bean(fqcn: &str, index: &ResolveIndex) -> bool {
     )
 }
 
+/// Resolve a `@Qualifier("id")` / `@Resource(name = "id")` against the DI XML bean
+/// registry: the named bean's class, when it is in scope and actually implements
+/// (or extends, transitively) the declared interface type.
+pub(crate) fn qualifier_bean_impl(
+    interface_fqcn: &str,
+    qualifier: &str,
+    index: &ResolveIndex,
+) -> Option<String> {
+    let fqcn = index.bean_class_by_id(qualifier)?;
+    if !index.is_known_type(fqcn) {
+        return None;
+    }
+    if !implements_transitively(fqcn, interface_fqcn, index) {
+        return None;
+    }
+    Some(fqcn.to_string())
+}
+
+/// True when `interface_fqcn` appears in `fqcn`'s supertype closure. Supertype
+/// entries whose import resolution failed are stored unqualified, so those also
+/// match on simple name (common across OSGi bundle boundaries).
+fn implements_transitively(fqcn: &str, interface_fqcn: &str, index: &ResolveIndex) -> bool {
+    let interface_simple = crate::di_xml::simple_name(interface_fqcn);
+    let mut visited = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<&str> = index
+        .supertypes(fqcn)
+        .iter()
+        .map(String::as_str)
+        .collect();
+    while let Some(super_fqcn) = queue.pop_front() {
+        if !visited.insert(super_fqcn) {
+            continue;
+        }
+        if super_fqcn == interface_fqcn
+            || (!super_fqcn.contains('.') && super_fqcn == interface_simple)
+        {
+            return true;
+        }
+        queue.extend(index.supertypes(super_fqcn).iter().map(String::as_str));
+    }
+    false
+}
+
 /// Returns the single @Service/@Component/@Repository implementor of `interface_fqcn`,
 /// or None when there are zero or multiple (ambiguous).
 ///

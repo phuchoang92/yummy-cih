@@ -114,4 +114,3 @@ impl RefKindKey for ReferenceSite {
         }
     }
 }
-

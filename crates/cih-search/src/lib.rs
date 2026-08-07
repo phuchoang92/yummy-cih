@@ -5,14 +5,20 @@
 //! with semantic hits from `cih-embed`.
 
 mod bm25;
+mod persist;
 mod rrf;
 mod tokenize;
 
 use cih_core::NodeKind;
 
-pub use bm25::{IndexedDoc, SearchIndex};
+pub use bm25::{IndexedDoc, SearchIndex, SearchIndexSizeBreakdown, TextIndex};
+pub use persist::{
+    inspect_search_index, load_search_index, persist_search_index, search_index_path,
+    search_schema_fingerprint, SearchIndexInspection, SearchIndexLoad, SearchIndexMetadata,
+    SearchIndexSource, SEARCH_INDEX_FILE_NAME, SEARCH_INDEX_FORMAT_VERSION,
+};
 pub use rrf::{rrf_merge, SearchHit, RRF_K};
-pub use tokenize::tokenize;
+pub use tokenize::{tokenize, tokenize_into, Tokenizer};
 
 pub fn is_searchable_kind(kind: NodeKind) -> bool {
     matches!(
@@ -23,10 +29,12 @@ pub fn is_searchable_kind(kind: NodeKind) -> bool {
             | NodeKind::Record
             | NodeKind::Annotation
             | NodeKind::Method
+            | NodeKind::Function
             | NodeKind::Constructor
             | NodeKind::Field
             | NodeKind::Route
             | NodeKind::DbTable
+            | NodeKind::DbQuery
             | NodeKind::IntegrationRoute
             | NodeKind::MessageDestination
     )

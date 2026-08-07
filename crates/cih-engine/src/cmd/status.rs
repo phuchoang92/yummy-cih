@@ -5,6 +5,14 @@ use cih_core::Registry;
 
 use super::features::load_feature_status;
 
+fn route_status(stats: &cih_core::RegistryStats) -> String {
+    if stats.routes_current {
+        stats.routes.to_string()
+    } else {
+        format!("{} (stale — re-run analyze)", stats.routes)
+    }
+}
+
 pub fn run(name: String, json: bool) -> Result<()> {
     let reg = Registry::load();
     if let Some(entry) = reg.find(&name) {
@@ -55,9 +63,27 @@ pub fn run(name: String, json: bool) -> Result<()> {
             println!("nodes:         {}", entry.stats.nodes);
             println!("edges:         {}", entry.stats.edges);
             println!("files:         {}", entry.stats.files);
-            println!("routes:        {}", entry.stats.routes);
+            println!("routes:        {}", route_status(&entry.stats));
             println!("communities:   {}", entry.stats.communities);
             println!("processes:     {}", entry.stats.processes);
+            println!(
+                "resolved:      {} edges ({} unresolved refs)",
+                entry.stats.resolved_edges, entry.stats.unresolved_refs
+            );
+            // Index quality, not just size: a graph can look big and still have
+            // barely any of its functions extracted.
+            match entry.stats.callable_coverage {
+                Some(cov) => println!(
+                    "coverage:      {:.0}% of callables extracted{}",
+                    cov * 100.0,
+                    if cov < 0.4 {
+                        "  ← low: an idiom may be unparsed"
+                    } else {
+                        ""
+                    }
+                ),
+                None => println!("coverage:      (unmeasured)"),
+            }
             if let Some(fs) = feat_status {
                 println!(
                     "features:      {} ({} nodes, strategy: {})",
@@ -75,4 +101,21 @@ pub fn run(name: String, json: bool) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_status_distinguishes_legacy_zero_from_current_zero() {
+        let legacy = cih_core::RegistryStats::default();
+        assert_eq!(route_status(&legacy), "0 (stale — re-run analyze)");
+
+        let current = cih_core::RegistryStats {
+            routes_current: true,
+            ..Default::default()
+        };
+        assert_eq!(route_status(&current), "0");
+    }
 }

@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use cih_core::{
-    constructor_id, field_id, file_id, function_id, method_id, type_id,
-    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport, SymbolDef,
+    constructor_id, field_id, file_id, function_id, method_id, type_id, BindingKind, ContractSite,
+    Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport,
+    StringConstant, SymbolDef, TypeBinding,
 };
 use crate::fingerprint::{compute_body_fingerprint, normalize_leaf_token_kotlin};
 use tree_sitter::Node as TsNode;
 
-fn range_of(node: TsNode<'_>) -> Range {
+use super::framework;
+
+pub(super) fn range_of(node: TsNode<'_>) -> Range {
     let start = node.start_position();
     let end = node.end_position();
     Range {
@@ -17,14 +20,14 @@ fn range_of(node: TsNode<'_>) -> Range {
     }
 }
 
-fn text(node: TsNode<'_>, src: &str) -> String {
+pub(super) fn text(node: TsNode<'_>, src: &str) -> String {
     node.utf8_text(src.as_bytes())
         .unwrap_or_default()
         .trim()
         .to_string()
 }
 
-fn first_simple_identifier(node: TsNode<'_>, src: &str) -> Option<String> {
+pub(super) fn first_simple_identifier(node: TsNode<'_>, src: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "simple_identifier" {
@@ -45,7 +48,7 @@ fn first_type_identifier(node: TsNode<'_>, src: &str) -> Option<String> {
 }
 
 /// True if any child (including unnamed keywords) has the given kind.
-fn has_child_kind(node: TsNode<'_>, kind: &str) -> bool {
+pub(super) fn has_child_kind(node: TsNode<'_>, kind: &str) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == kind {
@@ -80,7 +83,7 @@ fn count_parameters(fvp: TsNode<'_>) -> u16 {
 // Not `Iterator::find`: the returned node must outlive the cursor borrow,
 // which this tree-sitter version's iterator bounds don't allow.
 #[allow(clippy::manual_find)]
-fn find_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+pub(super) fn find_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == kind {
@@ -98,14 +101,39 @@ fn module_path(rel: &str) -> String {
     stripped.replace(['/', '\\'], ".")
 }
 
+/// Enclosing type recorded during the declaration walk, so the framework pass
+/// can find the innermost class (and its Spring `@RequestMapping` prefix) for
+/// any byte offset.
+pub(super) struct TypeCtx {
+    pub(super) spring_prefix: Option<String>,
+    pub(super) start_byte: usize,
+    pub(super) end_byte: usize,
+}
+
+/// Enclosing callable recorded during the declaration walk — the analog of the
+/// Java parser's `CallableContext`, looked up by byte offset to supply
+/// `ContractSite.in_callable`.
+pub(super) struct CallableCtx {
+    pub(super) id: NodeId,
+    /// Signature (`fqcn#name/arity`) — matches the Route `handler` prop shape.
+    pub(super) signature: String,
+    pub(super) start_byte: usize,
+    pub(super) end_byte: usize,
+}
+
 #[derive(Default)]
-struct Builder {
-    rel: String,
+pub(super) struct Builder {
+    pub(super) rel: String,
     module: String,
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
+    pub(super) nodes: Vec<Node>,
+    pub(super) edges: Vec<Edge>,
     defs: Vec<SymbolDef>,
     imports: Vec<RawImport>,
+    pub(super) contract_sites: Vec<ContractSite>,
+    pub(super) type_bindings: Vec<TypeBinding>,
+    string_constants: Vec<StringConstant>,
+    pub(super) type_contexts: Vec<TypeCtx>,
+    pub(super) callable_contexts: Vec<CallableCtx>,
 }
 
 impl Builder {
@@ -209,26 +237,13 @@ pub fn parse_kotlin_file(rel: &str, src: &str) -> Result<ParsedUnit> {
         }
     }
 
-    let import_bindings = builder.imports.iter().map(|imp| {
-        use cih_core::{ImportBinding, ImportBindingKind};
-        ImportBinding {
-            module: imp.raw.clone(),
-            imported: None,
-            local: None,
-            kind: if imp.is_wildcard {
-                ImportBindingKind::Wildcard
-            } else {
-                ImportBindingKind::Named
-            },
-            range: imp.range,
-        }
-    }).collect();
+    framework::collect(root, src, &mut builder);
 
     Ok(ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables: 0,
         nodes: builder.nodes,
         edges: builder.edges,
-        import_bindings,
         parsed_file: ParsedFile {
             file: rel.to_string(),
             language: String::new(), // set by parse driver
@@ -236,12 +251,13 @@ pub fn parse_kotlin_file(rel: &str, src: &str) -> Result<ParsedUnit> {
             defs: builder.defs,
             imports: builder.imports,
             reference_sites: vec![],
-            type_bindings: vec![],
-            contract_sites: vec![],
+            type_bindings: builder.type_bindings,
+            contract_sites: builder.contract_sites,
             sql_constants: vec![],
             sql_execution_sites: vec![],
-            string_constants: vec![],
-        },
+            string_constants: builder.string_constants,
+        http_wrappers: Vec::new(),
+    },
     })
 }
 
@@ -273,6 +289,7 @@ fn collect_imports(import_list: TsNode<'_>, src: &str, builder: &mut Builder) {
             raw,
             is_static: false,
             is_wildcard,
+            alias: None,
             range,
         });
     }
@@ -307,6 +324,12 @@ fn emit_class_decl(
     let type_node_id = type_id(kind, &fqcn);
     let range = range_of(node);
 
+    builder.type_contexts.push(TypeCtx {
+        spring_prefix: framework::spring_class_prefix(node, src),
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+    });
+
     builder.nodes.push(Node {
         id: type_node_id.clone(),
         kind,
@@ -340,6 +363,7 @@ fn emit_class_decl(
 
     // Primary constructor
     if let Some(ctor_node) = find_named_child(node, "primary_constructor") {
+        collect_class_parameter_bindings(ctor_node, src, builder, &fqcn);
         let arity = count_class_parameters(ctor_node);
         let ctor_id = constructor_id(&fqcn, arity);
         let ctor_range = range_of(ctor_node);
@@ -394,6 +418,24 @@ fn emit_object_decl(
 
     let type_node_id = type_id(NodeKind::Class, &fqcn);
     let range = range_of(node);
+
+    builder.type_contexts.push(TypeCtx {
+        spring_prefix: framework::spring_class_prefix(node, src),
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+    });
+
+    // Constants declared in a companion object are referenced through the
+    // *outer* class (`MyCls.BASE`), so record that as the owner; a named
+    // `object` is its own referencable owner.
+    let constants_owner = if node.kind() == "companion_object" {
+        outer_fqcn.map(str::to_string).unwrap_or_else(|| fqcn.clone())
+    } else {
+        fqcn.clone()
+    };
+    if let Some(body) = find_named_child(node, "class_body") {
+        collect_object_string_constants(body, src, builder, &constants_owner);
+    }
 
     builder.nodes.push(Node {
         id: type_node_id.clone(),
@@ -484,11 +526,18 @@ fn emit_function_decl(
     match in_fqcn {
         Some(fqcn) => {
             let node_id = method_id(fqcn, &name, arity);
+            let signature = format!("{fqcn}#{name}/{arity}");
+            builder.callable_contexts.push(CallableCtx {
+                id: node_id.clone(),
+                signature: signature.clone(),
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+            });
             builder.nodes.push(Node {
                 id: node_id.clone(),
                 kind: NodeKind::Method,
                 name: name.clone(),
-                qualified_name: Some(format!("{fqcn}#{name}/{arity}")),
+                qualified_name: Some(signature),
                 file: builder.rel.clone(),
                 range,
                 props: None,
@@ -513,11 +562,18 @@ fn emit_function_decl(
         }
         None => {
             let node_id = function_id(&builder.module, &name, arity);
+            let signature = format!("{}#{name}/{arity}", builder.module);
+            builder.callable_contexts.push(CallableCtx {
+                id: node_id.clone(),
+                signature: signature.clone(),
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+            });
             builder.nodes.push(Node {
                 id: node_id.clone(),
                 kind: NodeKind::Function,
                 name: name.clone(),
-                qualified_name: Some(format!("{}#{name}/{arity}", builder.module)),
+                qualified_name: Some(signature),
                 file: builder.rel.clone(),
                 range,
                 props: None,
@@ -543,6 +599,83 @@ fn emit_function_decl(
     }
 }
 
+/// Type annotation of a `class_parameter` / `variable_declaration` /
+/// `parameter` node: the `user_type` child (unwrapping `nullable_type`).
+pub(super) fn declared_type_text(node: TsNode<'_>, src: &str) -> Option<String> {
+    if let Some(ty) = find_named_child(node, "user_type") {
+        return Some(text(ty, src));
+    }
+    find_named_child(node, "nullable_type")
+        .and_then(|nullable| find_named_child(nullable, "user_type"))
+        .map(|ty| text(ty, src))
+}
+
+/// String constants in an `object` / `companion object` body: `val BASE =
+/// "/api"` (fully-literal initializers only) feed the resolve-phase constant
+/// index that folds dynamic contract URLs.
+fn collect_object_string_constants(
+    body: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    owner_fqcn: &str,
+) {
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() != "property_declaration" {
+            continue;
+        }
+        let Some(name) = find_named_child(child, "variable_declaration")
+            .and_then(|decl| first_simple_identifier(decl, src))
+        else {
+            continue;
+        };
+        let Some(value) = find_named_child(child, "string_literal")
+            .and_then(|lit| framework::literal_string_text(lit, src))
+        else {
+            continue;
+        };
+        builder.string_constants.push(StringConstant {
+            const_name: name,
+            owner_fqcn: owner_fqcn.to_string(),
+            value,
+            dynamic: false,
+            env_default: false,
+            range: range_of(child),
+        });
+    }
+}
+
+/// Record a receiver-typing binding for every typed primary-constructor
+/// parameter (`class C(private val rest: RestTemplate)`) — the light per-class
+/// env the framework pass matches receivers against.
+fn collect_class_parameter_bindings(
+    ctor_node: TsNode<'_>,
+    src: &str,
+    builder: &mut Builder,
+    fqcn: &str,
+) {
+    let mut cursor = ctor_node.walk();
+    for param in ctor_node.named_children(&mut cursor) {
+        if param.kind() != "class_parameter" {
+            continue;
+        }
+        let (Some(name), Some(raw_type)) = (
+            first_simple_identifier(param, src),
+            declared_type_text(param, src),
+        ) else {
+            continue;
+        };
+        builder.type_bindings.push(TypeBinding {
+            name,
+            raw_type,
+            kind: BindingKind::Field,
+            in_fqcn: fqcn.to_string(),
+            qualifier: None,
+            range: range_of(param),
+        });
+    }
+}
+
 fn emit_property_decl(
     node: TsNode<'_>,
     src: &str,
@@ -550,12 +683,14 @@ fn emit_property_decl(
     parent_id: &NodeId,
     in_fqcn: &str,
 ) {
-    let name = {
+    let (name, declared_type) = {
         let mut cursor = node.walk();
         let mut found = None;
+        let mut declared = None;
         for child in node.named_children(&mut cursor) {
             if child.kind() == "variable_declaration" {
                 found = first_simple_identifier(child, src);
+                declared = declared_type_text(child, src);
                 break;
             }
             if child.kind() == "simple_identifier" {
@@ -564,13 +699,24 @@ fn emit_property_decl(
             }
         }
         match found {
-            Some(n) => n,
+            Some(n) => (n, declared),
             None => return,
         }
     };
 
     let field_node_id = field_id(in_fqcn, &name);
     let range = range_of(node);
+
+    if let Some(raw_type) = declared_type {
+        builder.type_bindings.push(TypeBinding {
+            name: name.clone(),
+            raw_type,
+            kind: BindingKind::Field,
+            in_fqcn: in_fqcn.to_string(),
+            qualifier: None,
+            range,
+        });
+    }
 
     builder.nodes.push(Node {
         id: field_node_id.clone(),

@@ -1,9 +1,10 @@
-use cih_core::{SqlConstant, SqlExecutionSite, StringConstant};
+use cih_core::{looks_like_sql, SqlConstant, SqlExecutionSite, StringConstant};
 use tree_sitter::Node as TsNode;
 
+use super::super::SqlApi;
 use super::{
-    FileBuilder, callable_id_for, context_for, modifiers, range_of, receiver_has_type, text,
-    type_context_at, unquote_spring_literal,
+    callable_id_for, context_for, modifiers, range_of, receiver_has_type, text, type_context_at,
+    unquote_spring_literal, FileBuilder,
 };
 
 pub(super) fn collect_sql_constants(root: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
@@ -88,6 +89,7 @@ fn try_extract_string_constant(
             owner_fqcn: owner_fqcn.to_string(),
             value,
             dynamic,
+            env_default: false,
             range: range_of(node),
         });
     }
@@ -129,11 +131,7 @@ fn collect_sql_constants_in(
     }
 }
 
-fn try_extract_sql_constant(
-    node: TsNode<'_>,
-    src: &str,
-    owner_fqcn: &str,
-) -> Option<SqlConstant> {
+fn try_extract_sql_constant(node: TsNode<'_>, src: &str, owner_fqcn: &str) -> Option<SqlConstant> {
     let mods = modifiers(node, src);
     if !mods.iter().any(|m| m == "static") || !mods.iter().any(|m| m == "final") {
         return None;
@@ -149,18 +147,22 @@ fn try_extract_sql_constant(
         }
         let name_node = child.child_by_field_name("name")?;
         let const_name = text(name_node, src);
-        if const_name.is_empty()
-            || !const_name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-        {
+        if const_name.is_empty() {
             continue;
         }
+        let upper_snake = const_name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
         let Some(value_node) = child.child_by_field_name("value") else {
             continue;
         };
         let (sql_text, dynamic) = fold_string_init(value_node, src);
         if sql_text.is_empty() && !dynamic {
+            continue;
+        }
+        // UPPER_SNAKE names are captured on naming convention alone (value may be
+        // dynamic); any other name qualifies only when the value itself is SQL.
+        if !upper_snake && !looks_like_sql(&sql_text) {
             continue;
         }
         return Some(SqlConstant {
@@ -178,7 +180,11 @@ fn fold_string_init(node: TsNode<'_>, src: &str) -> (String, bool) {
     match node.kind() {
         "string_literal" => {
             let raw = text(node, src);
-            let inner = if raw.len() >= 2 { &raw[1..raw.len() - 1] } else { "" };
+            let inner = if raw.len() >= 2 {
+                &raw[1..raw.len() - 1]
+            } else {
+                ""
+            };
             let unescaped = inner
                 .replace("\\n", " ")
                 .replace("\\r", " ")
@@ -221,19 +227,25 @@ pub(super) fn collect_sql_execution_sites(
     root: TsNode<'_>,
     src: &str,
     builder: &mut FileBuilder,
+    extra_apis: &[SqlApi],
 ) {
-    collect_sql_execution_sites_in(root, src, builder);
+    collect_sql_execution_sites_in(root, src, builder, extra_apis);
 }
 
-fn collect_sql_execution_sites_in(node: TsNode<'_>, src: &str, builder: &mut FileBuilder) {
+fn collect_sql_execution_sites_in(
+    node: TsNode<'_>,
+    src: &str,
+    builder: &mut FileBuilder,
+    extra_apis: &[SqlApi],
+) {
     if node.kind() == "method_invocation" {
-        if let Some(site) = try_extract_execution_site(node, src, builder) {
+        if let Some(site) = try_extract_execution_site(node, src, builder, extra_apis) {
             builder.sql_execution_sites.push(site);
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_sql_execution_sites_in(child, src, builder);
+        collect_sql_execution_sites_in(child, src, builder, extra_apis);
     }
 }
 
@@ -251,6 +263,7 @@ fn try_extract_execution_site(
     node: TsNode<'_>,
     src: &str,
     builder: &FileBuilder,
+    extra_apis: &[SqlApi],
 ) -> Option<SqlExecutionSite> {
     let method_name_node = node.child_by_field_name("name")?;
     let method = text(method_name_node, src);
@@ -258,16 +271,18 @@ fn try_extract_execution_site(
     let in_callable = callable_id_for(node.start_byte(), builder);
     let in_fqcn = context_for(node.start_byte(), builder).unwrap_or_default();
 
-    let object = node.child_by_field_name("object")?;
-    let receiver = text(object, src);
+    let receiver = node
+        .child_by_field_name("object")
+        .map(|object| text(object, src));
 
-    if receiver == "DBUtil" && DBUTIL_METHODS.contains(&method.as_str()) {
+    if receiver.as_deref() == Some("DBUtil") && DBUTIL_METHODS.contains(&method.as_str()) {
         let const_ref = nth_identifier_argument(node, src, 1);
         if const_ref.is_some() || method == "prepareStatement" {
             return Some(SqlExecutionSite {
                 api_name: method,
                 const_ref,
                 inline_sql: None,
+                heuristic: false,
                 in_callable,
                 range,
             });
@@ -275,7 +290,9 @@ fn try_extract_execution_site(
     }
 
     if JDBC_TEMPLATE_METHODS.contains(&method.as_str())
-        && receiver_has_type(builder, &in_fqcn, &receiver, "JdbcTemplate")
+        && receiver
+            .as_deref()
+            .is_some_and(|receiver| receiver_has_type(builder, &in_fqcn, receiver, "JdbcTemplate"))
     {
         let (const_ref, inline_sql) = first_sql_argument(node, src);
         if const_ref.is_some() || inline_sql.is_some() {
@@ -283,12 +300,93 @@ fn try_extract_execution_site(
                 api_name: method,
                 const_ref,
                 inline_sql,
+                heuristic: false,
                 in_callable,
                 range,
             });
         }
     }
 
+    // Config-declared APIs (`[analyze] sql_apis`): trusted like the built-ins.
+    // `receiver` matches the receiver text (static style) or its declared type.
+    for api in extra_apis {
+        if method == api.method
+            && receiver.as_deref().is_some_and(|receiver| {
+                receiver == api.receiver
+                    || receiver_has_type(builder, &in_fqcn, receiver, &api.receiver)
+            })
+        {
+            let (const_ref, inline_sql) = first_sql_argument(node, src);
+            if const_ref.is_some() || inline_sql.is_some() {
+                return Some(SqlExecutionSite {
+                    api_name: format!("{}.{}", api.receiver, api.method),
+                    const_ref,
+                    inline_sql,
+                    heuristic: false,
+                    in_callable,
+                    range,
+                });
+            }
+        }
+    }
+
+    // Heuristic: a known SQL constant flowing into any other call is treated as an
+    // execution site (custom DAO/queue wrappers the config didn't name). Only the
+    // constant reference is trusted — db_access drops the site unless the constant
+    // resolves to real SQL. Logger receivers are excluded: methods commonly log the
+    // statement they execute, and the log call adds nothing over the real site.
+    if receiver
+        .as_deref()
+        .is_none_or(|receiver| !is_logger_receiver(receiver))
+    {
+        if let Some(const_ref) = sql_constant_argument(node, src, builder) {
+            return Some(SqlExecutionSite {
+                api_name: method,
+                const_ref: Some(const_ref),
+                inline_sql: None,
+                heuristic: true,
+                in_callable,
+                range,
+            });
+        }
+    }
+
+    None
+}
+
+fn is_logger_receiver(receiver: &str) -> bool {
+    matches!(
+        receiver.to_ascii_lowercase().as_str(),
+        "log" | "logger" | "tracing" | "console"
+    )
+}
+
+/// First identifier argument that names a SQL constant visible here: declared in
+/// this file with SQL-looking (or dynamic) text, or brought in by a static import
+/// (`import static com.x.SqlConstants.INSERT_AUDIT;` — cross-file text is checked
+/// downstream by the DB-access pass).
+fn sql_constant_argument(node: TsNode<'_>, src: &str, builder: &FileBuilder) -> Option<String> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() != "identifier" {
+            continue;
+        }
+        let name = text(child, src);
+        if name.is_empty() {
+            continue;
+        }
+        let same_file_sql = builder
+            .sql_constants
+            .iter()
+            .any(|c| c.const_name == name && (c.dynamic || looks_like_sql(&c.sql_text)));
+        let static_import = builder.imports.iter().any(|imp| {
+            imp.is_static && !imp.is_wildcard && imp.raw.rsplit('.').next() == Some(name.as_str())
+        });
+        if same_file_sql || static_import {
+            return Some(name);
+        }
+    }
     None
 }
 

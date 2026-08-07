@@ -1,5 +1,5 @@
 use cih_core::NodeId;
-use cih_graph_store::{Direction, FlowHop, FlowNode, Impact, ImpactNode};
+use cih_graph_store::{Direction, FlowHop, FlowNode, Impact, ImpactNode, TraversalStats};
 use cih_server::viz::{
     mermaid_key, render_community_diagram, render_d3_impact, render_mermaid_flow, render_openapi,
 };
@@ -32,6 +32,7 @@ fn render_mermaid_flow_two_hops() {
                 file: "Service.java".to_string(),
                 depth: 1,
                 parent_id: Some(parent_id.clone()),
+                intercepted_by: Vec::new(),
             },
             via: None,
         },
@@ -44,6 +45,7 @@ fn render_mermaid_flow_two_hops() {
                 file: "Repo.java".to_string(),
                 depth: 2,
                 parent_id: Some(child_id.clone()),
+                intercepted_by: Vec::new(),
             },
             via: None,
         },
@@ -85,6 +87,15 @@ fn render_d3_impact_produces_nodes_and_links() {
         direction: Direction::Upstream,
         affected,
         risk: "low".to_string(),
+        has_more: false,
+        backend_limit: 200,
+        traversal: TraversalStats {
+            visited_nodes: 3,
+            expanded_edges: 0,
+            truncated: false,
+        },
+        risk_exact: true,
+        risk_lower_bound: false,
     };
     let val = render_d3_impact(&impact);
     let nodes = val["nodes"].as_array().unwrap();

@@ -75,6 +75,7 @@ fn trace_from_entry(
     });
     queue.push_back(0usize);
     let max_states = cfg.max_states_per_entry.max(1);
+    let mut state_cap_hit = false;
 
     while let Some(state_idx) = queue.pop_front() {
         let state = states[state_idx];
@@ -95,6 +96,7 @@ fn trace_from_entry(
             continue;
         }
         if states.len() >= max_states {
+            state_cap_hit = true;
             if state.depth >= cfg.min_steps {
                 traces_for_entry.push(reconstruct_path(&states, state_idx));
             }
@@ -102,6 +104,7 @@ fn trace_from_entry(
         }
         for next in callees {
             if states.len() >= max_states {
+                state_cap_hit = true;
                 break;
             }
             states.push(TraceState {
@@ -111,6 +114,13 @@ fn trace_from_entry(
             });
             queue.push_back(states.len() - 1);
         }
+    }
+    if state_cap_hit {
+        tracing::warn!(
+            entry = %entry_id.as_str(),
+            max_states,
+            "BFS state cap reached; process trace for this entry point may be incomplete"
+        );
     }
 
     traces_for_entry.sort_by(|a, b| {

@@ -26,9 +26,6 @@ impl LanguageResolver for PhpResolver {
         in_fqcn.rsplit_once('.').map(|(owner, _)| owner.to_string())
     }
 
-    fn di_redirect(&self, _type_qname: &str, _index: &ResolveIndex) -> Option<String> {
-        None
-    }
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None

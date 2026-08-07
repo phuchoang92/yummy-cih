@@ -7,6 +7,7 @@
 //! `anyhow::Result` by design (context strings over structured variants).
 
 pub mod bodies;
+pub mod enrich_maps;
 pub mod features;
 pub mod graph;
 pub mod html;
@@ -14,25 +15,37 @@ pub mod manifest;
 pub mod mermaid;
 pub mod module_tree;
 pub mod pages;
+pub mod render;
+pub mod resident;
+pub mod sink;
 pub mod slugify;
 
 pub use bodies::{source_bodies, BodyEntry};
 pub use cih_core::RepoMap;
+pub use enrich_maps::{build_class_maps, class_method_chains};
 pub use features::{assign_class_slugs, FeatureGroup};
 pub use graph::WikiGraph;
 pub use manifest::{NavEntry, PageEntry, WikiGenerationInfo, WikiLlmInfo, WikiManifest, WikiStats};
 pub use module_tree::{
     build_graph_module_tree, build_wiki_meta, read_module_tree, validate_module_tree,
-    ClassCacheEntry, ClassEnrichmentStore, FeatureMetaEntry, FlowCacheEntry, ModuleTreeSource,
-    WikiMeta, WikiModuleCacheEntry, WikiModuleNode, WikiModuleTree,
+    ClassCacheEntry, ClassEnrichmentStore, CommunityFullCacheEntry, FeatureMetaEntry,
+    FlowCacheEntry, ModuleTreeSource, WikiMeta, WikiModuleCacheEntry, WikiModuleNode,
+    WikiModuleTree,
 };
+pub use render::{
+    build_page_index, render_page, resolve_slug, PageIndex, PageSubject, RenderContext,
+    RenderedPage,
+};
+pub use resident::OwnedWiki;
+
+use sink::PageSink;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use cih_core::{Node, NodeId, NodeKind, Range};
-use features::{build_dev_page_paths, group_communities_by_feature, group_nodes_by_package};
+use features::{group_communities_by_feature, group_nodes_by_package};
 use graph::node_stereotype;
 use slugify::slugify;
 
@@ -117,7 +130,7 @@ pub struct CommunityLlmFull {
 }
 
 /// Maps `(node_id, file_path)` to a feature name.
-pub type FeatureOfFn = Box<dyn Fn(&str, &str) -> String + Send>;
+pub type FeatureOfFn = Box<dyn Fn(&str, &str) -> String + Send + Sync>;
 
 pub struct WikiInput<'a> {
     pub nodes: &'a [Node],
@@ -156,7 +169,9 @@ pub struct WikiInput<'a> {
     /// (case-insensitive). Empty = no filter.
     pub filter_feature: Vec<String>,
     /// Stripped source bodies keyed by node_id string. Empty map = no bodies shown.
-    pub bodies: HashMap<String, BodyEntry>,
+    /// `Arc` so the on-demand render path (P3.8) can build a fresh `WikiInput`
+    /// per request without cloning the whole (large) map.
+    pub bodies: std::sync::Arc<HashMap<String, BodyEntry>>,
     /// Maps `(node_id, file)` to a feature slug. Supplied by `cih-engine`; called during
     /// `WikiGraph::build_package_grouped`. When grouping is "graph"/"llm" never called.
     /// When a pre-computed artifact is available, `node_id` gives a direct lookup;
@@ -165,16 +180,30 @@ pub struct WikiInput<'a> {
     /// Scheduled jobs and event listeners from `.cih/entrypoints.json`.
     /// Empty when the sidecar does not exist (no such methods in the repo).
     pub entrypoints: Vec<EntrypointRecord>,
+    /// Current git HEAD SHA of the target repo, stamped into wiki_meta.json for the no-op gate.
+    pub repo_commit: Option<String>,
+    /// FNV-1a hash of effective wiki flags (mode‖grouping‖language‖model‖PROMPT_VERSION).
+    /// Stored in wiki_meta.json so the no-op gate can detect flag changes between runs.
+    pub flags_hash: Option<String>,
+    /// Files changed since the `--since <ref>` git ref.
+    /// When `Some`, only features with nodes in these files are re-rendered.
+    /// `None` = full render (default).
+    pub changed_files: Option<std::collections::HashSet<String>>,
 }
 
 #[derive(Debug)]
 pub struct WikiOutcome {
     pub out_dir: PathBuf,
     pub manifest_path: PathBuf,
+    pub agent_index_path: PathBuf,
     pub page_count: usize,
     pub community_count: usize,
     pub route_count: usize,
     pub llm_enriched: bool,
+    /// Pages actually written to disk (new or content changed).
+    pub pages_written: usize,
+    /// Pages skipped because content was identical to the existing file.
+    pub pages_unchanged: usize,
 }
 
 /// Strip redundant class/method references that the LLM sometimes prepends to descriptions.
@@ -242,6 +271,68 @@ pub(crate) fn clean_method_desc(desc: &str, cls: &str, meth: &str) -> String {
     }
 }
 
+/// Resolve the feature-group hierarchy the wiki is built around: Leiden
+/// communities (graph/llm) or Java packages (package mode), with synthesis from
+/// controller file paths when no communities exist, then the `--filter-feature`
+/// filter. Shared by `generate_wiki` and the standalone render path so both see
+/// the same feature set.
+pub fn resolve_feature_groups(graph: &WikiGraph, input: &WikiInput<'_>) -> Vec<FeatureGroup> {
+    let mut feature_groups = if input.grouping == "package" {
+        // Restrict to packages that survived --filter-route (stored in input.community_nodes).
+        // When no route filter was active, input.community_nodes contains all packages.
+        let allowed_ids: std::collections::HashSet<&str> = input
+            .community_nodes
+            .iter()
+            .map(|n| n.id.as_str())
+            .collect();
+        let all_groups = group_nodes_by_package(graph);
+        if allowed_ids.is_empty() {
+            all_groups
+        } else {
+            all_groups
+                .into_iter()
+                .filter(|g| {
+                    g.community_ids
+                        .iter()
+                        .any(|id| allowed_ids.contains(id.as_str()))
+                })
+                .collect()
+        }
+    } else {
+        group_communities_by_feature(graph)
+    };
+
+    // No communities (discover not run): synthesize one group per feature found in
+    // controller file paths so controller pages still get generated.
+    if feature_groups.is_empty() && !graph.routes_by_controller.is_empty() {
+        let mut features: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for feat in graph.controller_feature.values() {
+            features.insert(feat.clone());
+        }
+        feature_groups = features
+            .into_iter()
+            .map(|feature| FeatureGroup {
+                feature,
+                community_ids: vec![],
+            })
+            .collect();
+    }
+
+    // Apply --filter-feature: keep only groups whose name contains a filter substring.
+    if !input.filter_feature.is_empty() {
+        let filters: Vec<String> = input
+            .filter_feature
+            .iter()
+            .map(|f| f.to_lowercase())
+            .collect();
+        feature_groups.retain(|g| {
+            let name = g.feature.to_lowercase();
+            filters.iter().any(|f| name.contains(f.as_str()))
+        });
+    }
+    feature_groups
+}
+
 /// Collected page output from one generation phase (pages + nav entries).
 struct PageBatch {
     pages: Vec<PageEntry>,
@@ -257,30 +348,17 @@ impl PageBatch {
     }
 }
 
-/// Shared immutable context threaded through all per-phase generation helpers.
-struct PageGenCtx<'a> {
-    graph: &'a WikiGraph,
-    input: &'a WikiInput<'a>,
-    out_dir: &'a Path,
-    method_flow_desc: &'a HashMap<String, String>,
-    known_features: &'a std::collections::HashSet<String>,
-    process_by_handler: &'a HashMap<String, String>,
-    class_primary_feature: &'a HashMap<String, String>,
-    feature_scheduled_counts: &'a HashMap<String, usize>,
-    feature_listener_counts: &'a HashMap<String, usize>,
-}
-
 /// Write the system-level global pages: system index + shared routes.
 fn emit_global_pages(
     feature_groups: &[FeatureGroup],
     graph: &WikiGraph,
     repo_name: &str,
-    out_dir: &Path,
+    sink: &mut PageSink,
 ) -> Result<PageBatch> {
     let mut batch = PageBatch::new();
 
     let system_md = pages::system_index::render_system_index(feature_groups, graph, repo_name);
-    std::fs::write(out_dir.join("pages/index.md"), &system_md)?;
+    sink.push("pages/index.md", system_md);
     batch.pages.push(PageEntry {
         slug: "index".into(),
         role: "system".into(),
@@ -293,11 +371,11 @@ fn emit_global_pages(
 
     let routes_md = pages::shared::render_routes_page(graph);
     let routes_json = pages::shared::render_routes_json(graph);
-    std::fs::write(out_dir.join("pages/routes.md"), &routes_md)?;
-    std::fs::write(
-        out_dir.join("pages/routes.json"),
+    sink.push("pages/routes.md", routes_md);
+    sink.push(
+        "pages/routes.json",
         serde_json::to_string_pretty(&routes_json)?,
-    )?;
+    );
     batch.pages.push(PageEntry {
         slug: "routes".into(),
         role: "shared".into(),
@@ -313,51 +391,102 @@ fn emit_global_pages(
 
 /// Write all pages for one feature: index, PO, BA, per-class dev, and per-route API flow.
 /// `class_dev_slugs` is populated during dev-class generation and read by API-flow generation.
-fn emit_feature_section(
-    group: &FeatureGroup,
-    ctx: &PageGenCtx<'_>,
-    class_dev_slugs: &mut HashMap<String, String>,
-    dev_paths: &HashMap<String, String>,
-) -> Result<PageBatch> {
-    let feature = &group.feature;
-    let cids = &group.community_ids;
-    let mut batch = PageBatch::new();
-
-    // D1 — Feature landing index
-    let idx_md = pages::feature_index::render_feature_index(feature, cids, dev_paths, ctx.graph);
-    std::fs::write(
-        ctx.out_dir.join(format!("pages/{}/index.md", feature)),
-        &idx_md,
-    )?;
+/// Register one generated page in a feature section: its sidebar nav entry plus
+/// its manifest `PageEntry`. Both share `slug`/`title`/`kind`; `role` is the
+/// feature. Extracted because the D1–D5 blocks below repeat this push verbatim.
+fn register_page(
+    batch: &mut PageBatch,
+    feature: &str,
+    slug: String,
+    title: String,
+    kind: &str,
+    path: String,
+    json_path: Option<String>,
+) {
     batch
         .nav
-        .entry(feature.clone())
+        .entry(feature.to_string())
         .or_default()
         .push(NavEntry {
-            slug: format!("{}/index", feature),
-            title: format!("{} Overview", capitalize(feature)),
-            kind: "index".into(),
+            slug: slug.clone(),
+            title: title.clone(),
+            kind: kind.into(),
         });
     batch.pages.push(PageEntry {
-        slug: format!("{}/index", feature),
-        role: feature.clone(),
-        title: format!("{} Overview", capitalize(feature)),
-        kind: "index".into(),
-        path: format!("pages/{}/index.md", feature),
-        json_path: None,
+        slug,
+        role: feature.to_string(),
+        title,
+        kind: kind.into(),
+        path,
+        json_path,
         community_id: None,
     });
+}
 
-    // D2 — Feature PO
+fn emit_feature_section(
+    group: &FeatureGroup,
+    graph: &WikiGraph,
+    ctx: &RenderContext<'_>,
+    out_dir: &Path,
+    class_dev_slugs: &mut HashMap<String, String>,
+    sink: &mut PageSink,
+    dev_entries: &mut Vec<(String, String, String)>,
+) -> Result<PageBatch> {
+    let feature = &group.feature;
+    // Guard: feature names are used as filesystem path segments; they must only contain
+    // safe slug characters ([a-z0-9-]) so that a malformed graph value cannot write
+    // outside the wiki output directory.
+    anyhow::ensure!(
+        is_safe_page_slug(feature),
+        "unsafe feature name rejected as write-path segment: {:?}",
+        feature
+    );
+    let fctx = match ctx.feature(feature) {
+        Some(fctx) => fctx,
+        // No context for this feature (not in feature_groups) — nothing to emit.
+        None => return Ok(PageBatch::new()),
+    };
+    let cids = &fctx.community_ids;
+    let feature_class_set = &fctx.class_set;
+    let slug_for = &fctx.slug_for;
+    let class_dev_links = &fctx.class_dev_links;
+    let mut batch = PageBatch::new();
+
+    // Provenance metadata shared by all pages in this feature section.
     let feature_llm = ctx
         .input
         .feature_llm_summaries
         .as_ref()
         .and_then(|m| m.get(feature.as_str()));
+    let page_meta = pages::WikiPageMeta {
+        enrichment_tier: ctx.enrichment_tier,
+        graph_version: &ctx.input.graph_version,
+    };
+
+    // D1 — Feature landing index
+    let idx_md = pages::feature_index::render_feature_index(
+        feature,
+        cids,
+        class_dev_links,
+        graph,
+        &page_meta,
+    );
+    sink.push(format!("pages/{}/index.md", feature), idx_md);
+    register_page(
+        &mut batch,
+        feature,
+        format!("{}/index", feature),
+        format!("{} Overview", capitalize(feature)),
+        "index",
+        format!("pages/{}/index.md", feature),
+        None,
+    );
+
+    // D2 — Feature PO (feature_llm, enrichment_tier, page_meta computed above)
     let po_md = pages::feature_po::render_feature_po(
         feature,
         cids,
-        ctx.graph,
+        graph,
         ctx.input.llm_summaries.as_ref(),
         ctx.input.llm_full.as_ref(),
         feature_llm,
@@ -370,111 +499,43 @@ fn emit_feature_section(
             .get(feature.as_str())
             .copied()
             .unwrap_or(0),
+        &page_meta,
     );
-    std::fs::write(ctx.out_dir.join(format!("pages/{}/po.md", feature)), &po_md)?;
-    batch
-        .nav
-        .entry(feature.clone())
-        .or_default()
-        .push(NavEntry {
-            slug: format!("{}/po", feature),
-            title: format!("{} — Business Overview", capitalize(feature)),
-            kind: "po".into(),
-        });
-    batch.pages.push(PageEntry {
-        slug: format!("{}/po", feature),
-        role: feature.clone(),
-        title: format!("{} — Business Overview", capitalize(feature)),
-        kind: "po".into(),
-        path: format!("pages/{}/po.md", feature),
-        json_path: None,
-        community_id: None,
-    });
+    sink.push(format!("pages/{}/po.md", feature), po_md);
+    register_page(
+        &mut batch,
+        feature,
+        format!("{}/po", feature),
+        format!("{} — Business Overview", capitalize(feature)),
+        "po",
+        format!("pages/{}/po.md", feature),
+        None,
+    );
 
     // D3 — Feature BA
     let ba_md = pages::feature_ba::render_feature_ba(
         feature,
         cids,
-        ctx.graph,
+        graph,
         ctx.input.llm_summaries.as_ref(),
         ctx.input.llm_full.as_ref(),
         feature_llm,
         ctx.input.flow_llm_summaries.as_ref(),
+        &page_meta,
     );
-    std::fs::write(ctx.out_dir.join(format!("pages/{}/ba.md", feature)), &ba_md)?;
-    batch
-        .nav
-        .entry(feature.clone())
-        .or_default()
-        .push(NavEntry {
-            slug: format!("{}/ba", feature),
-            title: format!("{} — Business Analysis", capitalize(feature)),
-            kind: "ba".into(),
-        });
-    batch.pages.push(PageEntry {
-        slug: format!("{}/ba", feature),
-        role: feature.clone(),
-        title: format!("{} — Business Analysis", capitalize(feature)),
-        kind: "ba".into(),
-        path: format!("pages/{}/ba.md", feature),
-        json_path: None,
-        community_id: None,
-    });
+    sink.push(format!("pages/{}/ba.md", feature), ba_md);
+    register_page(
+        &mut batch,
+        feature,
+        format!("{}/ba", feature),
+        format!("{} — Business Analysis", capitalize(feature)),
+        "ba",
+        format!("pages/{}/ba.md", feature),
+        None,
+    );
 
-    // D4 — Per-class dev pages
-    let mut feature_class_set: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for comm_id in cids {
-        if let Some(members) = ctx.graph.members_by_community.get(comm_id) {
-            for m in members {
-                if !matches!(
-                    m.kind,
-                    NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-                ) {
-                    continue;
-                }
-                if let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
-                    let fqcn = prefix
-                        .trim_start_matches("Method:")
-                        .trim_start_matches("Constructor:")
-                        .trim_start_matches("Function:");
-                    ["Class:", "Interface:", "Enum:", "Record:"]
-                        .iter()
-                        .map(|pfx| format!("{}{}", pfx, fqcn))
-                        .find(|id| {
-                            ctx.graph.nodes_by_id.contains_key(id.as_str())
-                                || ctx.graph.methods_by_class.contains_key(id.as_str())
-                        })
-                        .unwrap_or_else(|| format!("Class:{}", fqcn))
-                }) {
-                    if ctx
-                        .class_primary_feature
-                        .get(&cls_id)
-                        .map(|f| f == feature)
-                        .unwrap_or(true)
-                    {
-                        feature_class_set.insert(cls_id);
-                    }
-                }
-            }
-        }
-    }
-
-    let slug_for = features::assign_class_slugs(&feature_class_set, |id| {
-        ctx.graph
-            .nodes_by_id
-            .get(id)
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| {
-                id.trim_start_matches("Class:")
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("Unknown")
-                    .to_string()
-            })
-    });
-
-    for class_id in &feature_class_set {
+    // D4 — Per-class dev pages (feature_class_set and slug_for pre-computed above)
+    for class_id in feature_class_set {
         let slug = slug_for
             .get(class_id.as_str())
             .cloned()
@@ -483,7 +544,7 @@ fn emit_feature_section(
         class_dev_slugs.insert(class_id.clone(), slug.clone());
 
         let synthesized;
-        let cls_node: &Node = match ctx.graph.nodes_by_id.get(class_id.as_str()) {
+        let cls_node: &Node = match graph.nodes_by_id.get(class_id.as_str()) {
             Some(n) => n,
             None => {
                 let simple_name = class_id
@@ -492,8 +553,7 @@ fn emit_feature_section(
                     .next()
                     .unwrap_or("Unknown")
                     .to_string();
-                let file = ctx
-                    .graph
+                let file = graph
                     .methods_by_class
                     .get(class_id.as_str())
                     .and_then(|ms| ms.first())
@@ -512,87 +572,57 @@ fn emit_feature_section(
             }
         };
         let md = pages::dev::render_dev_class(
-            ctx.graph,
+            graph,
             cls_node,
             &ctx.input.bodies,
-            ctx.method_flow_desc,
+            &ctx.method_flow_desc,
+            &page_meta,
         );
-        let json_val = pages::dev::render_dev_class_json(ctx.graph, cls_node);
-        std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
-        std::fs::write(
-            ctx.out_dir.join(format!("pages/{}.json", page_path)),
+        let json_val = pages::dev::render_dev_class_json(graph, cls_node);
+        sink.push(format!("pages/{}.md", page_path), md);
+        sink.push(
+            format!("pages/{}.json", page_path),
             serde_json::to_string_pretty(&json_val)?,
-        )?;
+        );
+        dev_entries.push((
+            class_id.clone(),
+            cls_node.file.clone(),
+            format!("pages/{}.md", page_path),
+        ));
         let dev_title = cls_node.name.clone();
-        batch
-            .nav
-            .entry(feature.clone())
-            .or_default()
-            .push(NavEntry {
-                slug: page_path.clone(),
-                title: dev_title.clone(),
-                kind: "dev".into(),
-            });
-        batch.pages.push(PageEntry {
-            slug: page_path.clone(),
-            role: feature.clone(),
-            title: dev_title,
-            kind: "dev".into(),
-            path: format!("pages/{}.md", page_path),
-            json_path: Some(format!("pages/{}.json", page_path)),
-            community_id: None,
-        });
+        register_page(
+            &mut batch,
+            feature,
+            page_path.clone(),
+            dev_title,
+            "dev",
+            format!("pages/{}.md", page_path),
+            Some(format!("pages/{}.json", page_path)),
+        );
     }
 
-    // D5 — Per-route API-flow pages
-    let mut feature_controllers: Vec<(&str, &Vec<(Node, Node)>)> = ctx
-        .graph
-        .routes_by_controller
-        .iter()
-        .filter(|(ctrl, _)| {
-            let graph_feature = ctx
-                .graph
-                .controller_feature
-                .get(*ctrl)
-                .map(|f| f.as_str())
-                .unwrap_or("shared");
-            let effective_feature = if graph_feature == "shared" {
-                let llm_feat = ctx
-                    .input
-                    .controller_summaries
-                    .as_ref()
-                    .and_then(|m| m.get(*ctrl))
-                    .and_then(|s| s.feature.as_deref())
-                    .unwrap_or("shared");
-                if ctx.known_features.contains(llm_feat) {
-                    llm_feat
-                } else {
-                    graph_feature
-                }
-            } else {
-                graph_feature
-            };
-            effective_feature == feature.as_str()
-        })
-        .map(|(ctrl, routes)| (ctrl.as_str(), routes))
-        .collect();
-    feature_controllers.sort_by_key(|(ctrl, _)| *ctrl);
+    // D5 — Per-route API-flow pages (controllers pre-resolved in FeatureContext)
+    let feature_controllers = &fctx.controllers;
 
     if !feature_controllers.is_empty() {
-        let api_dir = ctx.out_dir.join(format!("pages/{}/api", feature));
+        let api_dir = out_dir.join(format!("pages/{}/api", feature));
         std::fs::create_dir_all(&api_dir)?;
         std::fs::write(
             api_dir.join("_category_.json"),
             "{\"position\": 3, \"label\": \"API Surface\"}\n",
         )?;
-        for (ctrl_pos, (ctrl_name, routes)) in feature_controllers.iter().enumerate() {
+        for (ctrl_pos, ctrl_name) in feature_controllers.iter().enumerate() {
+            let routes = match graph.routes_by_controller.get(ctrl_name) {
+                Some(routes) => routes,
+                None => continue,
+            };
             let ctrl_slug = slugify(ctrl_name);
             let display_title = pages::feature_po::controller_display_name(ctrl_name);
             let ctrl_summary = ctx
                 .input
                 .controller_summaries
                 .as_ref()
-                .and_then(|m| m.get(*ctrl_name));
+                .and_then(|m| m.get(ctrl_name));
             let description = ctrl_summary
                 .map(|s| s.description.as_str())
                 .filter(|s| !s.is_empty());
@@ -621,7 +651,10 @@ fn emit_feature_section(
                 description,
                 method_descriptions,
             );
-            std::fs::write(ctrl_dir.join("index.md"), &ctrl_md)?;
+            sink.push(
+                format!("pages/{}/api/{}/index.md", feature, ctrl_slug),
+                ctrl_md,
+            );
 
             for (route_pos, (handler, route)) in routes.iter().enumerate() {
                 let handler_slug = pages::api_flow::handler_slug(handler.id.as_str());
@@ -639,34 +672,22 @@ fn emit_feature_section(
                     route,
                     route_pos + 1,
                     flow_summary,
-                    ctx.graph,
+                    graph,
                     class_dev_slugs,
-                    ctx.method_flow_desc,
+                    &ctx.method_flow_desc,
                 );
                 let page_path = format!("{}/api/{}/{}", feature, ctrl_slug, handler_slug);
-                std::fs::write(
-                    ctx.out_dir.join(format!("pages/{}.md", page_path)),
-                    &flow_md,
-                )?;
+                sink.push(format!("pages/{}.md", page_path), flow_md);
                 let flow_title = pages::api_flow::handler_title(handler.id.as_str());
-                batch
-                    .nav
-                    .entry(feature.clone())
-                    .or_default()
-                    .push(NavEntry {
-                        slug: page_path.clone(),
-                        title: flow_title.clone(),
-                        kind: "api-flow".into(),
-                    });
-                batch.pages.push(PageEntry {
-                    slug: page_path.clone(),
-                    role: feature.clone(),
-                    title: flow_title,
-                    kind: "api-flow".into(),
-                    path: format!("pages/{}.md", page_path),
-                    json_path: None,
-                    community_id: None,
-                });
+                register_page(
+                    &mut batch,
+                    feature,
+                    page_path.clone(),
+                    flow_title,
+                    "api-flow",
+                    format!("pages/{}.md", page_path),
+                    None,
+                );
             }
         }
     }
@@ -676,8 +697,11 @@ fn emit_feature_section(
 
 /// Write scheduled-job and event-listener pages for all features.
 fn emit_entrypoint_section(
-    ctx: &PageGenCtx<'_>,
+    graph: &WikiGraph,
+    ctx: &RenderContext<'_>,
+    out_dir: &Path,
     class_dev_slugs: &HashMap<String, String>,
+    sink: &mut PageSink,
 ) -> Result<PageBatch> {
     let mut batch = PageBatch::new();
     if ctx.input.entrypoints.is_empty() {
@@ -697,8 +721,7 @@ fn emit_entrypoint_section(
     let mut by_feature_events: BTreeMap<String, Vec<&crate::EntrypointRecord>> = BTreeMap::new();
 
     for ep in &ctx.input.entrypoints {
-        let file = ctx
-            .graph
+        let file = graph
             .nodes_by_id
             .get(ep.method_id.as_str())
             .map(|n| n.file.as_str())
@@ -712,7 +735,7 @@ fn emit_entrypoint_section(
     }
 
     for (feature, entries) in &by_feature_scheduled {
-        let api_dir = ctx.out_dir.join(format!("pages/{}/api", feature));
+        let api_dir = out_dir.join(format!("pages/{}/api", feature));
         std::fs::create_dir_all(&api_dir)?;
         let cat_path = api_dir.join("_category_.json");
         if !cat_path.exists() {
@@ -729,12 +752,12 @@ fn emit_entrypoint_section(
             let md = pages::api_flow::render_scheduled_flow_page(
                 ep.method_id.as_str(),
                 pos + 1,
-                ctx.graph,
+                graph,
                 class_dev_slugs,
                 &all_method_desc,
             );
             let page_path = format!("{}/api/scheduled/{}", feature, slug);
-            std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
+            sink.push(format!("pages/{}.md", page_path), md);
             let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
             batch
                 .nav
@@ -758,7 +781,7 @@ fn emit_entrypoint_section(
     }
 
     for (feature, entries) in &by_feature_events {
-        let api_dir = ctx.out_dir.join(format!("pages/{}/api", feature));
+        let api_dir = out_dir.join(format!("pages/{}/api", feature));
         std::fs::create_dir_all(&api_dir)?;
         let cat_path = api_dir.join("_category_.json");
         if !cat_path.exists() {
@@ -776,12 +799,12 @@ fn emit_entrypoint_section(
                 ep.method_id.as_str(),
                 ep.topics.as_slice(),
                 pos + 1,
-                ctx.graph,
+                graph,
                 class_dev_slugs,
                 &all_method_desc,
             );
             let page_path = format!("{}/api/events/{}", feature, slug);
-            std::fs::write(ctx.out_dir.join(format!("pages/{}.md", page_path)), &md)?;
+            sink.push(format!("pages/{}.md", page_path), md);
             let flow_title = pages::api_flow::handler_title(ep.method_id.as_str());
             batch
                 .nav
@@ -808,17 +831,19 @@ fn emit_entrypoint_section(
 }
 
 /// Write community-level pages: community index and per-community detail/PO/BA pages.
-fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
+fn emit_community_section(
+    graph: &WikiGraph,
+    ctx: &RenderContext<'_>,
+    out_dir: &Path,
+    sink: &mut PageSink,
+) -> Result<PageBatch> {
     let mut batch = PageBatch::new();
-    let comm_slug_map = slugify::build_slug_map(&ctx.graph.community_nodes);
-    std::fs::create_dir_all(ctx.out_dir.join("pages/communities"))?;
+    let comm_slug_map = slugify::build_slug_map(&graph.community_nodes);
+    std::fs::create_dir_all(out_dir.join("pages/communities"))?;
 
-    let comm_idx = pages::community::render_community_index(
-        &ctx.graph.community_nodes,
-        &comm_slug_map,
-        ctx.graph,
-    );
-    std::fs::write(ctx.out_dir.join("pages/communities/index.md"), &comm_idx)?;
+    let comm_idx =
+        pages::community::render_community_index(&graph.community_nodes, &comm_slug_map, graph);
+    sink.push("pages/communities/index.md", comm_idx);
     batch.pages.push(PageEntry {
         slug: "communities/index".into(),
         role: "communities".into(),
@@ -829,17 +854,16 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
         community_id: None,
     });
 
-    for comm in &ctx.graph.community_nodes {
+    for comm in &graph.community_nodes {
         let comm_id = comm.id.as_str().to_string();
         let dir_name = comm_slug_map
             .get(&comm_id)
             .cloned()
             .unwrap_or_else(|| slugify(comm.id.as_str()));
-        let dir = ctx.out_dir.join(format!("pages/communities/{dir_name}"));
+        let dir = out_dir.join(format!("pages/communities/{dir_name}"));
         std::fs::create_dir_all(&dir)?;
 
-        let processes_here: Vec<&Node> = ctx
-            .graph
+        let processes_here: Vec<&Node> = graph
             .process_nodes
             .iter()
             .filter(|p| {
@@ -860,8 +884,8 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
         let llm_full = ctx.input.llm_full.as_ref().and_then(|m| m.get(&comm_id));
 
         let detail_md =
-            pages::community::render_community_detail(comm, ctx.graph, &processes_here, llm);
-        std::fs::write(dir.join("index.md"), &detail_md)?;
+            pages::community::render_community_detail(comm, graph, &processes_here, llm);
+        sink.push(format!("pages/communities/{dir_name}/index.md"), detail_md);
         batch.pages.push(PageEntry {
             slug: format!("communities/{dir_name}/index"),
             role: "communities".into(),
@@ -873,8 +897,8 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
         });
 
         if let Some(full) = llm_full {
-            let po_md = pages::community::render_community_po(comm, ctx.graph, full);
-            std::fs::write(dir.join("po.md"), &po_md)?;
+            let po_md = pages::community::render_community_po(comm, graph, full);
+            sink.push(format!("pages/communities/{dir_name}/po.md"), po_md);
             batch.pages.push(PageEntry {
                 slug: format!("communities/{dir_name}/po"),
                 role: "communities".into(),
@@ -885,9 +909,8 @@ fn emit_community_section(ctx: &PageGenCtx<'_>) -> Result<PageBatch> {
                 community_id: Some(comm_id.clone()),
             });
 
-            let ba_md =
-                pages::community::render_community_ba(comm, ctx.graph, &processes_here, full);
-            std::fs::write(dir.join("ba.md"), &ba_md)?;
+            let ba_md = pages::community::render_community_ba(comm, graph, &processes_here, full);
+            sink.push(format!("pages/communities/{dir_name}/ba.md"), ba_md);
             batch.pages.push(PageEntry {
                 slug: format!("communities/{dir_name}/ba"),
                 role: "communities".into(),
@@ -938,152 +961,37 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         }
     }
 
-    // Feature grouping — the core of the new hierarchy
-    let mut feature_groups = if input.grouping == "package" {
-        // Restrict to packages that survived --filter-route (stored in input.community_nodes).
-        // When no route filter was active, input.community_nodes contains all packages.
-        let allowed_ids: std::collections::HashSet<&str> = input
-            .community_nodes
-            .iter()
-            .map(|n| n.id.as_str())
-            .collect();
-        let all_groups = group_nodes_by_package(&graph);
-        if allowed_ids.is_empty() {
-            all_groups
-        } else {
-            all_groups
-                .into_iter()
-                .filter(|g| {
-                    g.community_ids
-                        .iter()
-                        .any(|id| allowed_ids.contains(id.as_str()))
-                })
-                .collect()
-        }
-    } else {
-        group_communities_by_feature(&graph)
-    };
+    // Feature grouping — the core of the new hierarchy.
+    let feature_groups = resolve_feature_groups(&graph, &input);
 
-    // No communities (discover not run): synthesize one group per feature found in
-    // controller file paths so controller pages still get generated.
-    if feature_groups.is_empty() && !graph.routes_by_controller.is_empty() {
-        let mut features: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for feat in graph.controller_feature.values() {
-            features.insert(feat.clone());
-        }
-        feature_groups = features
-            .into_iter()
-            .map(|feature| FeatureGroup {
-                feature,
-                community_ids: vec![],
-            })
-            .collect();
-    }
-
-    // Apply --filter-feature: keep only groups whose name contains a filter substring.
-    if !input.filter_feature.is_empty() {
-        let filters: Vec<String> = input
-            .filter_feature
-            .iter()
-            .map(|f| f.to_lowercase())
-            .collect();
-        feature_groups.retain(|g| {
-            let name = g.feature.to_lowercase();
-            filters.iter().any(|f| name.contains(f.as_str()))
-        });
-    }
-
-    let dev_paths = build_dev_page_paths(&feature_groups, &graph);
-
-    // Pre-collect known feature names so the controller filter below can validate
-    // LLM-suggested feature slugs — prevents controllers from being silently dropped
-    // when DeepSeek/Gemini returns a slug that doesn't match any real wiki feature.
-    let known_features: std::collections::HashSet<String> =
-        feature_groups.iter().map(|g| g.feature.clone()).collect();
-
-    // Flat method_id → description lookup built once from flow_llm_summaries.
-    let mut method_flow_desc: HashMap<String, String> = {
-        let mut map = HashMap::new();
-        if let Some(flow_map) = &input.flow_llm_summaries {
-            for (proc_id, summary) in flow_map {
-                if let Some(steps) = graph.process_steps.get(proc_id.as_str()) {
-                    for step in steps {
-                        let idx = step.step_number.saturating_sub(1);
-                        if let Some(desc) = summary.step_descriptions.get(idx) {
-                            if !desc.is_empty() {
-                                let id = step.symbol.id.as_str();
-                                let cleaned = if let Some((prefix, meth_arity)) = id.split_once('#')
-                                {
-                                    let cls = prefix
-                                        .trim_start_matches("Method:")
-                                        .trim_start_matches("Constructor:")
-                                        .rsplit('.')
-                                        .next()
-                                        .unwrap_or("");
-                                    let meth = meth_arity.split('/').next().unwrap_or("");
-                                    clean_method_desc(desc, cls, meth)
-                                } else {
-                                    desc.clone()
-                                };
-                                map.insert(id.to_string(), cleaned);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        map
-    };
-
-    // Merge per-method descriptions from controller LLM enrichment into method_flow_desc.
-    // The controller summaries use simple Java method names as keys; resolve them to full
-    // node IDs by scanning all methods in the graph.
-    if let Some(ctrl_summaries) = &input.controller_summaries {
-        for method_nodes in graph.methods_by_class.values() {
-            for method in method_nodes {
-                let method_id = method.id.as_str();
-                let class_name = method_id.split_once('#').and_then(|(prefix, _)| {
-                    prefix
-                        .trim_start_matches("Method:")
-                        .trim_start_matches("Constructor:")
-                        .rsplit('.')
-                        .next()
-                });
-                let simple_method_name = method_id
-                    .split('#')
-                    .nth(1)
-                    .and_then(|x| x.split('/').next());
-                if let (Some(cls), Some(meth)) = (class_name, simple_method_name) {
-                    if let Some(ctrl_summary) = ctrl_summaries.get(cls) {
-                        if let Some(desc) = ctrl_summary.method_descriptions.get(meth) {
-                            method_flow_desc
-                                .entry(method_id.to_string())
-                                .or_insert_with(|| clean_method_desc(desc, cls, meth));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let module_tree = input.module_tree.take().unwrap_or_else(|| {
+    let mut module_tree = input.module_tree.take().unwrap_or_else(|| {
         build_graph_module_tree(
             &graph,
             input.repo_map.as_ref(),
             &input.graph_version,
             &input.community_version,
-            None,
+            input.repo_commit.clone(),
         )
     });
+    // For user-provided trees that predate HEAD stamping, fill in the current commit.
+    if module_tree.repo_commit.is_none() {
+        module_tree.repo_commit = input.repo_commit.clone();
+    }
     validate_module_tree(&module_tree, &graph)?;
-    let wiki_meta = build_wiki_meta(
+    let mut wiki_meta = build_wiki_meta(
         &module_tree,
         input.llm_info.as_ref().map(|info| info.model.clone()),
         input.llm_info.as_ref().map(|info| info.language.clone()),
     );
+    wiki_meta.flags_hash = input.flags_hash.clone();
 
     // Create directories
     std::fs::create_dir_all(out_dir)?;
+    // Readers treat this marker as an unavailable, retryable publication. It
+    // remains after a failed generation so no reader can combine a previous
+    // manifest with partially replaced pages; a successful rerun clears it.
+    let publishing_marker = out_dir.join(".publishing");
+    std::fs::write(&publishing_marker, input.graph_version.as_bytes())?;
     std::fs::write(
         out_dir.join("module_tree.json"),
         serde_json::to_string_pretty(&module_tree)?,
@@ -1101,19 +1009,6 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
     std::fs::create_dir_all(out_dir.join("pages"))?;
     for group in &feature_groups {
         let dev_dir = out_dir.join(format!("pages/{}/dev", group.feature));
-        // Remove stale .md/.json files left over from a prior community-based run
-        if dev_dir.exists() {
-            for entry in std::fs::read_dir(&dev_dir)? {
-                let path = entry?.path();
-                if path
-                    .extension()
-                    .map(|e| e == "md" || e == "json")
-                    .unwrap_or(false)
-                {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-        }
         std::fs::create_dir_all(&dev_dir)?;
         // Feature folder root: position 10 so it sorts after index (1) and routes (2).
         let feature_dir = out_dir.join(format!("pages/{}", group.feature));
@@ -1162,124 +1057,60 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
             warnings: Vec::new(),
         };
         let manifest_path = out_dir.join("manifest.json");
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        write_json_atomic(&manifest_path, &manifest)?;
+        std::fs::remove_file(&publishing_marker)?;
         return Ok(WikiOutcome {
             out_dir: out_dir.to_path_buf(),
             manifest_path,
+            agent_index_path: out_dir.join("agent-index.json"),
             page_count: 0,
             community_count: graph.community_nodes.len(),
             route_count: graph.routes.len(),
             llm_enriched,
+            pages_written: 0,
+            pages_unchanged: 0,
         });
     }
 
-    let global_batch = emit_global_pages(&feature_groups, &graph, &input.repo_name, out_dir)?;
+    let mut sink = PageSink::new();
+
+    let global_batch = emit_global_pages(&feature_groups, &graph, &input.repo_name, &mut sink)?;
     page_count += global_batch.pages.len();
     all_pages.extend(global_batch.pages);
     nav.extend(global_batch.nav);
 
-    // Pre-pass: for each class, determine its primary feature (the one with the most methods).
-    // This prevents a class from appearing as a page in multiple features when its methods are
-    // spread across communities that belong to different features (e.g. CouponController having
-    // a cart-calling method landing it in the cart community).
-    let class_primary_feature: std::collections::HashMap<String, String> = {
-        let mut votes: std::collections::HashMap<
-            String,
-            std::collections::BTreeMap<String, usize>,
-        > = std::collections::HashMap::new();
-        for group in &feature_groups {
-            for comm_id in &group.community_ids {
-                if let Some(members) = graph.members_by_community.get(comm_id) {
-                    for m in members {
-                        if !matches!(
-                            m.kind,
-                            NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-                        ) {
-                            continue;
-                        }
-                        if let Some(cls_id) = m.id.as_str().split_once('#').map(|(prefix, _)| {
-                            let fqcn = prefix
-                                .trim_start_matches("Method:")
-                                .trim_start_matches("Constructor:")
-                                .trim_start_matches("Function:");
-                            ["Class:", "Interface:", "Enum:", "Record:"]
-                                .iter()
-                                .map(|pfx| format!("{}{}", pfx, fqcn))
-                                .find(|id| {
-                                    graph.nodes_by_id.contains_key(id.as_str())
-                                        || graph.methods_by_class.contains_key(id.as_str())
-                                })
-                                .unwrap_or_else(|| format!("Class:{}", fqcn))
-                        }) {
-                            *votes
-                                .entry(cls_id)
-                                .or_default()
-                                .entry(group.feature.clone())
-                                .or_insert(0) += 1;
-                        }
-                    }
-                }
-            }
-        }
-        votes
-            .into_iter()
-            .map(|(cls_id, feature_votes)| {
-                let best = feature_votes
-                    .into_iter()
-                    .max_by_key(|(_, v)| *v)
-                    .map(|(f, _)| f)
-                    .unwrap_or_default();
-                (cls_id, best)
-            })
-            .collect()
-    };
-
-    // Build handler_id → process_id lookup (used for flow pages).
-    let process_by_handler: HashMap<String, String> = graph
-        .process_steps
-        .iter()
-        .filter_map(|(proc_id, steps)| {
-            steps
-                .first()
-                .map(|s| (s.symbol.id.as_str().to_string(), proc_id.clone()))
-        })
-        .collect();
+    // All derived render state (globals + per-feature) computed once. Both the
+    // batch loop below and the standalone `render_page` read from this.
+    let ctx = RenderContext::build(&graph, &input, &feature_groups);
 
     // class_id → dev page slug (populated during dev page generation below).
     let mut class_dev_slugs: HashMap<String, String> = HashMap::new();
+    // Agent-index collector: (class_node_id, source_file, relative_page_path).
+    let mut dev_entries: Vec<(String, String, String)> = Vec::new();
 
-    // Pre-compute per-feature entrypoint counts for the PO page API Surface table.
-    let mut feature_scheduled_counts: HashMap<String, usize> = HashMap::new();
-    let mut feature_listener_counts: HashMap<String, usize> = HashMap::new();
-    for ep in &input.entrypoints {
-        let file = graph
-            .nodes_by_id
-            .get(ep.method_id.as_str())
-            .map(|n| n.file.as_str())
-            .unwrap_or("");
-        let feature = (input.feature_of)(ep.method_id.as_str(), file);
-        match ep.kind.as_str() {
-            "scheduled" => *feature_scheduled_counts.entry(feature).or_insert(0) += 1,
-            "event_listener" => *feature_listener_counts.entry(feature).or_insert(0) += 1,
-            _ => {}
-        }
-    }
-
-    let ctx = PageGenCtx {
-        graph: &graph,
-        input: &input,
-        out_dir,
-        method_flow_desc: &method_flow_desc,
-        known_features: &known_features,
-        process_by_handler: &process_by_handler,
-        class_primary_feature: &class_primary_feature,
-        feature_scheduled_counts: &feature_scheduled_counts,
-        feature_listener_counts: &feature_listener_counts,
-    };
+    // Compute which features need re-rendering when --since is active.
+    // Global and community pages are always re-rendered (fast, write-if-different handles mtimes).
+    let affected_features: Option<std::collections::HashSet<String>> = input
+        .changed_files
+        .as_ref()
+        .map(|changed| features_affected_by_changed_files(&feature_groups, &graph, changed));
 
     // Per-feature pages
     for group in &feature_groups {
-        let batch = emit_feature_section(group, &ctx, &mut class_dev_slugs, &dev_paths)?;
+        if let Some(ref af) = affected_features {
+            if !af.contains(&group.feature) {
+                continue;
+            }
+        }
+        let batch = emit_feature_section(
+            group,
+            &graph,
+            &ctx,
+            out_dir,
+            &mut class_dev_slugs,
+            &mut sink,
+            &mut dev_entries,
+        )?;
         page_count += batch.pages.len();
         all_pages.extend(batch.pages);
         nav.extend(batch.nav);
@@ -1287,7 +1118,7 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // ── Scheduled jobs & event listeners ────────────────────────────────────
     {
-        let ep_batch = emit_entrypoint_section(&ctx, &class_dev_slugs)?;
+        let ep_batch = emit_entrypoint_section(&graph, &ctx, out_dir, &class_dev_slugs, &mut sink)?;
         page_count += ep_batch.pages.len();
         all_pages.extend(ep_batch.pages);
         nav.extend(ep_batch.nav);
@@ -1295,10 +1126,32 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
 
     // ── Community pages ──────────────────────────────────────────────────────
     {
-        let comm_batch = emit_community_section(&ctx)?;
+        let comm_batch = emit_community_section(&graph, &ctx, out_dir, &mut sink)?;
         page_count += comm_batch.pages.len();
         all_pages.extend(comm_batch.pages);
         nav.extend(comm_batch.nav);
+    }
+
+    // ── Partial render: merge unchanged features from previous manifest ───────
+    if let Some(ref af) = affected_features {
+        let manifest_path = out_dir.join("manifest.json");
+        if let Ok(old_bytes) = std::fs::read(&manifest_path) {
+            if let Ok(old) = serde_json::from_slice::<WikiManifest>(&old_bytes) {
+                for page in old.pages {
+                    let is_feature_page =
+                        !matches!(page.role.as_str(), "system" | "shared" | "communities");
+                    if is_feature_page && !af.contains(&page.role) {
+                        page_count += 1;
+                        all_pages.push(page);
+                    }
+                }
+                for (feat, navs) in old.nav {
+                    if !af.contains(&feat) {
+                        nav.entry(feat).or_insert(navs);
+                    }
+                }
+            }
+        }
     }
 
     let manifest = WikiManifest {
@@ -1318,20 +1171,122 @@ pub fn generate_wiki(mut input: WikiInput<'_>, out_dir: &Path) -> Result<WikiOut
         warnings: Vec::new(),
     };
 
+    // Snapshot rendered paths before flush so we can prune stale dev files.
+    let rendered_paths: std::collections::HashSet<String> =
+        sink.path_set().into_iter().map(String::from).collect();
+    let flush_stats = sink.flush(out_dir)?;
+
+    prune_stale_dev_files(
+        &feature_groups,
+        &affected_features,
+        out_dir,
+        &rendered_paths,
+    );
+
     let manifest_path = out_dir.join("manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    write_json_atomic(&manifest_path, &manifest)?;
     if input.generation.html_viewer {
         html::write_html_viewer(out_dir, &manifest)?;
     }
 
+    // ── Agent index ──────────────────────────────────────────────────────────
+    // Emit agent-index.json: two lookup maps for coding agents.
+    //   fqn_to_page   — class node-id  → dev page path (relative to wiki out_dir)
+    //   file_to_pages — source file     → [dev page paths]
+    let agent_index_path = out_dir.join("agent-index.json");
+    write_agent_index(&dev_entries, out_dir, &agent_index_path)?;
+    std::fs::remove_file(&publishing_marker)?;
+
     Ok(WikiOutcome {
         out_dir: out_dir.to_path_buf(),
         manifest_path,
+        agent_index_path,
         page_count,
         community_count: graph.community_nodes.len(),
         route_count: graph.routes.len(),
         llm_enriched,
+        pages_written: flush_stats.written,
+        pages_unchanged: flush_stats.unchanged,
     })
+}
+
+fn write_json_atomic(path: &std::path::Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// Remove stale dev-class `.md`/`.json` files left over from a prior run with a
+/// different community assignment. Only touches features rendered this pass
+/// (those in `affected_features`, or all when `None`).
+fn prune_stale_dev_files(
+    feature_groups: &[FeatureGroup],
+    affected_features: &Option<std::collections::HashSet<String>>,
+    out_dir: &Path,
+    rendered_paths: &std::collections::HashSet<String>,
+) {
+    for group in feature_groups {
+        if let Some(af) = affected_features {
+            if !af.contains(&group.feature) {
+                continue;
+            }
+        }
+        let dev_dir = out_dir.join(format!("pages/{}/dev", group.feature));
+        if dev_dir.exists() {
+            for entry in std::fs::read_dir(&dev_dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let is_page = path
+                    .extension()
+                    .map(|e| e == "md" || e == "json")
+                    .unwrap_or(false);
+                if !is_page {
+                    continue;
+                }
+                // Build the relative path as pushed to the sink.
+                if let Ok(rel) = path.strip_prefix(out_dir) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    if !rendered_paths.contains(rel_str.as_str()) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Emit `agent-index.json` at `agent_index_path`: `fqn_to_page` (class node-id →
+/// dev page path) and `file_to_pages` (source file → dev page paths), the two
+/// lookup maps coding agents use to jump from code to the generated wiki.
+fn write_agent_index(
+    dev_entries: &[(String, String, String)],
+    out_dir: &Path,
+    agent_index_path: &Path,
+) -> Result<()> {
+    let mut fqn_to_page: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut file_to_pages: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (class_id, file, page_path) in dev_entries {
+        fqn_to_page.insert(class_id.clone(), page_path.clone());
+        file_to_pages
+            .entry(file.clone())
+            .or_default()
+            .push(page_path.clone());
+    }
+    let index_json = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "wiki_dir": out_dir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("wiki"),
+        "fqn_to_page": fqn_to_page,
+        "file_to_pages": file_to_pages,
+    }))?;
+    std::fs::write(agent_index_path, index_json)?;
+    Ok(())
 }
 
 pub(crate) fn capitalize(s: &str) -> String {
@@ -1340,6 +1295,14 @@ pub(crate) fn capitalize(s: &str) -> String {
         first.make_ascii_uppercase();
     }
     out
+}
+
+/// Returns true iff `s` is safe to use as a single filesystem path segment in the wiki
+/// output directory. Only allows characters produced by `slugify` ([a-z0-9-]).
+fn is_safe_page_slug(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn count_unresolved_refs(report: Option<&str>) -> usize {
@@ -1353,6 +1316,47 @@ fn count_unresolved_refs(report: Option<&str>) -> usize {
             })
         })
         .unwrap_or(0)
+}
+
+/// Map a set of changed file paths (relative to repo root) to the feature names that contain
+/// nodes from those files. Used by the `--since` partial-render path.
+fn features_affected_by_changed_files(
+    feature_groups: &[FeatureGroup],
+    graph: &WikiGraph,
+    changed_files: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut affected = std::collections::HashSet::new();
+    for group in feature_groups {
+        // Check community member nodes
+        let has_changed_member = group.community_ids.iter().any(|cid| {
+            graph
+                .members_by_community
+                .get(cid)
+                .map(|members| members.iter().any(|m| changed_files.contains(&m.file)))
+                .unwrap_or(false)
+        });
+        if has_changed_member {
+            affected.insert(group.feature.clone());
+            continue;
+        }
+        // For features driven by controller routes (including synthesized groups with no
+        // community_ids), check route handler files.
+        let has_changed_route = graph
+            .routes_by_controller
+            .iter()
+            .filter(|(ctrl, _)| {
+                graph
+                    .controller_feature
+                    .get(*ctrl)
+                    .map(|f| f == &group.feature)
+                    .unwrap_or(false)
+            })
+            .any(|(_, routes)| routes.iter().any(|(h, _)| changed_files.contains(&h.file)));
+        if has_changed_route {
+            affected.insert(group.feature.clone());
+        }
+    }
+    affected
 }
 
 fn count_test_classes(graph: &WikiGraph) -> usize {

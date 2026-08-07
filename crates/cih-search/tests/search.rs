@@ -130,3 +130,316 @@ fn rrf_combined_item_wins_over_single_source_items() {
     assert_eq!(fused[0].node_id.as_str(), "Class:B");
     assert_eq!(fused[0].sources, vec!["bm25", "semantic"]);
 }
+
+#[test]
+fn text_index_scores_generic_documents() {
+    use cih_search::TextIndex;
+
+    let docs = [
+        "Loan repayment schedules and interest accrual",
+        "Invoice generation for monthly billing",
+        "",
+    ];
+    let index = TextIndex::build(docs.iter().copied());
+    assert_eq!(index.len(), 3);
+
+    let hits = index.search("repayment schedule", 10);
+    assert_eq!(hits[0].0, 0);
+    // The empty document never matches.
+    assert!(hits.iter().all(|(ordinal, _)| *ordinal != 2));
+
+    assert!(index.search("", 10).is_empty());
+    assert!(index.search("repayment", 0).is_empty());
+    assert!(TextIndex::build(std::iter::empty())
+        .search("x", 5)
+        .is_empty());
+}
+
+/// Naive full-scan BM25 mirroring the pre-inverted-index algorithm exactly, used
+/// as the correctness reference for the inverted `TextIndex`. `SearchIndex` shares
+/// the identical scoring math, so parity here guards both.
+fn naive_text_search(docs: &[&str], query: &str, limit: usize) -> Vec<(usize, f32)> {
+    use std::collections::{HashMap, HashSet};
+    const K1: f32 = 1.2;
+    const B: f32 = 0.75;
+    let idf = |total: f32, matching: f32| ((total - matching + 0.5) / (matching + 0.5) + 1.0).ln();
+
+    let token_docs: Vec<Vec<String>> = docs.iter().map(|d| tokenize(d)).collect();
+    if token_docs.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let query_tokens = tokenize(query);
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+    let indexed = token_docs.iter().filter(|t| !t.is_empty()).count();
+    let total_len: usize = token_docs.iter().map(|t| t.len()).sum();
+    let avg_doc_len = if indexed == 0 {
+        0.0
+    } else {
+        total_len as f32 / indexed as f32
+    };
+    let mut doc_freq: HashMap<String, usize> = HashMap::new();
+    for tokens in &token_docs {
+        let mut seen = HashSet::new();
+        for token in tokens {
+            if seen.insert(token.as_str()) {
+                *doc_freq.entry(token.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut hits = Vec::new();
+    for (ordinal, tokens) in token_docs.iter().enumerate() {
+        if tokens.is_empty() {
+            continue;
+        }
+        let mut term_freq: HashMap<&str, usize> = HashMap::new();
+        for token in tokens {
+            *term_freq.entry(token.as_str()).or_insert(0) += 1;
+        }
+        let mut score = 0.0;
+        for token in &query_tokens {
+            let tf = *term_freq.get(token.as_str()).unwrap_or(&0) as f32;
+            if tf == 0.0 {
+                continue;
+            }
+            let df = *doc_freq.get(token).unwrap_or(&0) as f32;
+            score += idf(indexed as f32, df) * (tf * (K1 + 1.0))
+                / (tf + K1 * (1.0 - B + B * (tokens.len() as f32 / avg_doc_len.max(1.0))));
+        }
+        if score > 0.0 {
+            hits.push((ordinal, score));
+        }
+    }
+    hits.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    hits.truncate(limit);
+    hits
+}
+
+#[test]
+fn inverted_index_matches_naive_reference() {
+    use cih_search::TextIndex;
+
+    // Deterministic pseudo-random corpus over a small vocabulary so terms repeat
+    // across docs, doc lengths vary, and some docs are empty — the conditions a
+    // hand-written fixture would miss. Byte-identical scores are required.
+    let vocab = [
+        "loan",
+        "repayment",
+        "schedule",
+        "interest",
+        "accrual",
+        "invoice",
+        "billing",
+        "customer",
+        "account",
+        "balance",
+        "transfer",
+        "audit",
+        "report",
+        "ledger",
+    ];
+    let mut state: u64 = 0x9E3779B97F4A7C15;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let corpus: Vec<String> = (0..400)
+        .map(|_| {
+            let len = (next() % 12) as usize; // 0..11 → includes empty docs
+            (0..len)
+                .map(|_| vocab[(next() as usize) % vocab.len()])
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    let doc_refs: Vec<&str> = corpus.iter().map(String::as_str).collect();
+
+    let index = TextIndex::build(doc_refs.iter().copied());
+    assert_eq!(index.len(), corpus.len());
+
+    // Queries include single terms, multi-term, and a repeated term (which must
+    // double-count, matching the reference) and a term absent from the vocab.
+    let queries = [
+        "loan",
+        "repayment schedule",
+        "interest accrual balance transfer",
+        "audit audit report",
+        "nonexistentterm",
+        "loan repayment loan",
+    ];
+    for q in queries {
+        for &limit in &[1usize, 5, 10, 25, 50, 1000] {
+            let got = index.search(q, limit);
+            let want = naive_text_search(&doc_refs, q, limit);
+            assert_eq!(got, want, "mismatch for query {q:?} limit {limit}");
+        }
+    }
+}
+
+#[test]
+fn graph_index_matches_field_corpus_for_properties_unicode_and_ties() {
+    use cih_search::TextIndex;
+    use serde_json::json;
+
+    let mut nodes = Vec::new();
+    let mut corpus = Vec::new();
+    for ordinal in 0..120 {
+        let kind = match ordinal % 3 {
+            0 => NodeKind::Route,
+            1 => NodeKind::IntegrationRoute,
+            _ => NodeKind::MessageDestination,
+        };
+        let name = if ordinal % 7 == 0 {
+            "ÜberweisungAPI".to_string()
+        } else {
+            format!("processTransfer{}", ordinal % 11)
+        };
+        let qualified = format!("com.acme.TransferService.{name}");
+        let id = format!("{:03}:{}", ordinal, name);
+        let file = format!("src/service{}/Transfer.java", ordinal % 4);
+        let props = match kind {
+            NodeKind::Route => json!({
+                "httpMethod": "POST",
+                "path": "/api/v1/transfers/{id}/verify",
+                "handler": "verifyTransfer"
+            }),
+            NodeKind::IntegrationRoute => json!({
+                "uri": "direct:transferAudit",
+                "source": "jms:incomingTransfers"
+            }),
+            NodeKind::MessageDestination => json!({"destination_type": "KafkaTopic"}),
+            _ => unreachable!(),
+        };
+        let mut fields = vec![
+            kind.label().to_string(),
+            name.clone(),
+            qualified.clone(),
+            id.clone(),
+            file.clone(),
+        ];
+        match kind {
+            NodeKind::Route => {
+                fields.extend([
+                    "POST".into(),
+                    "/api/v1/transfers/{id}/verify".into(),
+                    "api".into(),
+                    "v1".into(),
+                    "transfers".into(),
+                    "verify".into(),
+                    "verifyTransfer".into(),
+                ]);
+            }
+            NodeKind::IntegrationRoute => fields.extend([
+                "direct:transferAudit".into(),
+                "jms:incomingTransfers".into(),
+            ]),
+            NodeKind::MessageDestination => fields.push("KafkaTopic".into()),
+            _ => unreachable!(),
+        }
+        corpus.push(fields.join(" "));
+        nodes.push(Node {
+            id: NodeId::new(id),
+            kind,
+            name,
+            qualified_name: Some(qualified),
+            file,
+            range: Range::default(),
+            props: Some(props),
+        });
+    }
+
+    let graph = SearchIndex::build(&nodes);
+    let text = TextIndex::build(corpus.iter().map(String::as_str));
+    for query in [
+        "transfer transfer verify",
+        "kafka topic",
+        "incoming transfers audit",
+        "überweisung api",
+        "POST api v1",
+    ] {
+        for limit in [1, 10, 50] {
+            let graph_hits = graph.search(query, limit);
+            let text_hits = text.search(query, limit);
+            let graph_order: Vec<(&str, u32)> = graph_hits
+                .iter()
+                .map(|hit| (hit.node_id.as_str(), hit.bm25_score.unwrap().to_bits()))
+                .collect();
+            let text_order: Vec<(&str, u32)> = text_hits
+                .iter()
+                .map(|(ordinal, score)| (nodes[*ordinal].id.as_str(), score.to_bits()))
+                .collect();
+            assert_eq!(graph_order, text_order, "query={query:?} limit={limit}");
+        }
+    }
+}
+
+/// DbQuery nodes are searchable by their SQL evidence: table names, operation,
+/// constant name, and the SQL preview — `search_code("AUDIT_LOG")` must surface
+/// the physical INSERT, not only symbols that happen to mention the name.
+#[test]
+fn db_query_nodes_are_searchable_by_table_and_sql_text() {
+    let mut dbquery = node(
+        "DbQuery:com.acme.AuditAdapter#INSERT_AUDIT",
+        NodeKind::DbQuery,
+        "INSERT_AUDIT",
+        None,
+    );
+    dbquery.props = Some(serde_json::json!({
+        "operation": "INSERT",
+        "constantName": "INSERT_AUDIT",
+        "tables": ["AUDIT_LOG"],
+        "sqlPreview": "INSERT INTO AUDIT_LOG (ID, ACTION) VALUES (?, ?)",
+    }));
+    let nodes = vec![
+        dbquery,
+        node(
+            "Method:com.acme.AuditService#audit/1",
+            NodeKind::Method,
+            "audit",
+            Some("com.acme.AuditService.audit"),
+        ),
+    ];
+
+    let index = SearchIndex::build(&nodes);
+    let hits = index.search("audit log insert", 10);
+
+    assert_eq!(
+        hits[0].node_id.as_str(),
+        "DbQuery:com.acme.AuditAdapter#INSERT_AUDIT",
+        "the physical SQL must outrank generically-named audit symbols"
+    );
+}
+
+/// Free functions (Go/Python/Rust/JS/TS emit `NodeKind::Function`, not `Method`)
+/// must be first-class search documents — in function-centric languages they are
+/// the bulk of the graph, and excluding them made `search_code` miss most symbols.
+#[test]
+fn function_nodes_are_searchable() {
+    let nodes = vec![
+        node(
+            "Function:src/services/user.service#getUserById/1",
+            NodeKind::Function,
+            "getUserById",
+            Some("user.service.getUserById"),
+        ),
+        node(
+            "Method:com.acme.UserService#delete/1",
+            NodeKind::Method,
+            "delete",
+            Some("com.acme.UserService.delete"),
+        ),
+    ];
+
+    let index = SearchIndex::build(&nodes);
+    assert_eq!(index.len(), 2, "Function nodes must produce BM25 documents");
+
+    let hits = index.search("get user by id", 10);
+    assert_eq!(
+        hits[0].node_id.as_str(),
+        "Function:src/services/user.service#getUserById/1"
+    );
+}

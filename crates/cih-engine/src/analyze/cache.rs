@@ -6,7 +6,8 @@ use cih_core::{GraphArtifacts, ParsedUnit};
 use cih_parse::ParseOutput;
 
 use crate::file_cache::{
-    hash_all, load_cached_parsed, save_cached_parsed, FileHashIndex, ImporterIndex,
+    hash_all, load_cached_parsed, prepare_parse_cache, save_cached_parsed, FileHashIndex,
+    ImporterIndex,
 };
 use crate::versioning::latest_graph_artifacts;
 
@@ -36,8 +37,43 @@ pub(super) struct ReusedArtifacts {
     pub(super) parsed_file_count: usize,
 }
 
-fn default_registry() -> cih_parse::LanguageRegistry {
-    crate::scan::default_scan_registry()
+/// Registry configured for this analyze: the Java provider learns the extra SQL
+/// execution APIs from `[analyze] sql_apis`; invalid specs are skipped loudly.
+fn registry_for(cache: &AnalyzeCacheOptions) -> cih_parse::LanguageRegistry {
+    let apis: Vec<cih_lang::java::SqlApi> = cache
+        .sql_apis
+        .iter()
+        .filter_map(|spec| {
+            let parsed = cih_lang::java::SqlApi::parse(spec);
+            if parsed.is_none() {
+                tracing::warn!(
+                    spec,
+                    "ignoring malformed sql_apis entry — expected Receiver.method"
+                );
+            }
+            parsed
+        })
+        .collect();
+    let mut r = cih_parse::LanguageRegistry::new();
+    for p in cih_lang::all_providers_with_java_sql_apis(apis) {
+        r.register_boxed(p);
+    }
+    r
+}
+
+/// Parse-cache namespace: the parser schema, plus a config fingerprint whenever
+/// parser output depends on config (`sql_apis`). Without the suffix, changing the
+/// config would silently serve stale cached IR for unchanged files.
+fn parse_cache_namespace(cache: &AnalyzeCacheOptions) -> String {
+    let schema = cih_lang::PARSE_CACHE_SCHEMA;
+    if cache.sql_apis.is_empty() {
+        return schema.to_string();
+    }
+    let mut apis = cache.sql_apis.clone();
+    apis.sort();
+    apis.dedup();
+    let hash = blake3::hash(apis.join("\n").as_bytes()).to_hex()[..8].to_string();
+    format!("{schema}-{hash}")
 }
 
 pub(super) fn parse_scope(
@@ -54,12 +90,18 @@ pub(super) fn parse_scope(
     let current_hashes = hash_all(repo_root, files);
     tracing::debug!(hashed = current_hashes.len(), "file hashing complete");
 
+    // Versioned cache dir: prune other schemas'/configs' entries and legacy flat
+    // files BEFORE either branch — the no-cache branch also writes cache entries.
+    let namespace = parse_cache_namespace(&cache);
+    let namespace = namespace.as_str();
+    prepare_parse_cache(cih_dir, namespace)?;
+
     if !cache.use_cache {
         tracing::info!(files = files.len(), "cache disabled — parsing all files");
-        let unit_output = cih_parse::parse_file_units(repo_root, files, &default_registry())?;
+        let unit_output = cih_parse::parse_file_units(repo_root, files, &registry_for(&cache))?;
         for unit in &unit_output.units {
             if let Some(hash) = current_hashes.get(&unit.rel) {
-                save_cached_parsed(cih_dir, hash, unit)?;
+                save_cached_parsed(cih_dir, namespace, hash, unit)?;
             }
         }
         let reparsed_files = unit_output.units.len();
@@ -137,11 +179,11 @@ pub(super) fn parse_scope(
     for rel in files {
         let unit = current_hashes
             .get(rel)
-            .and_then(|hash| load_cached_parsed(cih_dir, hash))
+            .and_then(|hash| load_cached_parsed(cih_dir, namespace, hash))
             .or_else(|| {
                 previous
                     .get(rel)
-                    .and_then(|hash| load_cached_parsed(cih_dir, hash))
+                    .and_then(|hash| load_cached_parsed(cih_dir, namespace, hash))
             });
         if let Some(unit) = unit {
             cached_by_file.insert(rel.clone(), unit);
@@ -176,7 +218,7 @@ pub(super) fn parse_scope(
         cache_hits_pre,
     );
 
-    let unit_output = cih_parse::parse_file_units(repo_root, &to_parse, &default_registry())?;
+    let unit_output = cih_parse::parse_file_units(repo_root, &to_parse, &registry_for(&cache))?;
     tracing::info!(
         parsed = unit_output.units.len(),
         skipped = unit_output.skipped.len(),
@@ -192,7 +234,7 @@ pub(super) fn parse_scope(
     let mut parsed_by_file: HashMap<String, ParsedUnit> = HashMap::new();
     for unit in unit_output.units {
         if let Some(hash) = current_hashes.get(&unit.rel) {
-            save_cached_parsed(cih_dir, hash, &unit)?;
+            save_cached_parsed(cih_dir, namespace, hash, &unit)?;
         }
         parsed_by_file.insert(unit.rel.clone(), unit);
     }
@@ -246,8 +288,12 @@ fn config_unchanged(repo_root: &Path, cih_dir: &Path, cache: &AnalyzeCacheOption
 
 fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts> {
     let artifacts = latest_graph_artifacts(repo_root)?;
-    let nodes = artifacts.read_nodes()?;
-    let edges = artifacts.read_edges()?;
+    let node_count = artifacts
+        .stream_nodes()?
+        .try_fold(0usize, |count, node| node.map(|_| count + 1))?;
+    let edge_count = artifacts
+        .stream_edges()?
+        .try_fold(0usize, |count, edge| edge.map(|_| count + 1))?;
     let parsed_dir = cih_dir.join("parsed").join(artifacts.version.as_str());
     let parsed_files_path = parsed_dir.join("parsed-files.jsonl");
     // A missing/corrupt parsed-files.jsonl is deliberately not an error here:
@@ -258,8 +304,8 @@ fn reused_artifacts(repo_root: &Path, cih_dir: &Path) -> Result<ReusedArtifacts>
     Ok(ReusedArtifacts {
         artifacts,
         parsed_files_path,
-        node_count: nodes.len(),
-        edge_count: edges.len(),
+        node_count,
+        edge_count,
         parsed_file_count,
     })
 }
@@ -284,7 +330,9 @@ mod tests {
             use_cache: true,
             allow_noop: true,
             skip_xml_integration: skip_xml,
-            cxf_base_path: cxf.map(String::from),
+            route_base_path: cxf.map(String::from),
+            quiet: false,
+            sql_apis: Vec::new(),
         }
     }
 
@@ -353,6 +401,39 @@ mod tests {
         a.use_cache = false;
         a.allow_noop = false;
         assert_eq!(fp1, analyze_config_fingerprint(&repo, &a));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Parser output depends on `sql_apis`, so the parse-cache namespace must
+    /// change with the config (order/duplicates normalized away) and the
+    /// fingerprint must change too — otherwise unchanged files silently keep
+    /// stale IR after a config edit.
+    #[test]
+    fn sql_apis_change_namespace_and_fingerprint() {
+        let repo = temp_repo("sqlapis");
+        let plain = opts(None, false);
+        let mut with_api = opts(None, false);
+        with_api.sql_apis = vec!["AuditQueue.enqueue".into()];
+
+        let base_ns = parse_cache_namespace(&plain);
+        assert_eq!(base_ns, cih_lang::PARSE_CACHE_SCHEMA.to_string());
+        let api_ns = parse_cache_namespace(&with_api);
+        assert_ne!(base_ns, api_ns);
+        assert!(api_ns.starts_with(&format!("{}-", cih_lang::PARSE_CACHE_SCHEMA)));
+
+        let mut reordered = opts(None, false);
+        reordered.sql_apis = vec!["B.two".into(), "A.one".into(), "A.one".into()];
+        let mut sorted = opts(None, false);
+        sorted.sql_apis = vec!["A.one".into(), "B.two".into()];
+        assert_eq!(
+            parse_cache_namespace(&reordered),
+            parse_cache_namespace(&sorted)
+        );
+
+        assert_ne!(
+            analyze_config_fingerprint(&repo, &plain),
+            analyze_config_fingerprint(&repo, &with_api)
+        );
         std::fs::remove_dir_all(&repo).ok();
     }
 }

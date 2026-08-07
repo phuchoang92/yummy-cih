@@ -135,6 +135,28 @@ docker compose --profile docs restart docs-viewer
 
 ---
 
+## Live search
+
+The landing page has a search box that queries cih-server's `GET /wiki/search`
+directly from the browser (BM25 over all wiki pages, with kind/role facets and
+graph provenance on every result).
+
+- **Server URL**: set `CIH_SERVER_URL` (default `http://localhost:8080`). It is
+  baked into the page at build time and fetched by the **browser**, so it must
+  be reachable from the user's machine — use the published cih-server port, not
+  a compose-internal hostname like `http://cih-server:8080`.
+- **CORS** is enabled server-side for the `/wiki/search` route only.
+- **Auth**: works out of the box when cih-server runs without `CIH_API_TOKEN`
+  (dev / trusted network). With a token set, put both services behind a reverse
+  proxy that injects the `Authorization: Bearer` header — the page has no token
+  input.
+- **Offline fallback**: the navbar search is a local index
+  (`docusaurus-search-local`) built into the static site, so search keeps
+  working when cih-server is unreachable; the landing page points there when
+  the live fetch fails.
+
+---
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -142,3 +164,4 @@ docker compose --profile docs restart docs-viewer
 | `CIH_WIKI_PATH` | — | Single-repo mode: path to `pages/` inside the container (e.g. `/wiki/pages` when `.cih/wiki` is mounted at `/wiki`) |
 | `CIH_WIKI_REPOS_DIR` | `/wiki` | Multi-repo mode: parent dir, each subdir = one repo |
 | `CIH_REPO_NAME` | folder name | Display name override (fallback when no `manifest.json`) |
+| `CIH_SERVER_URL` | `http://localhost:8080` | cih-server base URL for live wiki search (browser-reachable; baked in at build time) |

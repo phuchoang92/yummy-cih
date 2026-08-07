@@ -1,3 +1,4 @@
+use super::config::LlmRunParams;
 use super::flow_enrich::enrich_route_flows;
 use crate::llm::{LlmRequest, LlmResponse};
 use anyhow::Result;
@@ -8,6 +9,22 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering as AOrdering},
     Mutex,
 };
+
+/// Build the `LlmRunParams` bundle these flow tests share (they differ only in
+/// the mock adapter). Values match the pre-refactor positional arguments.
+fn flow_llm_params(adapter: &dyn crate::llm::LlmAdapter) -> LlmRunParams<'_> {
+    LlmRunParams {
+        adapter,
+        api_key: None,
+        model: "model",
+        max_tokens: 1000,
+        timeout_secs: 30,
+        retries: 0,
+        dry_run: false,
+        language: "en",
+        debug_evidence: false,
+    }
+}
 
 struct MockLlm {
     responses: Mutex<VecDeque<Result<String>>>,
@@ -96,14 +113,7 @@ fn flow_cache_hit_skips_llm_on_second_call() {
     let (summaries1, updates1) = enrich_route_flows(
         &graph,
         None,
-        &adapter1,
-        None,
-        "model",
-        1000,
-        30,
-        0,
-        "en",
-        false,
+        &flow_llm_params(&adapter1),
         &empty_cache,
         &pool,
     );
@@ -130,14 +140,7 @@ fn flow_cache_hit_skips_llm_on_second_call() {
     let (summaries2, updates2) = enrich_route_flows(
         &graph,
         None,
-        &adapter2,
-        None,
-        "model",
-        1000,
-        30,
-        0,
-        "en",
-        false,
+        &flow_llm_params(&adapter2),
         &flow_cache,
         &pool,
     );
@@ -191,14 +194,7 @@ fn flow_cache_miss_on_changed_call_chain() {
     let (_, updates1) = enrich_route_flows(
         &graph_v1,
         None,
-        &adapter1,
-        None,
-        "model",
-        1000,
-        30,
-        0,
-        "en",
-        false,
+        &flow_llm_params(&adapter1),
         &empty_cache,
         &pool,
     );
@@ -236,14 +232,7 @@ fn flow_cache_miss_on_changed_call_chain() {
     let (summaries2, _) = enrich_route_flows(
         &graph_v2,
         None,
-        &adapter2,
-        None,
-        "model",
-        1000,
-        30,
-        0,
-        "en",
-        false,
+        &flow_llm_params(&adapter2),
         &flow_cache,
         &pool,
     );

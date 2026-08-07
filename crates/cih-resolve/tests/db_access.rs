@@ -22,6 +22,7 @@ fn make_parsed_file(
         sql_constants,
         sql_execution_sites,
         string_constants: vec![],
+        http_wrappers: Vec::new(),
     }
 }
 
@@ -44,6 +45,7 @@ fn make_site(
         api_name: api_name.to_string(),
         const_ref: const_ref.map(str::to_string),
         inline_sql: None,
+        heuristic: false,
         in_callable,
         range: Range::default(),
     }
@@ -244,4 +246,190 @@ fn emit_db_access_marks_dynamic_in_props() {
 fn owner_fqcn_of_extracts_fqcn_from_method_id() {
     let id = method_id("com.bank.Adapter", "doWork", 2);
     assert_eq!(owner_fqcn_of(&id), "com.bank.Adapter");
+}
+
+#[test]
+fn emit_db_access_resolves_cross_file_unique_const() {
+    // The SQL constant lives in a dedicated constants class, not in the caller's file.
+    let const_fqcn = "com.bank.SqlConstants";
+    let caller_fqcn = "com.bank.AdapterImpl";
+    let callable = method_id(caller_fqcn, "fetchAccounts", 1);
+
+    let constants_file = make_parsed_file(
+        "src/main/java/SqlConstants.java",
+        const_fqcn,
+        vec![make_constant(
+            "QUERY_CROSS",
+            const_fqcn,
+            "SELECT * FROM ACCOUNTS WHERE id = ?",
+        )],
+        vec![],
+    );
+    let adapter_file = make_parsed_file(
+        "src/main/java/AdapterImpl.java",
+        caller_fqcn,
+        vec![],
+        vec![make_site(
+            "executeQuery",
+            Some("QUERY_CROSS"),
+            callable.clone(),
+        )],
+    );
+
+    let (nodes, edges) = emit_db_access(&[constants_file, adapter_file]);
+
+    let query_id = db_query_const_id(const_fqcn, "QUERY_CROSS");
+    let table_id = db_table_id("ACCOUNTS");
+
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.id == query_id && n.kind == NodeKind::DbQuery),
+        "DbQuery node missing for cross-file constant"
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n.id == table_id && n.kind == NodeKind::DbTable),
+        "DbTable node missing — cross-file resolution failed"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.src == callable && e.dst == query_id && e.kind == EdgeKind::ExecutesQuery),
+        "EXECUTES_QUERY edge missing"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.src == query_id && e.dst == table_id && e.kind == EdgeKind::ReadsTable),
+        "READS_TABLE edge missing"
+    );
+    // Must not be flagged dynamic — the constant was fully resolved.
+    let qnode = nodes.iter().find(|n| n.id == query_id).unwrap();
+    let dynamic = qnode
+        .props
+        .as_ref()
+        .and_then(|p| p.get("dynamic"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(!dynamic, "cross-file resolved constant must not be dynamic");
+}
+
+#[test]
+fn emit_db_access_marks_dynamic_when_const_name_ambiguous() {
+    // Two different files both define a constant with the same bare name.
+    // The caller cannot be resolved to either without import analysis → dynamic=true.
+    let fqcn_a = "com.bank.SqlConstantsA";
+    let fqcn_b = "com.bank.SqlConstantsB";
+    let caller_fqcn = "com.bank.AdapterImpl";
+    let callable = method_id(caller_fqcn, "doQuery", 0);
+
+    let file_a = make_parsed_file(
+        "src/main/java/SqlConstantsA.java",
+        fqcn_a,
+        vec![make_constant(
+            "QUERY_SHARED",
+            fqcn_a,
+            "SELECT * FROM TABLE_A",
+        )],
+        vec![],
+    );
+    let file_b = make_parsed_file(
+        "src/main/java/SqlConstantsB.java",
+        fqcn_b,
+        vec![make_constant(
+            "QUERY_SHARED",
+            fqcn_b,
+            "SELECT * FROM TABLE_B",
+        )],
+        vec![],
+    );
+    let caller = make_parsed_file(
+        "src/main/java/AdapterImpl.java",
+        caller_fqcn,
+        vec![],
+        vec![make_site("executeQuery", Some("QUERY_SHARED"), callable)],
+    );
+
+    let (nodes, edges) = emit_db_access(&[file_a, file_b, caller]);
+
+    let table_nodes: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::DbTable)
+        .collect();
+    assert!(
+        table_nodes.is_empty(),
+        "ambiguous const must not resolve to a DbTable: {table_nodes:?}"
+    );
+    let table_edges: Vec<_> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::ReadsTable || e.kind == EdgeKind::WritesTable)
+        .collect();
+    assert!(
+        table_edges.is_empty(),
+        "ambiguous const must not emit table edges: {table_edges:?}"
+    );
+}
+
+/// Heuristic sites (SQL constant flowing into an arbitrary call) are emitted only
+/// when the referenced constant resolves to text that actually reads as SQL; a
+/// message constant or an unresolvable reference must not fabricate a DbQuery.
+#[test]
+fn heuristic_sites_require_sql_shaped_text() {
+    let fqcn = "com.bank.AuditAdapter";
+    let callable = method_id(fqcn, "record", 1);
+    let heuristic_site = |const_ref: &str| SqlExecutionSite {
+        api_name: "enqueue".to_string(),
+        const_ref: Some(const_ref.to_string()),
+        inline_sql: None,
+        heuristic: true,
+        in_callable: callable.clone(),
+        range: Range::default(),
+    };
+    let pf = make_parsed_file(
+        "src/main/java/AuditAdapter.java",
+        fqcn,
+        vec![
+            make_constant(
+                "INSERT_AUDIT",
+                fqcn,
+                "INSERT INTO AUDIT_LOG (ID) VALUES (?)",
+            ),
+            make_constant("MSG_TEXT", fqcn, "password changed"),
+        ],
+        vec![
+            heuristic_site("INSERT_AUDIT"),
+            heuristic_site("MSG_TEXT"),
+            heuristic_site("UNKNOWN_CONST"),
+        ],
+    );
+
+    let (nodes, edges) = emit_db_access(&[pf]);
+
+    let queries: Vec<&cih_core::Node> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::DbQuery)
+        .collect();
+    assert_eq!(queries.len(), 1, "only the real SQL constant: {queries:?}");
+    assert_eq!(queries[0].id, db_query_const_id(fqcn, "INSERT_AUDIT"));
+    assert_eq!(
+        queries[0].props.as_ref().unwrap()["heuristic"],
+        serde_json::Value::Bool(true),
+        "heuristic provenance must be visible on the DbQuery"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::WritesTable && e.dst == db_table_id("AUDIT_LOG")),
+        "the audit INSERT must produce a WRITES_TABLE edge"
+    );
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::ExecutesQuery)
+            .count(),
+        1,
+        "non-SQL and unresolved heuristic sites are dropped"
+    );
 }

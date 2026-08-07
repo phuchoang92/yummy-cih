@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use cih_core::{Node, NodeId, NodeKind, Range};
@@ -8,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::{Client, NoTls};
 
 use crate::chunk_text;
+use crate::inference::{
+    EmbedInferenceConfig, EmbedInferenceMetricsSnapshot, EmbedInferenceRuntime,
+};
 use crate::model::{EmbedModel, EmbedModelKind};
 use crate::text::{content_hash, embeddable_nodes, embedding_text, source_bodies};
 
@@ -19,7 +23,8 @@ const EMBED_BATCH: usize = 256;
 
 pub struct EmbedStore {
     client: Client,
-    model: EmbedModel,
+    model: Arc<EmbedModel>,
+    inference: EmbedInferenceRuntime,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -67,6 +72,16 @@ struct PendingChunk {
 
 impl EmbedStore {
     pub async fn connect(pg_url: &str, model_kind: EmbedModelKind) -> Result<Self> {
+        let inference = EmbedInferenceConfig::from_env()
+            .with_context(|| "invalid embedding inference configuration")?;
+        Self::connect_with_inference_config(pg_url, model_kind, inference).await
+    }
+
+    pub async fn connect_with_inference_config(
+        pg_url: &str,
+        model_kind: EmbedModelKind,
+        inference: EmbedInferenceConfig,
+    ) -> Result<Self> {
         let (client, connection) = tokio_postgres::connect(pg_url, NoTls)
             .await
             .with_context(|| "failed to connect to Postgres for embeddings")?;
@@ -75,9 +90,19 @@ impl EmbedStore {
                 eprintln!("cih-embed postgres connection error: {err}");
             }
         });
-        let model = EmbedModel::load(model_kind)
-            .with_context(|| format!("failed to load embedding model {}", model_kind.label()))?;
-        Ok(Self { client, model })
+        let model =
+            Arc::new(EmbedModel::load(model_kind).with_context(|| {
+                format!("failed to load embedding model {}", model_kind.label())
+            })?);
+        Ok(Self {
+            client,
+            model,
+            inference: EmbedInferenceRuntime::new(inference),
+        })
+    }
+
+    pub fn inference_metrics(&self) -> EmbedInferenceMetricsSnapshot {
+        self.inference.metrics()
     }
 
     pub async fn ensure_schema(&self) -> Result<()> {
@@ -121,6 +146,35 @@ impl EmbedStore {
             ))
             .await
             .with_context(|| "failed to ensure cih_embeddings schema")?;
+
+        // Verify that the embedding column's dimension matches the current model.
+        // CREATE TABLE IF NOT EXISTS is a no-op when the table already exists, so a
+        // model swap would otherwise only surface as a pgvector type error on the first
+        // upsert — potentially after minutes of work. Fail here instead with a clear
+        // message telling the operator what to do.
+        let col_type: String = self
+            .client
+            .query_one(
+                r#"SELECT pg_catalog.format_type(atttypid, atttypmod)
+                   FROM pg_attribute
+                   WHERE attrelid = 'cih_embeddings'::regclass
+                     AND attname = 'embedding'
+                     AND attnum > 0
+                     AND NOT attisdropped"#,
+                &[],
+            )
+            .await
+            .with_context(|| "failed to inspect cih_embeddings.embedding column type")?
+            .get(0);
+        let expected = format!("vector({})", self.model.dimension());
+        if col_type != expected {
+            anyhow::bail!(
+                "cih_embeddings.embedding column has type '{col_type}' but the current \
+                 model produces {}-dimensional vectors; drop the cih_embeddings and \
+                 cih_node_vectors tables then re-run `cih embed` to rebuild",
+                self.model.dimension()
+            );
+        }
         Ok(())
     }
 
@@ -200,7 +254,14 @@ impl EmbedStore {
             return Ok(());
         }
         let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
-        let embeddings = self.model.embed(&texts)?;
+        // Bulk embedding is still admitted through the same single inference
+        // lane and runs on Tokio's blocking pool, but it is not subject to the
+        // interactive request deadline: large offline batches are expected to
+        // take longer than one query embedding.
+        let embeddings = self
+            .inference
+            .embed_batch(self.model.clone(), texts)
+            .await?;
         for (chunk, embedding) in batch.iter().zip(embeddings) {
             self.upsert_chunk(chunk, embedding).await?;
             summary.chunks_embedded += 1;
@@ -469,7 +530,10 @@ impl EmbedStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut query_embeddings = self.model.embed(&[query.to_string()])?;
+        let mut query_embeddings = self
+            .inference
+            .embed_query(self.model.clone(), vec![query.to_string()])
+            .await?;
         let Some(query_embedding) = query_embeddings.pop() else {
             return Ok(Vec::new());
         };

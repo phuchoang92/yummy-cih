@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use cih_core::{
-    file_id, ContractSite, Edge, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, RawImport, Range,
+    file_id, ContractSite, Edge, Node, NodeId, NodeKind, ParsedFile, ParsedUnit, Range, RawImport,
     ReferenceSite, RouteSource, SqlConstant, SqlExecutionSite, StringConstant, SymbolDef,
     TypeBinding,
 };
@@ -27,6 +27,7 @@ pub(super) struct TypeContext {
     pub(super) fqcn: String,
     pub(super) spring_prefix: Option<String>,
     pub(super) is_test: bool,
+    pub(super) accessor_fields: Vec<structural::AccessorField>,
     pub(super) start_byte: usize,
     pub(super) end_byte: usize,
 }
@@ -85,36 +86,16 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
     framework::collect_method_routes(root, src, &mut builder);
     framework::collect_contract_sites(root, src, &mut builder);
     constants::collect_sql_constants(root, src, &mut builder);
-    constants::collect_sql_execution_sites(root, src, &mut builder);
+    constants::collect_sql_execution_sites(root, src, &mut builder, provider.sql_apis());
     constants::collect_static_string_constants(root, src, &mut builder);
     structural::attach_structural_profiles(&mut builder);
     normalize::normalize_builder(&mut builder);
 
-    let import_bindings = builder.imports.iter().map(|imp| {
-        use cih_core::{ImportBinding, ImportBindingKind};
-        let kind = if imp.is_wildcard {
-            ImportBindingKind::Wildcard
-        } else if imp.is_static {
-            ImportBindingKind::StaticMember
-        } else {
-            ImportBindingKind::Named
-        };
-        // Static-member and named imports split identically; only wildcards differ.
-        let (module, imported) = if imp.is_wildcard {
-            (imp.raw.trim_end_matches(".*").to_string(), None)
-        } else if let Some((m, i)) = imp.raw.rsplit_once('.') {
-            (m.to_string(), Some(i.to_string()))
-        } else {
-            (imp.raw.clone(), None)
-        };
-        ImportBinding { module, imported, local: None, kind, range: imp.range }
-    }).collect::<Vec<_>>();
-
     Ok(ParsedUnit {
         rel: rel.to_string(),
+        syntactic_callables: 0,
         nodes: builder.nodes,
         edges: builder.edges,
-        import_bindings,
         parsed_file: ParsedFile {
             file: builder.file,
             language: "java".to_string(),
@@ -127,6 +108,7 @@ pub(super) fn parse_java_file(provider: &JavaProvider, rel: &str, src: &str) -> 
             sql_constants: builder.sql_constants,
             sql_execution_sites: builder.sql_execution_sites,
             string_constants: builder.string_constants,
+            http_wrappers: Vec::new(),
         },
     })
 }
@@ -253,7 +235,9 @@ pub(super) fn annotation_metadata(node: TsNode<'_>, src: &str) -> Vec<serde_json
                                     attrs.insert(
                                         key,
                                         serde_json::Value::Array(
-                                            vals.into_iter().map(serde_json::Value::String).collect(),
+                                            vals.into_iter()
+                                                .map(serde_json::Value::String)
+                                                .collect(),
                                         ),
                                     );
                                 }
@@ -274,32 +258,12 @@ pub(super) fn annotation_metadata(node: TsNode<'_>, src: &str) -> Vec<serde_json
     out
 }
 
-pub(super) fn rest_template_http_method(method: &str) -> Option<&'static str> {
-    match method {
-        "getForObject" | "getForEntity" => Some("GET"),
-        "postForObject" | "postForEntity" | "postForLocation" => Some("POST"),
-        "put" => Some("PUT"),
-        "delete" => Some("DELETE"),
-        "patchForObject" => Some("PATCH"),
-        "exchange" => None,
-        _ => None,
-    }
-}
-
-pub(super) fn infer_webclient_http_method(receiver: &str) -> Option<&'static str> {
-    for (needle, method) in [
-        (".get()", "GET"),
-        (".post()", "POST"),
-        (".put()", "PUT"),
-        (".delete()", "DELETE"),
-        (".patch()", "PATCH"),
-    ] {
-        if receiver.contains(needle) {
-            return Some(method);
-        }
-    }
-    None
-}
+// Pure string helpers shared with other framework detectors (Kotlin) live in
+// `contracts_common`; re-exported here so java submodule call sites are unchanged.
+pub(crate) use crate::contracts_common::{
+    base_type_simple, infer_webclient_http_method, normalize_external_url, normalize_route_path,
+    rest_template_http_method, spring_http_method,
+};
 
 pub(super) fn first_string_argument(node: TsNode<'_>, src: &str) -> Option<String> {
     let arguments = node.child_by_field_name("arguments")?;
@@ -310,6 +274,71 @@ pub(super) fn first_string_argument(node: TsNode<'_>, src: &str) -> Option<Strin
         }
     }
     None
+}
+
+/// The call's first argument when it is a plain string literal, unquoted.
+/// Positional extraction — unlike [`first_string_argument`], which scans the
+/// whole list — for arguments that are positional by API contract (Kafka
+/// topics: `send(topic, payload)` must not read the payload as the topic).
+pub(super) fn first_argument_string_literal(node: TsNode<'_>, src: &str) -> Option<String> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let first = arguments
+        .named_children(&mut cursor)
+        .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))?;
+    (first.kind() == "string_literal")
+        .then(|| unquote_spring_literal(&text(first, src)))
+        .flatten()
+}
+
+/// Structured parts of a call's first (URL/topic) argument when it is *not* a
+/// plain literal: `+`-concat folds like `fold_string_init` does for SQL —
+/// literal → `Lit`, identifier / field access → `ConstRef`, anything else →
+/// `Dynamic`. Returns `None` for a plain literal (covered by `url_template`)
+/// or when there is no argument.
+pub(super) fn url_argument_parts(node: TsNode<'_>, src: &str) -> Option<Vec<cih_core::UrlPart>> {
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let first = arguments
+        .named_children(&mut cursor)
+        .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))?;
+    let mut parts = Vec::new();
+    fold_url_expr(first, src, &mut parts);
+    parts
+        .iter()
+        .any(|part| !matches!(part, cih_core::UrlPart::Lit(_)))
+        .then_some(parts)
+}
+
+fn fold_url_expr(node: TsNode<'_>, src: &str, out: &mut Vec<cih_core::UrlPart>) {
+    use cih_core::UrlPart;
+    match node.kind() {
+        "string_literal" => {
+            let value = unquote_spring_literal(&text(node, src)).unwrap_or_default();
+            out.push(UrlPart::Lit(value));
+        }
+        "binary_expression" => {
+            let op = node.child_by_field_name("operator").map(|op| text(op, src));
+            if op.as_deref() != Some("+") {
+                out.push(UrlPart::Dynamic);
+                return;
+            }
+            match node.child_by_field_name("left") {
+                Some(left) => fold_url_expr(left, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+            match node.child_by_field_name("right") {
+                Some(right) => fold_url_expr(right, src, out),
+                None => out.push(UrlPart::Dynamic),
+            }
+        }
+        "parenthesized_expression" => match node.named_child(0) {
+            Some(inner) => fold_url_expr(inner, src, out),
+            None => out.push(UrlPart::Dynamic),
+        },
+        "identifier" | "field_access" => out.push(UrlPart::ConstRef(text(node, src))),
+        _ => out.push(UrlPart::Dynamic),
+    }
 }
 
 pub(super) fn first_constructor_argument_type(node: TsNode<'_>, src: &str) -> Option<String> {
@@ -372,36 +401,6 @@ fn class_of_signature(in_fqcn: &str) -> &str {
     in_fqcn.split('#').next().unwrap_or(in_fqcn)
 }
 
-pub(super) fn base_type_simple(raw: &str) -> String {
-    raw.split('<')
-        .next()
-        .unwrap_or(raw)
-        .replace("[]", "")
-        .rsplit('.')
-        .next()
-        .unwrap_or(raw)
-        .trim()
-        .to_string()
-}
-
-pub(super) fn normalize_external_url(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if let Some(rest) = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-    {
-        return rest
-            .find('/')
-            .map(|idx| collapse_slashes(&rest[idx..]))
-            .unwrap_or_else(|| "/".to_string());
-    }
-    if trimmed.starts_with('/') {
-        collapse_slashes(trimmed)
-    } else {
-        trimmed.to_string()
-    }
-}
-
 pub(super) fn spring_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> {
     annotations(node)
         .into_iter()
@@ -419,11 +418,7 @@ pub(super) fn jaxrs_class_prefix(node: TsNode<'_>, src: &str) -> Option<String> 
 pub(super) fn method_routes(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
     let mut routes = spring_method_routes_inner(node, src);
     routes.extend(jaxrs_method_routes_inner(node, src));
-    routes.sort_by(|a, b| {
-        a.http_method
-            .cmp(b.http_method)
-            .then(a.path.cmp(&b.path))
-    });
+    routes.sort_by(|a, b| a.http_method.cmp(b.http_method).then(a.path.cmp(&b.path)));
     routes.dedup_by(|a, b| a.http_method == b.http_method && a.path == b.path);
     routes
 }
@@ -462,14 +457,12 @@ pub(super) fn spring_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<Met
 }
 
 fn jaxrs_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
-    let verb = annotations(node)
-        .into_iter()
-        .find_map(|annotation| {
-            annotation_name(annotation, src)
-                .as_deref()
-                .and_then(jaxrs_http_method)
-                .map(|method| (method, annotation))
-        });
+    let verb = annotations(node).into_iter().find_map(|annotation| {
+        annotation_name(annotation, src)
+            .as_deref()
+            .and_then(jaxrs_http_method)
+            .map(|method| (method, annotation))
+    });
     let Some((http_method, verb_annotation)) = verb else {
         return Vec::new();
     };
@@ -480,7 +473,8 @@ fn jaxrs_method_routes_inner(node: TsNode<'_>, src: &str) -> Vec<MethodRoute> {
     let paths = path_annotation
         .map(|annotation| route_values(annotation, src))
         .unwrap_or_default();
-    let verb_name = annotation_name(verb_annotation, src).unwrap_or_else(|| http_method.to_string());
+    let verb_name =
+        annotation_name(verb_annotation, src).unwrap_or_else(|| http_method.to_string());
     let mut annotation_names = vec![verb_name];
     if path_annotation.is_some() {
         annotation_names.push("Path".to_string());
@@ -535,17 +529,6 @@ pub(super) fn annotation_name(node: TsNode<'_>, src: &str) -> Option<String> {
         .or_else(|| first_named_child(node, "identifier"))
         .map(|name| text(name, src))
         .filter(|name| !name.is_empty())
-}
-
-fn spring_http_method(annotation: &str) -> Option<&'static str> {
-    match annotation {
-        "GetMapping" => Some("GET"),
-        "PostMapping" => Some("POST"),
-        "PutMapping" => Some("PUT"),
-        "DeleteMapping" => Some("DELETE"),
-        "PatchMapping" => Some("PATCH"),
-        _ => None,
-    }
 }
 
 fn jaxrs_http_method(annotation: &str) -> Option<&'static str> {
@@ -649,40 +632,6 @@ pub(super) fn unquote_spring_literal(raw: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
-pub(super) fn normalize_route_path(route_path: &str, prefix: &str) -> String {
-    let path_part = route_path.trim().trim_matches('/');
-    let prefix_part = prefix.trim().trim_matches('/');
-    let joined = if prefix_part.is_empty() {
-        format!("/{path_part}")
-    } else if path_part.is_empty() {
-        format!("/{prefix_part}")
-    } else {
-        format!("/{prefix_part}/{path_part}")
-    };
-    collapse_slashes(&joined)
-}
-
-fn collapse_slashes(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    let mut previous_slash = false;
-    for ch in path.chars() {
-        if ch == '/' {
-            if !previous_slash {
-                out.push(ch);
-            }
-            previous_slash = true;
-        } else {
-            out.push(ch);
-            previous_slash = false;
-        }
-    }
-    if out.is_empty() {
-        "/".into()
-    } else {
-        out
-    }
-}
-
 pub(super) fn base_name_node(node: TsNode<'_>) -> Option<TsNode<'_>> {
     match node.kind() {
         "type_identifier" => Some(node),
@@ -708,6 +657,7 @@ pub(super) fn parse_import(node: TsNode<'_>, src: &str) -> Option<RawImport> {
         raw: body.to_string(),
         is_static,
         is_wildcard: body.ends_with(".*"),
+        alias: None,
         range: range_of(node),
     })
 }
@@ -912,7 +862,9 @@ pub(super) fn modifiers(node: TsNode<'_>, src: &str) -> Vec<String> {
 
 pub(super) fn first_named_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     let mut cursor = node.walk();
-    let result = node.named_children(&mut cursor).find(|child| child.kind() == kind);
+    let result = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == kind);
     result
 }
 

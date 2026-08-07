@@ -56,8 +56,16 @@ COPY --from=builder /tmp/libonnxruntime.so /usr/local/lib/libonnxruntime.so
 RUN test -s /usr/local/lib/libonnxruntime.so || rm -f /usr/local/lib/libonnxruntime.so; \
     ldconfig 2>/dev/null || true
 
+# Pre-baked embedding model (all-MiniLM-L6-v2 ONNX, vendored in the repo). Makes the
+# image self-contained: fastembed finds it via HF_HOME below and never downloads from
+# HuggingFace at runtime — required for hosts whose network blocks huggingface.co.
+# NOTE: this path is deliberately NOT under a mounted volume (/data), so a named
+# volume can't shadow the baked model.
+COPY vendor/hf-cache /opt/cih/hf-cache
+
 # ── Volumes ───────────────────────────────────────────────────────────────────
-# /data   — graph artifacts + HuggingFace model cache (persist across runs)
+# /data   — graph artifacts (persist across runs); the embedding model is baked
+#           into the image at /opt/cih/hf-cache, not here
 # /repo   — mount your Java repo here for cih-engine analyze
 VOLUME ["/data", "/repo"]
 
@@ -66,8 +74,10 @@ ENV CIH_BIND=0.0.0.0:8080
 ENV FALKOR_URL=redis://falkordb:6379
 ENV CIH_GRAPH_KEY=cih
 ENV CIH_ARTIFACTS_DIR=/data/artifacts
-# fastembed downloads embedding models from HuggingFace on first use; cache them here
-ENV HF_HOME=/data/hf-cache
+# Embedding-model cache. Points at the pre-baked model COPYed above so fastembed
+# never contacts HuggingFace at runtime. Override to a writable dir only if you
+# intend to fetch a different model online.
+ENV HF_HOME=/opt/cih/hf-cache
 ENV RUST_LOG=info,cih_server=debug
 
 EXPOSE 8080

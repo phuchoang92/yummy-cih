@@ -10,14 +10,16 @@
 //! This runs during `analyze` AFTER the main Java parse/resolve phase, so it can
 //! access the `ParsedFile` list for type bindings.
 //!
-//! Like `integration_xml.rs`, this is a deliberately lightweight text scanner: we
-//! do not pull in an XML parser dependency. Malformed input simply yields fewer
-//! facts; it never panics.
+//! XML is parsed with `quick-xml` so attributes are scoped to the element that
+//! owns them. Malformed input simply yields the facts parsed before the error; it
+//! never panics.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use cih_core::{type_id, BindingKind, Edge, EdgeKind, Node, NodeId, NodeKind, ParsedFile, Range};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 
 pub struct DiXmlOutput {
     pub nodes: Vec<Node>,
@@ -28,27 +30,77 @@ pub struct DiXmlOutput {
 #[derive(Clone, Debug)]
 #[doc(hidden)]
 pub struct BeanDef {
-    #[allow(dead_code)]
     pub id: Option<String>,
     pub fqcn: String,
     pub file: String,
 }
 
-/// A `<reference interface="...">` lookup parsed from Blueprint XML.
+/// All DI wiring facts collected from a repo's Spring/Blueprint XML, gathered once
+/// per analyze so both the resolver (qualifier → bean-id redirect) and the
+/// [`extract_di_xml_from`] augmentor consume the same walk.
+#[derive(Debug, Default)]
+pub struct DiWiring {
+    pub beans: Vec<BeanDef>,
+    pub references: Vec<ReferenceDef>,
+    /// Bean id/name → declared class FQCN. Conflicting declarations are omitted:
+    /// repo-wide wiring has no Spring application-context model, so choosing one
+    /// would make qualifier dispatch depend on filesystem walk order.
+    pub beans_by_id: HashMap<String, String>,
+}
+
+/// Walk `repo_root` for DI XML files and collect every bean/reference definition.
+pub fn collect_di_wiring(repo_root: &Path) -> DiWiring {
+    let (beans, references) = collect_di_definitions(repo_root);
+    let mut candidates: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for bean in &beans {
+        if let Some(id) = &bean.id {
+            candidates
+                .entry(id.as_str())
+                .or_default()
+                .insert(bean.fqcn.as_str());
+        }
+    }
+    let mut beans_by_id: HashMap<String, String> = HashMap::new();
+    for (id, classes) in candidates {
+        if classes.len() == 1 {
+            beans_by_id.insert(
+                id.to_string(),
+                classes.into_iter().next().unwrap().to_string(),
+            );
+        } else {
+            tracing::warn!(
+                bean_id = id,
+                classes = ?classes,
+                "di-xml: ambiguous bean id across application contexts — qualifier redirect disabled"
+            );
+        }
+    }
+    DiWiring {
+        beans,
+        references,
+        beans_by_id,
+    }
+}
+
+/// A `<reference interface="...">` lookup parsed from Blueprint or Spring-DM
+/// (`<osgi:reference>`) XML — the namespace prefix is stripped during parsing.
 #[derive(Clone, Debug)]
 #[doc(hidden)]
 pub struct ReferenceDef {
     pub interface: String,
 }
 
-/// Returns true when the file content looks like a Spring / Blueprint DI config.
+/// Returns true when the file content looks like a Spring / Blueprint / Spring-DM DI config.
 fn is_di_xml(content: &str) -> bool {
     content.contains("http://www.springframework.org/schema/beans")
         || content.contains("http://www.osgi.org/xmlns/blueprint")
+        || content.contains("http://www.springframework.org/schema/osgi")
 }
 
 /// Returns true when a repo-relative path matches one of the DI XML name patterns:
-/// `applicationContext*.xml`, `beans.xml`, `blueprint*.xml`, `OSGI-INF/blueprint/*.xml`.
+/// `applicationContext*.xml`, `beans.xml`, `blueprint*.xml`, `OSGI-INF/blueprint/*.xml`,
+/// `META-INF/spring/*.xml` (OSGi bundles, e.g. SAP-OCB `bundle-context-*.xml` /
+/// `beans_rest*.xml` — the [`is_di_xml`] content gate is the real filter there).
 #[doc(hidden)]
 pub fn is_di_xml_path(rel: &str) -> bool {
     let file_name = rel.rsplit('/').next().unwrap_or(rel);
@@ -65,6 +117,9 @@ pub fn is_di_xml_path(rel: &str) -> bool {
     if rel.contains("OSGI-INF/blueprint/") && lower.ends_with(".xml") {
         return true;
     }
+    if rel.contains("META-INF/spring/") && lower.ends_with(".xml") {
+        return true;
+    }
     false
 }
 
@@ -76,51 +131,49 @@ pub fn parse_di_document(rel: &str, content: &str) -> (Vec<BeanDef>, Vec<Referen
     let mut beans = Vec::new();
     let mut references = Vec::new();
 
-    let bytes = content.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            let tag_start = i;
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            let name_start = i;
-            while i < bytes.len()
-                && !bytes[i].is_ascii_whitespace()
-                && bytes[i] != b'>'
-                && bytes[i] != b'/'
-            {
-                i += 1;
-            }
-            let tag_name = &content[name_start..i];
-            // Strip any namespace prefix (`beans:bean` → `bean`).
-            let local = tag_name.rsplit(':').next().unwrap_or(tag_name);
-
-            match local {
-                "bean" => {
-                    if let Some(class) = extract_xml_attr(&content[tag_start..], "class") {
-                        let id = extract_xml_attr(&content[tag_start..], "id")
-                            .or_else(|| extract_xml_attr(&content[tag_start..], "name"));
-                        beans.push(BeanDef {
-                            id,
-                            fqcn: class,
-                            file: rel.to_string(),
-                        });
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                match element.local_name().as_ref() {
+                    b"bean" => {
+                        if let Some(class) = xml_attr(&element, b"class") {
+                            let id =
+                                xml_attr(&element, b"id").or_else(|| xml_attr(&element, b"name"));
+                            beans.push(BeanDef {
+                                id,
+                                fqcn: class,
+                                file: rel.to_string(),
+                            });
+                        }
                     }
-                }
-                "reference" => {
-                    if let Some(interface) = extract_xml_attr(&content[tag_start..], "interface") {
-                        references.push(ReferenceDef { interface });
+                    b"reference" => {
+                        if let Some(interface) = xml_attr(&element, b"interface") {
+                            references.push(ReferenceDef { interface });
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
+            Ok(Event::Eof) => break,
+            Err(error) => {
+                tracing::warn!(file = rel, %error, "di-xml: malformed document — keeping parsed prefix");
+                break;
+            }
+            _ => {}
         }
-        i += 1;
     }
 
     (beans, references)
+}
+
+fn xml_attr(element: &BytesStart<'_>, local_name: &[u8]) -> Option<String> {
+    element.attributes().flatten().find_map(|attr| {
+        (attr.key.local_name().as_ref() == local_name)
+            .then(|| attr.unescape_value().ok().map(|value| value.into_owned()))
+            .flatten()
+    })
 }
 
 /// Simple (unqualified) name of a possibly-qualified type/raw type, with generics
@@ -158,7 +211,13 @@ fn calls_edge(src: NodeId, dst_kind: NodeKind, dst_fqcn: &str, reason: &str) -> 
 /// 4. For each Blueprint `<reference interface="I">`, look up who implements `I`
 ///    among the parsed classes and emit a `CALLS` edge from `I` to each implementor.
 pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
-    let (beans, references) = collect_di_definitions(repo_root);
+    extract_di_xml_from(&collect_di_wiring(repo_root), parsed)
+}
+
+/// [`extract_di_xml`] over pre-collected wiring — callers that already ran
+/// [`collect_di_wiring`] (the analyze pipeline) avoid a second repo walk.
+pub fn extract_di_xml_from(wiring: &DiWiring, parsed: &[ParsedFile]) -> DiXmlOutput {
+    let (beans, references) = (&wiring.beans, &wiring.references);
 
     if beans.is_empty() && references.is_empty() {
         return DiXmlOutput {
@@ -169,7 +228,7 @@ pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
 
     // Index bean classes by their simple name (multiple beans may share a class).
     let mut beans_by_simple: HashMap<&str, Vec<&BeanDef>> = HashMap::new();
-    for bean in &beans {
+    for bean in beans {
         beans_by_simple
             .entry(simple_name(&bean.fqcn))
             .or_default()
@@ -281,7 +340,7 @@ pub fn extract_di_xml(repo_root: &Path, parsed: &[ParsedFile]) -> DiXmlOutput {
     }
 
     // 4. Blueprint `<reference interface="I">` → CALLS edge from I to each implementor.
-    for reference in &references {
+    for reference in references {
         let iface_simple = simple_name(&reference.interface);
         let Some(impls) = implementors.get(iface_simple) else {
             continue;
@@ -399,24 +458,14 @@ fn collect_di_definitions(repo_root: &Path) -> (Vec<BeanDef>, Vec<ReferenceDef>)
 /// not match a longer attribute like `myclass=`.
 #[doc(hidden)]
 pub fn extract_xml_attr(tag_fragment: &str, attr_name: &str) -> Option<String> {
-    let search_in = &tag_fragment[..tag_fragment.len().min(2000)];
-    let needle = format!("{attr_name}=");
-    let mut from = 0;
+    let mut reader = Reader::from_str(tag_fragment);
     loop {
-        let rel = search_in[from..].find(&needle)?;
-        let pos = from + rel;
-        let prev_ok = pos == 0
-            || search_in.as_bytes()[pos - 1].is_ascii_whitespace()
-            || search_in.as_bytes()[pos - 1] == b'<';
-        if prev_ok {
-            let after = &search_in[pos + needle.len()..];
-            let first = after.chars().next()?;
-            if first == '"' || first == '\'' {
-                let end = after[1..].find(first)?;
-                return Some(after[1..end + 1].to_string());
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                return xml_attr(&element, attr_name.as_bytes());
             }
-            return None;
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
         }
-        from = pos + needle.len();
     }
 }

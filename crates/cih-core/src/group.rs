@@ -1,6 +1,8 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use crate::registry::Registry;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupEntry {
@@ -26,8 +28,13 @@ pub enum ContractMatchKind {
 impl From<crate::MessagingFramework> for ContractMatchKind {
     fn from(fw: crate::MessagingFramework) -> Self {
         match fw {
-            crate::MessagingFramework::Kafka => ContractMatchKind::KafkaTopic,
             crate::MessagingFramework::Spring => ContractMatchKind::SpringEvent,
+            // Kafka + the JS topic/queue/event frameworks all match by topic name.
+            crate::MessagingFramework::Kafka
+            | crate::MessagingFramework::SocketIo
+            | crate::MessagingFramework::Bull
+            | crate::MessagingFramework::Rabbitmq
+            | crate::MessagingFramework::NestMicroservice => ContractMatchKind::KafkaTopic,
         }
     }
 }
@@ -42,20 +49,132 @@ pub struct ContractMatch {
     pub match_key: String,
 }
 
-fn cih_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cih"))
+/// The CIH home directory (registry, groups, and `config.toml` live here), or
+/// `None` when the platform-specific user data root cannot be determined.
+/// `CIH_HOME` overrides the default on every platform.
+pub fn cih_home() -> Option<PathBuf> {
+    crate::CihPaths::discover().map(|paths| paths.home().to_path_buf())
 }
 
 fn groups_path() -> Option<PathBuf> {
     cih_home().map(|dir| dir.join("groups.json"))
 }
 
+/// Validate a group name before it is used as a registry key or filesystem
+/// path component. Keeping this in core gives the CLI and every server
+/// transport one rule and prevents absolute/parent paths from escaping
+/// `~/.cih/groups`.
+pub fn validate_group_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        bail!("group name cannot be empty");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "invalid group name '{}': only alphanumeric, '-', and '_' are allowed",
+            name
+        );
+    }
+    Ok(())
+}
+
 pub fn group_dir(name: &str) -> Option<PathBuf> {
+    validate_group_name(name).ok()?;
     cih_home().map(|dir| dir.join("groups").join(name))
 }
 
 pub fn contracts_path(name: &str) -> Option<PathBuf> {
     group_dir(name).map(|dir| dir.join("contracts.jsonl"))
+}
+
+const SYNC_STATE_FILE: &str = "sync-state.json";
+
+pub fn sync_state_path(name: &str) -> Option<PathBuf> {
+    group_dir(name).map(|dir| dir.join(SYNC_STATE_FILE))
+}
+
+/// Registry snapshot of one member repo taken when the group was last synced.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncRepoSnapshot {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub indexed_at: String,
+    #[serde(default)]
+    pub last_git_head: Option<String>,
+}
+
+/// Freshness stamp written next to `contracts.jsonl` on every group sync.
+/// A separate file (not a header line in the jsonl) so old strict-parsing
+/// readers of `contracts.jsonl` keep working.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncState {
+    #[serde(default)]
+    pub synced_at: String,
+    /// Monotonic sync counter for this group (starts at 1).
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub repos: Vec<SyncRepoSnapshot>,
+}
+
+impl SyncState {
+    /// Returns `None` when the stamp is missing or unreadable (pre-stamp syncs).
+    pub fn load(group_dir: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(group_dir.join(SYNC_STATE_FILE)).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    pub fn save(&self, group_dir: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(group_dir)?;
+        let tmp = group_dir.join(format!("{SYNC_STATE_FILE}.tmp"));
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(tmp, group_dir.join(SYNC_STATE_FILE))?;
+        Ok(())
+    }
+
+    pub fn snapshot_of(entry: &crate::registry::RegistryEntry) -> SyncRepoSnapshot {
+        SyncRepoSnapshot {
+            name: entry.name.clone(),
+            indexed_at: entry.indexed_at.clone(),
+            last_git_head: entry.last_git_head.clone(),
+        }
+    }
+}
+
+/// Whether a group's synced contracts are stale relative to the repo registry.
+///
+/// Stale iff any member repo is missing from the registry, or a member's
+/// `indexed_at`/`last_git_head` differs from the sync-time snapshot (including
+/// members added to the group after the sync), or contracts exist without a
+/// stamp (pre-stamp sync). A group that was never synced (no contracts, no
+/// stamp) is not stale — there is nothing to be stale.
+pub fn group_contracts_stale(
+    group: &GroupEntry,
+    registry: &Registry,
+    state: Option<&SyncState>,
+    contracts_exist: bool,
+) -> bool {
+    if group.repos.iter().any(|repo| registry.find(repo).is_none()) {
+        return true;
+    }
+    let Some(state) = state else {
+        return contracts_exist;
+    };
+    group.repos.iter().any(|repo| {
+        let entry = registry
+            .find(repo)
+            .expect("checked above: every member resolves");
+        state
+            .repos
+            .iter()
+            .find(|snap| snap.name == entry.name)
+            .is_none_or(|snap| {
+                snap.indexed_at != entry.indexed_at || snap.last_git_head != entry.last_git_head
+            })
+    })
 }
 
 /// Normalize a URL path for cross-repo contract matching.
@@ -95,12 +214,46 @@ pub fn normalize_contract_path(path: &str) -> String {
     }
 }
 
+struct GroupRegistryCache {
+    mtime: Option<std::time::SystemTime>,
+    registry: std::sync::Arc<GroupRegistry>,
+}
+
+static GROUP_REGISTRY_CACHE: std::sync::OnceLock<std::sync::RwLock<Option<GroupRegistryCache>>> =
+    std::sync::OnceLock::new();
+
 impl GroupRegistry {
     pub fn load() -> Self {
         groups_path()
             .and_then(|p| std::fs::read_to_string(&p).ok())
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default()
+    }
+
+    /// Like [`load`](Self::load), but returns a shared snapshot cached on the
+    /// groups.json mtime — the read-only twin of [`Registry::load_cached`]. Any
+    /// [`save`](Self::save) bumps the mtime, so cached readers pick up writes.
+    /// Use this only on read-only paths; mutating callers must use `load` + `save`.
+    pub fn load_cached() -> std::sync::Arc<GroupRegistry> {
+        let cache = GROUP_REGISTRY_CACHE.get_or_init(|| std::sync::RwLock::new(None));
+        let current_mtime = groups_path()
+            .and_then(|p| std::fs::metadata(&p).ok())
+            .and_then(|m| m.modified().ok());
+        if let Ok(guard) = cache.read() {
+            if let Some(cached) = guard.as_ref() {
+                if cached.mtime == current_mtime {
+                    return cached.registry.clone();
+                }
+            }
+        }
+        let registry = std::sync::Arc::new(Self::load());
+        if let Ok(mut guard) = cache.write() {
+            *guard = Some(GroupRegistryCache {
+                mtime: current_mtime,
+                registry: registry.clone(),
+            });
+        }
+        registry
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -137,5 +290,15 @@ impl GroupRegistry {
         let before = self.groups.len();
         self.groups.retain(|group| group.name != name);
         self.groups.len() != before
+    }
+
+    /// Groups that list `repo_name` as a member.
+    pub fn groups_containing<'a>(
+        &'a self,
+        repo_name: &'a str,
+    ) -> impl Iterator<Item = &'a GroupEntry> {
+        self.groups
+            .iter()
+            .filter(move |group| group.repos.iter().any(|repo| repo == repo_name))
     }
 }

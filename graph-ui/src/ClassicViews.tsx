@@ -1,6 +1,7 @@
 import { Copy, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
+import { kindColor } from "./colors";
 import type { FlatGraph, FlatGraphEdge, FlatGraphNode, TabId } from "./types";
 
 function idOf(value: any): string {
@@ -29,8 +30,6 @@ export function normalizeGraph(input: any): FlatGraph {
   return { nodes: [...nodes.values()], edges };
 }
 
-const KIND_COLORS: Record<string, string> = { Route: "#f59e0b", Class: "#a855f7", Interface: "#c084fc", Method: "#06b6d4", Function: "#06b6d4", Community: "#a78bfa", ExternalEndpoint: "#fb7185", Node: "#64748b" };
-
 function DirectedGraph({ graph, selectedId, onSelect }: { graph: FlatGraph; selectedId: string | null; onSelect: (id: string) => void }) {
   const layout = useMemo(() => {
     const width = 1100, height = 720;
@@ -49,11 +48,32 @@ function DirectedGraph({ graph, selectedId, onSelect }: { graph: FlatGraph; sele
   return <svg className="directed-graph" viewBox={`0 0 ${layout.width} ${layout.height}`} role="img" aria-label="Directed code graph">
     <defs><marker id="classic-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#536475" /></marker></defs>
     <g>{graph.edges.map((edge, index) => { const source = layout.positions.get(edge.source), target = layout.positions.get(edge.target); if (!source || !target) return null; return <g key={`${edge.source}-${edge.target}-${index}`}><line x1={source.x} y1={source.y} x2={target.x} y2={target.y} markerEnd="url(#classic-arrow)" /><text x={(source.x + target.x) / 2} y={(source.y + target.y) / 2 - 5}>{edge.label}</text></g>; })}</g>
-    <g>{graph.nodes.map((node) => { const point = layout.positions.get(node.id)!; const active = node.id === selectedId; return <g key={node.id} className={active ? "classic-node is-selected" : "classic-node"} transform={`translate(${point.x} ${point.y})`} onClick={() => onSelect(node.id)} role="button" tabIndex={0}><circle r={active ? 18 : 14} fill={KIND_COLORS[node.kind] ?? "#64748b"}/><text y={31}>{node.label.slice(0, 28)}</text><title>{node.kind}: {node.id}</title></g>; })}</g>
+    <g>{graph.nodes.map((node) => { const point = layout.positions.get(node.id)!; const active = node.id === selectedId; return <g key={node.id} className={active ? "classic-node is-selected" : "classic-node"} transform={`translate(${point.x} ${point.y})`} onClick={() => onSelect(node.id)} role="button" tabIndex={0}><circle r={active ? 18 : 14} fill={kindColor(node.kind)}/><text y={31}>{node.label.slice(0, 28)}</text><title>{node.kind}: {node.id}</title></g>; })}</g>
   </svg>;
 }
 
 function Toolbar({ children }: { children: React.ReactNode }) { return <div className="classic-toolbar">{children}</div>; }
+
+// In-tab node search so Impact/Flow aren't dead-ends when arrived at directly.
+function NodePicker({ selectedId, onSelectedId }: { selectedId: string | null; onSelectedId: (id: string) => void }) {
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<any[]>([]);
+  const [open, setOpen] = useState(false);
+  const search = async (value: string) => {
+    setQ(value);
+    if (value.trim().length < 2) { setHits([]); setOpen(false); return; }
+    try { const data = await api.search(value.trim()); setHits((data.hits ?? []).slice(0, 8)); setOpen(true); }
+    catch { setHits([]); setOpen(false); }
+  };
+  const pick = (id: string) => { if (!id) return; onSelectedId(id); setOpen(false); setQ(""); setHits([]); };
+  return <div className="node-picker">
+    <Search size={13} />
+    <input value={q} onChange={(event) => void search(event.target.value)} onFocus={() => setOpen(hits.length > 0)}
+      onBlur={() => setTimeout(() => setOpen(false), 120)}
+      placeholder={selectedId ? shortLabel(selectedId) : "Pick a node…"} aria-label="Pick a node to analyze" />
+    {open && hits.length > 0 && <div className="node-picker-menu">{hits.map((hit) => { const id = idOf(hit.node_id ?? hit.id); return <button key={id} type="button" onMouseDown={() => pick(id)}><small>{hit.kind ?? "Node"}</small><strong>{hit.name ?? shortLabel(id)}</strong></button>; })}</div>}
+  </div>;
+}
 
 export function ClassicViews({ tab, selectedId, onSelectedId }: { tab: Exclude<TabId, "overview">; selectedId: string | null; onSelectedId: (id: string) => void }) {
   const [graph, setGraph] = useState<FlatGraph>({ nodes: [], edges: [] });
@@ -84,14 +104,14 @@ export function ClassicViews({ tab, selectedId, onSelectedId }: { tab: Exclude<T
           : error ? <div className="graph-empty error-state"><strong>Request failed</strong><span>{error}</span></div>
           : !clusters.length ? <div className="graph-empty"><strong>No embedding clusters</strong><span>{note || "Run `cih-engine discover <repo> --feature-strategy embed` to generate them."}</span></div>
           : !current ? <div className="graph-empty"><strong>Select a cluster</strong><span>Pick a cluster to inspect its member nodes.</span></div>
-          : <div className="cluster-members"><div className="cluster-members-head"><h2>{current.name === "shared" ? "shared · unclustered" : current.name}</h2><span>{current.name === "shared" ? `${current.node_count} first-party nodes the clusterer couldn't place` : `${current.node_count} nodes · ${Math.round((current.avg_confidence ?? 0) * 100)}% avg confidence · lowest-confidence first`}</span></div><ul>{current.members.map((m: any) => { const kind = m.node_id.split(":")[0] || "Node"; const conf = Math.round((m.confidence ?? 0) * 100); const weak = (m.confidence ?? 0) < 0.5; return <li key={m.node_id} className={m.node_id === selectedId ? "is-active" : ""} onClick={() => onSelectedId(m.node_id)} title={m.evidence}><span className="member-kind" style={{ color: KIND_COLORS[kind] ?? "#64748b" }}>{kind}</span><span className="member-name">{shortLabel(m.node_id)}</span>{m.pinned && <span className="member-pin">pinned</span>}<span className={weak ? "member-conf is-weak" : "member-conf"}>{conf}%</span></li>; })}</ul></div>}</main>
+          : <div className="cluster-members"><div className="cluster-members-head"><h2>{current.name === "shared" ? "shared · unclustered" : current.name}</h2><span>{current.name === "shared" ? `${current.node_count} first-party nodes the clusterer couldn't place` : `${current.node_count} nodes · ${Math.round((current.avg_confidence ?? 0) * 100)}% avg confidence · lowest-confidence first`}</span></div><ul>{current.members.map((m: any) => { const kind = m.node_id.split(":")[0] || "Node"; const conf = Math.round((m.confidence ?? 0) * 100); const weak = (m.confidence ?? 0) < 0.5; return <li key={m.node_id} className={m.node_id === selectedId ? "is-active" : ""} onClick={() => onSelectedId(m.node_id)} title={m.evidence}><span className="member-kind" style={{ color: kindColor(kind) }}>{kind}</span><span className="member-name">{shortLabel(m.node_id)}</span>{m.pinned && <span className="member-pin">pinned</span>}<span className={weak ? "member-conf is-weak" : "member-conf"}>{conf}%</span></li>; })}</ul></div>}</main>
       </div>
     </div>;
   }
 
   const controls = tab === "search" ? <form onSubmit={(event) => { event.preventDefault(); if (query.trim()) void run(() => api.search(query.trim()), (data) => { setItems(data.hits ?? []); setGraph(normalizeGraph(data.subgraph)); }); }}><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search symbol, route, table, or feature"/><button>Search</button></form>
-    : tab === "impact" ? <><select value={direction} onChange={(event) => setDirection(event.target.value)}><option value="upstream">Upstream</option><option value="downstream">Downstream</option><option value="both">Both</option></select><input type="number" min="1" max="8" value={depth} onChange={(event) => setDepth(Number(event.target.value))}/><button disabled={!selectedId} onClick={() => selectedId && void run(() => api.impact(selectedId, direction, depth), (data) => setGraph(normalizeGraph(data)))}>Load impact</button></>
-    : tab === "flow" ? <><input type="number" min="1" max="10" value={depth} onChange={(event) => setDepth(Number(event.target.value))}/><button disabled={!selectedId} onClick={() => selectedId && void run(() => api.flow(selectedId, depth), (data) => { setGraph(normalizeGraph(data)); setExportValue(data.mermaid ?? ""); })}>Trace flow</button>{exportValue && <button className="secondary" onClick={() => navigator.clipboard.writeText(exportValue)}><Copy size={13}/> Mermaid</button>}</>
+    : tab === "impact" ? <><NodePicker selectedId={selectedId} onSelectedId={onSelectedId}/><select value={direction} onChange={(event) => setDirection(event.target.value)}><option value="upstream">Upstream</option><option value="downstream">Downstream</option><option value="both">Both</option></select><input type="number" min="1" max="8" value={depth} onChange={(event) => setDepth(Number(event.target.value))}/><button disabled={!selectedId} onClick={() => selectedId && void run(() => api.impact(selectedId, direction, depth), (data) => setGraph(normalizeGraph(data)))}>Load impact</button></>
+    : tab === "flow" ? <><NodePicker selectedId={selectedId} onSelectedId={onSelectedId}/><input type="number" min="1" max="10" value={depth} onChange={(event) => setDepth(Number(event.target.value))}/><button disabled={!selectedId} onClick={() => selectedId && void run(() => api.flow(selectedId, depth), (data) => { setGraph(normalizeGraph(data)); setExportValue(data.mermaid ?? ""); })}>Trace flow</button>{exportValue && <button className="secondary" onClick={() => navigator.clipboard.writeText(exportValue)}><Copy size={13}/> Mermaid</button>}</>
     : tab === "communities" ? <button onClick={() => void loadCommunities()}>Refresh communities</button>
     : <><input value={prefix} onChange={(event) => setPrefix(event.target.value)} placeholder="Route prefix, e.g. /api"/><button onClick={() => void loadRoutes()}>Load routes</button>{exportValue && <button className="secondary" onClick={() => navigator.clipboard.writeText(exportValue)}><Copy size={13}/> OpenAPI</button>}</>;
 

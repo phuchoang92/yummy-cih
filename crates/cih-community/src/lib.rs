@@ -1,3 +1,12 @@
+//! Community detection — the `discover` stage that groups symbols into feature
+//! modules.
+//!
+//! Given the graph's nodes + edges, [`detect_communities`] runs Leiden clustering
+//! (with a package-based fallback for very large graphs) to partition symbols into
+//! cohesive communities, and traces named execution processes. The output feeds
+//! the wiki (feature pages) and the `communities` MCP tool. Pure compute over
+//! `cih-core` types — no graph-store dependency.
+
 pub mod bfs;
 mod cohesion;
 mod constants;
@@ -82,28 +91,23 @@ pub struct ProcessOutput {
     pub edges: Vec<Edge>,
 }
 
-pub fn detect_communities(
-    nodes: &[Node],
+/// Per-community enrichment lookups built once from the edge list, before the
+/// per-community loop: which routes a handler serves, which queries a method
+/// runs, which tables a query reads/writes, and which topics a member
+/// publishes/consumes (with the topic kind). Borrows nodes via `source_by_id`.
+struct EnrichmentIndex<'a> {
+    route_nodes_by_handler: FxHashMap<NodeId, Vec<&'a Node>>,
+    queries_by_method: FxHashMap<NodeId, Vec<NodeId>>,
+    read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>>,
+    write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>>,
+    publishes_by_member: FxHashMap<NodeId, Vec<(&'a Node, &'static str)>>,
+    consumes_by_member: FxHashMap<NodeId, Vec<(&'a Node, &'static str)>>,
+}
+
+fn build_enrichment_index<'a>(
     edges: &[Edge],
-    cfg: &CommunityConfig,
-) -> CommunityOutput {
-    let large = graph::symbol_node_count(nodes) > cfg.large_graph_threshold;
-    let (community_graph, _) =
-        graph::build_community_graph(nodes, edges, large, cfg.min_confidence_large);
-    if community_graph.node_count() == 0 {
-        return CommunityOutput::default();
-    }
-
-    let assignments = leiden::leiden(
-        &community_graph,
-        cfg.resolution,
-        cfg.max_iterations as usize,
-        cfg.seed as u64,
-    );
-
-    let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
-
-    // Edge lookups for community enrichment
+    source_by_id: &FxHashMap<&'a NodeId, &'a Node>,
+) -> EnrichmentIndex<'a> {
     let mut route_nodes_by_handler: FxHashMap<NodeId, Vec<&Node>> = FxHashMap::default();
     let mut queries_by_method: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
     let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
@@ -162,6 +166,45 @@ pub fn detect_communities(
             _ => {}
         }
     }
+    EnrichmentIndex {
+        route_nodes_by_handler,
+        queries_by_method,
+        read_tables_by_query,
+        write_tables_by_query,
+        publishes_by_member,
+        consumes_by_member,
+    }
+}
+
+pub fn detect_communities(
+    nodes: &[Node],
+    edges: &[Edge],
+    cfg: &CommunityConfig,
+) -> CommunityOutput {
+    let large = graph::symbol_node_count(nodes) > cfg.large_graph_threshold;
+    let (community_graph, _) =
+        graph::build_community_graph(nodes, edges, large, cfg.min_confidence_large);
+    if community_graph.node_count() == 0 {
+        return CommunityOutput::default();
+    }
+
+    let assignments = leiden::leiden(
+        &community_graph,
+        cfg.resolution,
+        cfg.max_iterations as usize,
+        cfg.seed as u64,
+    );
+
+    let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
+
+    let EnrichmentIndex {
+        route_nodes_by_handler,
+        queries_by_method,
+        read_tables_by_query,
+        write_tables_by_query,
+        publishes_by_member,
+        consumes_by_member,
+    } = build_enrichment_index(edges, &source_by_id);
 
     let mut groups: BTreeMap<usize, Vec<NodeIndex>> = BTreeMap::new();
     for idx in community_graph.node_indices() {
@@ -557,64 +600,14 @@ pub fn detect_communities_from_packages(
 ) -> CommunityOutput {
     let source_by_id: FxHashMap<&NodeId, &Node> = nodes.iter().map(|n| (&n.id, n)).collect();
 
-    // Build the same edge-lookup maps used by detect_communities.
-    let mut route_nodes_by_handler: FxHashMap<NodeId, Vec<&Node>> = FxHashMap::default();
-    let mut queries_by_method: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
-    let mut read_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
-    let mut write_tables_by_query: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
-    let mut publishes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
-        FxHashMap::default();
-    let mut consumes_by_member: FxHashMap<NodeId, Vec<(&Node, &'static str)>> =
-        FxHashMap::default();
-    for e in edges {
-        match e.kind {
-            EdgeKind::HandlesRoute => {
-                if let Some(rn) = source_by_id.get(&e.dst) {
-                    route_nodes_by_handler
-                        .entry(e.src.clone())
-                        .or_default()
-                        .push(rn);
-                }
-            }
-            EdgeKind::ExecutesQuery => {
-                queries_by_method
-                    .entry(e.src.clone())
-                    .or_default()
-                    .push(e.dst.clone());
-            }
-            EdgeKind::ReadsTable => {
-                read_tables_by_query
-                    .entry(e.src.clone())
-                    .or_default()
-                    .push(e.dst.clone());
-            }
-            EdgeKind::WritesTable => {
-                write_tables_by_query
-                    .entry(e.src.clone())
-                    .or_default()
-                    .push(e.dst.clone());
-            }
-            EdgeKind::PublishesEvent => {
-                if let Some(tn) = source_by_id.get(&e.dst) {
-                    let kind_str = topic_kind_str(tn);
-                    publishes_by_member
-                        .entry(e.src.clone())
-                        .or_default()
-                        .push((tn, kind_str));
-                }
-            }
-            EdgeKind::ListensTo => {
-                if let Some(tn) = source_by_id.get(&e.dst) {
-                    let kind_str = topic_kind_str(tn);
-                    consumes_by_member
-                        .entry(e.src.clone())
-                        .or_default()
-                        .push((tn, kind_str));
-                }
-            }
-            _ => {}
-        }
-    }
+    let EnrichmentIndex {
+        route_nodes_by_handler,
+        queries_by_method,
+        read_tables_by_query,
+        write_tables_by_query,
+        publishes_by_member,
+        consumes_by_member,
+    } = build_enrichment_index(edges, &source_by_id);
 
     // Group eligible symbol nodes by package feature.
     let mut groups: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
