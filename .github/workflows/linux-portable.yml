@@ -212,6 +212,15 @@ jobs:
           name: ${{ needs.qualify.outputs.artifact-name }}
           path: dist
 
+      - name: Restore portable bundle metadata
+        shell: bash
+        run: |
+          stage_name="${{ needs.qualify.outputs.stage-name }}"
+          rm -rf "dist/$stage_name"
+          tar xzf "dist/$stage_name.tar.gz" -C dist
+          test -x "dist/$stage_name/bin/cih"
+          test -L "dist/$stage_name/lib/liblbug.so"
+
       - name: Test bundle on supported glibc distributions
         shell: bash
         run: |
