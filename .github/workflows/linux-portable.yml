@@ -47,6 +47,7 @@ jobs:
         shell: bash
         run: |
           dnf install -y binutils curl diffutils findutils gcc gcc-c++ git gzip jq make perl-core pkgconfig tar which
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           patchelf_archive="$RUNNER_TEMP/patchelf-$PATCHELF_VERSION-x86_64.tar.gz"
           curl -fL "https://github.com/NixOS/patchelf/releases/download/$PATCHELF_VERSION/patchelf-$PATCHELF_VERSION-x86_64.tar.gz" -o "$patchelf_archive"
           echo "$PATCHELF_SHA256  $patchelf_archive" | sha256sum --check --strict
