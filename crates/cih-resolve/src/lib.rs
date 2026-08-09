@@ -51,6 +51,16 @@ pub use reports::write_unresolved_reports;
 pub use similarity::emit_similar_to_edges;
 
 /// Per-site diagnostic record for a reference that could not be resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnresolvedClassification {
+    Internal,
+    External,
+    #[default]
+    Dynamic,
+}
+
+/// Per-site diagnostic record for a reference that could not be resolved.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UnresolvedRef {
     pub file: String,
@@ -65,6 +75,11 @@ pub struct UnresolvedRef {
     /// ctor_type_unknown | type_ref_unknown | heritage_type_unknown |
     /// free_call_unresolved | field_not_found | callresult_return_type_unknown
     pub reason: String,
+    /// Whether this is a workspace miss, a dependency/runtime reference, or a
+    /// call whose target cannot be known without more type/runtime evidence.
+    /// Artifacts written before this field existed deserialize as `dynamic`.
+    #[serde(default)]
+    pub classification: UnresolvedClassification,
     pub resolved_receiver_type: Option<String>,
     pub external_fqcn: Option<String>,
 }
@@ -80,6 +95,9 @@ pub struct ResolveOutput {
     pub unresolved_external_fqcns: Vec<String>,
     /// Per-site diagnostic records for all unresolved references.
     pub unresolved_refs: Vec<UnresolvedRef>,
+    pub unresolved_internal_refs: u64,
+    pub unresolved_external_refs: u64,
+    pub unresolved_dynamic_refs: u64,
 }
 
 /// Options for the configurable resolve entrypoint.

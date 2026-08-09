@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (27, "e469e8a47abc703e");
+const GOLDEN: (u32, &str) = (28, "dd5b6e70527cb28d");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -325,6 +325,26 @@ func main() {
 
 func handleOrder(w http.ResponseWriter, r *http.Request) {
     http.Get("http://inventory/api/stock")
+}
+"#,
+    ),
+    (
+        "src/worker.rs",
+        r#"use crate::models::{Job, run as execute};
+
+trait Worker {
+    fn required(&self, job: Job);
+    fn defaulted(&self, job: Job) { self.required(job); }
+}
+
+struct Service;
+impl Service {
+    fn process(&self, job: Job) {
+        let local: Job = job;
+        self.validate(&local);
+        execute(local);
+    }
+    fn validate(&self, job: &Job) {}
 }
 "#,
     ),

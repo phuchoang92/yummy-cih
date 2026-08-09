@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -462,6 +463,11 @@ pub fn analyze_from_scope_with_options(
             edge_count,
             resolved_edge_count: 0,
             unresolved_reference_count: 0,
+            unresolved_internal_refs: 0,
+            unresolved_external_refs: 0,
+            unresolved_dynamic_refs: 0,
+            reference_site_count: 0,
+            resolved_reference_count: 0,
             unresolved_external_fqcns: Vec::new(),
             parsed_file_count,
             skipped_count: 0,
@@ -473,6 +479,8 @@ pub fn analyze_from_scope_with_options(
             // `None` ("unknown") rather than falsely claiming zero coverage.
             syntactic_callables: 0,
             callable_node_count: 0,
+            measured_callable_node_count: 0,
+            callable_coverage_by_language: BTreeMap::new(),
             route_node_count: 0,
             published_graph_report: None,
         });
@@ -652,10 +660,22 @@ pub fn analyze_from_scope_with_options(
     let node_count = all_nodes.len();
     let edge_count = edges.len();
     let unresolved_reference_count = resolve_output.skipped;
+    let unresolved_internal_refs = resolve_output.unresolved_internal_refs;
+    let unresolved_external_refs = resolve_output.unresolved_external_refs;
+    let unresolved_dynamic_refs = resolve_output.unresolved_dynamic_refs;
     let unresolved_external_fqcns = std::mem::take(&mut resolve_output.unresolved_external_fqcns);
     let parsed_file_count = parse_output.parsed_files.len();
     let skipped_count = parse_output.skipped.len();
+    let reference_site_count = parse_output
+        .parsed_files
+        .iter()
+        .map(|parsed| parsed.reference_sites.len() as u64)
+        .sum::<u64>();
+    let resolved_reference_count = reference_site_count.saturating_sub(unresolved_reference_count);
     let syntactic_callables = parse_output.syntactic_callables;
+    let measured_callable_node_count = parse_output.measured_callable_node_count;
+    let callable_coverage_by_language =
+        callable_coverage_by_language(&parse_output.callable_measurements_by_language);
     let callable_node_count = all_nodes
         .iter()
         .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
@@ -710,6 +730,11 @@ pub fn analyze_from_scope_with_options(
         edge_count,
         resolved_edge_count,
         unresolved_reference_count,
+        unresolved_internal_refs,
+        unresolved_external_refs,
+        unresolved_dynamic_refs,
+        reference_site_count,
+        resolved_reference_count,
         unresolved_external_fqcns,
         parsed_file_count,
         skipped_count,
@@ -719,6 +744,8 @@ pub fn analyze_from_scope_with_options(
         cache_stats,
         syntactic_callables,
         callable_node_count,
+        measured_callable_node_count,
+        callable_coverage_by_language,
         route_node_count,
         published_graph_report,
     })
@@ -975,6 +1002,11 @@ pub struct EmitOutcome {
     pub jar_node_count: usize,
     pub jar_failed: usize,
     pub unresolved_reference_count: u64,
+    pub unresolved_internal_refs: u64,
+    pub unresolved_external_refs: u64,
+    pub unresolved_dynamic_refs: u64,
+    pub reference_site_count: u64,
+    pub resolved_reference_count: u64,
     pub unresolved_external_fqcns: Vec<String>,
     pub parsed_file_count: usize,
     pub skipped_count: usize,
@@ -984,6 +1016,9 @@ pub struct EmitOutcome {
     pub syntactic_callables: u32,
     /// `Function`/`Method` nodes we actually emitted (numerator).
     pub callable_node_count: usize,
+    /// Numerator measured only from units that supplied the denominator.
+    pub measured_callable_node_count: usize,
+    pub callable_coverage_by_language: BTreeMap<String, f64>,
     /// `Route` nodes in the emitted graph — analyze owns the registry route
     /// stat now (discover may later overwrite it with its richer count).
     pub route_node_count: usize,
@@ -1002,7 +1037,33 @@ pub struct EmitOutcome {
 /// being silently dropped, which is exactly how the CommonJS blind spot survived a
 /// green test suite.
 pub fn callable_coverage(callable_nodes: usize, syntactic_callables: u32) -> Option<f64> {
-    (syntactic_callables > 0).then(|| callable_nodes as f64 / syntactic_callables as f64)
+    if syntactic_callables == 0 {
+        return None;
+    }
+    if callable_nodes > syntactic_callables as usize {
+        tracing::warn!(
+            measured_callable_nodes = callable_nodes,
+            syntactic_callables,
+            "callable numerator exceeds its measured denominator; coverage omitted"
+        );
+        return None;
+    }
+    Some(callable_nodes as f64 / syntactic_callables as f64)
+}
+
+fn callable_coverage_by_language(
+    measurements: &BTreeMap<String, cih_parse::CallableMeasurement>,
+) -> BTreeMap<String, f64> {
+    measurements
+        .iter()
+        .filter_map(|(language, measurement)| {
+            callable_coverage(
+                measurement.measured_callable_node_count,
+                measurement.syntactic_callables,
+            )
+            .map(|coverage| (language.clone(), coverage))
+        })
+        .collect()
 }
 
 impl EmitOutcome {
@@ -1017,6 +1078,11 @@ impl EmitOutcome {
             edge_count: self.edge_count,
             resolved_edge_count: self.resolved_edge_count,
             unresolved_reference_count: self.unresolved_reference_count,
+            unresolved_internal_refs: self.unresolved_internal_refs,
+            unresolved_external_refs: self.unresolved_external_refs,
+            unresolved_dynamic_refs: self.unresolved_dynamic_refs,
+            reference_site_count: self.reference_site_count,
+            resolved_reference_count: self.resolved_reference_count,
             unresolved_external_fqcns: &self.unresolved_external_fqcns,
             parsed_file_count: self.parsed_file_count,
             skipped_count: self.skipped_count,
@@ -1024,8 +1090,10 @@ impl EmitOutcome {
             jar_failed: self.jar_failed,
             syntactic_callables: self.syntactic_callables,
             callable_node_count: self.callable_node_count,
+            measured_callable_node_count: self.measured_callable_node_count,
+            callable_coverage_by_language: &self.callable_coverage_by_language,
             callable_coverage: callable_coverage(
-                self.callable_node_count,
+                self.measured_callable_node_count,
                 self.syntactic_callables,
             ),
             reused_artifacts: self.reused_artifacts,
@@ -1084,7 +1152,9 @@ impl EmitOutcome {
         // Extraction coverage: what the ASTs contained vs. what we pulled out of
         // them. Printing it makes a parser blind spot visible on every run instead
         // of only when someone thinks to go looking for it.
-        if let Some(cov) = callable_coverage(self.callable_node_count, self.syntactic_callables) {
+        if let Some(cov) =
+            callable_coverage(self.measured_callable_node_count, self.syntactic_callables)
+        {
             let warn = cov < 0.4;
             crate::ui::print_row(
                 "Coverage",
@@ -1135,6 +1205,11 @@ pub struct AnalyzeSummary<'a> {
     pub edge_count: usize,
     pub resolved_edge_count: usize,
     pub unresolved_reference_count: u64,
+    pub unresolved_internal_refs: u64,
+    pub unresolved_external_refs: u64,
+    pub unresolved_dynamic_refs: u64,
+    pub reference_site_count: u64,
+    pub resolved_reference_count: u64,
     pub unresolved_external_fqcns: &'a [String],
     pub parsed_file_count: usize,
     pub skipped_count: usize,
@@ -1145,6 +1220,8 @@ pub struct AnalyzeSummary<'a> {
     /// the parser is silently skipping a real idiom.
     pub syntactic_callables: u32,
     pub callable_node_count: usize,
+    pub measured_callable_node_count: usize,
+    pub callable_coverage_by_language: &'a BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callable_coverage: Option<f64>,
     pub reused_artifacts: bool,
@@ -1161,6 +1238,14 @@ pub struct AnalyzeSummary<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callable_coverage_rejects_an_impossible_numerator() {
+        assert_eq!(callable_coverage(0, 0), None);
+        assert_eq!(callable_coverage(0, 4), Some(0.0));
+        assert_eq!(callable_coverage(4, 4), Some(1.0));
+        assert_eq!(callable_coverage(5, 4), None);
+    }
 
     #[test]
     fn fingerprint_varies_with_parse_schema() {

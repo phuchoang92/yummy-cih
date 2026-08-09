@@ -594,7 +594,7 @@ pub struct RefreshArgs {
     /// Wiki generation mode: graph (default, no LLM), llm-summary, or llm-full.
     #[arg(long)]
     pub wiki_mode: Option<String>,
-    /// Community grouping strategy: package (default), graph, or llm.
+    /// Community and wiki grouping strategy: package (default), graph, or llm.
     #[arg(long)]
     pub grouping: Option<String>,
     /// Documentation language for LLM-generated wiki text (default: en).

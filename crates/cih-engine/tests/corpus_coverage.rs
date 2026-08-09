@@ -102,8 +102,9 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[test]
 fn real_commonjs_repo_meets_extraction_floors() {
     let (out, _) = analyze_corpus();
-    let coverage = analyze::callable_coverage(out.callable_node_count, out.syntactic_callables)
-        .expect("typescript provider must measure callables");
+    let coverage =
+        analyze::callable_coverage(out.measured_callable_node_count, out.syntactic_callables)
+            .expect("typescript provider must measure callables");
 
     assert!(
         out.callable_node_count >= MIN_CALLABLE_NODES,
@@ -117,7 +118,7 @@ fn real_commonjs_repo_meets_extraction_floors() {
         coverage >= MIN_CALLABLE_COVERAGE,
         "callable coverage {coverage:.3} < floor {MIN_CALLABLE_COVERAGE} — \
          {} of {} callables became nodes. An idiom is being dropped silently.",
-        out.callable_node_count,
+        out.measured_callable_node_count,
         out.syntactic_callables
     );
     assert!(

@@ -94,6 +94,19 @@ fn graph_is_empty(conn: &Connection) -> Result<bool> {
     Ok(true)
 }
 
+/// Load one CSV using the exact dialect emitted by Rust's `csv::Writer`.
+/// Keeping this in one helper prevents node and relationship COPY paths from
+/// silently drifting on quotes, embedded newlines, or JSON edge properties.
+fn copy_csv(conn: &Connection, table: &str, file: &Path) -> Result<()> {
+    let query = format!(
+        "COPY {table} FROM {} (header=true, delim=',', quote='\"', escape='\"', auto_detect=false, parallel=false)",
+        cstr(&file.to_string_lossy())
+    );
+    conn.query(&query)
+        .map_err(|error| GraphStoreError::Backend(format!("COPY {table}: {error}")))?;
+    Ok(())
+}
+
 pub(crate) fn load_observed(
     conn: &Connection,
     version_dir: &Path,
@@ -205,19 +218,10 @@ fn copy_load(
     // COPY node table, then each rel table present in the artifacts.
     // parallel=false: the parallel CSV reader rejects quoted newlines, which
     // real node names/props can contain (contract-tested).
-    let copy = |table: &str, file: &Path| -> Result<()> {
-        let q = format!(
-            "COPY {table} FROM {} (header=true, parallel=false)",
-            cstr(&file.to_string_lossy())
-        );
-        conn.query(&q)
-            .map_err(|e| GraphStoreError::Backend(format!("COPY {table}: {e}")))?;
-        Ok(())
-    };
-    copy("Symbol", &nodes_csv)?;
+    copy_csv(conn, "Symbol", &nodes_csv)?;
     obs.nodes_loaded(total_nodes);
     for label in kinds {
-        copy(label, &csv_dir.join(format!("{label}.csv")))?;
+        copy_csv(conn, label, &csv_dir.join(format!("{label}.csv")))?;
     }
     obs.edges_loaded(total_edges);
 

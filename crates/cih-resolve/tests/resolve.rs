@@ -6,7 +6,7 @@ use cih_core::{
 };
 use cih_resolve::{
     build_java_constant_resolver, default_registry, resolve_edges, resolve_with_registry,
-    ResolveOptions,
+    ResolveOptions, UnresolvedClassification,
 };
 
 fn simple_of(fqcn: &str) -> String {
@@ -497,6 +497,13 @@ fn phase_4_2_unresolved_external_receiver_is_reported() {
     let out = resolve_edges(&files);
     assert_eq!(out.skipped, 1);
     assert_eq!(out.unresolved_external_fqcns, vec!["com.external.Client"]);
+    assert_eq!(out.unresolved_external_refs, 1);
+    assert_eq!(out.unresolved_internal_refs, 0);
+    assert_eq!(out.unresolved_dynamic_refs, 0);
+    assert_eq!(
+        out.unresolved_refs[0].classification,
+        UnresolvedClassification::External
+    );
 }
 
 #[test]
@@ -1436,6 +1443,17 @@ fn unresolved_ref_receiver_type_unknown() {
     assert_eq!(r.name, "doSomething");
     assert_eq!(r.receiver.as_deref(), Some("unknownReceiver"));
     assert_eq!(r.file, "com/acme/Foo.java");
+    assert_eq!(r.classification, UnresolvedClassification::Dynamic);
+    assert_eq!(out.unresolved_dynamic_refs, 1);
+    assert_eq!(
+        out.unresolved_internal_refs + out.unresolved_external_refs + out.unresolved_dynamic_refs,
+        out.skipped
+    );
+
+    let mut legacy = serde_json::to_value(r).unwrap();
+    legacy.as_object_mut().unwrap().remove("classification");
+    let legacy: cih_resolve::UnresolvedRef = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.classification, UnresolvedClassification::Dynamic);
 }
 
 #[test]
@@ -1497,6 +1515,8 @@ fn unresolved_ref_member_not_found() {
         r.resolved_receiver_type.as_deref(),
         Some("com.acme.MyService")
     );
+    assert_eq!(r.classification, UnresolvedClassification::Internal);
+    assert_eq!(out.unresolved_internal_refs, 1);
 }
 
 #[test]
@@ -1524,6 +1544,87 @@ fn unresolved_ref_heritage_type_unknown() {
     let r = &out.unresolved_refs[0];
     assert_eq!(r.reason, "heritage_type_unknown");
     assert_eq!(r.name, "MissingParent");
+}
+
+#[test]
+fn rust_internal_calls_resolve_without_guessing_dynamic_or_external_targets() {
+    let models = cih_lang::rust::parse::parse_rust_file(
+        "src/models.rs",
+        r#"
+pub struct User;
+impl User {
+    pub fn new() -> Self { User }
+    pub fn touch(&self) {}
+}
+"#,
+    )
+    .unwrap();
+    let util = cih_lang::rust::parse::parse_rust_file(
+        "src/util.rs",
+        "pub fn helper(user: crate::models::User) {}",
+    )
+    .unwrap();
+    let service = cih_lang::rust::parse::parse_rust_file(
+        "src/service.rs",
+        r#"
+use crate::models::User;
+use crate::util::helper as run_helper;
+
+pub struct Service;
+impl Service {
+    pub fn process(&self, user: User) {
+        self.validate(&user);
+        user.touch();
+        let local: User = user;
+        local.touch();
+        run_helper(local);
+        User::new();
+        crate::util::helper(local);
+        std::mem::drop(local);
+        mystery.run();
+    }
+    fn validate(&self, user: &User) {}
+}
+"#,
+    )
+    .unwrap();
+
+    let parsed = vec![models.parsed_file, util.parsed_file, service.parsed_file];
+    let out = resolve_edges(&parsed);
+    let source = method_id("service::Service", "process", 1);
+    let calls = out
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Calls && edge.src == source)
+        .map(|edge| edge.dst.clone())
+        .collect::<Vec<_>>();
+
+    assert!(calls.contains(&method_id("service::Service", "validate", 1)));
+    assert!(calls.contains(&method_id("models::User", "touch", 0)));
+    assert!(calls.contains(&method_id("models::User", "new", 0)));
+    assert!(calls.contains(&function_id("util::helper", "helper", 1)));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|target| **target == function_id("util::helper", "helper", 1))
+            .count(),
+        1,
+        "duplicate call sites collapse to one graph edge"
+    );
+
+    assert!(out.unresolved_refs.iter().any(|reference| {
+        reference.name == "drop" && reference.classification == UnresolvedClassification::External
+    }));
+    assert!(out.unresolved_refs.iter().any(|reference| {
+        reference.name == "run" && reference.classification == UnresolvedClassification::Dynamic
+    }));
+    assert!(!out.edges.iter().any(|edge| {
+        edge.kind == EdgeKind::Calls && edge.src == source && edge.dst.as_str().contains("mystery")
+    }));
+    assert_eq!(
+        out.unresolved_internal_refs + out.unresolved_external_refs + out.unresolved_dynamic_refs,
+        out.skipped
+    );
 }
 
 #[test]

@@ -9,6 +9,11 @@ use crate::{LanguageProvider, SourceScan, Stereotype};
 pub mod parse;
 
 pub const RS_SCOPE_QUERY: &str = include_str!("query.scm");
+pub const RUST_CALLABLE_KINDS: &[&str] = &[
+    "function_item",
+    "function_signature_item",
+    "closure_expression",
+];
 
 static QUERY: Lazy<Query> =
     Lazy::new(|| Query::new(&language(), RS_SCOPE_QUERY).expect("Rust scope query must compile"));
@@ -63,6 +68,10 @@ impl LanguageProvider for RustProvider {
 
     fn parse_file(&self, rel: &str, src: &str) -> anyhow::Result<cih_core::ParsedUnit> {
         parse::parse_rust_file(rel, src)
+    }
+
+    fn callable_kinds(&self) -> &'static [&'static str] {
+        RUST_CALLABLE_KINDS
     }
 
     fn scan_file(&self, _rel: &str, src: &str) -> anyhow::Result<SourceScan> {

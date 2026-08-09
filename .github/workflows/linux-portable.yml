@@ -251,18 +251,50 @@ jobs:
           network="cih-portable-$GITHUB_RUN_ID"
           repo_volume="cih-portable-repo-$GITHUB_RUN_ID"
           data_volume="cih-portable-data-$GITHUB_RUN_ID"
+          self_repo_volume="cih-portable-self-repo-$GITHUB_RUN_ID"
+          self_data_volume="cih-portable-self-data-$GITHUB_RUN_ID"
           server="cih-portable-server-$GITHUB_RUN_ID"
           probe="cih-portable-probe-$GITHUB_RUN_ID"
           api_token="cih-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           cleanup() {
             docker rm -f "$server" "$probe" >/dev/null 2>&1 || true
             docker network rm "$network" >/dev/null 2>&1 || true
-            docker volume rm "$repo_volume" "$data_volume" >/dev/null 2>&1 || true
+            docker volume rm "$repo_volume" "$data_volume" "$self_repo_volume" "$self_data_volume" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
           docker network create --internal "$network"
           docker volume create "$repo_volume"
           docker volume create "$data_volume"
+          docker volume create "$self_repo_volume"
+          docker volume create "$self_data_volume"
+
+          # Self-index the complete tracked checkout (including every test
+          # corpus) with no source mask or portable workaround.
+          self_checkout="$RUNNER_TEMP/cih-self-index-$GITHUB_RUN_ID"
+          git clone --no-hardlinks "$PWD" "$self_checkout"
+          docker run --rm -v "$self_repo_volume:/repo" -v "$self_checkout:/checkout:ro" \
+            debian:bookworm-slim sh -ec 'cp -a /checkout/. /repo/; chown -R 1001:1001 /repo'
+          self_index_log="$RUNNER_TEMP/cih-self-index.log"
+          docker run --rm --network none \
+            -v "$self_repo_volume:/repo" -v "$self_data_volume:/data" \
+            "$image" index /repo --force --no-wiki 2>&1 | tee "$self_index_log"
+          if grep -E 'COPY CALLS|content digest mismatch' "$self_index_log"; then
+            echo "portable self-index emitted a forbidden COPY/registry warning" >&2
+            exit 1
+          fi
+          self_list_json=$(docker run --rm --network none \
+            -v "$self_repo_volume:/repo" -v "$self_data_volume:/data" \
+            "$image" list --json)
+          jq -e '
+            .entries | length == 1 and
+            .[0].path == "/repo" and
+            .[0].stats.communities > 1 and
+            .[0].stats.callable_coverage >= 0 and
+            .[0].stats.callable_coverage <= 1
+          ' <<<"$self_list_json"
+          docker run --rm -v "$self_repo_volume:/repo:ro" debian:bookworm-slim \
+            sh -ec 'grep -Eq '\''"kind":"Method".*"file":"[^"]+\.rs"'\'' /repo/.cih/artifacts/*/nodes.jsonl'
+
           docker run --rm -v "$repo_volume:/repo" \
             -v "$PWD/crates/cih-engine/tests/corpus/java-spring-aop:/fixture:ro" \
             debian:bookworm-slim sh -ec 'cp -a /fixture/. /repo/; chown -R 1001:1001 /repo'

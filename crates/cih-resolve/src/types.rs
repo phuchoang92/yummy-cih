@@ -18,9 +18,15 @@ pub(crate) fn is_type_kind(kind: NodeKind) -> bool {
     )
 }
 
-/// Simple (last) segment of a dotted FQCN.
+/// Simple (last) segment of a Java/Kotlin dotted or Rust `::` qualified name.
 pub(crate) fn simple_of(fqcn: &str) -> String {
-    fqcn.rsplit('.').next().unwrap_or(fqcn).to_string()
+    fqcn.rsplit("::")
+        .next()
+        .unwrap_or(fqcn)
+        .rsplit('.')
+        .next()
+        .unwrap_or(fqcn)
+        .to_string()
 }
 
 /// Enclosing container (class/module/package) of a callable signature.
@@ -36,6 +42,17 @@ pub(crate) fn class_of(in_fqcn: &str) -> &str {
 
 /// Strip generics and array brackets to the base type name.
 pub(crate) fn base_type_name(raw: &str) -> String {
+    let mut raw = raw.trim();
+    while let Some(stripped) = raw.strip_prefix('&') {
+        raw = stripped.trim_start();
+        if raw.starts_with('\'') {
+            raw = raw
+                .split_once(char::is_whitespace)
+                .map(|(_, rest)| rest.trim_start())
+                .unwrap_or(raw);
+        }
+        raw = raw.strip_prefix("mut ").unwrap_or(raw).trim_start();
+    }
     raw.split('<')
         .next()
         .unwrap_or(raw)
