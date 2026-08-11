@@ -67,8 +67,15 @@ pub fn run(name: String, json: bool) -> Result<()> {
             println!("communities:   {}", entry.stats.communities);
             println!("processes:     {}", entry.stats.processes);
             println!(
-                "resolved:      {} edges ({} unresolved refs)",
-                entry.stats.resolved_edges, entry.stats.unresolved_refs
+                "resolved:      {} edges / {} reference sites",
+                entry.stats.resolved_edges, entry.stats.resolved_reference_count
+            );
+            println!(
+                "unresolved:    {} total ({} internal, {} external, {} dynamic)",
+                entry.stats.unresolved_refs,
+                entry.stats.unresolved_internal_refs,
+                entry.stats.unresolved_external_refs,
+                entry.stats.unresolved_dynamic_refs
             );
             // Index quality, not just size: a graph can look big and still have
             // barely any of its functions extracted.

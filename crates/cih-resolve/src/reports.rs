@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-use crate::UnresolvedRef;
+use crate::{UnresolvedClassification, UnresolvedRef};
 
 /// Write `unresolved-refs.jsonl` and `unresolved-refs.md` into `dir`.
 /// Creates `dir` if it does not exist.
@@ -34,8 +34,22 @@ fn write_markdown(refs: &[UnresolvedRef], dir: &Path) -> io::Result<()> {
 
     let total = refs.len();
     let ext_count = refs.iter().filter(|r| r.external_fqcn.is_some()).count();
+    let internal_count = refs
+        .iter()
+        .filter(|reference| reference.classification == UnresolvedClassification::Internal)
+        .count();
+    let external_count = refs
+        .iter()
+        .filter(|reference| reference.classification == UnresolvedClassification::External)
+        .count();
+    let dynamic_count = total.saturating_sub(internal_count + external_count);
 
     writeln!(w, "# Unresolved References")?;
+    writeln!(w)?;
+    writeln!(
+        w,
+        "**Classification:** {internal_count} internal  |  {external_count} external  |  {dynamic_count} dynamic"
+    )?;
     writeln!(w)?;
     writeln!(
         w,

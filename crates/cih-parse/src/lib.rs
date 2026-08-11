@@ -85,6 +85,18 @@ pub struct ParseOutput {
     /// natural ceiling below 1.0. It is a floor/regression signal, not a target:
     /// a near-zero ratio means a real idiom is being dropped on the floor.
     pub syntactic_callables: u32,
+    /// `Function`/`Method` nodes emitted by the same parsed units that opted in
+    /// to syntactic callable measurement.
+    pub measured_callable_node_count: usize,
+    /// Truthful per-language numerator/denominator pairs. A language is present
+    /// only when at least one unit reported `syntactic_callables > 0`.
+    pub callable_measurements_by_language: BTreeMap<String, CallableMeasurement>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CallableMeasurement {
+    pub measured_callable_node_count: usize,
+    pub syntactic_callables: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -211,10 +223,39 @@ pub fn parse_output_from_units(
     let mut edges = BTreeMap::new();
     let mut parsed_files = Vec::new();
     let mut syntactic_callables = 0u32;
+    let mut measured_callable_node_count = 0usize;
+    let mut callable_measurements_by_language = BTreeMap::<String, CallableMeasurement>::new();
 
     for unit in units {
         add_structure_path(&unit.rel, &mut nodes, &mut edges);
         syntactic_callables = syntactic_callables.saturating_add(unit.syntactic_callables);
+        if unit.syntactic_callables > 0 {
+            let emitted = unit
+                .nodes
+                .iter()
+                .filter(|node| {
+                    matches!(
+                        node.kind,
+                        cih_core::NodeKind::Function | cih_core::NodeKind::Method
+                    )
+                })
+                .count();
+            measured_callable_node_count = measured_callable_node_count.saturating_add(emitted);
+            let language = if unit.parsed_file.language.is_empty() {
+                "unknown".to_string()
+            } else {
+                unit.parsed_file.language.clone()
+            };
+            let measurement = callable_measurements_by_language
+                .entry(language)
+                .or_default();
+            measurement.measured_callable_node_count = measurement
+                .measured_callable_node_count
+                .saturating_add(emitted);
+            measurement.syntactic_callables = measurement
+                .syntactic_callables
+                .saturating_add(unit.syntactic_callables);
+        }
         for node in unit.nodes {
             insert_node(&mut nodes, node);
         }
@@ -230,6 +271,8 @@ pub fn parse_output_from_units(
         parsed_files,
         skipped,
         syntactic_callables,
+        measured_callable_node_count,
+        callable_measurements_by_language,
     }
 }
 

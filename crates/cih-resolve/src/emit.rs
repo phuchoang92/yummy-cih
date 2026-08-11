@@ -14,7 +14,7 @@ use crate::lang::{DiSite, InheritanceModel, ResolverRegistry};
 use crate::types::{
     call_name, class_of, is_simple_ident, split_last_dot_outside_parens, starts_uppercase,
 };
-use crate::{ResolveOutput, UnresolvedRef};
+use crate::{ResolveOutput, UnresolvedClassification, UnresolvedRef};
 
 pub struct EdgeEmitter<'a> {
     parsed: &'a [ParsedFile],
@@ -84,6 +84,7 @@ impl<'a> EdgeEmitter<'a> {
         pf: &ParsedFile,
         site: &ReferenceSite,
         reason: &str,
+        classification: UnresolvedClassification,
         resolved_receiver_type: Option<String>,
         external_fqcn: Option<String>,
     ) {
@@ -101,6 +102,7 @@ impl<'a> EdgeEmitter<'a> {
             in_callable: site.in_callable.clone(),
             range: site.range,
             reason: reason.to_string(),
+            classification,
             resolved_receiver_type,
             external_fqcn,
         });
@@ -110,35 +112,82 @@ impl<'a> EdgeEmitter<'a> {
         &mut self,
         pf: &ParsedFile,
         site: &ReferenceSite,
-    ) -> (&'static str, Option<String>, Option<String>) {
+    ) -> (
+        &'static str,
+        UnresolvedClassification,
+        Option<String>,
+        Option<String>,
+    ) {
         match site.kind {
             RefKind::Call => {
                 if let Some(recv) = site.receiver.as_deref() {
                     match self.resolve_receiver_expr_type(pf, site, recv) {
                         Some(resolved)
-                            if resolved.fqcn.contains('.')
+                            if is_qualified_name(&resolved.fqcn)
                                 && !self.index.is_known_type(&resolved.fqcn) =>
                         {
-                            ("receiver_external", None, Some(resolved.fqcn))
+                            (
+                                "receiver_external",
+                                UnresolvedClassification::External,
+                                None,
+                                Some(resolved.fqcn),
+                            )
                         }
-                        Some(resolved) => ("member_not_found", Some(resolved.fqcn), None),
-                        None => ("receiver_type_unknown", None, None),
+                        Some(resolved) => (
+                            "member_not_found",
+                            UnresolvedClassification::Internal,
+                            Some(resolved.fqcn),
+                            None,
+                        ),
+                        None if self.is_workspace_receiver(pf, site, recv) => (
+                            "member_not_found",
+                            UnresolvedClassification::Internal,
+                            None,
+                            None,
+                        ),
+                        None if is_obviously_external_path(recv) => (
+                            "receiver_external",
+                            UnresolvedClassification::External,
+                            None,
+                            Some(recv.to_string()),
+                        ),
+                        None => (
+                            "receiver_type_unknown",
+                            UnresolvedClassification::Dynamic,
+                            None,
+                            None,
+                        ),
                     }
                 } else {
-                    ("free_call_unresolved", None, None)
+                    (
+                        "free_call_unresolved",
+                        self.classify_named_target(pf, &site.name),
+                        None,
+                        None,
+                    )
                 }
             }
             RefKind::Ctor => {
                 let ext = self
                     .resolve_type_cached(&site.name, &pf.file)
-                    .filter(|f| f.contains('.') && !self.index.is_known_type(f));
-                ("ctor_type_unknown", None, ext)
+                    .filter(|f| is_qualified_name(f) && !self.index.is_known_type(f));
+                let classification = if ext.is_some() {
+                    UnresolvedClassification::External
+                } else {
+                    self.classify_named_target(pf, &site.name)
+                };
+                ("ctor_type_unknown", classification, None, ext)
             }
             RefKind::TypeRef => {
                 let ext = self
                     .resolve_type_cached(&site.name, &pf.file)
-                    .filter(|f| f.contains('.') && !self.index.is_known_type(f));
-                ("type_ref_unknown", None, ext)
+                    .filter(|f| is_qualified_name(f) && !self.index.is_known_type(f));
+                let classification = if ext.is_some() {
+                    UnresolvedClassification::External
+                } else {
+                    self.classify_named_target(pf, &site.name)
+                };
+                ("type_ref_unknown", classification, None, ext)
             }
             RefKind::FieldRead | RefKind::FieldWrite => {
                 let recv_type = site
@@ -146,9 +195,63 @@ impl<'a> EdgeEmitter<'a> {
                     .as_deref()
                     .and_then(|r| self.resolve_receiver_expr_type(pf, site, r))
                     .map(|resolved| resolved.fqcn);
-                ("field_not_found", recv_type, None)
+                let classification = match recv_type.as_deref() {
+                    Some(fqcn) if self.index.is_known_type(fqcn) => {
+                        UnresolvedClassification::Internal
+                    }
+                    Some(fqcn) if is_qualified_name(fqcn) => UnresolvedClassification::External,
+                    _ => UnresolvedClassification::Dynamic,
+                };
+                ("field_not_found", classification, recv_type, None)
             }
-            _ => ("unresolved", None, None),
+            _ => (
+                "unresolved",
+                self.classify_named_target(pf, &site.name),
+                None,
+                None,
+            ),
+        }
+    }
+
+    fn is_workspace_receiver(&self, pf: &ParsedFile, site: &ReferenceSite, receiver: &str) -> bool {
+        if matches!(receiver, "self" | "Self" | "this" | "super") {
+            return true;
+        }
+        if is_workspace_path(receiver) {
+            return true;
+        }
+        pf.type_bindings
+            .iter()
+            .filter(|binding| binding.name == receiver && binding.in_fqcn == site.in_fqcn)
+            .any(|binding| {
+                self.index.is_known_type(&binding.raw_type) || is_workspace_path(&binding.raw_type)
+            })
+    }
+
+    fn classify_named_target(&self, pf: &ParsedFile, name: &str) -> UnresolvedClassification {
+        if is_workspace_path(name) || self.index.is_known_type(name) {
+            return UnresolvedClassification::Internal;
+        }
+        if is_obviously_external_path(name) {
+            return UnresolvedClassification::External;
+        }
+
+        let matching_import = pf.imports.iter().find(|import| {
+            import.alias.as_deref() == Some(name)
+                || import
+                    .raw
+                    .rsplit(['.', ':'])
+                    .find(|segment| !segment.is_empty())
+                    == Some(name)
+        });
+        if let Some(import) = matching_import {
+            if is_workspace_path(&import.raw) || self.index.is_known_type(&import.raw) {
+                UnresolvedClassification::Internal
+            } else {
+                UnresolvedClassification::External
+            }
+        } else {
+            UnresolvedClassification::Dynamic
         }
     }
 
@@ -274,8 +377,9 @@ impl<'a> EdgeEmitter<'a> {
                     self.push_edge(src, dst, kind, confidence, reason);
                     self.handled.insert((file_idx, site_idx));
                 } else if !matches!(site.kind, RefKind::Extends | RefKind::Implements) {
-                    let (reason, recv_type, ext_fqcn) = self.classify_unresolved_ref(pf, site);
-                    self.push_unresolved(pf, site, reason, recv_type, ext_fqcn);
+                    let (reason, classification, recv_type, ext_fqcn) =
+                        self.classify_unresolved_ref(pf, site);
+                    self.push_unresolved(pf, site, reason, classification, recv_type, ext_fqcn);
                 }
             }
         }
@@ -312,7 +416,19 @@ impl<'a> EdgeEmitter<'a> {
                     let ext = self
                         .resolve_type_cached(&site.name, &pf.file)
                         .filter(|f| f.contains('.') && !self.index.is_known_type(f));
-                    self.push_unresolved(pf, site, "heritage_type_unknown", None, ext);
+                    let classification = if ext.is_some() {
+                        UnresolvedClassification::External
+                    } else {
+                        self.classify_named_target(pf, &site.name)
+                    };
+                    self.push_unresolved(
+                        pf,
+                        site,
+                        "heritage_type_unknown",
+                        classification,
+                        None,
+                        ext,
+                    );
                     continue;
                 };
                 self.push_edge(
@@ -417,6 +533,21 @@ impl<'a> EdgeEmitter<'a> {
             return None;
         }
 
+        // Rust uses the same `Type::member()` syntax for associated functions
+        // and `module::function()` calls. Resolve the qualifier first, then use
+        // the existing member index; no edge is emitted unless that exact
+        // workspace member exists.
+        if lang == "rust" {
+            if let Some(owner) = self.resolve_type_cached(receiver, &pf.file) {
+                if let Some(dst) = self
+                    .index
+                    .find_member_in_hierarchy(&owner, &site.name, site.arity)
+                {
+                    return Some((dst, 1.0, "rust-qualified-call".to_string()));
+                }
+            }
+        }
+
         if let Some(resolved) = self.resolve_receiver_expr_type(pf, site, receiver) {
             let bare_receiver = !receiver.contains('.') && !receiver.contains('(');
             let owner = resolved.fqcn;
@@ -453,7 +584,7 @@ impl<'a> EdgeEmitter<'a> {
                 let confidence = if bare_receiver { 1.0 } else { 0.7 };
                 return Some((dst, confidence, "receiver-bound".to_string()));
             }
-            if owner.contains('.') && !self.index.is_known_type(&owner) {
+            if is_qualified_name(&owner) && !self.index.is_known_type(&owner) {
                 self.unresolved_external_fqcns.insert(owner);
             }
         }
@@ -519,23 +650,37 @@ impl<'a> EdgeEmitter<'a> {
         name: &str,
         arity: Option<u16>,
     ) -> Option<NodeId> {
+        let rust = effective_lang(pf) == "rust";
+        let separator = if rust { "::" } else { "." };
         for import in &pf.imports {
-            if !import.is_static {
+            if !import.is_static && !rust {
                 continue;
             }
             if import.is_wildcard {
-                let owner = import.raw.trim_end_matches(".*");
-                if let Some(dst) = self.index.find_member(owner, name, arity) {
+                let raw_owner = import.raw.trim_end_matches(".*").trim_end_matches("::*");
+                let owner = if rust {
+                    normalize_rust_import_owner(&self.index, raw_owner, &pf.file)
+                } else {
+                    raw_owner.to_string()
+                };
+                if let Some(dst) = self.index.find_member(&owner, name, arity) {
                     return Some(dst);
                 }
-            } else if let Some((owner, imported_name)) = import.raw.rsplit_once('.') {
-                if imported_name == name {
-                    if let Some(dst) = self.index.find_member(owner, name, arity) {
+            } else if let Some((raw_owner, imported_name)) = import.raw.rsplit_once(separator) {
+                let local_name = import.alias.as_deref().unwrap_or(imported_name);
+                if local_name == name {
+                    let target_name = if rust { imported_name } else { name };
+                    let owner = if rust {
+                        normalize_rust_import_owner(&self.index, raw_owner, &pf.file)
+                    } else {
+                        raw_owner.to_string()
+                    };
+                    if let Some(dst) = self.index.find_member(&owner, target_name, arity) {
                         return Some(dst);
                     }
                     // `require('./services')` names a directory — the module is
                     // actually `./services/index`.
-                    if let Some(owner) = self.index.normalize_module_path(owner) {
+                    if let Some(owner) = self.index.normalize_module_path(&owner) {
                         if let Some(dst) = self.index.find_member(&owner, name, arity) {
                             return Some(dst);
                         }
@@ -686,7 +831,14 @@ impl<'a> EdgeEmitter<'a> {
         pf: &ParsedFile,
     ) {
         if src.as_str() == "Method:<unknown>" || dst.as_str().is_empty() {
-            self.skipped += 1;
+            self.push_unresolved(
+                pf,
+                site,
+                "call_source_unknown",
+                UnresolvedClassification::Dynamic,
+                None,
+                None,
+            );
             return;
         }
         let props = if site.arg_texts.is_empty() {
@@ -751,13 +903,60 @@ impl<'a> EdgeEmitter<'a> {
             }
         }
         let edges = deduped.into_values().collect();
+        let unresolved_internal_refs = self
+            .unresolved_refs
+            .iter()
+            .filter(|reference| reference.classification == UnresolvedClassification::Internal)
+            .count() as u64;
+        let unresolved_external_refs = self
+            .unresolved_refs
+            .iter()
+            .filter(|reference| reference.classification == UnresolvedClassification::External)
+            .count() as u64;
+        let classified = unresolved_internal_refs.saturating_add(unresolved_external_refs);
+        let unresolved_dynamic_refs = self.skipped.saturating_sub(classified);
+        debug_assert_eq!(
+            unresolved_internal_refs + unresolved_external_refs + unresolved_dynamic_refs,
+            self.skipped
+        );
         ResolveOutput {
             nodes: deduped_nodes.into_values().collect(),
             edges,
             skipped: self.skipped,
             unresolved_external_fqcns: self.unresolved_external_fqcns.into_iter().collect(),
             unresolved_refs: self.unresolved_refs,
+            unresolved_internal_refs,
+            unresolved_external_refs,
+            unresolved_dynamic_refs,
         }
+    }
+}
+
+fn is_workspace_path(value: &str) -> bool {
+    matches!(value, "crate" | "self" | "super" | "Self")
+        || value.starts_with("crate::")
+        || value.starts_with("self::")
+        || value.starts_with("super::")
+}
+
+fn is_obviously_external_path(value: &str) -> bool {
+    matches!(value, "std" | "core" | "alloc")
+        || value.starts_with("std::")
+        || value.starts_with("core::")
+        || value.starts_with("alloc::")
+}
+
+fn is_qualified_name(value: &str) -> bool {
+    value.contains('.') || value.contains("::")
+}
+
+fn normalize_rust_import_owner(index: &ResolveIndex, owner: &str, file: &str) -> String {
+    if owner == "crate" {
+        String::new()
+    } else {
+        index
+            .resolve_type(owner, file)
+            .unwrap_or_else(|| owner.trim_start_matches("crate::").to_string())
     }
 }
 

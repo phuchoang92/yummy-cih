@@ -1,5 +1,6 @@
 use super::{InheritanceModel, LanguageResolver};
 use crate::index::ResolveIndex;
+use crate::types::container_of_callable;
 use cih_core::SymbolDef;
 
 pub struct RustResolver;
@@ -23,12 +24,10 @@ impl LanguageResolver for RustResolver {
         in_fqcn: &str,
         _index: &ResolveIndex,
     ) -> Option<String> {
-        // in_fqcn for Rust methods is "ModulePath::TypeName::method_name"
-        // The owner type is the second-to-last segment
-        let parts: Vec<&str> = in_fqcn.rsplitn(2, "::").collect();
-        parts.get(1).map(|s| s.to_string())
+        // Rust parser scopes call sites as `container#name/arity`, matching the
+        // rest of the IR and preserving `::` inside the container itself.
+        Some(container_of_callable(in_fqcn).to_string())
     }
-
 
     fn type_metadata(&self, _def: &SymbolDef) -> Option<String> {
         None

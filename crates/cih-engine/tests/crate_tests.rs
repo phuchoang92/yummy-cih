@@ -491,6 +491,7 @@ fn refresh_command_runs_analyze_and_writes_fingerprint_state() {
         serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
     // analyze_head is None when repo has no git (safe conservative default)
     assert!(state.get("analyze_head").is_some());
+    assert!(state["analyze_fingerprint"].as_str().is_some());
 
     fs::remove_dir_all(&root).unwrap();
 }

@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -27,6 +27,9 @@ enum Command {
         /// Skip documentation generation.
         #[arg(long)]
         no_wiki: bool,
+        /// Community/wiki grouping strategy (portable default: graph).
+        #[arg(long, value_enum, default_value_t = PortableGrouping::Graph)]
+        grouping: PortableGrouping,
         /// Print the stage summary as JSON.
         #[arg(long)]
         json: bool,
@@ -56,6 +59,22 @@ enum Command {
     Engine(Vec<OsString>),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum PortableGrouping {
+    #[default]
+    Graph,
+    Package,
+}
+
+impl std::fmt::Display for PortableGrouping {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Graph => "graph",
+            Self::Package => "package",
+        })
+    }
+}
+
 pub fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing();
@@ -64,8 +83,9 @@ pub fn main() -> Result<()> {
             repo,
             force,
             no_wiki,
+            grouping,
             json,
-        } => index(repo, force, no_wiki, json),
+        } => index(repo, force, no_wiki, grouping, json),
         Command::Serve { repo, bind, open } => serve(repo, bind, open),
         Command::Doctor { repo, json } => doctor(repo, json),
         Command::Engine(args) => engine(args),
@@ -112,7 +132,13 @@ fn repository_identity(repo: &Path) -> Result<cih_core::RepositoryId> {
     cih_core::ensure_repository_id(repo, preferred)
 }
 
-fn index(repo: Option<PathBuf>, force: bool, no_wiki: bool, json: bool) -> Result<()> {
+fn index(
+    repo: Option<PathBuf>,
+    force: bool,
+    no_wiki: bool,
+    grouping: PortableGrouping,
+    json: bool,
+) -> Result<()> {
     let repo = canonical_repo(repo)?;
     let paths = portable_paths()?;
     std::fs::create_dir_all(paths.graphs()).with_context(|| {
@@ -142,7 +168,7 @@ fn index(repo: Option<PathBuf>, force: bool, no_wiki: bool, json: bool) -> Resul
             no_discover: false,
             no_wiki,
             wiki_mode: Some("graph".to_string()),
-            grouping: Some("package".to_string()),
+            grouping: Some(grouping.to_string()),
             wiki_language: Some("en".to_string()),
             wiki_out: None,
             llm: false,
@@ -569,11 +595,28 @@ mod tests {
     #[test]
     fn cli_defaults_repo_arguments() {
         let cli = Cli::try_parse_from(["cih", "index", "--json"]).unwrap();
+        match cli.command {
+            Command::Index {
+                repo,
+                json,
+                grouping,
+                ..
+            } => {
+                assert!(repo.is_none());
+                assert!(json);
+                assert_eq!(grouping, PortableGrouping::Graph);
+            }
+            _ => panic!("expected index command"),
+        }
+    }
+
+    #[test]
+    fn cli_accepts_explicit_package_grouping() {
+        let cli = Cli::try_parse_from(["cih", "index", "--grouping", "package"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Index {
-                repo: None,
-                json: true,
+                grouping: PortableGrouping::Package,
                 ..
             }
         ));

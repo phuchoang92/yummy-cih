@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context as _};
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
@@ -361,6 +362,20 @@ pub struct RegistryStats {
     pub resolved_edges: usize,
     #[serde(default)]
     pub unresolved_refs: u64,
+    #[serde(default)]
+    pub unresolved_internal_refs: u64,
+    #[serde(default)]
+    pub unresolved_external_refs: u64,
+    #[serde(default)]
+    pub unresolved_dynamic_refs: u64,
+    #[serde(default)]
+    pub reference_site_count: u64,
+    #[serde(default)]
+    pub resolved_reference_count: u64,
+    #[serde(default)]
+    pub measured_callable_node_count: usize,
+    #[serde(default)]
+    pub syntactic_callables: u32,
     /// Emitted callable nodes ÷ callables in the AST. `None` when unmeasured (no
     /// provider in scope opts in, or the run was a cached no-op).
     #[serde(default)]
@@ -461,6 +476,11 @@ struct RegistryDocument {
     entries: Vec<RegistryEntry>,
 }
 
+#[derive(Deserialize)]
+struct RawRegistryDocument {
+    entries: Vec<Box<RawValue>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RegistrySource {
     Empty,
@@ -471,6 +491,12 @@ enum RegistrySource {
 struct LoadedRegistry {
     document: RegistryDocument,
     source: RegistrySource,
+    needs_canonical_repair: bool,
+}
+
+struct ReadRegistryDocument {
+    document: RegistryDocument,
+    needs_canonical_repair: bool,
 }
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -578,10 +604,29 @@ impl RegistryDocument {
         }
     }
 
-    fn validate(self, path: &Path) -> anyhow::Result<Self> {
+    fn canonical(revision: u64, entries: Vec<RegistryEntry>) -> anyhow::Result<Self> {
+        let entries = normalize_registry_entries(&entries)?;
+        Ok(Self {
+            revision,
+            content_digest: digest_normalized_entries(&entries)?,
+            entries,
+        })
+    }
+
+    fn validate(
+        self,
+        raw: &RawRegistryDocument,
+        path: &Path,
+    ) -> anyhow::Result<ReadRegistryDocument> {
         match (self.revision, self.content_digest.is_empty()) {
             // Legacy registry: no revision metadata existed yet.
-            (0, true) => Ok(self),
+            (0, true) => Ok(ReadRegistryDocument {
+                document: Self {
+                    entries: normalize_registry_entries(&self.entries)?,
+                    ..self
+                },
+                needs_canonical_repair: false,
+            }),
             (0, false) => Err(anyhow!(
                 "registry {} has a content digest but revision is zero",
                 path.display()
@@ -592,16 +637,40 @@ impl RegistryDocument {
                 self.revision
             )),
             _ => {
-                let actual = canonical_content_digest(&self.entries)?;
-                if actual != self.content_digest {
-                    return Err(anyhow!(
-                        "registry {} content digest mismatch: expected {}, computed {}",
-                        path.display(),
-                        self.content_digest,
-                        actual
-                    ));
+                let entries = normalize_registry_entries(&self.entries)?;
+                let canonical_digest = digest_normalized_entries(&entries)?;
+                if canonical_digest == self.content_digest {
+                    return Ok(ReadRegistryDocument {
+                        document: Self { entries, ..self },
+                        needs_canonical_repair: false,
+                    });
                 }
-                Ok(self)
+
+                let legacy_digest = legacy_raw_content_digest(&raw.entries)?;
+                if legacy_digest == self.content_digest {
+                    tracing::warn!(
+                        registry = %path.display(),
+                        revision = self.revision,
+                        legacy_digest = %self.content_digest,
+                        canonical_digest = %canonical_digest,
+                        "registry uses a legacy float-sensitive digest; repairing canonical representation"
+                    );
+                    return Ok(ReadRegistryDocument {
+                        document: Self {
+                            content_digest: canonical_digest,
+                            entries,
+                            ..self
+                        },
+                        needs_canonical_repair: true,
+                    });
+                }
+
+                Err(anyhow!(
+                    "registry {} content digest mismatch: expected {}, computed {}",
+                    path.display(),
+                    self.content_digest,
+                    canonical_digest
+                ))
             }
         }
     }
@@ -622,21 +691,84 @@ impl RegistryDocument {
 
 /// Hash the logical entry set, independent of insertion order and JSON layout.
 fn canonical_content_digest(entries: &[RegistryEntry]) -> anyhow::Result<String> {
+    let normalized = normalize_registry_entries(entries)?;
+    digest_normalized_entries(&normalized)
+}
+
+/// Force every entry through serde's deserialize boundary before it is hashed
+/// or persisted. In particular, this makes a floating-point value use the same
+/// representation before and after the registry is read back from disk.
+fn normalize_registry_entries(entries: &[RegistryEntry]) -> anyhow::Result<Vec<RegistryEntry>> {
+    entries
+        .iter()
+        .map(|entry| {
+            let encoded = serde_json::to_vec(entry)?;
+            Ok(serde_json::from_slice(&encoded)?)
+        })
+        .collect()
+}
+
+fn digest_normalized_entries(entries: &[RegistryEntry]) -> anyhow::Result<String> {
     let mut encoded_entries = entries
         .iter()
         .map(serde_json::to_vec)
         .collect::<Result<Vec<_>, _>>()?;
     encoded_entries.sort_unstable();
 
+    digest_encoded_entries(encoded_entries.iter().map(Vec::as_slice))
+}
+
+fn legacy_raw_content_digest(entries: &[Box<RawValue>]) -> anyhow::Result<String> {
+    let mut encoded_entries = entries
+        .iter()
+        .map(|entry| compact_json_lexeme(entry.get()))
+        .collect::<Vec<_>>();
+    encoded_entries.sort_unstable();
+
+    digest_encoded_entries(encoded_entries.iter().map(Vec::as_slice))
+}
+
+fn digest_encoded_entries<'a>(
+    entries: impl IntoIterator<Item = &'a [u8]>,
+) -> anyhow::Result<String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"cih-registry-content-v1\0");
-    for encoded in encoded_entries {
+    for encoded in entries {
         let len = u64::try_from(encoded.len())
             .map_err(|_| anyhow!("registry entry is too large to hash"))?;
         hasher.update(&len.to_le_bytes());
-        hasher.update(&encoded);
+        hasher.update(encoded);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Minify already-validated JSON without parsing numeric tokens. This is used
+/// only to verify registries written by the legacy float-sensitive digest path:
+/// string contents and numeric lexemes remain byte-for-byte intact.
+fn compact_json_lexeme(raw: &str) -> Vec<u8> {
+    let mut compact = Vec::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for byte in raw.bytes() {
+        if in_string {
+            compact.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+            compact.push(byte);
+        } else if !matches!(byte, b' ' | b'\n' | b'\r' | b'\t') {
+            compact.push(byte);
+        }
+    }
+
+    compact
 }
 
 fn artifact_version_from_path(path: &str) -> Option<String> {
@@ -752,19 +884,19 @@ impl RegistryStore {
         let _lock = self.lock_exclusive()?;
         let loaded = self.load_document_unlocked()?;
         let recovered_from_backup = loaded.source == RegistrySource::Backup;
+        let needs_canonical_repair = loaded.needs_canonical_repair;
         let old_document = loaded.document;
         let mut entries = old_document.entries.clone();
         let migrated = migrate_registry_entries(&mut entries)?;
 
         if migrated {
-            let new_document = RegistryDocument {
-                revision: old_document
+            let new_document = RegistryDocument::canonical(
+                old_document
                     .revision
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("registry revision overflow"))?,
-                content_digest: canonical_content_digest(&entries)?,
                 entries,
-            };
+            )?;
             self.persist_identity_migration(&new_document)?;
             invalidate_registry_cache();
             return Ok(new_document.into_snapshot(recovered_from_backup));
@@ -774,6 +906,12 @@ impl RegistryStore {
             // Repair the primary with the exact recovered revision. This is not
             // a logical mutation and therefore must not advance the sequence.
             self.persist_identity_migration(&old_document)?;
+            invalidate_registry_cache();
+        } else if needs_canonical_repair {
+            // A legacy float-sensitive digest is a representation repair, not
+            // a logical mutation. Rewrite only the primary and retain both the
+            // revision and the existing last-known-good backup.
+            self.persist_primary_repair(&old_document)?;
             invalidate_registry_cache();
         }
         Ok(old_document.into_snapshot(recovered_from_backup))
@@ -788,6 +926,7 @@ impl RegistryStore {
     ) -> anyhow::Result<RegistryUpdate<T>> {
         let _lock = self.lock_exclusive()?;
         let loaded = self.load_document_unlocked()?;
+        let needs_canonical_repair = loaded.needs_canonical_repair;
         let before_digest = canonical_content_digest(&loaded.document.entries)?;
         let old_document = loaded.document;
         let mut registry = Registry {
@@ -803,7 +942,7 @@ impl RegistryStore {
         let changed = content_digest != before_digest;
         let repairing_primary = loaded.source == RegistrySource::Backup;
 
-        if !changed && !repairing_primary {
+        if !changed && !repairing_primary && !needs_canonical_repair {
             return Ok(RegistryUpdate {
                 value,
                 snapshot: old_document.into_snapshot(false),
@@ -819,17 +958,16 @@ impl RegistryStore {
         } else {
             old_document.revision
         };
-        let new_document = RegistryDocument {
-            revision,
-            content_digest,
-            entries: registry.entries,
-        };
+        let new_document = RegistryDocument::canonical(revision, registry.entries)?;
+        debug_assert_eq!(new_document.content_digest, content_digest);
 
         if migrated_existing_entries {
             // Both copies must carry IDs assigned to entries that already
             // existed in the loaded snapshot. If the process dies between the
             // two renames, the higher-revision backup repairs the primary.
             self.persist_identity_migration(&new_document)?;
+        } else if !changed && needs_canonical_repair && !repairing_primary {
+            self.persist_primary_repair(&new_document)?;
         } else {
             self.persist_documents(&old_document, &new_document)?;
         }
@@ -876,22 +1014,26 @@ impl RegistryStore {
         let backup = read_document(&backup_path);
 
         match (primary, backup) {
-            (Ok(primary), Ok(backup)) if backup.revision > primary.revision => {
+            (Ok(primary), Ok(backup))
+                if backup.document.revision > primary.document.revision =>
+            {
                 tracing::warn!(
                     registry = %self.path.display(),
                     backup = %backup_path.display(),
-                    primary_revision = primary.revision,
-                    backup_revision = backup.revision,
+                    primary_revision = primary.document.revision,
+                    backup_revision = backup.document.revision,
                     "registry backup is newer than primary; recovering interrupted identity migration"
                 );
                 Ok(LoadedRegistry {
-                    document: backup,
+                    document: backup.document,
                     source: RegistrySource::Backup,
+                    needs_canonical_repair: backup.needs_canonical_repair,
                 })
             }
             (Ok(primary), _) => Ok(LoadedRegistry {
-                document: primary,
+                document: primary.document,
                 source: RegistrySource::Primary,
+                needs_canonical_repair: primary.needs_canonical_repair,
             }),
             (Err(primary_error), Ok(backup)) => {
                 let primary_missing = is_not_found(&primary_error);
@@ -903,8 +1045,9 @@ impl RegistryStore {
                     "registry primary is unavailable; using last-known-good backup"
                 );
                 Ok(LoadedRegistry {
-                    document: backup,
+                    document: backup.document,
                     source: RegistrySource::Backup,
+                    needs_canonical_repair: backup.needs_canonical_repair,
                 })
             }
             (Err(primary_error), Err(backup_error))
@@ -913,6 +1056,7 @@ impl RegistryStore {
                 Ok(LoadedRegistry {
                     document: RegistryDocument::empty(),
                     source: RegistrySource::Empty,
+                    needs_canonical_repair: false,
                 })
             }
             (Err(primary_error), Err(backup_error)) => Err(anyhow!(
@@ -946,6 +1090,12 @@ impl RegistryStore {
         write_synced_then_rename(&self.path, &encoded)?;
         sync_parent_directory(&self.path)
     }
+
+    fn persist_primary_repair(&self, document: &RegistryDocument) -> anyhow::Result<()> {
+        let encoded = serde_json::to_vec_pretty(document)?;
+        write_synced_then_rename(&self.path, &encoded)?;
+        sync_parent_directory(&self.path)
+    }
 }
 
 fn is_not_found(error: &anyhow::Error) -> bool {
@@ -954,11 +1104,13 @@ fn is_not_found(error: &anyhow::Error) -> bool {
         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn read_document(path: &Path) -> anyhow::Result<RegistryDocument> {
+fn read_document(path: &Path) -> anyhow::Result<ReadRegistryDocument> {
     let bytes = std::fs::read(path)?;
+    let raw = serde_json::from_slice::<RawRegistryDocument>(&bytes)
+        .with_context(|| format!("failed to parse registry {}", path.display()))?;
     let document = serde_json::from_slice::<RegistryDocument>(&bytes)
         .with_context(|| format!("failed to parse registry {}", path.display()))?;
-    document.validate(path)
+    document.validate(&raw, path)
 }
 
 fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {

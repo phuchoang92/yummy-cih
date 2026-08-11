@@ -62,18 +62,22 @@ pub(crate) struct ResolvedReceiver {
 #[derive(Debug, Default)]
 struct FileContext {
     package: Option<String>,
+    separator: &'static str,
     /// simple_name → FQCN for non-wildcard, non-static imports — O(1) lookup.
     import_map: HashMap<String, String>,
     /// Package prefixes from wildcard imports (e.g. `java.util` from `java.util.*`).
     wildcard_prefixes: Vec<String>,
 }
 
-fn build_import_map(imports: &[RawImport]) -> HashMap<String, String> {
+fn build_import_map(imports: &[RawImport], separator: &str) -> HashMap<String, String> {
     imports
         .iter()
         .filter(|i| !i.is_wildcard && !i.is_static)
         .filter_map(|i| {
-            let simple = i.raw.rsplit('.').next()?.to_string();
+            let simple = i
+                .alias
+                .clone()
+                .or_else(|| i.raw.rsplit(separator).next().map(str::to_string))?;
             Some((simple, i.raw.clone()))
         })
         .collect()
@@ -86,21 +90,6 @@ impl ResolveIndex {
 
         // Pass 1: defs, members, files, bindings.
         for pf in parsed {
-            let import_map = build_import_map(&pf.imports);
-            let wildcard_prefixes: Vec<String> = pf
-                .imports
-                .iter()
-                .filter(|i| i.is_wildcard)
-                .map(|i| i.raw.trim_end_matches(".*").to_string())
-                .collect();
-            idx.files.insert(
-                pf.file.clone(),
-                FileContext {
-                    package: pf.package.clone(),
-                    import_map,
-                    wildcard_prefixes,
-                },
-            );
             let inferred;
             let lang: &str = if pf.language.is_empty() {
                 inferred = infer_language_from_path(&pf.file);
@@ -108,6 +97,28 @@ impl ResolveIndex {
             } else {
                 &pf.language
             };
+            let separator = separator_for_language(lang);
+            let import_map = build_import_map(&pf.imports, separator);
+            let wildcard_prefixes: Vec<String> = pf
+                .imports
+                .iter()
+                .filter(|i| i.is_wildcard)
+                .map(|i| {
+                    i.raw
+                        .trim_end_matches(".*")
+                        .trim_end_matches("::*")
+                        .to_string()
+                })
+                .collect();
+            idx.files.insert(
+                pf.file.clone(),
+                FileContext {
+                    package: pf.package.clone(),
+                    separator,
+                    import_map,
+                    wildcard_prefixes,
+                },
+            );
             let resolver = registry.for_language(lang);
             for def in &pf.defs {
                 if is_type_kind(def.kind) {
@@ -124,9 +135,9 @@ impl ResolveIndex {
                         .entry(simple_of(&def.fqcn))
                         .or_default()
                         .push(def.fqcn.clone());
-                    if let Some(dot) = def.fqcn.rfind('.') {
+                    if let Some(boundary) = def.fqcn.rfind(separator) {
                         idx.package_to_fqcns
-                            .entry(def.fqcn[..dot].to_string())
+                            .entry(def.fqcn[..boundary].to_string())
                             .or_default()
                             .push(def.fqcn.clone());
                     }
@@ -202,53 +213,8 @@ impl ResolveIndex {
     /// package of `file`: explicit import → same package → wildcard import →
     /// workspace-unique simple name. Already-qualified names pass through.
     pub fn resolve_type(&self, raw: &str, file: &str) -> Option<String> {
-        let base = base_type_name(raw);
-        if base.is_empty() {
-            return None;
-        }
-        if base.contains('.') {
-            return Some(base); // already qualified
-        }
-        if let Some(ctx) = self.files.get(file) {
-            // O(1): explicit non-wildcard import map
-            if let Some(fqcn) = ctx.import_map.get(base.as_str()) {
-                return Some(fqcn.clone());
-            }
-            // Same-package local type
-            if let Some(pkg) = &ctx.package {
-                let cand = format!("{pkg}.{base}");
-                if self.types_by_fqcn.contains_key(&cand) {
-                    return Some(cand);
-                }
-            }
-            // Wildcard import scan (O(wildcard count), typically ≤5 per file)
-            for prefix in &ctx.wildcard_prefixes {
-                let cand = format!("{prefix}.{base}");
-                if self.types_by_fqcn.contains_key(&cand) {
-                    return Some(cand);
-                }
-            }
-            // 0.72 tier: unique match within wildcard-imported packages
-            let mut pkg_hit: Option<String> = None;
-            let mut pkg_hit_count = 0usize;
-            for prefix in &ctx.wildcard_prefixes {
-                if let Some(fqcns) = self.package_to_fqcns.get(prefix.as_str()) {
-                    for fqcn in fqcns {
-                        if simple_of(fqcn) == base.as_str() {
-                            pkg_hit = Some(fqcn.clone());
-                            pkg_hit_count += 1;
-                        }
-                    }
-                }
-            }
-            if pkg_hit_count == 1 {
-                return pkg_hit;
-            }
-        }
-        match self.simple_to_fqcns.get(&base) {
-            Some(fqcns) if fqcns.len() == 1 => Some(fqcns[0].clone()),
-            _ => None,
-        }
+        self.resolve_type_with_confidence(raw, file)
+            .map(|(fqcn, _)| fqcn)
     }
 
     /// Like [`resolve_type`] but also returns the resolution confidence:
@@ -262,21 +228,22 @@ impl ResolveIndex {
         if base.is_empty() {
             return None;
         }
-        if base.contains('.') {
-            return Some((base, TYPE_FULLY_QUALIFIED));
-        }
         if let Some(ctx) = self.files.get(file) {
+            if base.contains(ctx.separator) || (ctx.separator == "." && base.contains('.')) {
+                return Some((normalize_qualified_name(&base, ctx), TYPE_FULLY_QUALIFIED));
+            }
             if let Some(fqcn) = ctx.import_map.get(base.as_str()) {
-                return Some((fqcn.clone(), TYPE_EXPLICIT_IMPORT));
+                return Some((normalize_qualified_name(fqcn, ctx), TYPE_EXPLICIT_IMPORT));
             }
             if let Some(pkg) = &ctx.package {
-                let cand = format!("{pkg}.{base}");
+                let cand = join_qualified(pkg, &base, ctx.separator);
                 if self.types_by_fqcn.contains_key(&cand) {
                     return Some((cand, TYPE_SAME_PACKAGE));
                 }
             }
             for prefix in &ctx.wildcard_prefixes {
-                let cand = format!("{prefix}.{base}");
+                let prefix = normalize_qualified_name(prefix, ctx);
+                let cand = join_qualified(&prefix, &base, ctx.separator);
                 if self.types_by_fqcn.contains_key(&cand) {
                     return Some((cand, TYPE_WILDCARD_IMPORT));
                 }
@@ -285,6 +252,7 @@ impl ResolveIndex {
             let mut pkg_hit: Option<String> = None;
             let mut pkg_hit_count = 0usize;
             for prefix in &ctx.wildcard_prefixes {
+                let prefix = normalize_qualified_name(prefix, ctx);
                 if let Some(fqcns) = self.package_to_fqcns.get(prefix.as_str()) {
                     for fqcn in fqcns {
                         if simple_of(fqcn) == base.as_str() {
@@ -746,6 +714,61 @@ impl ResolveIndex {
             v.dedup();
         }
     }
+}
+
+fn separator_for_language(language: &str) -> &'static str {
+    if language == "rust" {
+        "::"
+    } else {
+        "."
+    }
+}
+
+fn join_qualified(prefix: &str, suffix: &str, separator: &str) -> String {
+    if prefix.is_empty() {
+        suffix.to_string()
+    } else if suffix.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}{separator}{suffix}")
+    }
+}
+
+fn normalize_qualified_name(raw: &str, context: &FileContext) -> String {
+    if context.separator != "::" {
+        return raw.to_string();
+    }
+
+    if let Some(rest) = raw.strip_prefix("crate::") {
+        return rest.to_string();
+    }
+    if let Some(rest) = raw.strip_prefix("self::") {
+        return join_qualified(
+            context.package.as_deref().unwrap_or(""),
+            rest,
+            context.separator,
+        );
+    }
+    if raw == "crate" {
+        return String::new();
+    }
+    if raw == "self" {
+        return context.package.clone().unwrap_or_default();
+    }
+
+    let mut rest = raw;
+    let mut package = context.package.clone().unwrap_or_default();
+    while let Some(stripped) = rest.strip_prefix("super::") {
+        rest = stripped;
+        package = package
+            .rsplit_once("::")
+            .map(|(parent, _)| parent.to_string())
+            .unwrap_or_default();
+    }
+    if rest != raw {
+        return join_qualified(&package, rest, context.separator);
+    }
+    raw.to_string()
 }
 
 /// Infer language from file extension for ParsedFiles with empty `language` field

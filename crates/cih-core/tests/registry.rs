@@ -35,6 +35,22 @@ fn repository_id(digit: char) -> RepositoryId {
     RepositoryId::parse(std::iter::repeat_n(digit, 64).collect::<String>()).unwrap()
 }
 
+fn legacy_content_digest(entries: &[RegistryEntry]) -> String {
+    let mut encoded = entries
+        .iter()
+        .map(|entry| serde_json::to_vec(entry).unwrap())
+        .collect::<Vec<_>>();
+    encoded.sort_unstable();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"cih-registry-content-v1\0");
+    for entry in encoded {
+        hasher.update(&(entry.len() as u64).to_le_bytes());
+        hasher.update(&entry);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 #[test]
 fn load_missing_returns_empty_snapshot() {
     let (_temp, store) = store_fixture();
@@ -196,6 +212,55 @@ fn canonical_digest_is_independent_of_entry_insertion_order() {
         left.snapshot.revision.content_digest,
         right.snapshot.revision.content_digest
     );
+}
+
+#[test]
+fn legacy_float_sensitive_digest_repairs_primary_without_advancing_revision() {
+    #[derive(serde::Serialize)]
+    struct LegacyDocument<'a> {
+        revision: u64,
+        content_digest: &'a str,
+        entries: &'a [RegistryEntry],
+    }
+
+    let (temp, store) = store_fixture();
+    let mut unstable = entry("coverage", "v1");
+    unstable.repository_id = Some(repository_id('9'));
+    unstable.latest_artifact_version = Some("v1".into());
+    unstable.stats.callable_coverage = Some(6621.0 / 4945.0);
+
+    let direct = serde_json::to_vec(&unstable).unwrap();
+    let round_tripped: RegistryEntry = serde_json::from_slice(&direct).unwrap();
+    let normalized_coverage = round_tripped.stats.callable_coverage;
+    assert_ne!(
+        direct,
+        serde_json::to_vec(&round_tripped).unwrap(),
+        "fixture must exercise the legacy float round-trip mismatch"
+    );
+
+    let entries = vec![unstable];
+    let legacy_digest = legacy_content_digest(&entries);
+    let legacy = LegacyDocument {
+        revision: 7,
+        content_digest: &legacy_digest,
+        entries: &entries,
+    };
+    let path = temp.path().join("registry.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+    let repaired = store.load().unwrap();
+    assert!(!repaired.recovered_from_backup);
+    assert_eq!(repaired.revision.sequence, 7);
+    assert_ne!(repaired.revision.content_digest, legacy_digest);
+    assert_eq!(
+        repaired.registry.entries[0].stats.callable_coverage,
+        normalized_coverage
+    );
+
+    let second = store.load().unwrap();
+    assert!(!second.recovered_from_backup);
+    assert_eq!(second.revision, repaired.revision);
+    assert!(!temp.path().join("registry.json.bak").exists());
 }
 
 #[test]
@@ -538,6 +603,16 @@ fn legacy_registry_stats_mark_route_count_stale() {
 
     assert_eq!(stats.routes, 0);
     assert!(!stats.routes_current);
+    assert_eq!(stats.measured_callable_node_count, 0);
+    assert_eq!(stats.syntactic_callables, 0);
+    assert_eq!(stats.reference_site_count, 0);
+    assert_eq!(stats.resolved_reference_count, 0);
+    assert_eq!(
+        stats.unresolved_internal_refs
+            + stats.unresolved_external_refs
+            + stats.unresolved_dynamic_refs,
+        stats.unresolved_refs
+    );
     assert!(stats.published_graph_report.is_none());
 }
 

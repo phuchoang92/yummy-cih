@@ -65,8 +65,15 @@ pub(crate) fn entry_from_analyze(emit: &EmitOutcome, graph_key: &str) -> Registr
             processes: 0,
             resolved_edges: emit.resolved_edge_count,
             unresolved_refs: emit.unresolved_reference_count,
+            unresolved_internal_refs: emit.unresolved_internal_refs,
+            unresolved_external_refs: emit.unresolved_external_refs,
+            unresolved_dynamic_refs: emit.unresolved_dynamic_refs,
+            reference_site_count: emit.reference_site_count,
+            resolved_reference_count: emit.resolved_reference_count,
+            measured_callable_node_count: emit.measured_callable_node_count,
+            syntactic_callables: emit.syntactic_callables,
             callable_coverage: crate::analyze::callable_coverage(
-                emit.callable_node_count,
+                emit.measured_callable_node_count,
                 emit.syntactic_callables,
             ),
             // This entry has not been published yet. `persist_analyze` binds
@@ -124,6 +131,13 @@ pub(crate) fn persist_analyze(
             if let Some(prev) = previous.as_ref() {
                 entry.stats.resolved_edges = prev.stats.resolved_edges;
                 entry.stats.unresolved_refs = prev.stats.unresolved_refs;
+                entry.stats.unresolved_internal_refs = prev.stats.unresolved_internal_refs;
+                entry.stats.unresolved_external_refs = prev.stats.unresolved_external_refs;
+                entry.stats.unresolved_dynamic_refs = prev.stats.unresolved_dynamic_refs;
+                entry.stats.reference_site_count = prev.stats.reference_site_count;
+                entry.stats.resolved_reference_count = prev.stats.resolved_reference_count;
+                entry.stats.measured_callable_node_count = prev.stats.measured_callable_node_count;
+                entry.stats.syntactic_callables = prev.stats.syntactic_callables;
                 entry.stats.callable_coverage = prev.stats.callable_coverage;
                 entry.stats.routes = prev.stats.routes;
                 entry.stats.routes_current = prev.stats.routes_current;
@@ -291,6 +305,11 @@ mod tests {
             jar_node_count: 0,
             jar_failed: 0,
             unresolved_reference_count: 0,
+            unresolved_internal_refs: 0,
+            unresolved_external_refs: 0,
+            unresolved_dynamic_refs: 0,
+            reference_site_count: 0,
+            resolved_reference_count: 0,
             unresolved_external_fqcns: Vec::new(),
             parsed_file_count: 1,
             skipped_count: 0,
@@ -298,6 +317,8 @@ mod tests {
             cache_stats: CacheStats::default(),
             syntactic_callables: 0,
             callable_node_count: 0,
+            measured_callable_node_count: 0,
+            callable_coverage_by_language: Default::default(),
             route_node_count: 0,
             published_graph_report: None,
         };
