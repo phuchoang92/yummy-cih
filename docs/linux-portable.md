@@ -13,7 +13,7 @@ not supported natively; use the portable OCI image there instead.
 Download `install.sh` from the matching GitHub Release and run:
 
 ```bash
-bash install.sh --version 0.1.0
+bash install.sh --version 0.1.1
 export PATH="$HOME/.local/bin:$PATH"
 cih doctor
 ```
@@ -27,15 +27,15 @@ To install an already downloaded package:
 
 ```bash
 bash install.sh \
-  --archive ./cih-linux-0.1.0.tar.gz \
-  --checksum ./cih-linux-0.1.0.sha256
+  --archive ./cih-linux-0.1.1.tar.gz \
+  --checksum ./cih-linux-0.1.1.sha256
 ```
 
 The archive can also run without installation:
 
 ```bash
-tar xzf cih-linux-0.1.0.tar.gz
-./cih-linux-0.1.0/bin/cih doctor
+tar xzf cih-linux-0.1.1.tar.gz
+./cih-linux-0.1.1/bin/cih doctor
 ```
 
 Keep the `bin` and `lib` directories together. The executable uses a relative
