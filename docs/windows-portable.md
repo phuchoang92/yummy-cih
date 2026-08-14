@@ -13,7 +13,7 @@ keep `cih.exe` beside the OpenSSL and any packaged MSVC runtime DLLs.
 Download `install.ps1` from the matching GitHub Release and run it in PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.1
 ```
 
 The installer downloads the ZIP and checksum, verifies SHA-256, runs the staged
@@ -23,8 +23,8 @@ downloaded package can be installed with:
 
 ```powershell
 .\install.ps1 `
-  -ZipPath .\cih-windows-0.1.0.zip `
-  -ChecksumPath .\cih-windows-0.1.0.sha256
+  -ZipPath .\cih-windows-0.1.1.zip `
+  -ChecksumPath .\cih-windows-0.1.1.sha256
 ```
 
 Installation and upgrades refuse to replace a running installed `cih.exe`. Stop
