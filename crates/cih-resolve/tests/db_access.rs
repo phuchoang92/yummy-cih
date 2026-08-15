@@ -179,6 +179,51 @@ fn emit_db_access_deduplicates_db_table_nodes() {
 }
 
 #[test]
+fn repeated_query_use_keeps_call_sites_but_deduplicates_table_edges() {
+    let fqcn = "com.bank.AuditAdapter";
+    let query_id = db_query_const_id(fqcn, "INSERT_AUDIT");
+    let table_id = db_table_id("AUDIT_LOG");
+    let pf = make_parsed_file(
+        "src/main/java/AuditAdapter.java",
+        fqcn,
+        vec![make_constant(
+            "INSERT_AUDIT",
+            fqcn,
+            "INSERT INTO AUDIT_LOG (ID) VALUES (?)",
+        )],
+        vec![
+            make_site(
+                "enqueue",
+                Some("INSERT_AUDIT"),
+                method_id(fqcn, "record", 1),
+            ),
+            make_site("enqueue", Some("INSERT_AUDIT"), method_id(fqcn, "retry", 1)),
+        ],
+    );
+
+    let (_nodes, edges) = emit_db_access(&[pf]);
+
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::ExecutesQuery && edge.dst == query_id)
+            .count(),
+        2,
+        "each execution site must retain its caller -> query evidence"
+    );
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::WritesTable && edge.src == query_id && edge.dst == table_id
+            })
+            .count(),
+        1,
+        "the shared query -> table relationship has one graph identity"
+    );
+}
+
+#[test]
 fn emit_db_access_skips_site_with_unknown_const_ref() {
     let fqcn = "com.bank.AdapterImpl";
     let callable = method_id(fqcn, "doSomething", 0);

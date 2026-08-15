@@ -347,6 +347,7 @@ struct DoctorReport {
 #[derive(Serialize)]
 struct Check {
     ok: bool,
+    blocking: bool,
     message: String,
 }
 
@@ -354,6 +355,7 @@ impl Check {
     fn pass(message: impl Into<String>) -> Self {
         Self {
             ok: true,
+            blocking: true,
             message: message.into(),
         }
     }
@@ -361,9 +363,29 @@ impl Check {
     fn fail(message: impl Into<String>) -> Self {
         Self {
             ok: false,
+            blocking: true,
             message: message.into(),
         }
     }
+
+    fn advisory(mut self) -> Self {
+        self.blocking = false;
+        self
+    }
+}
+
+fn check_port(address: &str) -> Check {
+    match TcpListener::bind(address) {
+        Ok(listener) => {
+            drop(listener);
+            Check::pass(format!("{address} is available")).advisory()
+        }
+        Err(error) => Check::fail(format!("{address} unavailable: {error}")).advisory(),
+    }
+}
+
+fn blocking_checks_pass<'a>(checks: impl IntoIterator<Item = &'a Check>) -> bool {
+    checks.into_iter().all(|check| !check.blocking || check.ok)
 }
 
 fn doctor(repo: Option<PathBuf>, json: bool) -> Result<()> {
@@ -379,13 +401,7 @@ fn doctor(repo: Option<PathBuf>, json: bool) -> Result<()> {
     };
     let embedded_graph = check_embedded_graph(&paths);
     let native_runtime = check_native_runtime();
-    let port = match TcpListener::bind("127.0.0.1:8080") {
-        Ok(listener) => {
-            drop(listener);
-            Check::pass("127.0.0.1:8080 is available")
-        }
-        Err(error) => Check::fail(format!("127.0.0.1:8080 unavailable: {error}")),
-    };
+    let port = check_port("127.0.0.1:8080");
     let repository = match repo {
         Some(repo) => match canonical_repo(Some(repo)) {
             Ok(repo) => match cih_core::load_repository_id(&repo) {
@@ -401,16 +417,14 @@ fn doctor(repo: Option<PathBuf>, json: bool) -> Result<()> {
         None => Check::pass("not requested"),
     };
     let legacy_windows_home = check_legacy_windows_home(&paths);
-    let ok = [
+    let ok = blocking_checks_pass([
         &home,
         &registry,
         &embedded_graph,
         &native_runtime,
         &port,
         &repository,
-    ]
-    .iter()
-    .all(|check| check.ok);
+    ]);
     let report = DoctorReport {
         ok,
         home,
@@ -557,8 +571,7 @@ fn check_legacy_windows_home(_paths: &cih_core::CihPaths) -> Check {
 }
 
 fn print_doctor(report: &DoctorReport) {
-    println!("CIH doctor: {}", if report.ok { "ok" } else { "failed" });
-    for (name, check) in [
+    let checks = [
         ("home", &report.home),
         ("registry", &report.registry),
         ("embedded graph", &report.embedded_graph),
@@ -566,11 +579,29 @@ fn print_doctor(report: &DoctorReport) {
         ("port", &report.port),
         ("repository", &report.repository),
         ("legacy Windows home", &report.legacy_windows_home),
-    ] {
+    ];
+    let has_warnings = checks.iter().any(|(_, check)| !check.ok && !check.blocking);
+    let summary = if report.ok {
+        if has_warnings {
+            "ok (with warnings)"
+        } else {
+            "ok"
+        }
+    } else {
+        "failed"
+    };
+    println!("CIH doctor: {summary}");
+    for (name, check) in checks {
         println!(
             "  {:<20} {}  {}",
             name,
-            if check.ok { "ok" } else { "FAIL" },
+            if check.ok {
+                "ok"
+            } else if check.blocking {
+                "FAIL"
+            } else {
+                "WARN"
+            },
             check.message
         );
     }
@@ -634,5 +665,26 @@ mod tests {
         assert!(!incomplete.ok);
         assert!(incomplete.message.contains("libssl.so.3"));
         assert!(incomplete.message.contains("libcrypto.so.3"));
+    }
+
+    #[test]
+    fn occupied_default_port_is_an_advisory_warning() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+
+        let port = check_port(&address);
+
+        assert!(!port.ok);
+        assert!(!port.blocking);
+        assert!(blocking_checks_pass([&port]));
+        assert!(port.message.contains("unavailable"));
+    }
+
+    #[test]
+    fn blocking_failures_still_fail_doctor_aggregation() {
+        let blocking = Check::fail("home is read-only");
+        let advisory = Check::fail("port is occupied").advisory();
+
+        assert!(!blocking_checks_pass([&blocking, &advisory]));
     }
 }

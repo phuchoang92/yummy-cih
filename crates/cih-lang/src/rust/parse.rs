@@ -170,7 +170,7 @@ fn walk_items(
                     continue;
                 };
                 let owner_fqcn = qualify_type(module, raw_type);
-                let owner_kind = defs
+                let parsed_owner_kind = defs
                     .iter()
                     .find(|definition| {
                         definition.fqcn == owner_fqcn
@@ -179,8 +179,33 @@ fn walk_items(
                                 NodeKind::Class | NodeKind::Enum | NodeKind::Interface
                             )
                     })
-                    .map(|definition| definition.kind)
-                    .unwrap_or(NodeKind::Class);
+                    .map(|definition| definition.kind);
+                let owner_kind = parsed_owner_kind.unwrap_or(NodeKind::Class);
+                if parsed_owner_kind.is_none() {
+                    let owner_id = type_id(owner_kind, &owner_fqcn);
+                    if !nodes.iter().any(|node| node.id == owner_id) {
+                        nodes.push(Node {
+                            id: owner_id.clone(),
+                            kind: owner_kind,
+                            name: raw_type.rsplit("::").next().unwrap_or(raw_type).to_string(),
+                            qualified_name: Some(owner_fqcn.clone()),
+                            file: rel.to_string(),
+                            range: range_of(child),
+                            props: Some(serde_json::json!({
+                                "source": "rust_impl",
+                                "external_owner": true,
+                            })),
+                        });
+                        edges.push(Edge {
+                            src: file_id.clone(),
+                            dst: owner_id,
+                            kind: EdgeKind::Contains,
+                            confidence: 1.0,
+                            reason: "rust-impl-owner".into(),
+                            props: None,
+                        });
+                    }
+                }
                 let impl_owner = Owner {
                     fqcn: owner_fqcn,
                     kind: owner_kind,

@@ -2,8 +2,72 @@ use cih_core::{
     type_id, BindingKind, EdgeKind, NodeKind, ParsedFile, Range, SymbolDef, TypeBinding,
 };
 use cih_resolve::di_xml::{
-    extract_di_xml, extract_xml_attr, is_di_xml_path, parse_di_document, simple_name,
+    extract_di_xml, extract_di_xml_from, extract_xml_attr, is_di_xml_path, parse_di_document,
+    simple_name, BeanDef, DiWiring,
 };
+
+fn type_def(kind: NodeKind, fqcn: &str) -> SymbolDef {
+    SymbolDef {
+        id: type_id(kind, fqcn),
+        kind,
+        fqcn: fqcn.into(),
+        name: simple_name(fqcn).into(),
+        owner: None,
+        range: Range::default(),
+        modifiers: vec![],
+        param_types: vec![],
+        return_type: None,
+        declared_type: None,
+        framework_role: None,
+        body_fingerprint: None,
+        complexity: None,
+        lang_meta: None,
+    }
+}
+
+fn parsed_types_with_field(
+    consumer_fqcn: &str,
+    field_type: &str,
+    mut defs: Vec<SymbolDef>,
+) -> Vec<ParsedFile> {
+    defs.insert(0, type_def(NodeKind::Class, consumer_fqcn));
+    vec![ParsedFile {
+        file: "Types.java".into(),
+        language: "java".into(),
+        package: Some("com.acme".into()),
+        defs,
+        imports: vec![],
+        reference_sites: vec![],
+        type_bindings: vec![TypeBinding {
+            name: "injected".into(),
+            raw_type: field_type.into(),
+            kind: BindingKind::Field,
+            in_fqcn: consumer_fqcn.into(),
+            qualifier: None,
+            range: Range::default(),
+        }],
+        contract_sites: vec![],
+        sql_constants: vec![],
+        sql_execution_sites: vec![],
+        string_constants: vec![],
+        http_wrappers: vec![],
+    }]
+}
+
+fn bean_wiring(classes: &[&str]) -> DiWiring {
+    DiWiring {
+        beans: classes
+            .iter()
+            .enumerate()
+            .map(|(index, fqcn)| BeanDef {
+                id: Some(format!("bean-{index}")),
+                fqcn: (*fqcn).into(),
+                file: "applicationContext.xml".into(),
+            })
+            .collect(),
+        ..DiWiring::default()
+    }
+}
 
 #[test]
 fn detects_di_xml_paths() {
@@ -165,6 +229,63 @@ fn field_injection_emits_calls_edge() {
         .nodes
         .iter()
         .any(|n| n.qualified_name.as_deref() == Some("com.acme.OrderService")));
+}
+
+#[test]
+fn parsed_bean_reuses_existing_type_node() {
+    let consumer = "com.acme.OrderController";
+    let bean = "com.acme.OrderService";
+    let parsed = parsed_types_with_field(
+        consumer,
+        "OrderService",
+        vec![type_def(NodeKind::Class, bean)],
+    );
+
+    let out = extract_di_xml_from(&bean_wiring(&[bean]), &parsed);
+
+    assert!(
+        out.nodes.is_empty(),
+        "parsed bean must not get a placeholder"
+    );
+    assert!(out.edges.iter().any(|edge| {
+        edge.src == type_id(NodeKind::Class, consumer)
+            && edge.dst == type_id(NodeKind::Class, bean)
+            && edge.reason == "di-xml-bean-field"
+    }));
+}
+
+#[test]
+fn parsed_non_class_bean_uses_its_actual_node_id() {
+    let consumer = "com.acme.AuditController";
+    let bean = "com.acme.AuditEvent";
+    let parsed = parsed_types_with_field(
+        consumer,
+        "AuditEvent",
+        vec![type_def(NodeKind::Record, bean)],
+    );
+
+    let out = extract_di_xml_from(&bean_wiring(&[bean]), &parsed);
+
+    assert!(
+        out.nodes.is_empty(),
+        "parsed record must not get a Class placeholder"
+    );
+    assert_eq!(out.edges.len(), 1);
+    assert_eq!(out.edges[0].dst, type_id(NodeKind::Record, bean));
+}
+
+#[test]
+fn repeated_external_bean_emits_one_placeholder_and_one_edge() {
+    let consumer = "com.acme.OrderController";
+    let bean = "com.vendor.OrderService";
+    let parsed = parsed_types_with_field(consumer, "OrderService", vec![]);
+
+    let out = extract_di_xml_from(&bean_wiring(&[bean, bean]), &parsed);
+
+    assert_eq!(out.nodes.len(), 1);
+    assert_eq!(out.nodes[0].id, type_id(NodeKind::Class, bean));
+    assert_eq!(out.edges.len(), 1);
+    assert_eq!(out.edges[0].dst, type_id(NodeKind::Class, bean));
 }
 
 #[test]

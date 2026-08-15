@@ -13,7 +13,7 @@ not supported natively; use the portable OCI image there instead.
 Download `install.sh` from the matching GitHub Release and run:
 
 ```bash
-bash install.sh --version 0.1.1
+bash install.sh --version 0.1.2
 export PATH="$HOME/.local/bin:$PATH"
 cih doctor
 ```
@@ -27,15 +27,15 @@ To install an already downloaded package:
 
 ```bash
 bash install.sh \
-  --archive ./cih-linux-0.1.1.tar.gz \
-  --checksum ./cih-linux-0.1.1.sha256
+  --archive ./cih-linux-0.1.2.tar.gz \
+  --checksum ./cih-linux-0.1.2.sha256
 ```
 
 The archive can also run without installation:
 
 ```bash
-tar xzf cih-linux-0.1.1.tar.gz
-./cih-linux-0.1.1/bin/cih doctor
+tar xzf cih-linux-0.1.2.tar.gz
+./cih-linux-0.1.2/bin/cih doctor
 ```
 
 Keep the `bin` and `lib` directories together. The executable uses a relative
@@ -77,20 +77,50 @@ docker run --rm \
   phuchoang29/yummy-cih:portable-latest \
   index /repo
 
-docker run --rm -p 8080:8080 \
+api_token=$(openssl rand -hex 32)
+docker run --rm -p 127.0.0.1:8080:8080 \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp/cih-user \
   -e CIH_HOME=/data \
+  -e CIH_API_TOKEN="$api_token" \
   -v "$PWD/.cih-portable-data:/data" \
   -v "$repo:/repo" \
   phuchoang29/yummy-cih:portable-latest \
   serve /repo --bind 0.0.0.0:8080
 ```
 
+The secure example protects `/mcp`, `/graph`, and graph API requests. MCP and
+API clients must send `Authorization: Bearer $api_token`. Put the service behind
+TLS before publishing it beyond the local machine; the bearer token must not be
+sent over cleartext HTTP.
+
+For an unauthenticated graph browser on a single local workstation, keep the
+host-side port bound to loopback and opt out explicitly inside the container:
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp/cih-user \
+  -e CIH_HOME=/data \
+  -e CIH_ALLOW_INSECURE=1 \
+  -v "$PWD/.cih-portable-data:/data" \
+  -v "$repo:/repo" \
+  phuchoang29/yummy-cih:portable-latest \
+  serve /repo --bind 0.0.0.0:8080
+```
+
+Do not change the host publish address to `0.0.0.0` in this local-only mode.
+The container listens on `0.0.0.0` because Docker forwards traffic into its
+network namespace; without `CIH_API_TOKEN` or the explicit local-only opt-out,
+CIH intentionally refuses to start.
+
 Use `portable-v<version>` instead of `portable-latest` for a pinned deployment.
 The repository must be mounted at the same absolute container path during
 `index` and `serve`, because its registry entry and source locators preserve that
-path.
+path. The image includes Git for reading the mounted repository's HEAD so a
+second unchanged `index` can skip analyze and discover. The `.git` metadata must
+therefore be mounted and readable by the selected container UID/GID; the image
+does not disable Git's ownership safety checks.
 
 ## Uninstall
 
