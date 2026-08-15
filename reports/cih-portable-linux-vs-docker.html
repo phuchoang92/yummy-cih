@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1c28'/%3E%3Cpath d='M17 20h30v8H25v8h18v8H17z' fill='%2355ded0'/%3E%3C/svg%3E">
+  <title>CIH Portable Linux native và Docker — nghiên cứu thực nghiệm</title>
+  <style>
+    :root{--bg:#07111a;--panel:#0d1c28;--panel2:#102636;--ink:#edf5f8;--muted:#a5b6c0;--line:#294757;--blue:#69baf5;--cyan:#55ded0;--green:#78da9c;--amber:#ffca69;--red:#ff8585;--violet:#b9a5ff;--shadow:0 18px 45px rgba(0,0,0,.22)}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 80% -10%,#153b50 0,transparent 34rem),var(--bg);color:var(--ink);font:15.5px/1.65 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    a{color:#8ed1ff;text-underline-offset:3px}code,kbd{font-family:"SFMono-Regular",Consolas,monospace;font-size:.9em}code{background:#07141e;border:1px solid #203947;border-radius:5px;padding:.1rem .32rem;overflow-wrap:anywhere}pre{margin:.8rem 0;padding:1rem;background:#061018;border:1px solid var(--line);border-radius:10px;overflow:auto;white-space:pre-wrap;color:#d2e3eb}
+    .wrap{width:min(1180px,calc(100% - 32px));margin:auto}.hero{padding:70px 0 38px}.eyebrow{color:var(--cyan);font-size:.78rem;font-weight:800;letter-spacing:.13em;text-transform:uppercase}.hero h1{max-width:960px;margin:.35rem 0 1rem;font-size:clamp(2.2rem,5vw,4.65rem);line-height:1.02;letter-spacing:-.045em}.lede{max-width:930px;font-size:1.12rem;color:#c4d4dd}.meta,.legend{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:1.25rem}.pill,.tag{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:.27rem .61rem;background:#0b1d29;color:#cad9e1;font-size:.78rem}.tag.measured{border-color:#267c70;color:#85eee1}.tag.fact{border-color:#397197;color:#9ed8ff}.tag.inference{border-color:#806d34;color:#ffdb84}.tag.current{border-color:#824d54;color:#ffb0b6}.tag.fixed{border-color:#34784b;color:#98e6af}.tag.limit{border-color:#6a5f8e;color:#d3c7ff}
+    nav{position:sticky;top:0;z-index:4;background:rgba(7,17,26,.91);backdrop-filter:blur(14px);border-block:1px solid rgba(68,100,119,.45)}nav .wrap{display:flex;gap:1.15rem;overflow:auto;padding:10px 0}nav a{white-space:nowrap;color:#bdcdd5;text-decoration:none;font-size:.82rem}nav a:hover{color:#fff}
+    main{padding:28px 0 80px}section{scroll-margin-top:58px;margin:0 0 28px;padding:26px;background:linear-gradient(145deg,rgba(16,38,54,.95),rgba(10,25,36,.97));border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}h2{margin:0 0 1rem;font-size:1.56rem;letter-spacing:-.02em}h3{margin:1.45rem 0 .55rem;font-size:1.03rem;color:#dfecf2}.kicker{color:var(--muted);margin-top:-.6rem}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}.card{grid-column:span 4;background:rgba(5,18,27,.58);border:1px solid var(--line);border-radius:13px;padding:17px}.card.wide{grid-column:span 6}.card h3{margin:0 0 .55rem}.card p:last-child{margin-bottom:0}.recommend{border-top:3px solid var(--cyan)}.warn{border-top:3px solid var(--amber)}.stop{border-top:3px solid var(--red)}.metric{font-size:1.85rem;font-weight:800;letter-spacing:-.04em}.sub,.foot{color:var(--muted);font-size:.84rem}
+    .callout{margin:1rem 0;padding:14px 16px;border-left:4px solid var(--amber);background:#251f10;border-radius:0 10px 10px 0}.callout.red{border-color:var(--red);background:#271416}.callout.green{border-color:var(--green);background:#102419}.callout p{margin:.3rem 0}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;min-width:760px;background:rgba(4,15,23,.4)}th,td{padding:11px 12px;border-bottom:1px solid #213b49;vertical-align:top;text-align:left}th{position:sticky;top:0;background:#102736;color:#deebf1;font-size:.79rem;letter-spacing:.025em}tr:last-child td{border-bottom:0}.good{color:var(--green)}.bad{color:#ff9f9f}.caution{color:var(--amber)}.muted{color:var(--muted)}.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+    .chart{background:#071923;border:1px solid var(--line);border-radius:13px;padding:10px;margin-top:14px}.chart svg{display:block;width:100%;height:auto}.chart text{fill:#c4d5de;font:13px system-ui}.chart .axis{stroke:#355565}.chart .native{fill:var(--cyan)}.chart .docker{fill:var(--blue)}.chart .hot{fill:var(--red)}.chart .label{fill:#f4f9fb;font-weight:700}.chart .note{fill:#94aab6;font-size:11px}
+    .bug{border-left:4px solid var(--line)}.bug.high{border-left-color:var(--red)}.bug.medium{border-left-color:var(--amber)}.bug.low{border-left-color:var(--blue)}.bug-head{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}.bug h3{margin:0}.sev{font-weight:800;font-size:.72rem;padding:.18rem .43rem;border-radius:5px;background:#382027;color:#ffaeae}.sev.medium{background:#3b301a;color:#ffdb88}.sev.low{background:#17334a;color:#addaff}.evidence{font-size:.89rem;color:#c8d6de}.timeline{position:relative;margin-left:.5rem;padding-left:1.5rem;border-left:2px solid #315263}.event{position:relative;margin:0 0 1.3rem}.event:before{content:"";position:absolute;left:-1.91rem;top:.45rem;width:11px;height:11px;background:var(--cyan);border:3px solid var(--panel);border-radius:50%}.event strong{display:block}.event small{color:var(--muted)}details{border:1px solid var(--line);border-radius:10px;padding:.65rem .85rem;margin:.7rem 0;background:#091a24}summary{cursor:pointer;font-weight:700}.check{list-style:none;padding:0}.check li{margin:.4rem 0;padding-left:1.45rem;position:relative}.check li:before{content:"✓";position:absolute;left:0;color:var(--green);font-weight:800}.check li.no:before{content:"—";color:var(--amber)}
+    @media(max-width:820px){.hero{padding-top:46px}.card,.card.wide{grid-column:span 12}section{padding:19px}.wrap{width:min(100% - 20px,1180px)}.hero h1{font-size:2.45rem}.meta{gap:.35rem}nav .wrap{padding-inline:3px}.table-wrap{margin-inline:-8px;border-radius:8px}.chart{padding:4px}}
+    @media print{body{background:#fff;color:#111}.wrap{width:100%}nav{display:none}section,.card,.chart{box-shadow:none;background:#fff;border-color:#bbb;break-inside:avoid}a{color:#075a92}.muted,.sub,.foot,.kicker{color:#555}code,pre{background:#f4f4f4;color:#111}.hero{padding-top:20px}.tag,.pill{background:#fff;color:#222}}
+  </style>
+</head>
+<body>
+  <header class="hero"><div class="wrap">
+    <div class="eyebrow">Báo cáo kỹ thuật · 15/08/2026</div>
+    <h1>CIH Portable Linux native và Docker</h1>
+    <p class="lede">Báo cáo hậu kiểm sau khi sửa năm lỗi CIH Portable đã xác nhận trong nghiên cứu ban đầu. Cùng một bundle release được chạy native và đóng vào OCI: warm index đã hoạt động lại, graph report vượt safety gate, tài liệu serve an toàn có thể copy/paste, MCP smoke chạy với <code>mawk</code>, và port 8080 bận chỉ còn là cảnh báo.</p>
+    <div class="meta"><span class="pill">HEAD gốc <code>b49fc9e</code> + working patch</span><span class="pill">branch <code>dev</code></span><span class="pill">release target <code>0.1.2</code></span><span class="pill">bundle đo pre-bump 0.1.1-fix</span><span class="pill">Linux x86_64</span><span class="pill">Docker 29.7.2</span><span class="pill">3 warm run / biến thể</span><span class="pill">offline runtime</span></div>
+  </div></header>
+  <nav><div class="wrap"><a href="#summary">Kết luận</a><a href="#scope">Phạm vi</a><a href="#comparison">So sánh</a><a href="#benchmark">Benchmark</a><a href="#graph">Graph</a><a href="#runtime">Runtime</a><a href="#bugs">Bugs</a><a href="#timeline">Timeline</a><a href="#method">Phương pháp</a><a href="#data">Dữ liệu</a></div></nav>
+  <main class="wrap">
+    <section id="summary">
+      <h2>Executive summary</h2>
+      <div class="callout green"><p><strong>Kết quả:</strong> toàn bộ năm bug hiện tại trong báo cáo gốc đã được sửa và có regression evidence. OCI có Git, fresh-container warm index skip analyze/discover 3/3; full self-index có 0 duplicate node, 0 duplicate edge và tạo <code>RegistryGraphReport</code> hợp lệ. Safety gate <code>RegistryGraphReport::try_build</code> không bị nới lỏng.</p></div>
+      <div class="grid">
+        <article class="card recommend"><h3>Chọn Linux native khi</h3><p>Developer workstation/CI runner Linux x86_64 có glibc ≥ 2.28; cần no-op nhanh, source path tự nhiên và ít lớp debug.</p><p class="sub"><span class="tag measured">Sau fix</span> Warm <code>--no-wiki</code> median 0,028 s.</p></article>
+        <article class="card recommend"><h3>Chọn Docker khi</h3><p>Host là musl/Alpine, cần isolation, image pinning, UID/network/mount policy hoặc deploy theo container. Git hiện là runtime guarantee của image.</p><p class="sub"><span class="tag measured">Sau fix</span> Warm fresh-container median 0,228 s; graph parity tuyệt đối.</p></article>
+        <article class="card warn"><h3>Trade-off còn lại</h3><p>Git và dependency runtime làm image tăng 30,07 MB (+51,6%). Bind mount vẫn cần UID/GID phù hợp; index và serve vẫn phải dùng cùng container path.</p><p class="sub"><span class="tag limit">Design / operations</span> Không còn bug mở trong phạm vi năm lỗi.</p></article>
+      </div>
+      <h3>Khuyến nghị theo use case</h3>
+      <div class="table-wrap"><table><thead><tr><th>Use case</th><th>Chọn</th><th>Điều kiện</th><th>Bằng chứng</th></tr></thead><tbody>
+        <tr><td>Dev workstation Linux glibc</td><td class="good"><strong>Native</strong></td><td>Dùng bundle/tarball đã pin checksum.</td><td>Regression suite pass; warm cache đúng 3/3.</td></tr>
+        <tr><td>Alpine/musl hoặc distro ngoài baseline</td><td class="good"><strong>Docker</strong></td><td>Giữ <code>/repo</code>, <code>/data</code>; chạy host UID/GID.</td><td>Native không hỗ trợ musl; image Debian Bookworm đã có Git.</td></tr>
+        <tr><td>CI/CD cold, disposable</td><td><strong>Docker hoặc native</strong></td><td>Không tái sử dụng cache thì cân nhắc isolation thay vì warm-start latency.</td><td>Một cold run: Docker chậm hơn khoảng 8,6%; chưa đủ mẫu để khái quát.</td></tr>
+        <tr><td>Incremental index thường xuyên</td><td><strong>Native hoặc Docker</strong></td><td>Docker phải giữ source + data volume và mount cả <code>.git</code>.</td><td>Cả hai skip analyze/discover 3/3.</td></tr>
+        <tr><td>Serve trên network</td><td><strong>Docker</strong> nếu có policy</td><td>Phải có <code>CIH_API_TOKEN</code>, path mount ổn định, port probe.</td><td>401/200 auth và graceful SIGTERM pass.</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="scope">
+      <h2>Phạm vi và provenance</h2>
+      <p class="kicker">Fact, measurement, inference và limitation được gắn nhãn riêng.</p>
+      <div class="legend"><span class="tag measured">Measurement — đã chạy</span><span class="tag fact">Source fact — code/docs/history</span><span class="tag fixed">Fixed — patch + regression</span><span class="tag inference">Inference — suy luận có căn cứ</span><span class="tag limit">Limitation — giới hạn thiết kế/phép đo</span></div>
+      <div class="grid">
+        <article class="card"><div class="metric">b49fc9e</div><div class="sub">source commit</div><p>Clean clone tại cùng commit; dirty workspace của người dùng không được đưa vào corpus và không bị sửa.</p></article>
+        <article class="card"><div class="metric">25,82 MB</div><div class="sub">tar.gz · SHA-256 464376a2…c3636b</div><p>Bundle directory 91.636.902 B; GLIBC max 2.28; LadybugDB 0.18.2; OpenSSL 3.5.7.</p></article>
+        <article class="card"><div class="metric">88,39 MB</div><div class="sub">OCI image có Git 2.39.5</div><p>Cùng binary native, non-root UID 1001; tăng 30.070.119 B so với image baseline 58.315.115 B.</p></article>
+      </div>
+      <div class="callout green"><p><strong>Qualification pass:</strong> package/ELF audit, full portable smoke, 180 test <code>cih-resolve</code>, 2 Rust parser test, 6 CLI test, registry tests, full self-index native/OCI, named-volume + bind-mount persistence, secure/local serve và graceful SIGTERM.</p></div>
+      <p>Nguồn chính: <a href="../.github/workflows/linux-portable.yml">workflow linux-portable</a>, <a href="../Dockerfile.portable">Dockerfile.portable</a>, <a href="../docs/linux-portable.md">docs Linux portable</a>, <a href="../scripts/linux/smoke.sh">portable smoke</a>, <a href="../crates/cih-resolve/src/di_xml.rs">DI XML resolver</a>, <a href="../crates/cih-resolve/src/db_access.rs">DB-access emitter</a>, <a href="../crates/cih-lang/src/rust/parse.rs">Rust parser</a> và <a href="../crates/cih-core/src/registry.rs">registry safety report</a>.</p>
+    </section>
+
+    <section id="comparison">
+      <h2>Pros / cons vận hành</h2>
+      <div class="table-wrap"><table><thead><tr><th>Tiêu chí</th><th>Linux native</th><th>Docker portable</th><th>Kết luận</th></tr></thead><tbody>
+        <tr><td>Cài đặt</td><td class="good">Tarball/install rootless; không cần daemon.</td><td>Cần Docker daemon/socket và image pull/build.</td><td>Native đơn giản hơn trên host tương thích.</td></tr>
+        <tr><td>Dependency / nền tảng</td><td>Bundle pin native libs nhưng cần glibc ≥ 2.28; không hỗ trợ musl.</td><td class="good">Mang Debian userland; chạy trên host Alpine/musl có Docker.</td><td>Docker có compatibility envelope rộng hơn.</td></tr>
+        <tr><td>Offline</td><td class="good">Analyze/index/MCP không cần model/service.</td><td class="good"><code>--network none</code> pass cho mọi one-shot benchmark.</td><td>Hai biến thể đều offline sau download/build.</td></tr>
+        <tr><td>Cold performance</td><td class="good">Index 20,808 s.</td><td>Index 22,591 s.</td><td>Một run sau fix: OCI chậm hơn 1,783 s (8,6%); không suy diễn tail latency.</td></tr>
+        <tr><td>Incremental</td><td class="good">Warm <code>--no-wiki</code> median 0,028 s.</td><td class="good">Fresh-container warm median 0,228 s; HEAD được lưu.</td><td>Cả hai skip analyze/discover; Docker thêm startup overhead.</td></tr>
+        <tr><td>Tài nguyên</td><td>Peak RSS process; cold index 568,5 MiB.</td><td>Cgroup peak cả container; cold index 564,9 MiB.</td><td>Không so tuyệt đối vì metric boundary khác nhau.</td></tr>
+        <tr><td>Isolation / security</td><td>Process có quyền user host.</td><td class="good">Non-root 1001; mount/network/cgroup policy.</td><td>Docker có boundary tốt hơn nhưng daemon là trust surface riêng.</td></tr>
+        <tr><td>Filesystem permission</td><td class="good">Tự nhiên cùng UID host.</td><td class="caution">UID 1001 không ghi được host-owned bind; <code>--user uid:gid</code> pass.</td><td>Friction OCI chính, đã document.</td></tr>
+        <tr><td>Persistence</td><td><code>.cih</code> + <code>CIH_HOME</code> trực tiếp trên host.</td><td>Cần giữ cả repo mount và <code>/data</code>.</td><td>Named volume và bind persistence đều pass.</td></tr>
+        <tr><td>Path handling</td><td>Canonical absolute host path.</td><td class="caution">Index/serve phải dùng cùng absolute container path.</td><td>Giới hạn thiết kế, không phải bug.</td></tr>
+        <tr><td>Network / MCP</td><td class="good">Portable smoke pass dưới <code>mawk</code>.</td><td>Publish loopback + token; readiness 227–253 ms.</td><td>Docker thêm lifecycle/network plumbing.</td></tr>
+        <tr><td>Debugging</td><td class="good">Process/log/path trực tiếp.</td><td>Cần inspect container, cgroup, mount, UID, PID 1.</td><td>Docker tái lập tốt hơn nhưng nhiều lớp hơn.</td></tr>
+        <tr><td>Upgrade / rollback</td><td>Installer và symlink/version.</td><td class="good">Pin image digest, rollback rõ.</td><td>Không dùng mutable <code>portable-latest</code> nếu cần tái lập.</td></tr>
+        <tr><td>Feature profile</td><td colspan="2">Không có <code>start</code>/<code>embed</code>; semantic/vector search tắt; BM25 local. OCI dùng đúng binary native.</td><td>Tương đương.</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="benchmark">
+      <h2>Regression benchmark sau fix</h2>
+      <p class="kicker">Cùng bundle release, clean clone, <code>--network none</code> cho OCI. Ba warm run dùng ba process/container mới. p95 nearest-rank với n=3 bằng giá trị lớn nhất.</p>
+      <div class="table-wrap"><table><thead><tr><th>Kịch bản</th><th>Biến thể</th><th class="num">Run 1</th><th class="num">Run 2</th><th class="num">Run 3</th><th class="num">Median</th><th class="num">Min–max / p95</th><th>Kết quả cache</th></tr></thead><tbody>
+        <tr><td rowspan="2">Index cold <code>--force --no-wiki</code></td><td>Native</td><td class="num" colspan="3">20,808 s</td><td class="num">20,808 s</td><td class="num">20,808 s</td><td>Graph report hợp lệ</td></tr>
+        <tr><td>Docker named volume</td><td class="num" colspan="3">22,591 s</td><td class="num">22,591 s</td><td class="num">22,591 s</td><td>HEAD được ghi</td></tr>
+        <tr><td rowspan="2">Index warm <code>--no-wiki</code></td><td>Native</td><td class="num">0,039 s</td><td class="num">0,028 s</td><td class="num">0,019 s</td><td class="num good">0,028 s</td><td class="num">0,019–0,039 / 0,039</td><td class="good">skip 3/3</td></tr>
+        <tr><td>Docker fresh container</td><td class="num">0,231 s</td><td class="num">0,228 s</td><td class="num">0,216 s</td><td class="num good">0,228 s</td><td class="num">0,216–0,231 / 0,231</td><td class="good">skip 3/3</td></tr>
+        <tr><td>Docker bind warm</td><td>Host UID/GID</td><td class="num">0,216 s</td><td class="num">0,226 s</td><td class="num">0,220 s</td><td class="num good">0,220 s</td><td class="num">0,216–0,226 / 0,226</td><td class="good">skip 3/3</td></tr>
+        <tr><td>Serve readiness</td><td>Docker secure / local</td><td class="num">0,253 s</td><td class="num">0,227 s</td><td class="num">—</td><td class="num">—</td><td class="num">0,227–0,253</td><td>HTTP probe</td></tr>
+      </tbody></table></div>
+      <div class="chart" role="img" aria-label="Median wall time native và Docker">
+        <svg viewBox="0 0 960 330" xmlns="http://www.w3.org/2000/svg">
+          <text class="label" x="12" y="22">Median wall time sau fix (thang riêng cho cold và warm)</text>
+          <text x="12" y="80">Cold index</text><rect class="native" x="180" y="55" width="590" height="22" rx="4"/><rect class="docker" x="180" y="84" width="640" height="22" rx="4"/><text x="830" y="72">20,808 s</text><text x="830" y="101">22,591 s</text>
+          <text x="12" y="190">Warm index</text><rect class="native" x="180" y="165" width="79" height="22" rx="4"/><rect class="docker" x="180" y="194" width="640" height="22" rx="4"/><text x="270" y="182">0,028 s</text><text x="830" y="211">0,228 s</text>
+          <rect class="native" x="12" y="278" width="16" height="10"/><text class="note" x="34" y="288">Native</text><rect class="docker" x="105" y="278" width="16" height="10"/><text class="note" x="127" y="288">Docker</text><text class="note" x="235" y="288">Cả hai: analyze/discover skipped 3/3</text>
+        </svg>
+      </div>
+      <p class="foot">Cold chỉ chạy một lần vì mục tiêu regression là ba warm run độc lập. Readiness Docker tính từ trước <code>docker run</code>, vì vậy gồm create/start overhead.</p>
+    </section>
+
+    <section id="graph">
+      <h2>Graph equivalence và determinism</h2>
+      <div class="callout green"><p><strong>Pass:</strong> native và Docker có cùng graph content version, artifact version, counts và SHA-256 JSONL. Full self-index không còn duplicate identity hoặc missing endpoint; registry quality report được tạo thành công.</p></div>
+      <div class="grid">
+        <article class="card"><div class="metric">7.465 / 11.788</div><div class="sub">artifact nodes / edges</div><p>559 files · 11 routes · 124 communities · 268 processes.</p></article>
+        <article class="card"><div class="metric">1ca0e27b…5b</div><div class="sub">published graph content</div><p>Graph report: 7.857 nodes · 13.246 edges · schema v1.</p></article>
+        <article class="card"><div class="metric">0 / 0</div><div class="sub">duplicate nodes / edges</div><p>nodes SHA <code>d1a7018d…d7fc1</code>; edges SHA <code>9ff7c34c…5f48</code>.</p></article>
+      </div>
+      <div class="callout green"><p><strong>Quality metadata đã phục hồi:</strong> registry ghi 4.335 resolved edges, 48.203 unresolved refs và callable coverage 0,5490. <code>RegistryGraphReport::try_build</code> vẫn reject mọi identity trùng; lỗi được sửa tại DI XML, Rust impl owner và DB-access emitter.</p></div>
+      <div class="table-wrap"><table><thead><tr><th>Dữ liệu</th><th>Native (mỗi run)</th><th>Docker (mỗi run)</th><th>Nhận định</th></tr></thead><tbody>
+        <tr><td>Graph JSONL</td><td class="good">SHA-256 parity</td><td class="good">SHA-256 parity</td><td>Payload giống byte-for-byte.</td></tr>
+        <tr><td><code>last_git_head</code></td><td><code>b49fc9e…</code></td><td><code>b49fc9e…</code></td><td>Fresh-container cache dùng cùng HEAD.</td></tr>
+        <tr><td><code>COPY CALLS</code> / digest warning</td><td class="good">Không có trong run logs</td><td class="good">Không có trong run logs</td><td>Regression lịch sử giữ được.</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="runtime">
+      <h2>Serve, MCP, permission, persistence và path</h2>
+      <div class="table-wrap"><table><thead><tr><th>Kiểm tra</th><th>Native</th><th>Docker</th><th>Kết luận</th></tr></thead><tbody>
+        <tr><td><code>doctor</code>, port 8080 bận</td><td class="good">Exit 0; <code>ok=true</code>; port <code>WARN</code>.</td><td class="good"><code>blocking=false</code> trong JSON.</td><td>False-negative đã được loại bỏ.</td></tr>
+        <tr><td><code>/health</code>, <code>/ready</code>, <code>/graph</code></td><td class="good">Pass ×3</td><td class="good">Pass ×3</td><td>Graph UI mở offline.</td></tr>
+        <tr><td>MCP initialize, tools/list, search, query, communities</td><td class="good">Portable smoke pass với <code>mawk</code></td><td class="good">Secure initialize 200 với token.</td><td>Header mixed-case + CRLF parse đúng.</td></tr>
+        <tr><td>Bearer token</td><td class="good">401 không token; 200 có token.</td><td class="good">401/200 ×3.</td><td>Security guard đúng.</td></tr>
+        <tr><td><code>--network none</code></td><td>Không áp dụng</td><td class="good">Analyze/index/list/status pass.</td><td>Runtime chính thức không cần network.</td></tr>
+        <tr><td>Default UID 1001 + host bind</td><td>Không áp dụng</td><td class="bad">Exit 1 tại <code>/data/graphs</code>: permission denied.</td><td>Dùng host UID/GID như docs.</td></tr>
+        <tr><td>Host UID/GID + bind</td><td>Không áp dụng</td><td class="good">Index pass; output owned host user.</td><td>Workaround chuẩn.</td></tr>
+        <tr><td>Repo / data read-only</td><td class="good">Fail rõ theo path</td><td class="good">Exit 1 với read-only filesystem.</td><td>Hai mount đều cần writable khi index.</td></tr>
+        <tr><td>HOME không tồn tại/không writable</td><td>—</td><td class="good">Doctor pass khi <code>CIH_HOME=/data</code> writable.</td><td><code>CIH_HOME</code> explicit là đủ.</td></tr>
+        <tr><td>Named volume qua recreate</td><td>Không áp dụng</td><td class="good">Index/list pass; registry và ownership 1001 còn nguyên.</td><td>Persistence đúng nếu giữ cả volumes.</td></tr>
+        <tr><td>Đổi <code>/repo</code> thành <code>/workspace</code></td><td class="caution">Cùng limitation canonical path.</td><td class="caution">Exit 1 “not indexed”.</td><td>Giới hạn thiết kế đã document.</td></tr>
+        <tr><td>Hai Docker serve example</td><td>—</td><td class="good">Secure 401/200; local UI 200 trên loopback.</td><td>Docs mới khớp security guard.</td></tr>
+        <tr><td>Port conflict</td><td class="good">Fail fast</td><td class="good">Docker exit 125; server đầu vẫn ready.</td><td>Không làm hỏng container đang chạy.</td></tr>
+        <tr><td>SIGTERM / PID 1</td><td>Process stop sạch</td><td class="good">186 ms; exit 0.</td><td>Lifecycle container đạt.</td></tr>
+        <tr><td>Portable baseline</td><td class="good" colspan="2">Package audit xác nhận maximum required GLIBC symbol là 2.28.</td><td>Distro matrix của báo cáo gốc không chạy lại vì ABI baseline không đổi.</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="bugs">
+      <h2>Bug register</h2>
+      <p class="kicker">Trạng thái cập nhật theo working patch; mỗi bug chỉ chuyển sang fixed khi regression evidence tương ứng đã pass.</p>
+      <div class="grid">
+        <article class="card wide bug medium"><div class="bug-head"><span class="sev medium">MEDIUM</span><span class="tag fixed">Đã sửa + OCI regression</span><h3>DOCK-GIT-001 · Stock OCI mất warm-index cache</h3></div><p class="evidence"><strong>Fix:</strong> <a href="../Dockerfile.portable">Dockerfile.portable</a> cài <code>git</code> với <code>--no-install-recommends</code>; workflow kiểm tra executable, package/SBOM, HEAD, named volume và host-UID bind.</p><p><strong>Evidence:</strong> Git 2.39.5; fresh-container warm 0,216–0,231 s, skip analyze/discover 3/3; <code>last_git_head=b49fc9e…</code>. Image tăng 30.070.119 B. Không thêm SSH client, clone feature hay <code>safe.directory=*</code>.</p></article>
+        <article class="card wide bug medium"><div class="bug-head"><span class="sev medium">MEDIUM</span><span class="tag fixed">Đã sửa + self-index gate</span><h3>GRAPH-DUP-002 · Graph identity làm mất quality metadata</h3></div><p class="evidence"><strong>Fix tại nguồn:</strong> DI XML tái dùng NodeId của type đã parse; Rust external impl tạo đúng một owner placeholder; DB-access deduplicate identity của query→table nhưng giữ từng caller→query.</p><p><strong>Evidence:</strong> regression cho source/external bean, enum/record, repeated SQL use và Rust external impl đều pass; full self-index có 0 duplicate node/edge, 1 <code>AuditQueue</code>, graph report schema v1. Safety gate CRITICAL <code>RegistryGraphReport::try_build</code> không đổi.</p></article>
+        <article class="card wide bug medium"><div class="bug-head"><span class="sev medium">MEDIUM</span><span class="tag fixed">Đã sửa + live smoke</span><h3>DOC-OCI-003 · Docker serve example thiếu auth</h3></div><p class="evidence"><strong>Fix:</strong> <a href="../docs/linux-portable.md">docs</a> tách secure MCP/API và local Graph UI; cả hai publish host loopback, secure dùng token/Bearer/TLS guidance, local dùng explicit <code>CIH_ALLOW_INSECURE=1</code>.</p><p><strong>Evidence:</strong> secure `/graph` + `/mcp` trả 401 không token và 200 có token; local `/graph` 200; Docker inspect xác nhận <code>127.0.0.1</code>.</p></article>
+        <article class="card wide bug low"><div class="bug-head"><span class="sev low">LOW</span><span class="tag fixed">Đã sửa + mawk smoke</span><h3>SMOKE-MAWK-004 · Smoke script phụ thuộc gawk</h3></div><p class="evidence"><strong>Fix:</strong> <a href="../scripts/linux/smoke.sh">smoke.sh</a> dùng POSIX <code>tolower($1)</code>, loại CR và tự probe mixed-case header trước suite.</p><p><strong>Evidence:</strong> exact parser và full portable smoke đều pass dưới <code>mawk 1.3.4</code>, gồm MCP initialize, tools/list, search, query và communities. <code>gawk</code> không có trên host nên không chạy cục bộ.</p></article>
+        <article class="card wide bug low"><div class="bug-head"><span class="sev low">LOW</span><span class="tag fixed">Đã sửa + process test</span><h3>DOCTOR-PORT-005 · Port 8080 bận làm doctor exit 1</h3></div><p class="evidence"><strong>Fix:</strong> JSON check có trường additive <code>blocking</code>; port mặc định là advisory, các check home/registry/runtime/graph/repository vẫn blocking.</p><p><strong>Evidence:</strong> listener thật trên 127.0.0.1:8080: exit 0, top-level <code>ok=true</code>, <code>port.ok=false</code>, <code>port.blocking=false</code>, human output <code>WARN</code>. CIH_HOME read-only vẫn exit 1.</p></article>
+        <article class="card wide bug high"><div class="bug-head"><span class="sev">HIGH</span><span class="tag fixed">Đã sửa + regression pass</span><h3>PORT-CSV-006 · Ladybug COPY CALLS vỡ với nested JSON</h3></div><p class="evidence">Lịch sử trước <code>6545e26</code>: CSV CALLS có JSON chứa comma/quote/newline làm loader báo sai số cột và dừng publication.</p><p><strong>Fix:</strong> commit <code>6545e26</code> cố định CSV dialect và thêm contract <code>copy_round_trips_late_nested_call_sites_and_quoted_fields</code>. 5 contract tests pass; 6 full-repo run không có <code>COPY CALLS</code> hay <code>content digest mismatch</code>. Đây là bug lịch sử, không phải bug HEAD.</p></article>
+      </div>
+      <h3>Giới hạn thiết kế, không phân loại bug</h3>
+      <ul>
+        <li>Repo được định danh bằng canonical absolute path; index và serve phải thấy cùng path, đặc biệt qua container recreate.</li>
+        <li>Index cần ghi cả <code>/repo/.cih</code> và <code>CIH_HOME</code>; read-only mount không được hỗ trợ cho index.</li>
+        <li>UID 1001 mặc định phù hợp named volume đã chown, không tự tương thích mọi host bind mount.</li>
+        <li>Portable native cần glibc ≥ 2.28 và không chạy native trên musl; OCI là đường hỗ trợ thay thế.</li>
+      </ul>
+      <div class="callout green"><p><strong>Không còn bug mở trong scope:</strong> không có crash, data loss, auth bypass, graph divergence, duplicate identity, <code>COPY CALLS</code>, content-digest warning hoặc graph-report omission trong qualification sau fix.</p></div>
+    </section>
+
+    <section id="timeline">
+      <h2>Timeline và regression coverage</h2>
+      <div class="timeline">
+        <div class="event"><strong>01/08 · <code>78bd35d</code> — shared Ladybug runtime</strong><small>Đặt nền cho portable native libraries.</small></div>
+        <div class="event"><strong>06/08 · <code>5fc57e4</code> — portable distribution workflows</strong><small>Thêm bundle, Dockerfile, docs, distro/OCI smoke.</small></div>
+        <div class="event"><strong>07/08 · <code>4d0014e</code> / <code>cd70ff8</code> — auth + internal network probe</strong><small>Regression cover non-loopback token và readiness trong OCI.</small></div>
+        <div class="event"><strong>07/08 · <code>21a9f6d</code> — release publication</strong><small>Tự động hóa artifacts/image publication.</small></div>
+        <div class="event"><strong>10/08 · <code>6545e26</code> — stabilize indexing/graph quality</strong><small>Sửa COPY CSV, registry canonical digest, Rust extraction; thêm full self-index OCI gate và contract tests.</small></div>
+        <div class="event"><strong>15/08 · <code>b49fc9e</code> — version 0.1.1</strong><small>HEAD gốc của khảo sát; năm lỗi hiện tại được tái hiện và lập kế hoạch sửa.</small></div>
+        <div class="event"><strong>15/08 · working patch — portable hardening</strong><small>Thêm Git + OCI qualification/SBOM; sửa DI/Rust/DB graph emit; doctor advisory; POSIX MCP header; secure/local docs. Toàn bộ năm bug chuyển sang fixed có evidence.</small></div>
+      </div>
+    </section>
+
+    <section id="method">
+      <h2>Phương pháp, môi trường và command</h2>
+      <div class="table-wrap"><table><tbody>
+        <tr><th>Host</th><td>Ubuntu 26.04; Linux 7.0.0-29-generic; x86_64; glibc 2.43</td></tr>
+        <tr><th>CPU / RAM</th><td>AMD Ryzen 7 2700, 8 core / 16 thread; 16.150.237.184 B Docker memory</td></tr>
+        <tr><th>Toolchain</th><td>Rust/Cargo 1.97.1; manylinux_2_28 build; GCC; patchelf 0.18.0</td></tr>
+        <tr><th>Docker</th><td>Client/server 29.7.2; overlayfs; cgroup v2; daemon Ubuntu 26.04</td></tr>
+        <tr><th>Code intelligence</th><td>GitNexus fresh tại HEAD: 15.122 symbols, 36.764 relationships, 300 flows; query/context dùng cho portable CLI, refresh, registry và publication.</td></tr>
+        <tr><th>Bundle</th><td><code>cih-linux-0.1.1-fix</code>; SHA-256 <code>464376a287879ace8f418114216b475ed71c4ea5753cae4bdf13d8edd1c3636b</code></td></tr>
+      </tbody></table></div>
+      <h3>Quy trình</h3>
+      <ol>
+        <li>Ghi commit/dirty state, refresh GitNexus, tạo clean clone local tại đúng HEAD.</li>
+        <li>Build bằng manylinux glibc 2.28 theo workflow, pin Ladybug/OpenSSL, audit ELF, package, smoke và tests.</li>
+        <li>Chạy trực tiếp <code>bin/cih</code> cho native; build <code>Dockerfile.portable</code> từ cùng bundle cho OCI.</li>
+        <li>Cold qualification dùng clean clone; ba warm call độc lập dùng cùng persistent source/data để xác minh cache. Docker dùng <code>--network none</code>.</li>
+        <li>Serve/MCP được probe đủ health/ready/graph, initialize/tools/list và ba tool calls; Docker token và SIGTERM được kiểm tra.</li>
+        <li>Chuẩn hóa path/timestamp rồi so counts, versions và SHA-256 JSONL.</li>
+      </ol>
+      <details><summary>Command chính xác (rút gọn biến đường dẫn)</summary><pre>node .gitnexus/run.cjs status
+node .gitnexus/run.cjs analyze
+
+# Native
+CIH_HOME=$RUN/home cih index $RUN/repo --force --no-wiki --json
+CIH_HOME=$RUN/home cih index $RUN/repo --no-wiki --json  # ×3
+CIH_HOME=$RUN/home cih serve $RUN/repo --bind 127.0.0.1:$PORT
+
+# Docker one-shot, mỗi clean run
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp/cih-user -e CIH_HOME=/data \
+  -v "$RUN/repo:/repo" -v "$RUN/home:/data" IMAGE \
+  index /repo --force --no-wiki --json
+# Fresh second container, same mounts, ×3
+docker run --rm --network none -v repo:/repo -v data:/data IMAGE \
+  index /repo --no-wiki --json
+
+# Docker serve
+docker run -d -p 127.0.0.1::8080 --user "$(id -u):$(id -g)" \
+  -e CIH_API_TOKEN=study-token -v "$RUN/repo:/repo" -v "$RUN/home:/data" \
+  IMAGE serve /repo --bind 0.0.0.0:8080</pre></details>
+      <h3>Giới hạn nghiên cứu</h3>
+      <ul>
+        <li>n=3 đủ phát hiện regression lớn, không đủ mô tả tail latency; p95 = max.</li>
+        <li>Một máy, một CPU/kernel/storage; không pin CPU, không drop page cache và không chạy workload song song.</li>
+        <li>Process RSS và container cgroup peak có scope khác, vì vậy chỉ trình bày chứ không kết luận memory winner.</li>
+        <li>Docker readiness gồm client/create/start; native readiness chỉ từ lúc spawn process.</li>
+        <li>Image là local qualification build của working patch, chưa phải artifact release có chữ ký/provenance từ GitHub Actions.</li>
+        <li>Cold chỉ đo một lần sau fix; các số cold 3-run trong nghiên cứu gốc vẫn hữu ích nhưng không được trộn vào bảng regression này.</li>
+      </ul>
+    </section>
+
+    <section id="data">
+      <h2>Dữ liệu JSON dựng bảng</h2>
+      <p class="kicker">Nhúng trực tiếp; báo cáo mở offline, không CDN hoặc asset ngoài.</p>
+      <details><summary>Measurement dataset</summary><pre id="json-view"></pre></details>
+      <script id="study-data" type="application/json">
+{
+  "study":{"date":"2026-08-15","repo":"yummy-cih","head":"b49fc9e1667728b80585d11d85a5d0d8b60726d8","branch":"dev","repetitions":3,"runtime_network":"disabled","gitnexus":{"fresh":true,"symbols":15122,"relationships":36764,"flows":300}},
+  "environment":{"kernel":"7.0.0-29-generic","arch":"x86_64","glibc":"2.43","cpu":"AMD Ryzen 7 2700","logical_cpus":16,"docker":"29.7.2","cgroup":2},
+  "bundle":{"version":"0.1.1-fix","bytes":91636902,"tar_bytes":25816485,"sha256":"464376a287879ace8f418114216b475ed71c4ea5753cae4bdf13d8edd1c3636b","glibc_max":"2.28","ladybug":"0.18.2","openssl":"3.5.7"},
+  "image":{"id":"sha256:d9cd510c48b30d19ab3cb73ce34494d138c5759ccd4196042ae2a95341a17e92","bytes":88385234,"baseline_without_git_bytes":58315115,"delta_bytes":30070119,"git":"2.39.5-0+deb12u3","user":"cih","uid":1001},
+  "native":{"cold_index_seconds":20.808,"warm_index_seconds":[0.039,0.028,0.019],"warm_median_seconds":0.028,"warm_skipped":3},
+  "docker":{"cold_index_seconds":22.591,"warm_index_seconds":[0.231,0.228,0.216],"warm_median_seconds":0.228,"bind_warm_seconds":[0.216,0.226,0.220],"warm_skipped":3,"last_git_head":"b49fc9e1667728b80585d11d85a5d0d8b60726d8","secure_readiness_seconds":0.253,"local_readiness_seconds":0.227,"sigterm_seconds":0.186},
+  "graph":{"native_docker_equal":true,"artifact":"3b04c3de72388e69","nodes":7465,"edges":11788,"files":559,"routes":11,"communities":124,"processes":268,"resolved_edges":4335,"unresolved_refs":48203,"callable_coverage":0.5490078771562469,"report_nodes":7857,"report_edges":13246,"content":"1ca0e27b8bfd6a5f6ff8c94677ecc3796cab6bbb0656fab31f995ffeeb497f5b","nodes_sha256":"d1a7018d75d2e11ff043bfefa3f4ebf7f1adfeaf6c1975e35649e06c8dbd7fc1","edges_sha256":"9ff7c34c112f554a4048617d9278106bd077c251604be4456732e2fff8315f48"},
+  "qualification":{"bugs_fixed":5,"duplicate_nodes":0,"duplicate_edges":0,"copy_calls_warnings":0,"content_digest_warnings":0,"secure_http":{"graph_without_token":401,"graph_with_token":200,"mcp_without_token":401,"mcp_with_token":200},"mawk_smoke":"pass","targeted_tests":"pass"}
+}
+      </script>
+      <script>document.getElementById('json-view').textContent=JSON.stringify(JSON.parse(document.getElementById('study-data').textContent),null,2);</script>
+      <p class="foot">Báo cáo chỉ tạo một file HTML trong repo. Log thô và workspace benchmark nằm trong temporary study directory trong lúc kiểm chứng và được dọn sau khi hoàn tất.</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -10,7 +10,7 @@ LABEL org.opencontainers.image.title="CIH portable" \
       org.opencontainers.image.revision="$SOURCE_COMMIT" \
       org.opencontainers.image.source="https://github.com/phuchoang92/yummy-cih"
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1001 cih \
     && mkdir -p /opt/cih/bin /opt/cih/lib /data /repo \

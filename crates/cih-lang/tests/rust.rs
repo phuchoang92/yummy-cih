@@ -1,4 +1,6 @@
-use cih_core::{function_id, method_id, BindingKind, NodeKind, RefKind};
+use cih_core::{
+    file_id, function_id, method_id, type_id, BindingKind, EdgeKind, NodeKind, RefKind,
+};
 
 #[test]
 fn rust_impl_traits_imports_bindings_and_callable_measurement_are_extracted() {
@@ -103,4 +105,52 @@ fn with_closure() { let f = |value| value; f(1); }
         .reference_sites
         .iter()
         .any(|site| { site.receiver.as_deref() == Some("crate::util") && site.name == "helper" }));
+}
+
+#[test]
+fn rust_external_impl_emits_one_owner_placeholder_for_structure_edges() {
+    let source = r#"
+struct DirectionArg;
+
+impl From<DirectionArg> for cih_graph_store::Direction {
+    fn from(_direction: DirectionArg) -> Self { todo!() }
+}
+
+impl TryFrom<&str> for cih_graph_store::Direction {
+    type Error = ();
+    fn try_from(_direction: &str) -> Result<Self, Self::Error> { todo!() }
+}
+"#;
+
+    let unit = cih_lang::rust::parse::parse_rust_file("src/args.rs", source).unwrap();
+    let owner_id = type_id(NodeKind::Class, "cih_graph_store::Direction");
+
+    let owners = unit
+        .nodes
+        .iter()
+        .filter(|node| node.id == owner_id)
+        .collect::<Vec<_>>();
+    assert_eq!(owners.len(), 1);
+    assert_eq!(
+        owners[0]
+            .props
+            .as_ref()
+            .and_then(|props| props.get("external_owner"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert!(unit.edges.iter().any(|edge| {
+        edge.src == file_id("src/args.rs")
+            && edge.dst == owner_id
+            && edge.kind == EdgeKind::Contains
+    }));
+    for method in [
+        method_id("cih_graph_store::Direction", "from", 1),
+        method_id("cih_graph_store::Direction", "try_from", 1),
+    ] {
+        assert!(unit.nodes.iter().any(|node| node.id == method));
+        assert!(unit.edges.iter().any(|edge| {
+            edge.src == owner_id && edge.dst == method && edge.kind == EdgeKind::HasMethod
+        }));
+    }
 }

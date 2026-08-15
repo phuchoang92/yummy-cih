@@ -20,9 +20,19 @@ while (($#)); do
   esac
 done
 
-for command in curl jq; do
+for command in awk curl jq; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
+
+mcp_session_id() {
+  awk 'tolower($1) == "mcp-session-id:" { sub(/\r$/, "", $2); print $2; exit }'
+}
+
+case_probe=$(printf 'mCp-SeSsIoN-Id: portable-session\r\n' | mcp_session_id)
+[[ $case_probe == portable-session ]] || {
+  echo "awk cannot parse case-insensitive MCP session headers" >&2
+  exit 1
+}
 cih=$(realpath "$cih")
 fixture=$(realpath "$fixture")
 mkdir -p "$work_dir"
@@ -122,7 +132,7 @@ initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVer
 curl -fsS -D "$headers" -o "$work_dir/initialize.json" \
   -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
   -d "$initialize" "http://127.0.0.1:$port/mcp"
-session=$(awk 'BEGIN {IGNORECASE=1} /^Mcp-Session-Id:/ {gsub("\r", "", $2); print $2}' "$headers" | tail -n 1)
+session=$(mcp_session_id <"$headers")
 [[ -n $session ]] || { echo "MCP initialize returned no session id" >&2; exit 1; }
 
 mcp_post() {

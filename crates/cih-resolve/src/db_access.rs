@@ -53,6 +53,15 @@ pub fn emit_db_access(parsed: &[ParsedFile]) -> (Vec<Node>, Vec<Edge>) {
         }
     }
 
+    // A named SQL constant can legitimately flow into multiple execution sites.
+    // Keep each caller -> query edge, but emit the shared query -> table
+    // relationship only once (and collapse any other exact DB-edge duplicate).
+    // Registry graph identity is `(src, dst, kind)`, so duplicates here would
+    // otherwise make the publication safety report reject an otherwise valid
+    // graph.
+    let mut seen_edges: FxHashSet<(NodeId, NodeId, EdgeKind)> = FxHashSet::default();
+    edges.retain(|edge| seen_edges.insert((edge.src.clone(), edge.dst.clone(), edge.kind)));
+
     (nodes, edges)
 }
 

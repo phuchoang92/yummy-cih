@@ -239,6 +239,7 @@ pub fn extract_di_xml_from(wiring: &DiWiring, parsed: &[ParsedFile]) -> DiXmlOut
     // each implemented/extended interface simple name → its implementors.
     let mut types_by_simple: HashMap<&str, Vec<(&str, NodeKind)>> = HashMap::new();
     let mut owner_kind_by_fqcn: HashMap<&str, NodeKind> = HashMap::new();
+    let mut parsed_type_id_by_fqcn: HashMap<&str, &NodeId> = HashMap::new();
     for pf in parsed {
         for def in &pf.defs {
             if matches!(
@@ -250,6 +251,9 @@ pub fn extract_di_xml_from(wiring: &DiWiring, parsed: &[ParsedFile]) -> DiXmlOut
                     .or_default()
                     .push((def.fqcn.as_str(), def.kind));
                 owner_kind_by_fqcn.insert(def.fqcn.as_str(), def.kind);
+                parsed_type_id_by_fqcn
+                    .entry(def.fqcn.as_str())
+                    .or_insert(&def.id);
             }
         }
     }
@@ -282,9 +286,14 @@ pub fn extract_di_xml_from(wiring: &DiWiring, parsed: &[ParsedFile]) -> DiXmlOut
     let mut edges: Vec<Edge> = Vec::new();
     let mut seen_bean_nodes: HashSet<String> = HashSet::new();
 
-    // Emit a Class node for every bean class so the CALLS edge has a destination,
-    // even if the bean class itself was not parsed (it may live in a JAR).
+    // Emit a Class placeholder only when the bean class was not parsed (for
+    // example, when it lives in a JAR). Parsed types already contribute their
+    // own node; emitting another Class with the same id would make the graph
+    // report reject the complete publication as non-unique.
     let mut emit_bean_node = |fqcn: &str, file: &str, nodes: &mut Vec<Node>| {
+        if parsed_type_id_by_fqcn.contains_key(fqcn) {
+            return;
+        }
         let id = type_id(NodeKind::Class, fqcn);
         if seen_bean_nodes.insert(id.as_str().to_string()) {
             nodes.push(Node {
@@ -329,12 +338,18 @@ pub fn extract_di_xml_from(wiring: &DiWiring, parsed: &[ParsedFile]) -> DiXmlOut
                     continue; // no self-edge
                 }
                 emit_bean_node(&bean.fqcn, &bean.file, &mut nodes);
-                edges.push(calls_edge(
-                    src.clone(),
-                    NodeKind::Class,
-                    &bean.fqcn,
-                    "di-xml-bean-field",
-                ));
+                let dst = parsed_type_id_by_fqcn
+                    .get(bean.fqcn.as_str())
+                    .map(|id| (*id).clone())
+                    .unwrap_or_else(|| type_id(NodeKind::Class, &bean.fqcn));
+                edges.push(Edge {
+                    src: src.clone(),
+                    dst,
+                    kind: EdgeKind::Calls,
+                    confidence: 0.7,
+                    reason: "di-xml-bean-field".to_string(),
+                    props: None,
+                });
             }
         }
     }

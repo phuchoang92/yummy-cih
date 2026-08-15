@@ -248,6 +248,12 @@ jobs:
             --build-arg "CIH_VERSION=${{ needs.qualify.outputs.package-version }}" \
             --build-arg "SOURCE_COMMIT=${{ needs.qualify.outputs.source-commit }}" \
             -t "$image" .
+          docker run --rm --entrypoint git "$image" --version
+          git_package=$(docker run --rm --entrypoint dpkg-query "$image" \
+            -W '-f=${binary:Package}\t${Version}\t${Architecture}\n' git)
+          image_size_bytes=$(docker image inspect --format '{{.Size}}' "$image")
+          printf 'OCI Git package: %s\nOCI image size: %s bytes\n' \
+            "$git_package" "$image_size_bytes" >> "$GITHUB_STEP_SUMMARY"
           network="cih-portable-$GITHUB_RUN_ID"
           repo_volume="cih-portable-repo-$GITHUB_RUN_ID"
           data_volume="cih-portable-data-$GITHUB_RUN_ID"
@@ -278,22 +284,71 @@ jobs:
           docker run --rm --network none \
             -v "$self_repo_volume:/repo" -v "$self_data_volume:/data" \
             "$image" index /repo --force --no-wiki 2>&1 | tee "$self_index_log"
-          if grep -E 'COPY CALLS|content digest mismatch' "$self_index_log"; then
+          if grep -E 'COPY CALLS|content digest mismatch|graph report omitted|duplicate (node|edge)' "$self_index_log"; then
             echo "portable self-index emitted a forbidden COPY/registry warning" >&2
             exit 1
           fi
+          self_warm_json=$(docker run --rm --network none \
+            -v "$self_repo_volume:/repo" -v "$self_data_volume:/data" \
+            "$image" index /repo --no-wiki --json)
+          jq -e '
+            .analyze.status == "skipped" and
+            .discover.status == "skipped" and
+            .wiki.status == "skipped"
+          ' <<<"$self_warm_json"
           self_list_json=$(docker run --rm --network none \
             -v "$self_repo_volume:/repo" -v "$self_data_volume:/data" \
             "$image" list --json)
-          jq -e '
+          jq -e --arg source_commit "${{ needs.qualify.outputs.source-commit }}" '
             .entries | length == 1 and
             .[0].path == "/repo" and
+            .[0].last_git_head == $source_commit and
             .[0].stats.communities > 1 and
+            .[0].stats.published_graph_report.schema_version == 1 and
             .[0].stats.callable_coverage >= 0 and
             .[0].stats.callable_coverage <= 1
           ' <<<"$self_list_json"
           docker run --rm -v "$self_repo_volume:/repo:ro" debian:bookworm-slim \
-            sh -ec 'grep -Eq '\''"kind":"Method".*"file":"[^"]+\.rs"'\'' /repo/.cih/artifacts/*/nodes.jsonl'
+            sh -ec '
+              nodes=$(find /repo/.cih/artifacts -name nodes.jsonl -type f | head -n 1)
+              edges=$(find /repo/.cih/artifacts -name edges.jsonl -type f | head -n 1)
+              test -n "$nodes" && test -n "$edges"
+              grep -Eq '\''"kind":"Method".*"file":"[^"]+\.rs"'\'' "$nodes"
+              duplicate_nodes=$(sed -n '\''s/.*"id":"\([^"]*\)".*/\1/p'\'' "$nodes" | LC_ALL=C sort | uniq -d)
+              test -z "$duplicate_nodes" || { printf "duplicate node ids:\n%s\n" "$duplicate_nodes" >&2; exit 1; }
+              duplicate_edges=$(sed -n '\''s/.*"src":"\([^"]*\)","dst":"\([^"]*\)","kind":"\([^"]*\)".*/\1\t\2\t\3/p'\'' "$edges" | LC_ALL=C sort | uniq -d)
+              test -z "$duplicate_edges" || { printf "duplicate edge ids:\n%s\n" "$duplicate_edges" >&2; exit 1; }
+            '
+
+          # Bind-mount qualification uses the host UID/GID and a real Git repo;
+          # a fresh second container must retain the warm-stage fingerprints.
+          bind_repo="$RUNNER_TEMP/cih-bind-repo-$GITHUB_RUN_ID"
+          bind_data="$RUNNER_TEMP/cih-bind-data-$GITHUB_RUN_ID"
+          mkdir -p "$bind_repo" "$bind_data"
+          cp -a "$PWD/crates/cih-engine/tests/corpus/java-spring-aop/." "$bind_repo/"
+          git -C "$bind_repo" init -q
+          git -C "$bind_repo" -c user.name=CI -c user.email=ci@example.invalid \
+            add .
+          git -C "$bind_repo" -c user.name=CI -c user.email=ci@example.invalid \
+            commit -qm fixture
+          bind_head=$(git -C "$bind_repo" rev-parse HEAD)
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/cih-user -e CIH_HOME=/data \
+            -v "$bind_repo:/repo" -v "$bind_data:/data" \
+            "$image" index /repo --force --no-wiki
+          bind_warm_json=$(docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/cih-user -e CIH_HOME=/data \
+            -v "$bind_repo:/repo" -v "$bind_data:/data" \
+            "$image" index /repo --no-wiki --json)
+          jq -e '.analyze.status == "skipped" and .discover.status == "skipped"' \
+            <<<"$bind_warm_json"
+          bind_list_json=$(docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/cih-user -e CIH_HOME=/data \
+            -v "$bind_repo:/repo" -v "$bind_data:/data" \
+            "$image" list --json)
+          jq -e --arg head "$bind_head" \
+            '.entries | length == 1 and .[0].last_git_head == $head' \
+            <<<"$bind_list_json"
 
           docker run --rm -v "$repo_volume:/repo" \
             -v "$PWD/crates/cih-engine/tests/corpus/java-spring-aop:/fixture:ro" \
@@ -329,7 +384,50 @@ jobs:
           [[ "$(http_status /health)" == 200 ]]
           [[ "$(http_status /graph)" == 401 ]]
           [[ "$(http_status /graph "$api_token")" == 200 ]]
+          mkdir -p dist
+          docker run --rm --entrypoint dpkg-query "$image" \
+            -W '-f=${binary:Package}\t${Version}\t${Architecture}\n' \
+            | LC_ALL=C sort > dist/oci-packages.tsv
+          IMAGE_NAME="$image" IMAGE_SIZE_BYTES="$image_size_bytes" jq -Rn '
+            [inputs | split("\t") | {
+              type: "library",
+              name: .[0],
+              version: .[1],
+              properties: [{name: "cih:debian:architecture", value: .[2]}]
+            }] as $components |
+            {
+              bomFormat: "CycloneDX",
+              specVersion: "1.5",
+              version: 1,
+              metadata: {
+                component: {type: "container", name: env.IMAGE_NAME},
+                properties: [{name: "cih:image:size_bytes", value: env.IMAGE_SIZE_BYTES}]
+              },
+              components: $components
+            }
+          ' < dist/oci-packages.tsv > dist/sbom-oci-linux-x64.cdx.json
+          jq -e '.components | any(.name == "git")' dist/sbom-oci-linux-x64.cdx.json
+          cat >dist/oci-qualification.md <<EOF
+          # Portable OCI qualification
+
+          - Source commit: ${{ needs.qualify.outputs.source-commit }}
+          - Image: $image
+          - Image size: $image_size_bytes bytes
+          - Git package: $git_package
+          - Offline cold and warm index: passed
+          - Named-volume and host-UID bind-mount persistence: passed
+          EOF
           echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Upload OCI qualification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.qualify.outputs.artifact-name }}-oci
+          path: |
+            dist/sbom-oci-linux-x64.cdx.json
+            dist/oci-qualification.md
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Publish Docker Hub image
         if: startsWith(github.ref, 'refs/tags/v')
@@ -368,6 +466,10 @@ jobs:
         with:
           name: ${{ needs.qualify.outputs.artifact-name }}
           path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.qualify.outputs.artifact-name }}-oci
+          path: release
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
@@ -385,7 +487,9 @@ jobs:
             release/${{ needs.qualify.outputs.stage-name }}.tar.gz
             release/${{ needs.qualify.outputs.stage-name }}.sha256
             release/sbom-linux-x64.cdx.json
+            release/sbom-oci-linux-x64.cdx.json
             release/THIRD_PARTY_NOTICES-linux-x64.txt
             release/linux-v*-qualification.md
+            release/oci-qualification.md
             release/install.sh
             release/uninstall.sh
