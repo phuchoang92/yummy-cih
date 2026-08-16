@@ -147,6 +147,6 @@ outside the bundle. The same package is exercised on Rocky Linux 8, Ubuntu
 20.04, Debian 12, and in the published OCI image.
 
 Merging a new workspace version to `master` creates its `v<version>` tag and
-dispatches the Linux and Windows release builds automatically. If that version
-tag already belongs to an earlier commit, bump `[workspace.package].version`
-before merging another release.
+dispatches the Linux, Windows, and macOS release builds automatically. If that
+version tag already belongs to an earlier commit, bump
+`[workspace.package].version` before merging another release.

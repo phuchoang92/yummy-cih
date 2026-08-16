@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "cih-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "cih-community"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "cih-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "cih-embed"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "cih-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "cih-falkor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "cih-graph-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "cih-grouping"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "cih-jar"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cafebabe",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "cih-ladybug"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "cih-lang"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "cih-parse"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "cih-patterns"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "toml",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "cih-resolve"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cih-core",
  "cih-lang",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "cih-search"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "cih-core",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "cih-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "cih-store-factory"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "cih-taint"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cih-core",
  "rustc-hash",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "cih-wiki"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cih-core",

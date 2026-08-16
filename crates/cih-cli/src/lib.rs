@@ -608,7 +608,43 @@ fn check_linux_native_runtime_maps(maps: &str) -> Check {
     }
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn check_native_runtime() -> Check {
+    let executable = match std::env::current_exe().and_then(std::fs::canonicalize) {
+        Ok(executable) => executable,
+        Err(error) => return Check::fail(format!("cannot locate cih executable: {error}")),
+    };
+    check_macos_native_runtime_at(&executable)
+}
+
+#[cfg(target_os = "macos")]
+fn check_macos_native_runtime_at(executable: &Path) -> Check {
+    let Some(bundle_root) = executable.parent().and_then(Path::parent) else {
+        return Check::fail(format!(
+            "cannot locate portable bundle for {}",
+            executable.display()
+        ));
+    };
+    if !bundle_root.join("BUILD_INFO.txt").is_file() {
+        return Check::pass("development runtime; portable bundle check not applicable");
+    }
+
+    let library_dir = bundle_root.join("lib");
+    let missing = ["liblbug.0.dylib", "libssl.3.dylib", "libcrypto.3.dylib"]
+        .into_iter()
+        .filter(|name| !library_dir.join(name).is_file())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Check::pass("bundled Ladybug and OpenSSL 3 libraries are present")
+    } else {
+        Check::fail(format!(
+            "missing bundled macOS libraries: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
 fn check_native_runtime() -> Check {
     Check::pass("native-runtime bundle check not applicable")
 }
@@ -767,6 +803,29 @@ mod tests {
         assert!(!incomplete.ok);
         assert!(incomplete.message.contains("libssl.so.3"));
         assert!(incomplete.message.contains("libcrypto.so.3"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_native_runtime_check_requires_bundle_companions() {
+        let root = tempfile::tempdir().unwrap();
+        let binary_dir = root.path().join("bin");
+        let library_dir = root.path().join("lib");
+        std::fs::create_dir_all(&binary_dir).unwrap();
+        std::fs::create_dir_all(&library_dir).unwrap();
+        std::fs::write(root.path().join("BUILD_INFO.txt"), "portable").unwrap();
+        let executable = binary_dir.join("cih");
+        std::fs::write(&executable, "binary").unwrap();
+
+        let incomplete = check_macos_native_runtime_at(&executable);
+        assert!(!incomplete.ok);
+        assert!(incomplete.message.contains("liblbug.0.dylib"));
+
+        for name in ["liblbug.0.dylib", "libssl.3.dylib", "libcrypto.3.dylib"] {
+            std::fs::write(library_dir.join(name), "library").unwrap();
+        }
+        let complete = check_macos_native_runtime_at(&executable);
+        assert!(complete.ok);
     }
 
     #[test]

@@ -1,0 +1,272 @@
+name: macOS portable
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: macos-portable-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  LBUG_VERSION: 0.18.2
+  OPENSSL_VERSION: 3.5.7
+  OPENSSL_SHA256: a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
+  LBUG_SHARED: 1
+  LBUG_LIB_KIND: shared
+  MACOSX_DEPLOYMENT_TARGET: "13.3"
+  DEV_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'dev') }}
+
+jobs:
+  qualify:
+    name: macOS ${{ matrix.arch }} qualification
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+            openssl-config: darwin64-arm64-cc
+            lbug-sha256: cfda345488d1622c98e8473494ca49607e5424c8081f91340a5e5faabb5552b8
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+            openssl-config: darwin64-x86_64-cc
+            lbug-sha256: 059e576a1af2ff89cb063893e368c5ff56b6077d86f65f656834b2efff7abe3e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Resolve package identity
+        id: identity
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test -n "$version"
+          source_commit=$(git rev-parse HEAD)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            [[ "v$version" == "$GITHUB_REF_NAME" ]] || { echo "tag does not match workspace version" >&2; exit 1; }
+            package_version=$version
+          elif [[ "$DEV_CANDIDATE" == true ]]; then
+            package_version="$version-candidate.$GITHUB_RUN_NUMBER"
+          else
+            package_version="$version-pr.$GITHUB_RUN_NUMBER"
+          fi
+          stage_name="cih-macos-${{ matrix.arch }}-$package_version"
+          {
+            echo "WORKSPACE_VERSION=$version"
+            echo "PACKAGE_VERSION=$package_version"
+            echo "SOURCE_COMMIT=$source_commit"
+            echo "STAGE_NAME=$stage_name"
+          } >> "$GITHUB_ENV"
+          {
+            echo "workspace-version=$version"
+            echo "source-commit=$source_commit"
+            echo "stage-name=$stage_name"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Show pinned toolchain and host
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          sw_vers
+          uname -m
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-portable-${{ matrix.arch }}
+
+      - name: Build pinned OpenSSL 3 shared runtime
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/openssl-$OPENSSL_VERSION.tar.gz"
+          source_dir="$RUNNER_TEMP/openssl-$OPENSSL_VERSION"
+          prefix="$RUNNER_TEMP/openssl-runtime"
+          curl -fL "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz" -o "$archive"
+          echo "$OPENSSL_SHA256  $archive" | shasum -a 256 --check
+          tar xzf "$archive" -C "$RUNNER_TEMP"
+          cd "$source_dir"
+          ./Configure "${{ matrix.openssl-config }}" shared no-tests --prefix="$prefix" --libdir=lib
+          make -s -j3 build_libs
+          mkdir -p "$prefix/lib"
+          install -m 0755 libcrypto.3.dylib libssl.3.dylib "$prefix/lib/"
+          {
+            echo "OPENSSL_ROOT_DIR=$prefix"
+            echo "OPENSSL_LIB_DIR=$prefix/lib"
+            echo "DYLD_LIBRARY_PATH=$prefix/lib"
+          } >> "$GITHUB_ENV"
+
+      - name: Install pinned Ladybug shared runtime
+        shell: bash
+        run: |
+          lbug_dir="$RUNNER_TEMP/lbug-$LBUG_VERSION-${{ matrix.arch }}"
+          archive="$RUNNER_TEMP/liblbug-osx-${{ matrix.arch }}.tar.gz"
+          mkdir -p "$lbug_dir"
+          curl -fL "https://github.com/LadybugDB/ladybug/releases/download/v$LBUG_VERSION/liblbug-osx-${{ matrix.arch }}.tar.gz" -o "$archive"
+          echo "${{ matrix.lbug-sha256 }}  $archive" | shasum -a 256 --check
+          tar xzf "$archive" -C "$lbug_dir"
+          test -f "$lbug_dir/liblbug.0.18.2.dylib"
+          test -f "$lbug_dir/lbug.h"
+          lbug="$lbug_dir/liblbug.0.18.2.dylib"
+          while IFS= read -r dependency; do
+            case "$dependency" in
+              */libssl.3.dylib)
+                install_name_tool -change "$dependency" "$RUNNER_TEMP/openssl-runtime/lib/libssl.3.dylib" "$lbug"
+                ;;
+              */libcrypto.3.dylib)
+                install_name_tool -change "$dependency" "$RUNNER_TEMP/openssl-runtime/lib/libcrypto.3.dylib" "$lbug"
+                ;;
+            esac
+          done < <(otool -L "$lbug" | tail -n +2 | awk '{print $1}')
+          codesign --force --sign - "$lbug"
+          codesign --verify --strict "$lbug"
+          {
+            echo "LBUG_LIBRARY_DIR=$lbug_dir"
+            echo "LBUG_INCLUDE_DIR=$lbug_dir"
+            echo "DYLD_LIBRARY_PATH=$lbug_dir:$RUNNER_TEMP/openssl-runtime/lib"
+          } >> "$GITHUB_ENV"
+
+      - name: Build portable executable
+        shell: bash
+        run: cargo build --locked --release -p cih-cli --target "${{ matrix.target }}"
+
+      - name: Verify portable dependency exclusions
+        shell: bash
+        run: |
+          tree=$(cargo tree --locked -p cih-cli -e normal)
+          for forbidden in cih-falkor cih-embed fastembed pgvector tokio-postgres redis; do
+            if grep -Fq "$forbidden" <<<"$tree"; then
+              echo "portable dependency tree contains $forbidden" >&2
+              exit 1
+            fi
+          done
+
+      - name: Generate SBOM and third-party notices
+        shell: bash
+        run: |
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo install cargo-license --locked --version 0.7.0
+          mkdir -p dist
+          cargo cyclonedx --manifest-path crates/cih-cli/Cargo.toml --format json --all --target "${{ matrix.target }}" --override-filename bom
+          mv crates/cih-cli/bom.json "dist/sbom-macos-${{ matrix.arch }}.cdx.json"
+          cargo license --authors --do-not-bundle --avoid-dev-deps >"dist/THIRD_PARTY_NOTICES-macos-${{ matrix.arch }}.txt"
+
+      - name: Package and audit portable archive
+        shell: bash
+        run: |
+          scripts/macos/package.sh \
+            --version "$PACKAGE_VERSION" \
+            --arch "${{ matrix.arch }}" \
+            --target-dir "target/${{ matrix.target }}/release" \
+            --lbug-dir "$LBUG_LIBRARY_DIR" \
+            --openssl-lib-dir "$OPENSSL_LIB_DIR" \
+            --sbom "dist/sbom-macos-${{ matrix.arch }}.cdx.json" \
+            --notices "dist/THIRD_PARTY_NOTICES-macos-${{ matrix.arch }}.txt"
+
+      - name: Portable CLI and installer smoke tests
+        shell: bash
+        run: |
+          scripts/macos/smoke.sh \
+            --cih "dist/$STAGE_NAME/bin/cih" \
+            --fixture crates/cih-engine/tests/corpus/java-spring-aop \
+            --work-dir "$RUNNER_TEMP/cih smoke"
+          scripts/macos/test-installer.sh \
+            "dist/$STAGE_NAME.tar.gz" \
+            "dist/$STAGE_NAME.sha256"
+
+      - name: Targeted Rust tests
+        shell: bash
+        run: |
+          cargo test --locked -p cih-cli --target "${{ matrix.target }}"
+          cargo test --locked -p cih-ladybug --all-targets --target "${{ matrix.target }}"
+
+      - name: Write qualification record
+        shell: bash
+        run: |
+          checksum=$(awk '{print $1}' "dist/$STAGE_NAME.sha256")
+          cat >"dist/macos-${{ matrix.arch }}-v$WORKSPACE_VERSION-qualification.md" <<EOF
+          # macOS ${{ matrix.arch }} v$WORKSPACE_VERSION qualification
+
+          - Source commit: $SOURCE_COMMIT
+          - Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - Package: $STAGE_NAME.tar.gz
+          - SHA-256: $checksum
+          - Target: ${{ matrix.target }}
+          - Minimum macOS: 13.3
+          - Signing: ad-hoc; not Developer ID signed; not notarized
+          - Hosted macOS CI: passed
+          - Clean desktop Gatekeeper qualification: pending
+          EOF
+
+      - name: Upload qualification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.stage-name }}
+          path: |
+            dist/cih-macos-${{ matrix.arch }}-*.tar.gz
+            dist/cih-macos-${{ matrix.arch }}-*.sha256
+            dist/sbom-macos-${{ matrix.arch }}.cdx.json
+            dist/THIRD_PARTY_NOTICES-macos-${{ matrix.arch }}.txt
+            dist/macos-${{ matrix.arch }}-v*-qualification.md
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: qualify
+    runs-on: ubuntu-latest
+    concurrency:
+      group: portable-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cih-macos-*
+          path: release
+          merge-multiple: true
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/cih-macos-*.tar.gz
+
+      - name: Stage platform-specific installer assets
+        shell: bash
+        run: |
+          install -m 0755 scripts/macos/install.sh release/install-macos.sh
+          install -m 0755 scripts/macos/uninstall.sh release/uninstall-macos.sh
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            Portable CIH release assets for Linux, Windows, and macOS. Packages operate offline after download and include audited native runtimes, checksums, SBOMs, notices, and provenance. macOS packages are ad-hoc signed but are not Developer ID signed or notarized.
+          files: |
+            release/cih-macos-*.tar.gz
+            release/cih-macos-*.sha256
+            release/sbom-macos-*.cdx.json
+            release/THIRD_PARTY_NOTICES-macos-*.txt
+            release/macos-*-qualification.md
+            release/install-macos.sh
+            release/uninstall-macos.sh

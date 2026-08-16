@@ -102,6 +102,6 @@ runtime prerequisites installed; hosted GitHub Windows runners are not substitut
 for that final desktop-OS qualification.
 
 Merging a new workspace version to `master` creates its `v<version>` tag and
-dispatches the Linux and Windows release builds automatically. If that version
-tag already belongs to an earlier commit, bump `[workspace.package].version`
-before merging another release.
+dispatches the Linux, Windows, and macOS release builds automatically. If that
+version tag already belongs to an earlier commit, bump
+`[workspace.package].version` before merging another release.

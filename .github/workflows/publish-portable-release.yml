@@ -44,7 +44,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch Linux and Windows release builds
+      - name: Dispatch Linux, Windows, and macOS release builds
         if: steps.release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,4 +61,5 @@ jobs:
           }
           dispatch linux-portable.yml
           dispatch windows-portable.yml
-          echo "Dispatched portable release builds for $RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          dispatch macos-portable.yml
+          echo "Dispatched Linux, Windows, and macOS portable release builds for $RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
