@@ -11,6 +11,8 @@ use super::args::DiscoverArgs;
 pub fn run(args: DiscoverArgs) -> Result<()> {
     // Layer flags over <repo>/cih.toml and ~/.cih/config.toml (see settings.rs).
     let layers = settings::Layers::load(&args.repo);
+    let repo = args.repo.clone();
+    let agent_context = settings::resolve_agent_context(args.no_agent_context, &layers);
     let r = settings::resolve_discover(
         settings::DiscoverFlagInputs {
             community_strategy: args.community_strategy,
@@ -86,5 +88,14 @@ pub fn run(args: DiscoverArgs) -> Result<()> {
             embed_knn: r.embed_knn,
             embed_leiden_resolution: r.embed_leiden_resolution,
         },
-    )
+    )?;
+
+    crate::agent_context::generate_repo_agent_context(
+        &repo,
+        crate::agent_context::AgentContextOptions {
+            enabled: agent_context.enabled,
+            area_skills: agent_context.area_skills,
+        },
+    )?;
+    Ok(())
 }

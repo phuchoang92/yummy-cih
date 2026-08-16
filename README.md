@@ -55,6 +55,43 @@ uninstall instructions. Alpine/musl is not a native target; use the OCI image.
 
 ---
 
+## Coding-agent integration
+
+`cih index` generates repository-local CIH instructions in `AGENTS.md` and
+`CLAUDE.md`, plus standard and discovered-area skills under `.agents/skills`,
+`.claude/skills`, and `.kiro/skills`. Content outside the `<!-- cih:start -->`
+managed block is preserved. Disable this for one run with
+`--no-agent-context`, or configure it per repository:
+
+```toml
+[agent_context]
+enabled = true
+area_skills = true
+```
+
+Configure the global MCP entry and standard skills for supported agents with:
+
+```bash
+cih setup --coding-agent codex,claude,opencode,kiro
+cih setup --coding-agent codex --url https://cih.example.com/mcp --token-env CIH_TOKEN
+```
+
+The default endpoint is `http://127.0.0.1:8080/mcp`. CIH does not start the
+server or install hooks; run `cih serve` separately. Plain HTTP is accepted only
+for loopback, remote endpoints require HTTPS, and `--token-env` stores only the
+environment-variable name. A different existing `cih` entry is left untouched
+unless `--force` is passed.
+
+Uninstall previews its actions by default and removes only CIH-owned entries and
+standard skill directories when confirmed:
+
+```bash
+cih uninstall --coding-agent codex,claude,opencode,kiro
+cih uninstall --coding-agent codex,claude,opencode,kiro --force
+```
+
+---
+
 ## Prerequisites
 
 - **Docker** and **Docker Compose** (v2)

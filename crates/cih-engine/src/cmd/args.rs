@@ -371,6 +371,9 @@ pub struct DiscoverArgs {
     /// Print the summary as JSON instead of the human summary.
     #[arg(long)]
     pub json: bool,
+    /// Do not generate repository-local AGENTS.md/CLAUDE.md and CIH skills.
+    #[arg(long)]
+    pub no_agent_context: bool,
 
     // ── Community detection overrides ──────────────────────────────────
     /// Community detection strategy.
@@ -564,8 +567,7 @@ pub struct WikiArgs {
     /// Prevents readers from observing a partially-written wiki output during generation.
     #[arg(long)]
     pub stage_and_swap: bool,
-    /// After generating the wiki, write or update a CIH pointer block in AGENTS.md and
-    /// CLAUDE.md at the repo root so that AI agents can locate the wiki and agent-index.json.
+    /// After generating the wiki, update repository-local CIH instructions and skills.
     #[arg(long)]
     pub update_agents_md: bool,
 }
@@ -591,6 +593,9 @@ pub struct RefreshArgs {
     /// Skip the wiki stage even if the wiki is stale.
     #[arg(long)]
     pub no_wiki: bool,
+    /// Do not generate repository-local AGENTS.md/CLAUDE.md and CIH skills.
+    #[arg(long)]
+    pub no_agent_context: bool,
     /// Wiki generation mode: graph (default, no LLM), llm-summary, or llm-full.
     #[arg(long)]
     pub wiki_mode: Option<String>,
@@ -682,6 +687,31 @@ mod tests {
             }
             other => panic!("expected Analyze command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_context_opt_out_parses_for_discover_and_refresh() {
+        let discover =
+            Cli::try_parse_from(["cih-engine", "discover", "/tmp/repo", "--no-agent-context"])
+                .unwrap();
+        assert!(matches!(
+            discover.command,
+            Command::Discover(DiscoverArgs {
+                no_agent_context: true,
+                ..
+            })
+        ));
+
+        let refresh =
+            Cli::try_parse_from(["cih-engine", "refresh", "/tmp/repo", "--no-agent-context"])
+                .unwrap();
+        assert!(matches!(
+            refresh.command,
+            Command::Refresh(RefreshArgs {
+                no_agent_context: true,
+                ..
+            })
+        ));
     }
 
     /// Parsing `analyze --all` (no repo) should keep repo as None (cwd fallback at runtime).

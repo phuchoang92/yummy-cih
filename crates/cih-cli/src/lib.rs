@@ -8,6 +8,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+mod agent_setup;
+
 #[derive(Debug, Parser)]
 #[command(name = "cih", version, about = "Code Intelligence Hub")]
 struct Cli {
@@ -27,6 +29,9 @@ enum Command {
         /// Skip documentation generation.
         #[arg(long)]
         no_wiki: bool,
+        /// Do not generate repository-local coding-agent instructions and skills.
+        #[arg(long)]
+        no_agent_context: bool,
         /// Community/wiki grouping strategy (portable default: graph).
         #[arg(long, value_enum, default_value_t = PortableGrouping::Graph)]
         grouping: PortableGrouping,
@@ -51,6 +56,39 @@ enum Command {
         #[arg(long)]
         repo: Option<PathBuf>,
         /// Print machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Configure CIH MCP and skills for one or more coding agents.
+    Setup {
+        /// Coding agents to configure (comma-delimited). Defaults to all supported agents.
+        #[arg(long, value_delimiter = ',')]
+        coding_agent: Vec<agent_setup::CodingAgent>,
+        /// CIH MCP endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:8080/mcp")]
+        url: String,
+        /// Name of the environment variable containing the bearer token.
+        #[arg(long)]
+        token_env: Option<String>,
+        /// Preview files and entries without changing them.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace a different existing `cih` MCP entry.
+        #[arg(long)]
+        force: bool,
+        /// Print a machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove CIH-owned MCP entries and standard skills for coding agents.
+    Uninstall {
+        /// Coding agents to clean (comma-delimited). Defaults to all supported agents.
+        #[arg(long, value_delimiter = ',')]
+        coding_agent: Vec<agent_setup::CodingAgent>,
+        /// Apply removal. Without this flag uninstall is a dry-run.
+        #[arg(long)]
+        force: bool,
+        /// Print a machine-readable report.
         #[arg(long)]
         json: bool,
     },
@@ -83,11 +121,32 @@ pub fn main() -> Result<()> {
             repo,
             force,
             no_wiki,
+            no_agent_context,
             grouping,
             json,
-        } => index(repo, force, no_wiki, grouping, json),
+        } => index(repo, force, no_wiki, no_agent_context, grouping, json),
         Command::Serve { repo, bind, open } => serve(repo, bind, open),
         Command::Doctor { repo, json } => doctor(repo, json),
+        Command::Setup {
+            coding_agent,
+            url,
+            token_env,
+            dry_run,
+            force,
+            json,
+        } => agent_setup::setup(
+            coding_agent,
+            &url,
+            token_env.as_deref(),
+            dry_run,
+            force,
+            json,
+        ),
+        Command::Uninstall {
+            coding_agent,
+            force,
+            json,
+        } => agent_setup::uninstall(coding_agent, force, json),
         Command::Engine(args) => engine(args),
     }
 }
@@ -136,6 +195,7 @@ fn index(
     repo: Option<PathBuf>,
     force: bool,
     no_wiki: bool,
+    no_agent_context: bool,
     grouping: PortableGrouping,
     json: bool,
 ) -> Result<()> {
@@ -167,6 +227,7 @@ fn index(
             no_analyze: false,
             no_discover: false,
             no_wiki,
+            no_agent_context,
             wiki_mode: Some("graph".to_string()),
             grouping: Some(grouping.to_string()),
             wiki_language: Some("en".to_string()),
@@ -650,6 +711,47 @@ mod tests {
                 grouping: PortableGrouping::Package,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn cli_parses_agent_context_and_setup_commands() {
+        let cli = Cli::try_parse_from(["cih", "index", "--no-agent-context"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Index {
+                no_agent_context: true,
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            "cih",
+            "setup",
+            "--coding-agent",
+            "codex,claude,opencode",
+            "--token-env",
+            "CIH_TOKEN",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Setup {
+                coding_agent,
+                dry_run: true,
+                ..
+            } if coding_agent == vec![
+                agent_setup::CodingAgent::Codex,
+                agent_setup::CodingAgent::Claude,
+                agent_setup::CodingAgent::OpenCode,
+            ]
+        ));
+
+        let cli = Cli::try_parse_from(["cih", "uninstall"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Uninstall { force: false, .. }
         ));
     }
 

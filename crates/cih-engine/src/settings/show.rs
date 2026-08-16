@@ -20,6 +20,7 @@ pub fn effective_rows(layers: &Layers) -> Vec<ShowRow> {
     let (ha, ra) = (&layers.home.analyze, &layers.repo.analyze);
     let (hd, rd) = (&layers.home.discover, &layers.repo.discover);
     let (hw, rw) = (&layers.home.wiki, &layers.repo.wiki);
+    let (hc, rc) = (&layers.home.agent_context, &layers.repo.agent_context);
     let mut rows = Vec::new();
 
     // A concrete-default option: resolve to its display string + source.
@@ -328,6 +329,22 @@ pub fn effective_rows(layers: &Layers) -> Vec<ShowRow> {
         hw.incremental,
     ));
 
+    // [agent_context] defaults to enabled, unlike opt-in feature booleans.
+    rows.push(req(
+        "agent_context",
+        "enabled",
+        rc.enabled,
+        hc.enabled,
+        DEFAULT_AGENT_CONTEXT_ENABLED.to_string(),
+    ));
+    rows.push(req(
+        "agent_context",
+        "area_skills",
+        rc.area_skills,
+        hc.area_skills,
+        DEFAULT_AGENT_CONTEXT_AREA_SKILLS.to_string(),
+    ));
+
     rows
 }
 
@@ -380,6 +397,10 @@ pub fn starter_toml() -> String {
 # grouping = "{wg}"               # package | graph | llm
 # html = false
 # incremental = false
+
+[agent_context]
+# enabled = true                    # generate AGENTS.md/CLAUDE.md and standard skills
+# area_skills = true                # generate up to 20 cih-area-* skills from discovery
 "#,
         cs = DEFAULT_COMMUNITY_STRATEGY,
         fs = DEFAULT_FEATURE_STRATEGY,
