@@ -56,6 +56,7 @@ mod config_tests {
     }
 }
 
+pub mod agent_context;
 pub mod analyze;
 pub mod cmd;
 pub mod db;

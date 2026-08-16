@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "cih-cli"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -562,17 +562,19 @@ dependencies = [
  "cih-server",
  "cih-store-factory",
  "clap",
+ "jsonc-parser",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "cih-community"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -589,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "cih-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -608,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "cih-embed"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -623,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "cih-engine"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -665,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "cih-falkor"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -679,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "cih-graph-store"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -692,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "cih-grouping"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -704,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "cih-jar"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cafebabe",
@@ -716,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "cih-ladybug"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -735,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "cih-lang"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -761,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "cih-parse"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -776,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "cih-patterns"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "toml",
@@ -785,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "cih-resolve"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cih-core",
  "cih-lang",
@@ -802,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "cih-search"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "cih-core",
@@ -813,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "cih-server"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -848,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "cih-store-factory"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -860,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "cih-taint"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cih-core",
  "rustc-hash",
@@ -875,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "cih-wiki"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cih-core",
@@ -2369,6 +2371,16 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonc-parser"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0560e3f9a9a03ea6b6e90b41138c5db9e21526c99eb192c1a26c68176593285"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

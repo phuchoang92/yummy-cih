@@ -50,7 +50,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 
@@ -71,6 +71,8 @@ quick-xml = "0.38"
 rayon = "1"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
+toml_edit = "0.22"
+jsonc-parser = { version = "0.33.1", features = ["cst", "serde", "serde_json"] }
 tree-sitter = "0.24"
 tree-sitter-java = "0.23.5"
 tree-sitter-typescript = "0.23"

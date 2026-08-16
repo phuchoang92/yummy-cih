@@ -40,6 +40,8 @@ pub const DEFAULT_WIKI_LLM_CONCURRENCY: usize = 8;
 pub const DEFAULT_WIKI_LANGUAGE: &str = "en";
 pub const DEFAULT_WIKI_MODE: &str = "graph";
 pub const DEFAULT_WIKI_GROUPING: &str = "package";
+pub const DEFAULT_AGENT_CONTEXT_ENABLED: bool = true;
+pub const DEFAULT_AGENT_CONTEXT_AREA_SKILLS: bool = true;
 
 // ── Source tracking ─────────────────────────────────────────────────────────
 
@@ -195,10 +197,18 @@ pub struct WikiSettings {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct AgentContextSettings {
+    pub enabled: Option<bool>,
+    pub area_skills: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct CihSettings {
     pub analyze: AnalyzeSettings,
     pub discover: DiscoverSettings,
     pub wiki: WikiSettings,
+    pub agent_context: AgentContextSettings,
 }
 
 impl CihSettings {

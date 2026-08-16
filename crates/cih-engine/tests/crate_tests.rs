@@ -470,6 +470,7 @@ fn refresh_command_runs_analyze_and_writes_fingerprint_state() {
         no_analyze: false,
         no_discover: true,
         no_wiki: true,
+        no_agent_context: false,
         wiki_mode: None,
         grouping: None,
         wiki_language: None,
@@ -515,6 +516,7 @@ fn refresh_command_skips_stages_when_no_flags_set() {
         no_analyze: true,
         no_discover: true,
         no_wiki: true,
+        no_agent_context: true,
         wiki_mode: None,
         grouping: None,
         wiki_language: None,
@@ -963,17 +965,30 @@ fn wiki_command_update_agents_md_writes_pointer_block() {
     );
     let content = fs::read_to_string(&agents_md).unwrap();
     assert!(
-        content.contains("<!-- cih-wiki:start -->"),
-        "AGENTS.md must contain cih-wiki:start marker"
+        content.contains("<!-- cih:start -->"),
+        "AGENTS.md must contain cih:start marker"
     );
     assert!(
-        content.contains("<!-- cih-wiki:end -->"),
-        "AGENTS.md must contain cih-wiki:end marker"
+        content.contains("<!-- cih:end -->"),
+        "AGENTS.md must contain cih:end marker"
     );
     assert!(
         content.contains("agent-index.json"),
         "AGENTS.md must reference agent-index.json"
     );
+    for skill_root in [".agents/skills", ".claude/skills", ".kiro/skills"] {
+        assert!(
+            root.join(skill_root).join("cih-guide/SKILL.md").exists(),
+            "standard skills must be mirrored to {skill_root}"
+        );
+        assert!(
+            fs::read_dir(root.join(skill_root))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("cih-area-")),
+            "discovery must produce at least one area skill in {skill_root}"
+        );
+    }
 
     // Running again must not alter the file (idempotent second run).
     let before = fs::read_to_string(&agents_md).unwrap();

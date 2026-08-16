@@ -3,6 +3,29 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Copy)]
+pub struct AgentContextResolved {
+    pub enabled: bool,
+    pub area_skills: bool,
+}
+
+pub fn resolve_agent_context(disabled_by_flag: bool, layers: &Layers) -> AgentContextResolved {
+    let (home, repo) = (&layers.home.agent_context, &layers.repo.agent_context);
+    AgentContextResolved {
+        enabled: if disabled_by_flag {
+            false
+        } else {
+            repo.enabled
+                .or(home.enabled)
+                .unwrap_or(DEFAULT_AGENT_CONTEXT_ENABLED)
+        },
+        area_skills: repo
+            .area_skills
+            .or(home.area_skills)
+            .unwrap_or(DEFAULT_AGENT_CONTEXT_AREA_SKILLS),
+    }
+}
+
 /// `analyze` flags that participate in config layering.
 ///
 /// `skip_xml_integration` and `include_decompiled` are `Option<bool>` so that

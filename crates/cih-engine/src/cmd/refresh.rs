@@ -106,10 +106,11 @@ pub fn run(args: RefreshArgs) -> Result<()> {
 
     let repo_head = cih_core::git_head(&repo);
     let mut state = RefreshState::load(&cih_dir);
-    let analyze_settings = crate::settings::resolve_analyze(
-        crate::settings::AnalyzeFlagInputs::default(),
-        &crate::settings::Layers::load(&repo),
-    );
+    let layers = crate::settings::Layers::load(&repo);
+    let analyze_settings =
+        crate::settings::resolve_analyze(crate::settings::AnalyzeFlagInputs::default(), &layers);
+    let agent_context_settings =
+        crate::settings::resolve_agent_context(args.no_agent_context, &layers);
     let current_analyze_fingerprint = analyze_fingerprint(
         repo_head.as_deref(),
         &analyze_settings,
@@ -336,6 +337,26 @@ pub fn run(args: RefreshArgs) -> Result<()> {
         StageOutcome::skipped(reason)
     };
 
+    // Agent context is refreshed even when the graph/wiki stages are cache hits,
+    // so new templates and managed-instruction migrations still take effect.
+    let agent_context_out = if agent_context_settings.enabled {
+        let t = Instant::now();
+        crate::agent_context::generate_repo_agent_context(
+            &repo,
+            crate::agent_context::AgentContextOptions {
+                enabled: true,
+                area_skills: agent_context_settings.area_skills,
+            },
+        )?;
+        StageOutcome::ran(t.elapsed())
+    } else {
+        StageOutcome::skipped(if args.no_agent_context {
+            "--no-agent-context"
+        } else {
+            "disabled by [agent_context].enabled"
+        })
+    };
+
     // ── Output ───────────────────────────────────────────────────────────────
     if json {
         println!(
@@ -344,12 +365,14 @@ pub fn run(args: RefreshArgs) -> Result<()> {
                 "analyze":  analyze_out,
                 "discover": discover_out,
                 "wiki":     wiki_out,
+                "agent_context": agent_context_out,
             }))?
         );
     } else {
         print_stage("analyze ", &analyze_out);
         print_stage("discover", &discover_out);
         print_stage("wiki    ", &wiki_out);
+        print_stage("agents  ", &agent_context_out);
     }
 
     Ok(())

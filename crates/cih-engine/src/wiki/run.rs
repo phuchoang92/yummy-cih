@@ -720,54 +720,10 @@ pub fn run_wiki(cfg: WikiConfig) -> Result<()> {
     }
 
     if update_agents_md {
-        let wiki_rel = outcome
-            .out_dir
-            .strip_prefix(repo)
-            .unwrap_or(&outcome.out_dir)
-            .display()
-            .to_string();
-        let index_rel = outcome
-            .agent_index_path
-            .strip_prefix(repo)
-            .unwrap_or(&outcome.agent_index_path)
-            .display()
-            .to_string();
-        // Core block (no leading newline — surrounding newlines are managed per-case below).
-        let block_core = format!(
-            "<!-- cih-wiki:start -->\n## CIH Wiki\n\
-             This repository's wiki is at `{wiki_rel}/`. \
-             Agent navigation index: `{index_rel}`.\n\
-             <!-- cih-wiki:end -->"
-        );
-        for filename in &["AGENTS.md", "CLAUDE.md"] {
-            let path = repo.join(filename);
-            let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            let updated = if let (Some(start), Some(end)) = (
-                existing.find("<!-- cih-wiki:start -->"),
-                existing.find("<!-- cih-wiki:end -->"),
-            ) {
-                // Replace in-place: keep whatever surrounds the block as-is.
-                let end_pos = end + "<!-- cih-wiki:end -->".len();
-                format!(
-                    "{}{}{}",
-                    &existing[..start],
-                    block_core,
-                    &existing[end_pos..]
-                )
-            } else {
-                // Append: add a blank-line separator then a trailing newline.
-                let prefix = existing.trim_end_matches('\n');
-                if prefix.is_empty() {
-                    format!("\n{}\n", block_core)
-                } else {
-                    format!("{}\n\n{}\n", prefix, block_core)
-                }
-            };
-            if updated != existing {
-                std::fs::write(&path, &updated)
-                    .with_context(|| format!("writing pointer block to {}", path.display()))?;
-            }
-        }
+        crate::agent_context::generate_repo_agent_context(
+            repo,
+            crate::agent_context::AgentContextOptions::default(),
+        )?;
     }
 
     if json {

@@ -47,6 +47,23 @@ fn parses_partial_file_with_only_one_section() {
     assert!(s.discover.community_strategy.is_none());
     assert!(s.analyze.languages.is_none());
     assert!(s.wiki.llm.is_none());
+    assert!(s.agent_context.enabled.is_none());
+}
+
+#[test]
+fn agent_context_defaults_and_opt_out() {
+    let resolved = resolve_agent_context(false, &Layers::default());
+    assert!(resolved.enabled);
+    assert!(resolved.area_skills);
+
+    let configured = layers(
+        "[agent_context]\narea_skills = false",
+        "[agent_context]\nenabled = false\narea_skills = true",
+    );
+    let resolved = resolve_agent_context(false, &configured);
+    assert!(!resolved.enabled);
+    assert!(!resolved.area_skills, "repo layer wins");
+    assert!(!resolve_agent_context(true, &Layers::default()).enabled);
 }
 
 #[test]
