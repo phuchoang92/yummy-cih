@@ -65,7 +65,7 @@ impl std::fmt::Display for NodeId {
     }
 }
 
-/// Node labels (mirrors `gitnexus-shared` `NodeLabel`, trimmed for Java/Spring v1).
+/// Node labels used by CIH's Java/Spring v1 graph schema.
 ///
 /// Graph labels are the variant names verbatim (strum's default); they are
 /// stored in FalkorDB, so renaming a variant is a breaking schema change.
@@ -223,7 +223,7 @@ pub fn message_destination_id(dest_type: &str, name: &str) -> NodeId {
     NodeId::new(format!("MessageDestination:{dest_type}:{name}"))
 }
 
-/// Edge types (mirrors `gitnexus-shared` `RelationshipType`, trimmed for v1).
+/// Edge types used by CIH's graph schema.
 ///
 /// Cypher labels are SCREAMING_SNAKE_CASE of the variant name (except `Other`
 /// → `REL`); they are stored in FalkorDB, so renaming a variant is a breaking

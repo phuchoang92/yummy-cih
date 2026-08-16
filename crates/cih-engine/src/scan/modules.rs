@@ -1,6 +1,6 @@
 //! Module detection (Maven/Gradle) to `ModuleCandidate`s, plus file-to-module
 //! ownership (longest-prefix), and build-system detection. Builds a module TREE
-//! on top of GitNexus's flat pom/gradle parsing.
+//! across Maven and Gradle projects.
 
 use std::fs;
 use std::path::Path;

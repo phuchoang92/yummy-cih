@@ -7,7 +7,7 @@
 | `cargo fmt --all -- --check` | ❌ FAIL (exit 1) | Pre-existing formatting diffs in cih-wiki, cih-community, and other crates — NOT in our changed files |
 | `cargo test -p cih-engine` | ✅ PASS (all 117 tests) | All unit, integration, and doc-tests pass |
 | `cargo clippy -p cih-engine -- -D warnings` | ❌ FAIL | Pre-existing clippy errors in dependency crates (cih-lang, cih-community, cih-taint, cih-grouping) — NOT in cih-engine code |
-| GitNexus `detect_changes({scope:'all'})` | ✅ Expected symbols only | `main`, `Command`, `Command.all`, `make_commands` |
+| Change detection | ✅ Expected symbols only | `main`, `Command`, `Command.all`, `make_commands` |
 | `git diff --stat` | ✅ Scoped correctly | Only `main.rs` (+100/-21) and `tui.rs` (+45/-2) |
 
 ---
@@ -100,7 +100,7 @@ All errors are in **dependency crates**, not in `cih-engine` itself.
 
 ---
 
-## 4. GitNexus `detect_changes({scope:'all', repo:'yummy-cih'})`
+## 4. Change detection
 
 ### Changed Symbols (all expected):
 | Symbol | File | Change Type |
@@ -142,7 +142,7 @@ All errors are in **dependency crates**, not in `cih-engine` itself.
 | `cargo fmt --all -- --check` | ✅ passes | ❌ fails on pre-existing cih-wiki formatting |
 | `cargo test -p cih-engine` | ✅ all pass | ✅ 117/117 pass |
 | `cargo clippy` no new warnings | ✅ no new warnings | ✅ no new warnings (all pre-existing) |
-| GitNexus detect_changes | ✅ expected symbols | ✅ `main`, `Command`, `Command.all`, `make_commands` |
+| Change detection | ✅ expected symbols | ✅ `main`, `Command`, `Command.all`, `make_commands` |
 | `git diff --stat` scoped | ✅ main.rs + tui.rs | ✅ exactly those 2 files |
 
-**The analyze-cwd-repo implementation is verified.** The two failures (`fmt` and `clippy`) are pre-existing issues in other crates, not introduced by our changes. All tests pass, the diff is scoped to exactly the expected files, and GitNexus confirms only the expected symbols are affected.
+**The analyze-cwd-repo implementation is verified.** The two failures (`fmt` and `clippy`) are pre-existing issues in other crates, not introduced by our changes. All tests pass, and the diff is scoped to exactly the expected files.

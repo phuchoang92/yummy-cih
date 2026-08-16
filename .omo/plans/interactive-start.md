@@ -99,12 +99,12 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
 
 - [x] 1. Safety and Impact Baseline
 
-  **What to do**: Create `.omo/evidence/`, run GitNexus impact analysis before code edits for `main`/`Command` in `crates/cih-engine/src/main.rs`, inspect current diff, and record risk in implementation notes. If impact is HIGH or CRITICAL, warn the user before editing. Do not modify files in this task except optional evidence notes.
+  **What to do**: Create `.omo/evidence/`, run impact analysis before code edits for `main`/`Command` in `crates/cih-engine/src/main.rs`, inspect current diff, and record risk in implementation notes. If impact is HIGH or CRITICAL, warn the user before editing. Do not modify files in this task except optional evidence notes.
   **Must NOT do**: Do not edit symbols before impact analysis. Do not commit.
 
   **Recommended Agent Profile**:
   - Category: `quick` - Reason: focused safety gate before implementation.
-  - Skills: [`gitnexus/gitnexus-impact-analysis`] - Required by repository rules before symbol edits.
+  - Skills: [] - Perform an impact review before symbol edits.
   - Omitted: [`playwright`] - No browser/UI work in this task.
 
   **Parallelization**: Can Parallel: NO | Wave 1 | Blocks: Tasks 2-8 | Blocked By: none
@@ -115,13 +115,13 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
   - Pattern: `crates/cih-engine/src/main.rs:300-474` - command dispatch match to be changed later.
 
   **Acceptance Criteria**:
-  - [ ] `gitnexus_impact` or equivalent GitNexus impact result for `Command`/`main` is saved in `.omo/evidence/task-1-impact-baseline.md`.
+  - [ ] An impact result for `Command`/`main` is saved in `.omo/evidence/task-1-impact-baseline.md`.
   - [ ] `git status --short` shows no source/doc changes from this task.
 
   **QA Scenarios**:
   ```
   Scenario: Impact baseline recorded
-    Tool: Bash + GitNexus
+    Tool: Bash
     Steps: Run impact analysis, then inspect .omo/evidence/task-1-impact-baseline.md
     Expected: Evidence file includes risk level, direct callers/importers, and affected processes or states none found
     Evidence: .omo/evidence/task-1-impact-baseline.md
@@ -142,7 +142,7 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
 
   **Recommended Agent Profile**:
   - Category: `unspecified-high` - Reason: introduces new core module and testable abstractions.
-  - Skills: [`gitnexus/gitnexus-impact-analysis`] - Needed if touching `main.rs` beyond module declaration.
+  - Skills: [] - Needed if touching `main.rs` beyond module declaration.
   - Omitted: [`playwright`] - No browser interaction.
 
   **Parallelization**: Can Parallel: YES | Wave 1 | Blocks: Tasks 4, 5, 8 | Blocked By: Task 1
@@ -185,7 +185,7 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
   **Recommended Agent Profile**:
   - Category: `quick` - Reason: contained file helper logic with tests.
   - Skills: [] - No specialized skill needed beyond Rust testing.
-  - Omitted: [`gitnexus/gitnexus-refactoring`] - New helper logic, not a rename/refactor.
+  - Omitted: [] - New helper logic, not a rename/refactor.
 
   **Parallelization**: Can Parallel: YES | Wave 1 | Blocks: Tasks 4, 8 | Blocked By: Task 1
 
@@ -226,7 +226,7 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
 
   **Recommended Agent Profile**:
   - Category: `unspecified-high` - Reason: CLI integration plus interactive behavior.
-  - Skills: [`gitnexus/gitnexus-impact-analysis`] - Required before editing `Command`/dispatch symbols.
+  - Skills: [] - Perform an impact review before editing `Command`/dispatch symbols.
   - Omitted: [`playwright`] - CLI work only.
 
   **Parallelization**: Can Parallel: YES | Wave 2 | Blocks: Tasks 5, 8 | Blocked By: Tasks 2, 3
@@ -310,7 +310,7 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
   **Recommended Agent Profile**:
   - Category: `writing` - Reason: documentation rewrite with technical guardrails.
   - Skills: [] - No code skills needed.
-  - Omitted: [`gitnexus/gitnexus-refactoring`] - Documentation only.
+  - Omitted: [] - Documentation only.
 
   **Parallelization**: Can Parallel: YES | Wave 2 | Blocks: Task 8 | Blocked By: Task 1
 
@@ -386,12 +386,12 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
 
 - [x] 8. Integrated Verification and Polish
 
-  **What to do**: Run the complete validation suite and fix all failures introduced by Tasks 2-7. Commands: `cargo fmt --check`, `cargo test --workspace`, `cargo run -p cih-engine -- start --help`, dry-run happy path with a temp Java fixture, dry-run missing repo failure, and `cd docs-viewer && npm run build`. Run GitNexus `detect_changes({scope:"all"})` before any commit or final review.
+  **What to do**: Run the complete validation suite and fix all failures introduced by Tasks 2-7. Commands: `cargo fmt --check`, `cargo test --workspace`, `cargo run -p cih-engine -- start --help`, dry-run happy path with a temp Java fixture, dry-run missing repo failure, and `cd docs-viewer && npm run build`. Review the changed scope before any commit or final review.
   **Must NOT do**: Do not commit unless explicitly requested by the user. Do not skip failing docs-viewer build because it is "unrelated" without proving it existed before.
 
   **Recommended Agent Profile**:
   - Category: `unspecified-high` - Reason: full integration verification and fixes.
-  - Skills: [`gitnexus/gitnexus-impact-analysis`] - Detect changes before commit/review.
+  - Skills: [] - Review changed scope before commit/review.
   - Omitted: [`playwright`] - Browser automation not needed unless docs-viewer runtime smoke is chosen.
 
   **Parallelization**: Can Parallel: NO | Wave 3 | Blocks: Final Verification | Blocked By: Tasks 2-7
@@ -409,7 +409,7 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
   - [ ] Dry-run happy path exits 0 and writes no `.env`.
   - [ ] Missing repo path dry-run exits non-zero with clear error.
   - [ ] `cd docs-viewer && npm run build` passes.
-  - [ ] GitNexus `detect_changes({scope:"all"})` output is saved to `.omo/evidence/task-8-detect-changes.md`.
+  - [ ] Change-detection output is saved to `.omo/evidence/task-8-detect-changes.md`.
 
   **QA Scenarios**:
   ```
@@ -441,7 +441,7 @@ Wave 3: Task 7 docs-viewer validation docs, Task 8 integrated verification and p
 - Default: do not commit unless user explicitly requests.
 - If asked to commit, use one commit after Task 8 passes.
 - Suggested message: `feat(engine): add interactive start wizard`
-- Before commit: inspect `git status`, `git diff`, `git log --oneline -10`, and run GitNexus `detect_changes({scope:"all"})`.
+- Before commit: inspect `git status`, `git diff`, and `git log --oneline -10`.
 
 ## Success Criteria
 - New users can run `cih-engine start` and receive an interactive, safe setup path.

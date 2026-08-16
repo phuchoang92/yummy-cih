@@ -427,11 +427,9 @@ pattern to extract the shortest-path parent for each node.
 
 ---
 
-## Near-term additions (from GitNexus discovery)
+## Near-term additions
 
 ## Phase 18 — Repo registry + MCP resources ✅ (2026-06-14)
-
-Source: `docs/gitnexus-discovery.md` §1 + §2
 
 - **Completed 2026-06-14:**
   - **`~/.cih/registry.json`** — `Registry` / `RegistryEntry` / `RegistryStats` types in
@@ -460,8 +458,6 @@ Source: `docs/gitnexus-discovery.md` §1 + §2
   - Workspace: **102 tests** green *(at the time)*, clippy clean.
 
 ## Phase 19 — Ambiguous symbol resolution + `detect_changes` ✅ (2026-06-14)
-
-Source: `docs/gitnexus-discovery.md` §3 + §4
 
 **Ambiguous symbol handling:** `context` and `impact` now call `resolve_symbol()` before
 forwarding to the store. A short name (no `:` prefix) queries `candidates_by_name()`:
@@ -493,8 +489,6 @@ Implementation: `git diff --name-only [--cached] HEAD` → `nodes_in_files()` �
 
 ## Phase 20 — Agent workflow docs ✅ (2026-06-14)
 
-Source: `docs/gitnexus-discovery.md` §5
-
 Created `docs/agent-workflows/` with five skill files:
 
 ```
@@ -513,11 +507,9 @@ Feeds Phase 10 — these docs become the grounding for yummy persona system prom
 
 ---
 
-## Mid-term additions (from GitNexus discovery)
+## Mid-term additions
 
 ## Phase 21 — Cross-service contract extraction ✅ (2026-06-15)
-
-Source: `docs/gitnexus-discovery.md` §6
 
 - **HTTP clients:** `@FeignClient`, `RestTemplate`, `WebClient` call sites detected in
   `cih-parse/src/java.rs:682-845` → `ExternalEndpoint` nodes + `EXTERNAL_CALL` edges.
@@ -541,8 +533,6 @@ Source: `docs/gitnexus-discovery.md` §6
 
 ## Phase 22 — API impact + shape check ✅ (2026-06-15)
 
-Source: `docs/gitnexus-discovery.md` §7
-
 Builds on Phase 21 HTTP contracts:
 
 - **`api_impact({ group, method, path })`** — return all consumers of an HTTP route across the group.
@@ -565,16 +555,12 @@ Builds on Phase 21 HTTP contracts:
 
 ## Phase 23 — Generated wiki ✅ (covered by Phase 10a + docs-viewer)
 
-Source: `docs/gitnexus-discovery.md` §10
-
 `cih-engine wiki` (Phase 10a) delivers the full wiki generation pipeline. `docs-viewer/` (added
 2026-06-16) is the Docusaurus 3 viewer: `CIH_WIKI_PATH=<repo>/.cih/wiki/pages npm start`.
 Feature-first hierarchy, per-feature PO/BA/Dev pages, and LLM enrichment are all in place.
 No further work needed for this milestone.
 
 ## Phase 24 — Graph-assisted rename dry-run
-
-Source: `docs/gitnexus-discovery.md` §8
 
 ```
 rename_symbol({ id, new_name, dry_run: true })
@@ -585,11 +571,9 @@ Developer persona safe-refactoring workflow.
 
 ---
 
-## Later additions (from GitNexus discovery)
+## Later additions
 
 ## Phase 25 — CFG/PDG + taint analysis
-
-Source: `docs/gitnexus-discovery.md` §9
 
 ```
 cih-engine analyze <repo> --pdg
