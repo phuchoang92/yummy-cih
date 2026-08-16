@@ -107,7 +107,7 @@ Your next move: choose whether to start implementation now or run a high-accurac
   Commit: Y | `test(tui): omit analyze repo when blank`
 
 - [x] 4. Workspace verification: Run formatting, targeted tests, clippy, and change impact review - expect clean outputs and scoped diff
-  What to do / Must NOT do: Run final formatting, tests, and clippy. Run `git diff -- crates/cih-engine/src/main.rs crates/cih-engine/src/tui.rs crates/cih-engine/Cargo.toml` and confirm no unintended docs/dependency/other-command changes. Run GitNexus `detect_changes({scope:'all'})` after edits and record changed symbols/affected flows. Do not commit unless the user explicitly requests a commit.
+  What to do / Must NOT do: Run final formatting, tests, and clippy. Run `git diff -- crates/cih-engine/src/main.rs crates/cih-engine/src/tui.rs crates/cih-engine/Cargo.toml` and confirm no unintended docs/dependency/other-command changes. Record the changed symbols and affected flows after edits. Do not commit unless the user explicitly requests a commit.
   Parallelization: Wave 3 | Blocked by: 2, 3 | Blocks: final verification
   References (executor has NO interview context - be exhaustive): AGENTS.md requires `detect_changes()` before committing and impact analysis before edits; `.omo/drafts/analyze-cwd-repo.md` records approved behavior and scope; `crates/cih-engine/Cargo.toml:49-50` should remain unchanged unless justified; dirty worktree initially contained unrelated `.omo/run-continuation/ses_0e80ae5e8ffeF0dVMOV4vXzbNb.json` and must remain out of scope.
   Acceptance criteria (agent-executable): `cargo fmt --all -- --check`, `cargo test -p cih-engine`, and `cargo clippy -p cih-engine -- -D warnings` all exit 0. Diff contains only intended source/test changes. `detect_changes({scope:'all'})` reports expected symbols only.
@@ -145,4 +145,4 @@ Your next move: choose whether to start implementation now or run a high-accurac
 - `cih-engine analyze` from inside a valid repo without selector/scope preserves the existing scope prompt and exit behavior; it does not index all files by default.
 - TUI analyze command assembly omits blank repo and preserves explicit repo.
 - `cargo fmt --all -- --check`, `cargo test -p cih-engine`, and `cargo clippy -p cih-engine -- -D warnings` pass.
-- GitNexus change detection and final verification show only the intended CLI/TUI/test blast radius.
+- Change detection and final verification show only the intended CLI/TUI/test blast radius.

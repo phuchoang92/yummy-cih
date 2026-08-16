@@ -33,6 +33,28 @@ The Docker/developer workflow below remains supported and uses the compatibility
 
 ---
 
+## macOS portable release
+
+Apple Silicon and Intel users on macOS 13.3 or newer can install the offline
+local profile without Rust, Homebrew, Docker, Java, Node.js, or an external
+database:
+
+```bash
+bash install-macos.sh --version <version>
+export PATH="$HOME/.local/bin:$PATH"
+cih doctor
+cih index /path/to/repository
+cih serve /path/to/repository --open
+```
+
+The release contains separate native archives for arm64 and x86_64. They are
+ad-hoc signed but, because the project does not currently use an Apple Developer
+account, they are not Developer ID signed or notarized. See the
+[macOS portable guide](docs/macos-portable.md) for offline installation,
+Gatekeeper handling, checksums, compatibility, and uninstall instructions.
+
+---
+
 ## Linux portable release
 
 Linux x64 users can run the same offline local profile on glibc 2.28 or newer.

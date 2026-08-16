@@ -1,5 +1,4 @@
-//! Ignore lists + directory/path/extension predicates. Mirrors GitNexus's
-//! `src/config/ignore-service.ts` (`DEFAULT_IGNORE_LIST` / `IGNORED_EXTENSIONS`).
+//! Ignore lists plus directory, path, and extension predicates.
 //! `.gitignore` itself is honored by the `ignore` crate in `walk.rs`.
 
 const DEFAULT_IGNORE_LIST: &[&str] = &[

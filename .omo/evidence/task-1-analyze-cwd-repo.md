@@ -8,7 +8,7 @@ Command requested:
 impact({ target: "main", file_path: "crates/cih-engine/src/main.rs", kind: "Function", direction: "upstream", maxDepth: 2, summaryOnly: true, repo: "yummy-cih" })
 ```
 
-Result observed from GitNexus: risk `UNKNOWN`, impacted count `0`.
+Result observed from impact review: risk `UNKNOWN`, impacted count `0`.
 
 Note: the MCP call returned a parameter validation error because the client supplied `line: 0` with `mode: "callgraph"`; no HIGH/CRITICAL risk was reported.
 

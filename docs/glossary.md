@@ -10,8 +10,7 @@ This file explains project terms used in the CIH docs and Rust crates. It is wri
 | Engine | The local indexing CLI, implemented by `cih-engine`. It scans repos, selects scope, parses Java, resolves references, writes graph artifacts, and can load them into FalkorDB. |
 | MCP | Model Context Protocol. The `cih-server` crate exposes graph queries as MCP tools for agents and clients. |
 | Phase | A planned implementation stage. For example, Phase 3 builds scan/parse/load, while Phase 4 resolves references into a call and heritage graph. |
-| GitNexus | The source/reference system this project is porting ideas from. Docs often say "port" when a GitNexus algorithm is being rewritten in Rust. |
-| Port | Reimplement an existing GitNexus concept in this Rust codebase. |
+| Port | Reimplement a concept or mechanism in this Rust codebase. |
 | Workspace | The Rust workspace in this repo, made of crates such as `cih-core`, `cih-engine`, `cih-parse`, and `cih-resolve`. |
 
 ## Main Workflow

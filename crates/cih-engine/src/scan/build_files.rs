@@ -1,6 +1,5 @@
 //! `pom.xml` (streaming XML stack-parse) + `build.gradle[.kts]` / `settings.gradle`
-//! parsing to group/artifact/dependencies/modules. Mirrors GitNexus's
-//! `java-workspace-extractor.ts` but uses a real XML reader for Maven.
+//! parsing to group/artifact/dependencies/modules, using a real XML reader for Maven.
 
 use std::collections::BTreeSet;
 use std::path::Path;

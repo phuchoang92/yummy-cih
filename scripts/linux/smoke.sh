@@ -166,4 +166,4 @@ curl -fsS "http://127.0.0.1:$port/ready" >/dev/null
 kill "$server_pid"
 wait "$server_pid" || true
 server_pid=
-echo "Linux portable smoke test passed"
+echo "${CIH_SMOKE_PLATFORM:-Linux} portable smoke test passed"

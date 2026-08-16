@@ -482,7 +482,7 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            Portable CIH release assets for Linux and Windows. Packages operate offline after download and include audited native runtimes, checksums, SBOMs, notices, and provenance. Linux x64 requires glibc 2.28 or newer.
+            Portable CIH release assets for Linux, Windows, and macOS. Packages operate offline after download and include audited native runtimes, checksums, SBOMs, notices, and provenance. Linux x64 requires glibc 2.28 or newer; macOS packages are ad-hoc signed but are not Developer ID signed or notarized.
           files: |
             release/${{ needs.qualify.outputs.stage-name }}.tar.gz
             release/${{ needs.qualify.outputs.stage-name }}.sha256

@@ -306,7 +306,7 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            Portable CIH release assets for Linux and Windows. Packages operate offline after download and include audited native runtimes, checksums, SBOMs, notices, and provenance. Windows 10/11 x64 users can inspect `SIGNING_STATUS.txt` inside the ZIP for the Authenticode status.
+            Portable CIH release assets for Linux, Windows, and macOS. Packages operate offline after download and include audited native runtimes, checksums, SBOMs, notices, and provenance. Windows users can inspect `SIGNING_STATUS.txt` for Authenticode status; macOS packages are ad-hoc signed but are not Developer ID signed or notarized.
           files: |
             release/dist/cih-windows-*.zip
             release/dist/cih-windows-*.sha256

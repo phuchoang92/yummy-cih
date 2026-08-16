@@ -1,5 +1,5 @@
 //! Gitignore-aware filesystem walk to `ScannedFile` paths + sizes (no content).
-//! Mirrors GitNexus's `filesystem-walker.ts`, using the `ignore` crate.
+//! Uses the `ignore` crate for Gitignore-compatible traversal.
 
 use std::path::Path;
 

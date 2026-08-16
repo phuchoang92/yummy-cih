@@ -50,7 +50,7 @@ Your next move: choose whether to start work now or run a high-accuracy review f
 - Do not run destructive Docker commands (`docker compose down -v`, volume removal, database wipe).
 - Do not write `.env` into the target Java/Spring repository; only write the CIH repo-root `.env`.
 - Do not print `POSTGRES_PASSWORD` after input or include it in evidence logs.
-- Do not edit Rust symbols unless the worker first runs required GitNexus impact analysis and records the result.
+- Do not edit Rust symbols unless the worker first runs impact analysis and records the result.
 - Do not touch unrelated untracked files already present in the worktree.
 
 ## Verification strategy
@@ -88,9 +88,9 @@ Your next move: choose whether to start work now or run a high-accuracy review f
 > Implementation + Test = ONE todo. Never separate.
 <!-- APPEND TASK BATCHES BELOW THIS LINE WITH edit/apply_patch - never rewrite the headers above. -->
 - [x] 1. Safety baseline and dirty-worktree guard
-  What to do / Must NOT do: Record current `git status --short`, note unrelated untracked files, and confirm no product Rust symbol edit is planned. If the worker later decides to edit Rust code, stop and run GitNexus impact analysis on the target symbol first. Must NOT modify source/docs in this todo except evidence files.
+  What to do / Must NOT do: Record current `git status --short`, note unrelated untracked files, and confirm no product Rust symbol edit is planned. If the worker later decides to edit Rust code, stop and run impact analysis on the target symbol first. Must NOT modify source/docs in this todo except evidence files.
   Parallelization: Wave 1 | Blocked by: none | Blocks: 2-7
-  References (executor has NO interview context - be exhaustive): `AGENTS.md` GitNexus rules; current planner evidence that untracked `.claude/`, `AGENTS.md`, `CLAUDE.md`, `.omo/run-continuation/*` exist; `.gitignore:8-11` keeps `.env` secrets untracked.
+  References (executor has NO interview context - be exhaustive): current planner evidence and `.gitignore:8-11`, which keeps `.env` secrets untracked.
   Acceptance criteria (agent-executable): `.omo/evidence/task-1-repo-setup-scripts.md` contains `git status --short`, explicit out-of-scope dirty paths, and a statement that planned edits are limited to `setup.sh`, `setup.bat`, `README.md`, `docs/DOCKER-QUICKSTART.md`, and evidence unless a new blocker appears.
   QA scenarios (name the exact tool + invocation): Happy: run `git status --short` and save output. Failure: verify `.env` is not staged/tracked by checking `git check-ignore .env` returns ignored. Evidence `.omo/evidence/task-1-repo-setup-scripts.md`.
   Commit: N | n/a

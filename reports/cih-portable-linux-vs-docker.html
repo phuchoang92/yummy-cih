@@ -180,22 +180,18 @@
         <tr><th>CPU / RAM</th><td>AMD Ryzen 7 2700, 8 core / 16 thread; 16.150.237.184 B Docker memory</td></tr>
         <tr><th>Toolchain</th><td>Rust/Cargo 1.97.1; manylinux_2_28 build; GCC; patchelf 0.18.0</td></tr>
         <tr><th>Docker</th><td>Client/server 29.7.2; overlayfs; cgroup v2; daemon Ubuntu 26.04</td></tr>
-        <tr><th>Code intelligence</th><td>GitNexus fresh tại HEAD: 15.122 symbols, 36.764 relationships, 300 flows; query/context dùng cho portable CLI, refresh, registry và publication.</td></tr>
         <tr><th>Bundle</th><td><code>cih-linux-0.1.1-fix</code>; SHA-256 <code>464376a287879ace8f418114216b475ed71c4ea5753cae4bdf13d8edd1c3636b</code></td></tr>
       </tbody></table></div>
       <h3>Quy trình</h3>
       <ol>
-        <li>Ghi commit/dirty state, refresh GitNexus, tạo clean clone local tại đúng HEAD.</li>
+        <li>Ghi commit/dirty state và tạo clean clone local tại đúng HEAD.</li>
         <li>Build bằng manylinux glibc 2.28 theo workflow, pin Ladybug/OpenSSL, audit ELF, package, smoke và tests.</li>
         <li>Chạy trực tiếp <code>bin/cih</code> cho native; build <code>Dockerfile.portable</code> từ cùng bundle cho OCI.</li>
         <li>Cold qualification dùng clean clone; ba warm call độc lập dùng cùng persistent source/data để xác minh cache. Docker dùng <code>--network none</code>.</li>
         <li>Serve/MCP được probe đủ health/ready/graph, initialize/tools/list và ba tool calls; Docker token và SIGTERM được kiểm tra.</li>
         <li>Chuẩn hóa path/timestamp rồi so counts, versions và SHA-256 JSONL.</li>
       </ol>
-      <details><summary>Command chính xác (rút gọn biến đường dẫn)</summary><pre>node .gitnexus/run.cjs status
-node .gitnexus/run.cjs analyze
-
-# Native
+      <details><summary>Command chính xác (rút gọn biến đường dẫn)</summary><pre># Native
 CIH_HOME=$RUN/home cih index $RUN/repo --force --no-wiki --json
 CIH_HOME=$RUN/home cih index $RUN/repo --no-wiki --json  # ×3
 CIH_HOME=$RUN/home cih serve $RUN/repo --bind 127.0.0.1:$PORT
@@ -230,7 +226,7 @@ docker run -d -p 127.0.0.1::8080 --user "$(id -u):$(id -g)" \
       <details><summary>Measurement dataset</summary><pre id="json-view"></pre></details>
       <script id="study-data" type="application/json">
 {
-  "study":{"date":"2026-08-15","repo":"yummy-cih","head":"b49fc9e1667728b80585d11d85a5d0d8b60726d8","branch":"dev","repetitions":3,"runtime_network":"disabled","gitnexus":{"fresh":true,"symbols":15122,"relationships":36764,"flows":300}},
+  "study":{"date":"2026-08-15","repo":"yummy-cih","head":"b49fc9e1667728b80585d11d85a5d0d8b60726d8","branch":"dev","repetitions":3,"runtime_network":"disabled"},
   "environment":{"kernel":"7.0.0-29-generic","arch":"x86_64","glibc":"2.43","cpu":"AMD Ryzen 7 2700","logical_cpus":16,"docker":"29.7.2","cgroup":2},
   "bundle":{"version":"0.1.1-fix","bytes":91636902,"tar_bytes":25816485,"sha256":"464376a287879ace8f418114216b475ed71c4ea5753cae4bdf13d8edd1c3636b","glibc_max":"2.28","ladybug":"0.18.2","openssl":"3.5.7"},
   "image":{"id":"sha256:d9cd510c48b30d19ab3cb73ce34494d138c5759ccd4196042ae2a95341a17e92","bytes":88385234,"baseline_without_git_bytes":58315115,"delta_bytes":30070119,"git":"2.39.5-0+deb12u3","user":"cih","uid":1001},
