@@ -596,8 +596,28 @@ impl IntoResponse for BrowserError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_graph_store::GraphStore;
     use cih_grouping::FeatureGroupEntry;
+    use std::sync::Arc;
+
+    use crate::domain::repository::{RepoCatalogSnapshot, RepoSelector, ResolvedRepo};
+    use crate::ports::repo_context_provider::{RepoContext, RepoContextProvider};
+
+    struct UnexpectedRepoContexts;
+
+    #[async_trait::async_trait]
+    impl RepoContextProvider for UnexpectedRepoContexts {
+        fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
+            panic!("blank browser search must not inspect repository state")
+        }
+
+        fn resolve_repo(&self, _selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
+            panic!("blank browser search must not resolve repository identity")
+        }
+
+        async fn resolve(&self, _selector: RepoSelector) -> Result<Arc<RepoContext>, AppError> {
+            panic!("blank browser search must not initialize repository infrastructure")
+        }
+    }
 
     fn entry(name: &str, node_id: &str, confidence: f32) -> FeatureGroupEntry {
         FeatureGroupEntry {
@@ -635,31 +655,8 @@ mod tests {
 
     #[tokio::test]
     async fn browser_handler_maps_application_validation_to_bad_request() {
-        let (backend, url) = if cfg!(feature = "falkor") {
-            ("falkor", "redis://127.0.0.1:6380".to_string())
-        } else {
-            (
-                "ladybug",
-                std::env::temp_dir()
-                    .join("cih-browser-boundary-test")
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        };
-        let store: std::sync::Arc<dyn GraphStore> = cih_store_factory::connect_store(
-            backend,
-            &url,
-            "browser_boundary_test",
-            &cih_store_factory::StoreOptions::default(),
-        )
-        .expect("lazy graph store");
         let state = BrowserState::new(
-            GraphBrowserService::new(
-                store,
-                std::sync::Arc::new(crate::infrastructure::search_provider::SearchState::new(
-                    None, None,
-                )),
-            ),
+            GraphBrowserService::new(Arc::new(UnexpectedRepoContexts)),
             None,
         );
 

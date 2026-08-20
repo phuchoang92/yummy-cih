@@ -93,8 +93,6 @@ pub(crate) fn assemble_services(
         embed_store.clone(),
         search_cache.clone(),
     );
-    let browser_service = GraphBrowserService::new(store.clone(), Arc::new(search.clone()))
-        .with_graph_key(graph_key.clone());
     let repo_contexts: Arc<dyn RepoContextProvider> =
         Arc::new(DefaultRepoContextProvider::production(
             graph_key.clone(),
@@ -108,6 +106,7 @@ pub(crate) fn assemble_services(
             embed_store,
             search_cache.clone(),
         ));
+    let browser_service = GraphBrowserService::new(repo_contexts.clone());
     let jobs = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let artifacts: Arc<dyn ArtifactRepository> = Arc::new(ArtifactCache::new());
     let index_scheduler = Arc::new(IndexScheduler::new(

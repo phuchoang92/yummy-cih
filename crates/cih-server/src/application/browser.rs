@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use cih_core::{Node, NodeId};
 use cih_graph_store::{
     BackendReadinessState, CommunityEdge, CommunityInfo, Direction, FlowHop, GraphOverview,
-    GraphStore, GraphStoreError, GraphSummary, Impact, RouteInfo, Subgraph, SymbolContext,
+    GraphStoreError, GraphSummary, Impact, RouteInfo, Subgraph, SymbolContext,
 };
 use cih_search::SearchHit;
 use serde::Serialize;
@@ -17,9 +17,9 @@ use crate::application::search::{
 };
 use crate::domain::error::AppError;
 use crate::domain::readiness::{ReadinessIssue, ReadinessReport, ReadinessState};
-use crate::ports::blocking_runtime::{blocking_timeout, run_blocking};
+use crate::domain::repository::RepoSelector;
 use crate::ports::graph_readiness::GraphReadiness;
-use crate::ports::search_provider::SearchProvider;
+use crate::ports::repo_context_provider::{RepoContext, RepoContextProvider};
 
 /// Hard ceiling on `graph_overview` materialization, enforced here so every
 /// caller is bounded before the store builds overview rows in memory — the
@@ -56,46 +56,29 @@ pub(crate) struct BrowserCommunities {
 
 #[derive(Clone)]
 pub(crate) struct GraphBrowserService {
-    store: Arc<dyn GraphStore>,
-    search: Arc<dyn SearchProvider>,
-    graph_key: Option<String>,
+    repos: Arc<dyn RepoContextProvider>,
 }
 
 impl GraphBrowserService {
-    pub(crate) fn new(store: Arc<dyn GraphStore>, search: Arc<dyn SearchProvider>) -> Self {
-        Self {
-            store,
-            search,
-            graph_key: None,
-        }
+    pub(crate) fn new(repos: Arc<dyn RepoContextProvider>) -> Self {
+        Self { repos }
     }
 
-    pub(crate) fn with_graph_key(mut self, graph_key: String) -> Self {
-        self.graph_key = Some(graph_key);
-        self
+    async fn resolve_context(&self) -> Result<Arc<RepoContext>, AppError> {
+        self.repos.resolve(RepoSelector::Default).await
     }
 
     pub(crate) async fn summary(&self) -> Result<GraphSummary, AppError> {
-        if let Some(graph_key) = self.graph_key.clone() {
-            match run_blocking(blocking_timeout(), "graph summary metadata", move || {
-                cih_core::Registry::load_cached()
-                    .entries
-                    .iter()
-                    .find(|entry| entry.graph_key == graph_key)
-                    .and_then(crate::application::graph_report::current)
-                    .map(crate::application::graph_report::summary)
-            })
-            .await
-            {
-                Ok(Some(summary)) => return Ok(summary),
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    error = %error,
-                    "graph summary metadata unavailable; using live graph fallback"
-                ),
-            }
+        let repo = self.repos.resolve_repo(RepoSelector::Default)?;
+        if let Some(report) = crate::application::graph_report::current(&repo.registry_entry) {
+            return Ok(crate::application::graph_report::summary(report));
         }
-        self.store.graph_summary().await.map_err(graph_error)
+        self.resolve_context()
+            .await?
+            .store
+            .graph_summary()
+            .await
+            .map_err(graph_error)
     }
 
     pub(crate) async fn overview(
@@ -105,10 +88,37 @@ impl GraphBrowserService {
         kinds: Option<&[String]>,
     ) -> Result<GraphOverview, AppError> {
         let (max_nodes, max_edges) = overview_ceiling(max_nodes, max_edges);
-        self.store
+        let context = self.resolve_context().await?;
+        let overview = context
+            .store
             .graph_overview(max_nodes, max_edges, kinds)
             .await
-            .map_err(graph_error)
+            .map_err(graph_error)?;
+        if kinds.is_none() && overview.nodes.is_empty() {
+            if let Some(report) =
+                crate::application::graph_report::current(&context.repo.registry_entry)
+            {
+                if report.total_nodes > 0 {
+                    let live = context.store.graph_summary().await.map_err(graph_error)?;
+                    if live.total_nodes == 0 {
+                        tracing::error!(
+                            logical_graph_key = context.repo.graph_key(),
+                            published_epoch = ?context.repo.registry_entry.published_epoch,
+                            expected_nodes = report.total_nodes,
+                            "published graph metadata does not match the resolved browser store"
+                        );
+                        return Err(AppError::GraphUnavailable {
+                            code: "GRAPH_PUBLICATION_MISMATCH",
+                            message: "published graph metadata exists, but the resolved graph store is empty"
+                                .into(),
+                            retryable: false,
+                            retry_after_ms: None,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(overview)
     }
 
     pub(crate) async fn search(
@@ -125,7 +135,10 @@ impl GraphBrowserService {
                 message: "query parameter is required".into(),
             });
         }
-        let hits = self
+        // Resolve once so search hits and any graph expansion are pinned to the
+        // same repository publication for the lifetime of this request.
+        let context = self.resolve_context().await?;
+        let hits = context
             .search
             .query_hits(query, limit)
             .await
@@ -139,7 +152,7 @@ impl GraphBrowserService {
             })?;
         let subgraph = if expand && !hits.is_empty() {
             let seeds = expansion_seeds(&hits);
-            let page = bounded_subgraph(self.store.as_ref(), &seeds, expansion_limits).await?;
+            let page = bounded_subgraph(context.store.as_ref(), &seeds, expansion_limits).await?;
             let contained = contain_expansion_page(&hits, seeds, page, expansion_limits)?;
             return Ok(BrowserSearchResult {
                 hits: contained.hits,
@@ -157,7 +170,12 @@ impl GraphBrowserService {
     }
 
     pub(crate) async fn context(&self, id: &NodeId) -> Result<SymbolContext, AppError> {
-        self.store.context(id).await.map_err(graph_error)
+        self.resolve_context()
+            .await?
+            .store
+            .context(id)
+            .await
+            .map_err(graph_error)
     }
 
     pub(crate) async fn impact(
@@ -166,7 +184,9 @@ impl GraphBrowserService {
         direction: Direction,
         depth: u32,
     ) -> Result<Impact, AppError> {
-        self.store
+        self.resolve_context()
+            .await?
+            .store
             .impact(id, direction, depth)
             .await
             .map_err(graph_error)
@@ -177,19 +197,25 @@ impl GraphBrowserService {
         entry_id: &NodeId,
         depth: u32,
     ) -> Result<BrowserFlow, AppError> {
-        let hops = self
+        let context = self.resolve_context().await?;
+        let hops = context
             .store
             .flow_downstream(entry_id, &cih_graph_store::FlowFilter::depth(depth))
             .await
             .map_err(graph_error)?
             .hops;
-        let entry_node = self.store.get_node(entry_id).await.map_err(graph_error)?;
+        let entry_node = context
+            .store
+            .get_node(entry_id)
+            .await
+            .map_err(graph_error)?;
         Ok(BrowserFlow { entry_node, hops })
     }
 
     pub(crate) async fn communities(&self) -> Result<BrowserCommunities, AppError> {
-        let communities = self.store.communities().await.map_err(graph_error)?;
-        let edges = self.store.community_graph().await.map_err(graph_error)?;
+        let context = self.resolve_context().await?;
+        let communities = context.store.communities().await.map_err(graph_error)?;
+        let edges = context.store.community_graph().await.map_err(graph_error)?;
         Ok(BrowserCommunities { communities, edges })
     }
 
@@ -198,7 +224,9 @@ impl GraphBrowserService {
         prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RouteInfo>, AppError> {
-        self.store
+        self.resolve_context()
+            .await?
+            .store
             .route_map(prefix, limit)
             .await
             .map_err(graph_error)
@@ -340,8 +368,131 @@ fn graph_error(error: GraphStoreError) -> AppError {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cih_graph_store::BackendReadiness;
+    use cih_core::{GraphArtifacts, NodeKind, Range, VersionId};
+    use cih_graph_store::{BackendReadiness, GraphStore};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::RwLock;
+
+    use crate::domain::repository::{RepoCatalogSnapshot, ResolvedRepo};
+    use crate::infrastructure::search_provider::SearchState;
+
+    struct SwitchingRepoContexts {
+        current: RwLock<Arc<RepoContext>>,
+        resolve_calls: AtomicUsize,
+    }
+
+    impl SwitchingRepoContexts {
+        fn new(context: Arc<RepoContext>) -> Self {
+            Self {
+                current: RwLock::new(context),
+                resolve_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn replace(&self, context: Arc<RepoContext>) {
+            *self
+                .current
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = context;
+        }
+
+        fn current(&self) -> Arc<RepoContext> {
+            self.current
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl RepoContextProvider for SwitchingRepoContexts {
+        fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
+            panic!("graph browser operations do not request a catalog snapshot")
+        }
+
+        fn resolve_repo(&self, _selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
+            Ok(self.current().repo.clone())
+        }
+
+        async fn resolve(&self, _selector: RepoSelector) -> Result<Arc<RepoContext>, AppError> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.current())
+        }
+    }
+
+    fn registry_entry(path: &std::path::Path, epoch: &str) -> cih_core::RegistryEntry {
+        cih_core::RegistryEntry {
+            repository_id: None,
+            name: "browser-publication-test".into(),
+            path: path.to_string_lossy().into_owned(),
+            graph_key: "logical-key".into(),
+            artifacts_dir: String::new(),
+            latest_artifact_version: None,
+            published_artifact_version: None,
+            published_graph_content_version: None,
+            published_epoch: Some(epoch.into()),
+            community_artifacts_dir: None,
+            indexed_at: String::new(),
+            last_git_head: None,
+            stats: Default::default(),
+        }
+    }
+
+    fn reported_registry_entry(path: &std::path::Path) -> cih_core::RegistryEntry {
+        let mut entry = registry_entry(path, "published-epoch");
+        entry.published_artifact_version = Some("base-v1".into());
+        entry.published_graph_content_version = Some("content-v1".into());
+        entry.stats.published_graph_report = Some(cih_core::RegistryGraphReport {
+            schema_version: 1,
+            graph_content_version: "content-v1".into(),
+            total_nodes: 1,
+            total_edges: 0,
+            kinds: vec![cih_core::RegistryKindCount {
+                kind: "Method".into(),
+                count: 1,
+            }],
+            symbol_hubs: Vec::new(),
+        });
+        entry
+    }
+
+    async fn graph_context(
+        root: &std::path::Path,
+        key: &str,
+        epoch: &str,
+        node_names: &[&str],
+    ) -> Arc<RepoContext> {
+        let store = cih_ladybug::LadybugStore::connect(&root.to_string_lossy(), key)
+            .expect("connect embedded browser test graph");
+        let nodes = node_names
+            .iter()
+            .map(|name| Node {
+                id: NodeId::new(format!("Method:test.Service#{name}/0")),
+                kind: NodeKind::Method,
+                name: (*name).to_string(),
+                qualified_name: Some(format!("test.Service::{name}")),
+                file: "src/service.rs".into(),
+                range: Range::default(),
+                props: None,
+            })
+            .collect::<Vec<_>>();
+        let artifacts = GraphArtifacts::write(
+            &root.join(format!("artifacts-{epoch}")),
+            VersionId::new(epoch),
+            &nodes,
+            &[],
+        )
+        .expect("write browser graph artifacts");
+        store
+            .bulk_load(&artifacts)
+            .await
+            .expect("load browser graph artifacts");
+        Arc::new(RepoContext {
+            repo: ResolvedRepo::from_entry(registry_entry(root, epoch)),
+            store: Arc::new(store),
+            search: Arc::new(SearchState::new(None, None)),
+        })
+    }
 
     #[test]
     fn overview_ceiling_bounds_every_caller() {
@@ -351,6 +502,66 @@ mod tests {
             overview_ceiling(usize::MAX, usize::MAX),
             (OVERVIEW_NODE_CAP, OVERVIEW_EDGE_CAP)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_browser_resolves_fresh_publication_context_per_request() {
+        let temp = tempfile::tempdir().expect("browser publication test root");
+        let epoch_a = graph_context(temp.path(), "physical-a", "epoch-a", &["alpha"]).await;
+        let epoch_b = graph_context(temp.path(), "physical-b", "epoch-b", &["beta", "gamma"]).await;
+        let provider = Arc::new(SwitchingRepoContexts::new(epoch_a));
+        let service = GraphBrowserService::new(provider.clone());
+        let kinds = ["Method".to_string()];
+
+        let first = service.overview(100, 100, Some(&kinds)).await.unwrap();
+        assert_eq!(first.nodes.len(), 1);
+        assert_eq!(provider.resolve_calls.load(Ordering::SeqCst), 1);
+
+        let first_summary = service.summary().await.unwrap();
+        assert_eq!(first_summary.total_nodes, 1);
+        assert_eq!(provider.resolve_calls.load(Ordering::SeqCst), 2);
+
+        provider.replace(epoch_b);
+
+        let second = service.overview(100, 100, Some(&kinds)).await.unwrap();
+        assert_eq!(second.nodes.len(), 2);
+        assert!(second.nodes.iter().any(|node| node.node.name == "beta"));
+        assert!(second.nodes.iter().any(|node| node.node.name == "gamma"));
+        assert_eq!(provider.resolve_calls.load(Ordering::SeqCst), 3);
+
+        let second_summary = service.summary().await.unwrap();
+        assert_eq!(second_summary.total_nodes, 2);
+        assert_eq!(provider.resolve_calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_browser_reports_publication_mismatch_instead_of_empty_index_guidance() {
+        let temp = tempfile::tempdir().expect("browser mismatch test root");
+        let store = cih_ladybug::LadybugStore::connect(
+            &temp.path().join("graphs").to_string_lossy(),
+            "empty-logical-key",
+        )
+        .expect("connect empty logical graph");
+        let context = Arc::new(RepoContext {
+            repo: ResolvedRepo::from_entry(reported_registry_entry(temp.path())),
+            store: Arc::new(store),
+            search: Arc::new(SearchState::new(None, None)),
+        });
+        let service = GraphBrowserService::new(Arc::new(SwitchingRepoContexts::new(context)));
+
+        let error = service
+            .overview(100, 100, None)
+            .await
+            .expect_err("published metadata plus an empty store is inconsistent");
+
+        assert!(matches!(
+            error,
+            AppError::GraphUnavailable {
+                code: "GRAPH_PUBLICATION_MISMATCH",
+                retryable: false,
+                ..
+            }
+        ));
     }
 
     #[test]
