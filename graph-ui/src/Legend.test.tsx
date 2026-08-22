@@ -16,7 +16,7 @@ describe("Legend", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show legend" }));
     expect(screen.getByText("Node kinds")).toBeInTheDocument();
     expect(screen.getByText("Relationships")).toBeInTheDocument();
-    expect(screen.getByText("Stars — degree")).toBeInTheDocument();
+    expect(screen.getByText("Node size")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Hide legend" }));
     expect(screen.queryByText("Node kinds")).not.toBeInTheDocument();
   });

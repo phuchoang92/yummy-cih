@@ -152,7 +152,12 @@ pub(super) fn edge_from_label(label: &str) -> EdgeKind {
         "LISTENS_TO" => EdgeKind::ListensTo,
         "EXTERNAL_CALL" => EdgeKind::ExternalCall,
         "TESTS" => EdgeKind::Tests,
+        "EXECUTES_QUERY" => EdgeKind::ExecutesQuery,
+        "READS_TABLE" => EdgeKind::ReadsTable,
+        "WRITES_TABLE" => EdgeKind::WritesTable,
+        "INTEGRATION_LINK" => EdgeKind::IntegrationLink,
         "SIMILAR_TO" => EdgeKind::SimilarTo,
+        "TAINT_FLOW" => EdgeKind::TaintFlow,
         "ADVISES" => EdgeKind::Advises,
         _ => EdgeKind::Other,
     }

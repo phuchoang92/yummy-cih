@@ -35,6 +35,32 @@ pub const TRANSITION_PAGE_MAX: usize = 8_000;
 pub const SUBGRAPH_NODE_LIMIT: usize = 200;
 /// Compatibility edge bound for the legacy `subgraph` read.
 pub const SUBGRAPH_EDGE_LIMIT: usize = 1_000;
+/// Largest node projection accepted by the browser projection contract.
+pub const PROJECTION_NODE_LIMIT: usize = 10_000;
+/// Largest edge projection accepted by the browser projection contract.
+pub const PROJECTION_EDGE_LIMIT: usize = 50_000;
+/// Largest number of external aggregate groups admitted into one projection.
+pub const PROJECTION_BOUNDARY_LIMIT: usize = 500;
+
+/// Relationship kinds shown by browser projections unless the caller chooses
+/// an explicit subset. Structural membership/containment edges are excluded.
+pub fn default_projection_edge_kinds() -> Vec<EdgeKind> {
+    vec![
+        EdgeKind::Calls,
+        EdgeKind::Imports,
+        EdgeKind::Extends,
+        EdgeKind::Implements,
+        EdgeKind::Tests,
+        EdgeKind::HandlesRoute,
+        EdgeKind::ExternalCall,
+        EdgeKind::PublishesEvent,
+        EdgeKind::ListensTo,
+        EdgeKind::IntegrationLink,
+        EdgeKind::ExecutesQuery,
+        EdgeKind::ReadsTable,
+        EdgeKind::WritesTable,
+    ]
+}
 
 #[cfg(feature = "test-support")]
 pub mod contract;
@@ -442,6 +468,8 @@ pub struct SubgraphFilter {
     pub node_limit: usize,
     pub edge_limit: usize,
     pub transition_page_limit: usize,
+    /// Empty selects every stored relationship kind.
+    pub edge_kinds: Vec<EdgeKind>,
 }
 
 impl SubgraphFilter {
@@ -451,6 +479,7 @@ impl SubgraphFilter {
             node_limit: SUBGRAPH_NODE_LIMIT,
             edge_limit: SUBGRAPH_EDGE_LIMIT,
             transition_page_limit: TRANSITION_PAGE_MAX,
+            edge_kinds: Vec::new(),
         }
     }
 
@@ -512,6 +541,104 @@ pub struct GraphOverview {
     pub total_nodes: u64,
     pub total_edges: u64,
     pub truncated: bool,
+}
+
+/// Hierarchy level materialized for the browser's bounded graph projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionScope {
+    Repository,
+    Community,
+    File,
+}
+
+/// Why a node is present in a browser projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionNodeRole {
+    Aggregate,
+    Entity,
+    Boundary,
+}
+
+/// Minimal node payload for a bounded browser projection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphProjectionNode {
+    pub id: NodeId,
+    pub kind: NodeKind,
+    pub name: String,
+    pub role: ProjectionNodeRole,
+    pub member_count: u64,
+    pub degree: u64,
+    pub expandable: bool,
+}
+
+/// An edge in a quotient graph. `count` is the number of stored edges reduced
+/// into the projected source/target/kind tuple.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphProjectionEdge {
+    pub source: NodeId,
+    pub target: NodeId,
+    pub kind: EdgeKind,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphProjection {
+    pub nodes: Vec<GraphProjectionNode>,
+    pub edges: Vec<GraphProjectionEdge>,
+    /// Candidate groups/entities in the requested scope before result bounds.
+    pub total_nodes: u64,
+    /// Candidate quotient edges in the requested scope before result bounds.
+    pub total_edges: u64,
+    /// True when a backend node, edge, boundary, or query cap omitted data.
+    pub truncated: bool,
+}
+
+/// Bounds and selection for one hierarchy projection query.
+#[derive(Clone, Debug)]
+pub struct GraphProjectionQuery {
+    pub scope: ProjectionScope,
+    pub parent_id: Option<NodeId>,
+    /// Empty selects the browser's semantic relationship defaults.
+    pub edge_kinds: Vec<EdgeKind>,
+    pub node_limit: usize,
+    pub edge_limit: usize,
+    pub boundary_limit: usize,
+}
+
+impl GraphProjectionQuery {
+    pub fn validate(&self) -> Result<()> {
+        match self.scope {
+            ProjectionScope::Repository if self.parent_id.is_some() => {
+                return Err(GraphStoreError::InvalidInput(
+                    "repository projection does not accept parent_id".into(),
+                ));
+            }
+            ProjectionScope::Community | ProjectionScope::File if self.parent_id.is_none() => {
+                return Err(GraphStoreError::InvalidInput(
+                    "community and file projections require parent_id".into(),
+                ));
+            }
+            _ => {}
+        }
+        if self.node_limit == 0 || self.node_limit > PROJECTION_NODE_LIMIT {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "projection node_limit must be in 1..={PROJECTION_NODE_LIMIT}"
+            )));
+        }
+        if self.edge_limit == 0 || self.edge_limit > PROJECTION_EDGE_LIMIT {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "projection edge_limit must be in 1..={PROJECTION_EDGE_LIMIT}"
+            )));
+        }
+        if self.boundary_limit > PROJECTION_BOUNDARY_LIMIT {
+            return Err(GraphStoreError::InvalidInput(format!(
+                "projection boundary_limit must be in 0..={PROJECTION_BOUNDARY_LIMIT}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1088,6 +1215,12 @@ pub trait GraphStore: Send + Sync {
         max_edges: usize,
         kinds: Option<&[String]>,
     ) -> Result<GraphOverview>;
+    /// Return one deterministic, backend-filtered quotient graph for the
+    /// browser. Production adapters override this; the default keeps test and
+    /// third-party stores source-compatible.
+    async fn graph_projection(&self, _query: &GraphProjectionQuery) -> Result<GraphProjection> {
+        Err(GraphStoreError::Unimplemented("graph_projection"))
+    }
     async fn context(&self, id: &NodeId) -> Result<SymbolContext>;
     /// Return independently paged callers, callees, and process membership.
     ///

@@ -13,7 +13,9 @@ use cih_graph_store::publication::{
     GraphPublicationStore, ManifestDigest, PublicationCasResult, PublisherFencingToken,
     ValidationDigest,
 };
-use cih_graph_store::{Direction, GraphStore, TransitionQuery};
+use cih_graph_store::{
+    Direction, GraphProjectionQuery, GraphStore, ProjectionScope, TransitionQuery,
+};
 use cih_ladybug::{LadybugPublicationStore, LadybugStore};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -283,4 +285,146 @@ async fn copy_round_trips_late_nested_call_sites_and_quoted_fields() {
         nested.props,
         Some(serde_json::json!({"call_sites": call_sites}))
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hierarchical_projection_is_bounded_and_endpoint_closed() {
+    let root = tempfile::tempdir().expect("projection root");
+    let store = LadybugStore::connect(&root.path().to_string_lossy(), "projection")
+        .expect("connect Ladybug");
+    let community_a = Node {
+        id: NodeId::new("Community:a"),
+        kind: NodeKind::Community,
+        name: "A".into(),
+        qualified_name: None,
+        file: String::new(),
+        range: Range::default(),
+        props: Some(serde_json::json!({"symbolCount": 2})),
+    };
+    let community_b = Node {
+        id: NodeId::new("Community:b"),
+        kind: NodeKind::Community,
+        name: "B".into(),
+        qualified_name: None,
+        file: String::new(),
+        range: Range::default(),
+        props: Some(serde_json::json!({"symbolCount": 1})),
+    };
+    let file_a = Node {
+        id: NodeId::new("File:src/a.c"),
+        kind: NodeKind::File,
+        name: "a.c".into(),
+        qualified_name: None,
+        file: "src/a.c".into(),
+        range: Range::default(),
+        props: None,
+    };
+    let function_a = Node {
+        id: NodeId::new("Function:a"),
+        kind: NodeKind::Function,
+        name: "a".into(),
+        qualified_name: None,
+        file: "src/a.c".into(),
+        range: Range::default(),
+        props: None,
+    };
+    let function_b = Node {
+        id: NodeId::new("Function:b"),
+        kind: NodeKind::Function,
+        name: "b".into(),
+        qualified_name: None,
+        file: "src/b.c".into(),
+        range: Range::default(),
+        props: None,
+    };
+    let nodes = vec![
+        community_a.clone(),
+        community_b.clone(),
+        file_a.clone(),
+        function_a.clone(),
+        function_b.clone(),
+    ];
+    let edges = vec![
+        Edge::new(
+            function_a.id.clone(),
+            community_a.id.clone(),
+            EdgeKind::MemberOf,
+            1.0,
+            String::new(),
+        ),
+        Edge::new(
+            function_b.id.clone(),
+            community_b.id.clone(),
+            EdgeKind::MemberOf,
+            1.0,
+            String::new(),
+        ),
+        Edge::new(
+            function_a.id.clone(),
+            function_b.id.clone(),
+            EdgeKind::Calls,
+            1.0,
+            String::new(),
+        ),
+    ];
+    let artifacts = GraphArtifacts::write(
+        &root.path().join("artifacts"),
+        VersionId::new("projection-v1"),
+        &nodes,
+        &edges,
+    )
+    .expect("write projection fixture");
+    store
+        .bulk_load(&artifacts)
+        .await
+        .expect("load projection fixture");
+
+    let repository = store
+        .graph_projection(&GraphProjectionQuery {
+            scope: ProjectionScope::Repository,
+            parent_id: None,
+            edge_kinds: vec![EdgeKind::Calls],
+            node_limit: 10,
+            edge_limit: 10,
+            boundary_limit: 10,
+        })
+        .await
+        .expect("repository projection");
+    assert_eq!(repository.nodes.len(), 2);
+    assert_eq!(repository.edges.len(), 1);
+
+    let community = store
+        .graph_projection(&GraphProjectionQuery {
+            scope: ProjectionScope::Community,
+            parent_id: Some(community_a.id),
+            edge_kinds: vec![EdgeKind::Calls],
+            node_limit: 10,
+            edge_limit: 10,
+            boundary_limit: 10,
+        })
+        .await
+        .expect("community projection");
+    assert!(community
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::File));
+    assert!(community.edges.iter().all(|edge| community
+        .nodes
+        .iter()
+        .any(|node| node.id == edge.source)
+        && community.nodes.iter().any(|node| node.id == edge.target)));
+
+    let file = store
+        .graph_projection(&GraphProjectionQuery {
+            scope: ProjectionScope::File,
+            parent_id: Some(file_a.id),
+            edge_kinds: vec![EdgeKind::Calls],
+            node_limit: 10,
+            edge_limit: 10,
+            boundary_limit: 10,
+        })
+        .await
+        .expect("file projection");
+    assert_eq!(file.nodes.len(), 1);
+    assert_eq!(file.nodes[0].id, function_a.id);
 }

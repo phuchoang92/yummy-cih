@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// (expected PARSE_CACHE_SCHEMA, blake3-16 of the corpus parse output).
-const GOLDEN: (u32, &str) = (28, "dd5b6e70527cb28d");
+const GOLDEN: (u32, &str) = (29, "3939c6a8ca67038c");
 
 const FIXTURES: &[(&str, &str)] = &[
     (
@@ -325,6 +325,17 @@ func main() {
 
 func handleOrder(w http.ResponseWriter, r *http.Request) {
     http.Get("http://inventory/api/stock")
+}
+"#,
+    ),
+    (
+        "src/native.c",
+        r#"#include "native.h"
+
+struct native_job { int id; };
+
+static int run_job(struct native_job *job) {
+    return job->id;
 }
 "#,
     ),

@@ -1,10 +1,18 @@
 use cih_core::{file_id, ParsedUnit, RawImport};
-use tree_sitter::Node as TsNode;
+use tree_sitter::{Node as TsNode, Parser};
 use crate::generic_parse::{emit_function, emit_method, emit_type, range_of, text, build_unit};
 use cih_core::{Edge, Node, NodeKind, SymbolDef, ReferenceSite};
 
 pub fn parse_cpp_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
-    let mut parser = super::make_parser();
+    parse_c_family_file(rel, src, "cpp", super::make_parser())
+}
+
+pub(crate) fn parse_c_family_file(
+    rel: &str,
+    src: &str,
+    language: &str,
+    mut parser: Parser,
+) -> anyhow::Result<ParsedUnit> {
     let tree = parser.parse(src, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse {rel}"))?;
     let root = tree.root_node();
@@ -19,7 +27,7 @@ pub fn parse_cpp_file(rel: &str, src: &str) -> anyhow::Result<ParsedUnit> {
     walk(root, src, rel, &file_node_id, None,
          &mut nodes, &mut edges, &mut defs, &mut imports, &mut sites);
 
-    Ok(build_unit(rel, "cpp", None, nodes, edges, defs, imports, sites))
+    Ok(build_unit(rel, language, None, nodes, edges, defs, imports, sites))
 }
 
 #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)] // walker signature; `sites` reserved for reference-site collection

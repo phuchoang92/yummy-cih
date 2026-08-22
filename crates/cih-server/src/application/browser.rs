@@ -1,5 +1,6 @@
 //! Typed query services used by the graph-browser and readiness HTTP adapters.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,7 +8,8 @@ use std::time::{Duration, Instant};
 use cih_core::{Node, NodeId};
 use cih_graph_store::{
     BackendReadinessState, CommunityEdge, CommunityInfo, Direction, FlowHop, GraphOverview,
-    GraphStoreError, GraphSummary, Impact, RouteInfo, Subgraph, SymbolContext,
+    GraphProjection, GraphProjectionQuery, GraphStoreError, GraphSummary, Impact, RouteInfo,
+    Subgraph, SubgraphFilter, SubgraphPage, SymbolContext,
 };
 use cih_search::SearchHit;
 use serde::Serialize;
@@ -57,11 +59,109 @@ pub(crate) struct BrowserCommunities {
 #[derive(Clone)]
 pub(crate) struct GraphBrowserService {
     repos: Arc<dyn RepoContextProvider>,
+    projection_cache: Arc<tokio::sync::Mutex<ProjectionCache>>,
+    projection_flights:
+        Arc<tokio::sync::Mutex<HashMap<ProjectionCacheKey, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ProjectionCacheKey {
+    publication: String,
+    scope: cih_graph_store::ProjectionScope,
+    parent_id: Option<String>,
+    edge_kinds: Vec<cih_core::EdgeKind>,
+    node_limit: usize,
+    edge_limit: usize,
+    boundary_limit: usize,
+}
+
+struct ProjectionCacheEntry {
+    graph: Arc<GraphProjection>,
+    weight: usize,
+    touched: u64,
+}
+
+struct ProjectionCache {
+    entries: HashMap<ProjectionCacheKey, ProjectionCacheEntry>,
+    max_entries: usize,
+    max_weight: usize,
+    sequence: u64,
+}
+
+impl ProjectionCache {
+    fn new(max_entries: usize, max_weight: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            max_entries: max_entries.max(1),
+            max_weight: max_weight.max(1),
+            sequence: 0,
+        }
+    }
+
+    fn get(&mut self, key: &ProjectionCacheKey) -> Option<Arc<GraphProjection>> {
+        self.sequence = self.sequence.wrapping_add(1);
+        let entry = self.entries.get_mut(key)?;
+        entry.touched = self.sequence;
+        Some(entry.graph.clone())
+    }
+
+    fn insert(&mut self, key: ProjectionCacheKey, graph: Arc<GraphProjection>, weight: usize) {
+        if weight > self.max_weight {
+            return;
+        }
+        self.sequence = self.sequence.wrapping_add(1);
+        self.entries.insert(
+            key,
+            ProjectionCacheEntry {
+                graph,
+                weight,
+                touched: self.sequence,
+            },
+        );
+        while self.entries.len() > self.max_entries || self.retained_weight() > self.max_weight {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.touched)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    fn retained_weight(&self) -> usize {
+        self.entries
+            .values()
+            .fold(0usize, |total, entry| total.saturating_add(entry.weight))
+    }
+}
+
+pub(crate) struct BrowserProjection {
+    pub(crate) graph: Arc<GraphProjection>,
+    pub(crate) publication_epoch: Option<String>,
+}
+
+pub(crate) struct BrowserExpansion {
+    pub(crate) graph: SubgraphPage,
+    pub(crate) publication_epoch: Option<String>,
 }
 
 impl GraphBrowserService {
     pub(crate) fn new(repos: Arc<dyn RepoContextProvider>) -> Self {
-        Self { repos }
+        let max_bytes = std::env::var("CIH_PROJECTION_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024)
+            .max(1);
+        Self {
+            repos,
+            projection_cache: Arc::new(tokio::sync::Mutex::new(ProjectionCache::new(
+                128, max_bytes,
+            ))),
+            projection_flights: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     async fn resolve_context(&self) -> Result<Arc<RepoContext>, AppError> {
@@ -119,6 +219,92 @@ impl GraphBrowserService {
             }
         }
         Ok(overview)
+    }
+
+    pub(crate) async fn projection(
+        &self,
+        query: GraphProjectionQuery,
+    ) -> Result<BrowserProjection, AppError> {
+        let context = self.resolve_context().await?;
+        let publication_epoch = context.repo.registry_entry.published_epoch.clone();
+        let key = ProjectionCacheKey {
+            publication: publication_epoch
+                .clone()
+                .or_else(|| {
+                    context
+                        .repo
+                        .registry_entry
+                        .published_graph_content_version
+                        .clone()
+                })
+                .or_else(|| context.repo.registry_entry.latest_artifact_version.clone())
+                .unwrap_or_else(|| context.repo.graph_key().to_string()),
+            scope: query.scope,
+            parent_id: query.parent_id.as_ref().map(ToString::to_string),
+            edge_kinds: query.edge_kinds.clone(),
+            node_limit: query.node_limit,
+            edge_limit: query.edge_limit,
+            boundary_limit: query.boundary_limit,
+        };
+        if let Some(graph) = self.projection_cache.lock().await.get(&key) {
+            return Ok(BrowserProjection {
+                graph,
+                publication_epoch,
+            });
+        }
+
+        let flight = {
+            let mut flights = self.projection_flights.lock().await;
+            flights
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = flight.lock().await;
+        if let Some(graph) = self.projection_cache.lock().await.get(&key) {
+            self.projection_flights.lock().await.remove(&key);
+            return Ok(BrowserProjection {
+                graph,
+                publication_epoch,
+            });
+        }
+        let graph = match context.store.graph_projection(&query).await {
+            Ok(graph) => Arc::new(graph),
+            Err(error) => {
+                self.projection_flights.lock().await.remove(&key);
+                return Err(graph_error(error));
+            }
+        };
+        let weight = serde_json::to_vec(graph.as_ref())
+            .map(|bytes| bytes.len())
+            .unwrap_or(1);
+        self.projection_cache
+            .lock()
+            .await
+            .insert(key.clone(), graph.clone(), weight);
+        self.projection_flights.lock().await.remove(&key);
+        Ok(BrowserProjection {
+            graph,
+            publication_epoch,
+        })
+    }
+
+    pub(crate) async fn expand(
+        &self,
+        id: NodeId,
+        filter: SubgraphFilter,
+    ) -> Result<BrowserExpansion, AppError> {
+        let context = self.resolve_context().await?;
+        let publication_epoch = context.repo.registry_entry.published_epoch.clone();
+        let graph = context
+            .store
+            .subgraph_bounded(&[id], &filter)
+            .await
+            .map_err(graph_error)?;
+        Ok(BrowserExpansion {
+            graph,
+            publication_epoch,
+        })
     }
 
     pub(crate) async fn search(
