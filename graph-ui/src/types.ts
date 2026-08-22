@@ -35,6 +35,8 @@ export interface OverviewData {
   truncated: boolean;
 }
 
+export type GraphMode = "performance" | "fancy";
+
 export interface ContextNode {
   id: string;
   kind: string;
