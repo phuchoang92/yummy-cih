@@ -1,16 +1,17 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overview } from "./Overview";
 import type { OverviewData } from "./types";
 
 // Mock the Canvas renderer; interaction/state is covered by the Overview tests.
+const graphCanvasProps = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
 vi.mock("./Scene", () => ({
-  GraphCanvas: () => <div data-testid="graph-canvas" />,
+  GraphCanvas: (props: Record<string, unknown>) => { graphCanvasProps.current = props; return <div data-testid="graph-canvas" data-mode={String(props.mode)} />; },
   cameraTarget: () => null,
   hasWebGl: () => true,
 }));
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); graphCanvasProps.current = null; try { localStorage.clear(); } catch { /* optional */ } });
 
 const MOCK_DATA: OverviewData = {
   nodes: [
@@ -26,6 +27,36 @@ const MOCK_DATA: OverviewData = {
   total_edges: 890,
   truncated: true,
 };
+
+const ROOT_NAV_DATA: OverviewData = {
+  scope: "repository",
+  nodes: [
+    { index: 0, id: "Community:Architecture", kind: "Community", name: "Architecture", role: "aggregate", member_count: 20, expandable: true, degree: 4, x: 0, y: 0, size: 8 },
+    { index: 1, id: "Method:root", kind: "Method", name: "rootMethod", role: "entity", degree: 2, x: 20, y: 0, size: 4 },
+  ],
+  edges: [{ source: 0, target: 1, kind: "CALLS" }],
+  total_nodes: 2,
+  total_edges: 1,
+  truncated: false,
+};
+
+const CHILD_NAV_DATA: OverviewData = {
+  scope: "community",
+  parent_id: "Community:Architecture",
+  nodes: [{ index: 0, id: "File:src/App.ts", kind: "File", name: "App.ts", role: "aggregate", member_count: 8, expandable: true, degree: 1, x: 0, y: 0, size: 7 }],
+  edges: [],
+  total_nodes: 1,
+  total_edges: 0,
+  truncated: false,
+};
+
+function response(data: OverviewData) { return { ok: true, text: async () => JSON.stringify(data) }; }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => { resolve = next; reject = fail; });
+  return { promise, resolve, reject };
+}
 
 function mockFetchOverview(data: OverviewData = MOCK_DATA) {
   vi.stubGlobal("fetch", vi.fn((url: string) => {
@@ -144,5 +175,125 @@ describe("Overview", () => {
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
     await waitFor(() => expect(screen.getByText("3 nodes")).toBeInTheDocument());
     expect(screen.getByText("2 relationships")).toBeInTheDocument();
+  });
+
+  it("defaults to Performance without reloading the projection when mode changes", async () => {
+    mockFetchOverview();
+    const fetchMock = vi.mocked(fetch);
+    render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("graph-canvas")).toHaveAttribute("data-mode", "performance"));
+    expect(screen.getByRole("button", { name: "Performance" })).toHaveAttribute("aria-pressed", "true");
+    const projectionCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/graph/projection")).length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Fancy" }));
+    expect(screen.getByTestId("graph-canvas")).toHaveAttribute("data-mode", "fancy");
+    expect(localStorage.getItem("cih-graph-mode")).toBe("fancy");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/graph/projection"))).toHaveLength(projectionCalls);
+    expect(graphCanvasProps.current?.mode).toBe("fancy");
+  });
+
+  it("restores Fancy from localStorage and rejects unknown stored modes", async () => {
+    localStorage.setItem("cih-graph-mode", "fancy");
+    mockFetchOverview();
+    const first = render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("graph-canvas")).toHaveAttribute("data-mode", "fancy"));
+    first.unmount();
+
+    localStorage.setItem("cih-graph-mode", "turbo");
+    render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("graph-canvas")).toHaveAttribute("data-mode", "performance"));
+  });
+
+  it("keeps the current projection mounted while a child projection loads", async () => {
+    const child = deferred<{ ok: boolean; text: () => Promise<string> }>();
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("scope=community")) return child.promise;
+      return Promise.resolve(response(ROOT_NAV_DATA));
+    }));
+    render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Architecture")).toBeInTheDocument());
+
+    fireEvent.doubleClick(screen.getByText("Architecture").closest("button")!);
+    expect(screen.getByTestId("graph-canvas")).toBeInTheDocument();
+    expect(screen.getByText("2 nodes")).toBeInTheDocument();
+    expect(screen.queryByText("Loading bounded projection")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Opening Architecture…");
+
+    await act(async () => { child.resolve(response(CHILD_NAV_DATA)); });
+    await waitFor(() => expect(screen.getByText("App.ts")).toBeInTheDocument());
+    expect(document.querySelector(".overview-shell")).toHaveClass("is-enter-in");
+    expect(screen.getByRole("button", { name: "Back to Repository" })).toBeInTheDocument();
+  });
+
+  it("restores the parent data and controls from cache without refetching", async () => {
+    const fetchMock = vi.fn((url: string) => Promise.resolve(response(url.includes("scope=community") ? CHILD_NAV_DATA : ROOT_NAV_DATA)));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Architecture")).toBeInTheDocument());
+    const searchInput = screen.getByPlaceholderText("Find node or group…");
+    fireEvent.change(searchInput, { target: { value: "Architecture" } });
+    fireEvent.doubleClick(screen.getByText("Architecture").closest("button")!);
+    await waitFor(() => expect(screen.getByText("App.ts")).toBeInTheDocument());
+    expect(screen.getByPlaceholderText("Find node or group…")).toHaveValue("");
+    const projectionCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/graph/projection")).length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to Repository" }));
+    expect(screen.getByText("Architecture")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Find node or group…")).toHaveValue("Architecture");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/graph/projection"))).toHaveLength(projectionCalls);
+    expect(document.querySelector(".overview-shell")).toHaveClass("is-enter-out");
+    expect(screen.queryByRole("button", { name: /Back to/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps the parent view and breadcrumbs when a child projection fails", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("scope=community")
+      ? Promise.reject(new Error("child unavailable"))
+      : Promise.resolve(response(ROOT_NAV_DATA))));
+    render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Architecture")).toBeInTheDocument());
+    fireEvent.doubleClick(screen.getByText("Architecture").closest("button")!);
+
+    await waitFor(() => expect(screen.getByText("child unavailable")).toBeInTheDocument());
+    expect(screen.getByText("Architecture")).toBeInTheDocument();
+    expect(screen.getByTestId("graph-canvas")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Back to/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("ignores an older projection response after a newer hop completes", async () => {
+    const first = deferred<{ ok: boolean; text: () => Promise<string> }>();
+    const second = deferred<{ ok: boolean; text: () => Promise<string> }>();
+    let childRequest = 0;
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (!url.includes("scope=community")) return Promise.resolve(response(ROOT_NAV_DATA));
+      childRequest += 1;
+      return childRequest === 1 ? first.promise : second.promise;
+    }));
+    render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Architecture")).toBeInTheDocument());
+    const target = screen.getByText("Architecture").closest("button")!;
+    fireEvent.doubleClick(target);
+    fireEvent.doubleClick(target);
+    const newer = { ...CHILD_NAV_DATA, nodes: [{ ...CHILD_NAV_DATA.nodes[0], id: "File:new.ts", name: "new.ts" }] };
+    const older = { ...CHILD_NAV_DATA, nodes: [{ ...CHILD_NAV_DATA.nodes[0], id: "File:old.ts", name: "old.ts" }] };
+    await act(async () => { second.resolve(response(newer)); });
+    await waitFor(() => expect(screen.getByText("new.ts")).toBeInTheDocument());
+    await act(async () => { first.resolve(response(older)); });
+    expect(screen.getByText("new.ts")).toBeInTheDocument();
+    expect(screen.queryByText("old.ts")).not.toBeInTheDocument();
+  });
+
+  it("preserves active search and filters when refreshing the current projection", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(response(ROOT_NAV_DATA)));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Overview selectedId={null} onSelectedId={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Architecture")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByText("Method")[0].closest("button")!);
+    fireEvent.change(screen.getByPlaceholderText("Find node or group…"), { target: { value: "Architecture" } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(1));
+
+    expect(screen.getByPlaceholderText("Find node or group…")).toHaveValue("Architecture");
+    expect(screen.getAllByText("Method")[0].closest("button")).not.toHaveClass("is-active");
   });
 });
