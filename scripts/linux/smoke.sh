@@ -54,6 +54,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
+assert_graph_browser_data() {
+  local suffix=${1:?} summary overview search
+  summary="$work_dir/graph-summary-$suffix.json"
+  overview="$work_dir/graph-overview-$suffix.json"
+  search="$work_dir/graph-search-$suffix.json"
+
+  curl -fsS "http://127.0.0.1:$port/api/graph/summary" -o "$summary"
+  jq -e '.total_nodes > 0 and .total_edges > 0' "$summary" >/dev/null || {
+    echo "graph summary reported no indexed data after $suffix" >&2
+    return 1
+  }
+
+  curl -fsS \
+    "http://127.0.0.1:$port/api/graph/overview?kinds=Class,Method,Route,Community,Process" \
+    -o "$overview"
+  jq -e '(.nodes | length) > 0 and (.edges | length) > 0' "$overview" >/dev/null || {
+    echo "graph overview returned no live graph projection after $suffix" >&2
+    return 1
+  }
+
+  curl -fsS \
+    "http://127.0.0.1:$port/api/graph/search?q=OrderService&limit=5" \
+    -o "$search"
+  jq -e '(.hits | length) > 0 and (.subgraph.nodes | length) > 0' "$search" >/dev/null || {
+    echo "graph search expansion returned no live nodes after $suffix" >&2
+    return 1
+  }
+}
+
 "$cih" doctor >/dev/null
 
 if [[ $(id -u) -ne 0 ]]; then
@@ -126,6 +155,7 @@ conflict_pid=
 for route in health ready graph; do
   curl -fsS "http://127.0.0.1:$port/$route" >/dev/null
 done
+assert_graph_browser_data initial-index
 
 headers=$(mktemp "$work_dir/headers.XXXXXXXX")
 initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linux-smoke","version":"1"}}}'
@@ -162,6 +192,7 @@ grep -q 'bm25' "$work_dir/call-4.json"
 
 "$cih" index "$repo" --force --no-wiki
 curl -fsS "http://127.0.0.1:$port/ready" >/dev/null
+assert_graph_browser_data re-index
 
 kill "$server_pid"
 wait "$server_pid" || true

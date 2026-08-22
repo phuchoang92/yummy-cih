@@ -5,7 +5,7 @@ import { App } from "./App";
 afterEach(() => { cleanup(); vi.restoreAllMocks(); delete document.documentElement.dataset.theme; try { localStorage.clear(); } catch { /* ignore */ } });
 
 describe("App", () => {
-  it("opens on the bounded 3D overview", async () => {
+  it("opens on the bounded Canvas overview", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
       text: async () => JSON.stringify({ nodes: [], edges: [], total_nodes: 0, total_edges: 0, truncated: false }),
@@ -55,4 +55,3 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Switch to dark theme" })).toBeInTheDocument();
   });
 });
-

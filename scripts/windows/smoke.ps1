@@ -35,6 +35,28 @@ function Start-CihProcess {
     return [Diagnostics.Process]::Start($startInfo)
 }
 
+function Assert-GraphBrowserData {
+    param(
+        [Parameter(Mandatory = $true)] [string] $BaseUrl,
+        [Parameter(Mandatory = $true)] [string] $Phase
+    )
+
+    $summary = Invoke-RestMethod -UseBasicParsing -Uri "$BaseUrl/api/graph/summary"
+    if ($summary.total_nodes -le 0 -or $summary.total_edges -le 0) {
+        throw "graph summary reported no indexed data after $Phase"
+    }
+
+    $overview = Invoke-RestMethod -UseBasicParsing -Uri "$BaseUrl/api/graph/overview?kinds=Class,Method,Route,Community,Process"
+    if ($overview.nodes.Count -le 0 -or $overview.edges.Count -le 0) {
+        throw "graph overview returned no live graph projection after $Phase"
+    }
+
+    $search = Invoke-RestMethod -UseBasicParsing -Uri "$BaseUrl/api/graph/search?q=OrderService&limit=5"
+    if ($search.hits.Count -le 0 -or $search.subgraph.nodes.Count -le 0) {
+        throw "graph search expansion returned no live nodes after $Phase"
+    }
+}
+
 $normalHome = $env:CIH_HOME
 $readOnlyHome = Join-Path $WorkDir "read only home"
 New-Item -ItemType Directory -Force -Path $readOnlyHome | Out-Null
@@ -109,6 +131,7 @@ try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/$route"
         if ($response.StatusCode -ne 200) { throw "/$route returned $($response.StatusCode)" }
     }
+    Assert-GraphBrowserData -BaseUrl "http://127.0.0.1:$Port" -Phase "initial index"
 
     $headers = @{ Accept = "application/json, text/event-stream"; "Content-Type" = "application/json" }
     $initialize = @{
@@ -152,6 +175,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "concurrent re-index failed" }
     $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/ready"
     if ($response.StatusCode -ne 200) { throw "server not ready after re-index" }
+    Assert-GraphBrowserData -BaseUrl "http://127.0.0.1:$Port" -Phase "re-index"
 } finally {
     if (-not $server.HasExited) {
         Stop-Process -Id $server.Id

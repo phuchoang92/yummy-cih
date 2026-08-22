@@ -633,6 +633,7 @@ async fn bounded_kernel_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyh
                 node_limit: 20,
                 edge_limit: 30,
                 transition_page_limit: 2,
+                edge_kinds: Vec::new(),
             },
         )
         .await?;
@@ -676,6 +677,7 @@ async fn bounded_kernel_case(mk: &dyn Fn(&str) -> MkResult, key: String) -> anyh
                 node_limit: 3,
                 edge_limit: 30,
                 transition_page_limit: 2,
+                edge_kinds: Vec::new(),
             },
         )
         .await?;

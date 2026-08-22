@@ -3,23 +3,31 @@ export interface OverviewNode {
   id: string;
   kind: string;
   name: string;
+  role?: "aggregate" | "entity" | "boundary";
+  member_count?: number;
+  expandable?: boolean;
+  pinned?: boolean;
   qualified_name?: string | null;
-  file: string;
+  file?: string;
   degree: number;
   x: number;
   y: number;
-  z: number;
+  z?: number;
   size: number;
-  color: string;
+  color?: string;
 }
 
 export interface OverviewEdge {
   source: number;
   target: number;
   kind: string;
+  count?: number;
 }
 
 export interface OverviewData {
+  scope?: "repository" | "community" | "file";
+  parent_id?: string | null;
+  publication_epoch?: string | null;
   nodes: OverviewNode[];
   edges: OverviewEdge[];
   total_nodes: number;

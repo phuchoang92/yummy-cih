@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overview } from "./Overview";
 import type { OverviewData } from "./types";
 
-// Mock the Scene module since WebGL is not available in jsdom.
+// Mock the Canvas renderer; interaction/state is covered by the Overview tests.
 vi.mock("./Scene", () => ({
-  GalaxyScene: () => <div data-testid="galaxy-scene" />,
+  GraphCanvas: () => <div data-testid="graph-canvas" />,
   cameraTarget: () => null,
   hasWebGl: () => true,
 }));
@@ -33,7 +33,7 @@ function mockFetchOverview(data: OverviewData = MOCK_DATA) {
       const kinds = [...new Set(data.nodes.map((n) => n.kind))].map((kind) => ({ kind, count: 1 }));
       return Promise.resolve({ ok: true, text: async () => JSON.stringify({ kinds, total_nodes: data.total_nodes, total_edges: data.total_edges }) });
     }
-    if (url.includes("/api/graph/overview")) {
+    if (url.includes("/api/graph/projection")) {
       return Promise.resolve({ ok: true, text: async () => JSON.stringify(data) });
     }
     if (url.includes("/api/graph/context")) {
@@ -56,23 +56,22 @@ describe("Overview", () => {
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
     // Wait for data to load — the projection meta shows "3 of 300 nodes" and "2 of 890 edges"
     await waitFor(() => expect(screen.getByText("bounded view")).toBeInTheDocument());
-    // The "3 stars" HUD confirms rendered node count
-    expect(screen.getByText("3 stars")).toBeInTheDocument();
+    expect(screen.getByText("3 nodes")).toBeInTheDocument();
   });
 
   it("renders node type filter chips for each kind", async () => {
     mockFetchOverview();
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Route")).toBeInTheDocument());
-    expect(screen.getByText("Method")).toBeInTheDocument();
-    expect(screen.getByText("Class")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText("Route").length).toBeGreaterThan(0));
+    expect(screen.getAllByText("Method").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Class").length).toBeGreaterThan(0);
   });
 
   it("toggles node type filter on chip click", async () => {
     mockFetchOverview();
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Route")).toBeInTheDocument());
-    const routeChip = screen.getByText("Route").closest("button")!;
+    await waitFor(() => expect(screen.getAllByText("Route").length).toBeGreaterThan(0));
+    const routeChip = screen.getAllByText("Route")[0].closest("button")!;
     expect(routeChip).toHaveClass("is-active");
     fireEvent.click(routeChip);
     expect(routeChip).not.toHaveClass("is-active");
@@ -88,21 +87,19 @@ describe("Overview", () => {
     expect(screen.getByText("calls")).toBeInTheDocument();
   });
 
-  it("renders file cluster tree list", async () => {
+  it("renders the bounded projection node list", async () => {
     mockFetchOverview();
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
-    // Cluster names are derived from the first 2 path components of the file
-    await waitFor(() => expect(screen.getByText("src/orders.rs")).toBeInTheDocument());
-    expect(screen.getByText("src/repo.rs")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText("GET /orders").length).toBeGreaterThan(0));
+    expect(screen.getAllByText("OrderRepo").length).toBeGreaterThan(0);
   });
 
   it("shows inspector when a node is selected", async () => {
     mockFetchOverview();
     const onSelectedId = vi.fn();
     render(<Overview selectedId="Route:GET /orders" onSelectedId={onSelectedId} />);
-    await waitFor(() => expect(screen.getByText("GET /orders")).toBeInTheDocument());
-    // Inspector should appear with context data
-    await waitFor(() => expect(screen.getByText("outbound")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("GET /orders").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByText("members")).toBeInTheDocument());
   });
 
   it("displays error state and retry button on fetch failure", async () => {
@@ -123,8 +120,8 @@ describe("Overview", () => {
   it("filters search results as user types", async () => {
     mockFetchOverview();
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Route")).toBeInTheDocument());
-    const searchInput = screen.getByPlaceholderText("Find node or file…");
+    await waitFor(() => expect(screen.getAllByText("Route").length).toBeGreaterThan(0));
+    const searchInput = screen.getByPlaceholderText("Find node or group…");
     fireEvent.change(searchInput, { target: { value: "list" } });
     // The search should find the Method node named "list"
     await waitFor(() => expect(screen.getByText("list")).toBeInTheDocument());
@@ -136,16 +133,16 @@ describe("Overview", () => {
     await waitFor(() => expect(screen.getByText("Clear selection")).toBeInTheDocument());
   });
 
-  it("shows the galaxy scene component", async () => {
+  it("shows the graph canvas component", async () => {
     mockFetchOverview();
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
-    await waitFor(() => expect(screen.getByTestId("galaxy-scene")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("graph-canvas")).toBeInTheDocument());
   });
 
-  it("shows HUD with star and link counts", async () => {
+  it("shows HUD with node and relationship counts", async () => {
     mockFetchOverview();
     render(<Overview selectedId={null} onSelectedId={() => {}} />);
-    await waitFor(() => expect(screen.getByText("3 stars")).toBeInTheDocument());
-    expect(screen.getByText("2 links")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("3 nodes")).toBeInTheDocument());
+    expect(screen.getByText("2 relationships")).toBeInTheDocument();
   });
 });

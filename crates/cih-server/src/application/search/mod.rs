@@ -337,6 +337,7 @@ pub(crate) async fn bounded_subgraph(
         node_limit: limits.max_nodes.max(roots.len()),
         edge_limit: limits.max_edges,
         transition_page_limit: limits.max_edges.clamp(1, TRANSITION_PAGE_MAX),
+        edge_kinds: Vec::new(),
     };
     store
         .subgraph_bounded(roots, &filter)

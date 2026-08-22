@@ -1,6 +1,9 @@
 use super::*;
 use cih_core::{Node, NodeId, Range};
-use cih_graph_store::{GraphOverviewEdge, GraphOverviewNode};
+use cih_graph_store::{
+    GraphOverviewEdge, GraphOverviewNode, GraphProjection, GraphProjectionEdge,
+    GraphProjectionNode, ProjectionNodeRole, ProjectionScope,
+};
 
 fn node(id: &str, kind: NodeKind, file: &str, degree: u64) -> GraphOverviewNode {
     GraphOverviewNode {
@@ -67,6 +70,61 @@ fn empty_layout_keeps_totals() {
     assert!(layout.nodes.is_empty());
     assert_eq!(layout.total_nodes, 42);
     assert!(layout.truncated);
+}
+
+#[test]
+fn projection_seed_is_deterministic_and_endpoint_closed() {
+    let graph = GraphProjection {
+        nodes: vec![
+            GraphProjectionNode {
+                id: NodeId::new("Community:a"),
+                kind: NodeKind::Community,
+                name: "A".into(),
+                role: ProjectionNodeRole::Aggregate,
+                member_count: 400_000,
+                degree: 12,
+                expandable: true,
+            },
+            GraphProjectionNode {
+                id: NodeId::new("Community:b"),
+                kind: NodeKind::Community,
+                name: "B".into(),
+                role: ProjectionNodeRole::Boundary,
+                member_count: 20,
+                degree: 12,
+                expandable: true,
+            },
+        ],
+        edges: vec![GraphProjectionEdge {
+            source: NodeId::new("Community:a"),
+            target: NodeId::new("Community:b"),
+            kind: EdgeKind::Calls,
+            count: 12,
+        }],
+        total_nodes: 2,
+        total_edges: 1,
+        truncated: false,
+    };
+    let first = compute_projection(
+        graph.clone(),
+        ProjectionScope::Repository,
+        None,
+        Some("epoch-1".into()),
+    );
+    let second = compute_projection(
+        graph,
+        ProjectionScope::Repository,
+        None,
+        Some("epoch-1".into()),
+    );
+    assert_eq!(first.nodes.len(), 2);
+    assert_eq!(first.edges.len(), 1);
+    assert_eq!(first.edges[0].source, 0);
+    assert_eq!(first.edges[0].target, 1);
+    assert_eq!(
+        (first.nodes[0].x, first.nodes[0].y),
+        (second.nodes[0].x, second.nodes[0].y)
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # cih-graph-ui
 
-The React 19 + Three.js graph explorer that `cih-server` serves at **`/graph`**.
+The React 19 + modular D3/Canvas graph explorer that `cih-server` serves at **`/graph`**.
 
 This is **the** built-in graph browser — not a separate app. `vite build` compiles
 this source into `../crates/cih-server/assets/graph/` (`outDir` in `vite.config.ts`,
@@ -8,15 +8,16 @@ with `emptyOutDir: true`), and the server embeds those files via `include_str!` 
 `crates/cih-server/src/browser.rs`. So `npm run build` here overwrites what the server
 ships; the Rust routes in `browser.rs` back the UI's `/api/graph/*` calls.
 
-- **Overview** — a WebGL "galaxy": nodes are a Three.js point cloud positioned by the
-  server-side layout (`crates/cih-server/src/layout.rs`); star color encodes node
-  degree, rail chips/legend encode node kind.
+- **Overview** — a bounded hierarchy (repository → community → file), rendered
+  with Canvas 2D. The server aggregates and filters; deterministic seed positions
+  paint immediately; a cancellable D3 force Worker refines them incrementally.
+- **Expansion** — symbols are added as bounded one-hop layers instead of loading
+  the entire codebase into the browser.
 - **Search / Impact / Flow / Communities / Clusters / Routes** — lighter analytical
   views rendered with inline SVG.
 
-Color palettes live in one place: `src/colors.ts` (`KIND_COLORS`, `EDGE_COLORS`,
-`STELLAR_RAMP` — the last mirrors `stellar_color` in `layout.rs`). The in-UI **Legend**
-(collapsed by default, top-right of the overview) documents all three.
+Color palettes live in one place: `src/colors.ts` (`KIND_COLORS` and
+`EDGE_COLORS`). The in-UI **Legend** is collapsed by default.
 
 ## Develop
 

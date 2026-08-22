@@ -1,7 +1,7 @@
 //! Local graph browser HTTP routes.
 //!
 //! This is intentionally CIH-only and read-only. It serves the embedded graph
-//! explorer UI (a React 19 + Three.js single-page app built from `graph-ui/` and
+//! explorer UI (a React 19 + D3/Canvas single-page app built from `graph-ui/` and
 //! baked in via `include_str!`) plus bounded JSON endpoints backed by the existing
 //! `GraphStore` domain methods.
 
@@ -12,10 +12,14 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use cih_core::{Node, NodeId};
-use cih_graph_store::{Direction, FlowHop, GraphSummary};
+use cih_core::{EdgeKind, Node, NodeId};
+use cih_graph_store::{
+    Direction, FlowHop, GraphProjection, GraphProjectionEdge, GraphProjectionNode,
+    GraphProjectionQuery, GraphSummary, ProjectionNodeRole, ProjectionScope, SubgraphFilter,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::application::browser::{BrowserSearchResult, GraphBrowserService};
@@ -56,6 +60,8 @@ pub(crate) fn router(state: BrowserState) -> Router {
         .route("/graph/assets/styles.css", get(styles_css))
         .route("/api/graph/summary", get(graph_summary_handler))
         .route("/api/graph/overview", get(graph_overview))
+        .route("/api/graph/projection", get(graph_projection))
+        .route("/api/graph/projection/expand", get(graph_projection_expand))
         .route("/api/graph/search", get(graph_search))
         .route("/api/graph/context", get(graph_context))
         .route("/api/graph/impact", get(graph_impact))
@@ -106,6 +112,26 @@ struct OverviewParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProjectionParams {
+    scope: Option<String>,
+    parent_id: Option<String>,
+    /// Comma-separated stored relationship labels.
+    edge_kinds: Option<String>,
+    max_nodes: Option<usize>,
+    max_edges: Option<usize>,
+    max_response_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectionExpandParams {
+    id: String,
+    edge_kinds: Option<String>,
+    max_nodes: Option<usize>,
+    max_edges: Option<usize>,
+    max_response_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NodeParams {
     id: String,
 }
@@ -138,6 +164,17 @@ pub const OVERVIEW_DEFAULT_EDGES: usize = 25_000;
 #[doc(hidden)]
 pub const OVERVIEW_MAX_EDGES: usize = crate::application::browser::OVERVIEW_EDGE_CAP;
 
+const PROJECTION_REPOSITORY_DEFAULT_NODES: usize = 2_000;
+const PROJECTION_REPOSITORY_DEFAULT_EDGES: usize = 5_000;
+const PROJECTION_DETAIL_DEFAULT_NODES: usize = 5_000;
+const PROJECTION_DETAIL_DEFAULT_EDGES: usize = 20_000;
+const PROJECTION_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const PROJECTION_EXPAND_DEFAULT_NODES: usize = 250;
+const PROJECTION_EXPAND_DEFAULT_EDGES: usize = 1_000;
+const PROJECTION_EXPAND_MAX_NODES: usize = 1_000;
+const PROJECTION_EXPAND_MAX_EDGES: usize = 5_000;
+const PROJECTION_EXPAND_DEFAULT_BYTES: usize = 256 * 1024;
+
 async fn graph_overview(
     State(state): State<BrowserState>,
     Query(params): Query<OverviewParams>,
@@ -161,6 +198,222 @@ async fn graph_overview(
     .await
     .map_err(|err| BrowserError::internal(err.to_string()))?;
     Ok(Json(positioned))
+}
+
+async fn graph_projection(
+    State(state): State<BrowserState>,
+    Query(params): Query<ProjectionParams>,
+) -> Result<Json<layout::LayoutProjection>, BrowserError> {
+    let scope = parse_projection_scope(params.scope.as_deref())?;
+    let parent_id = match params.parent_id {
+        Some(id) => Some(node_id(id)?),
+        None => None,
+    };
+    let (default_nodes, default_edges) = if scope == ProjectionScope::Repository {
+        (
+            PROJECTION_REPOSITORY_DEFAULT_NODES,
+            PROJECTION_REPOSITORY_DEFAULT_EDGES,
+        )
+    } else {
+        (
+            PROJECTION_DETAIL_DEFAULT_NODES,
+            PROJECTION_DETAIL_DEFAULT_EDGES,
+        )
+    };
+    let query = GraphProjectionQuery {
+        scope,
+        parent_id: parent_id.clone(),
+        edge_kinds: parse_projection_edge_kinds(params.edge_kinds.as_deref())?,
+        node_limit: limit_or_default(
+            params.max_nodes,
+            default_nodes,
+            cih_graph_store::PROJECTION_NODE_LIMIT,
+        ),
+        edge_limit: limit_or_default(
+            params.max_edges,
+            default_edges,
+            cih_graph_store::PROJECTION_EDGE_LIMIT,
+        ),
+        boundary_limit: cih_graph_store::PROJECTION_BOUNDARY_LIMIT,
+    };
+    query
+        .validate()
+        .map_err(|error| BrowserError::bad_request(error.to_string()))?;
+    let result = state
+        .queries
+        .projection(query)
+        .await
+        .map_err(BrowserError::from_app)?;
+    let response = layout::compute_projection(
+        result.graph.as_ref().clone(),
+        scope,
+        parent_id.map(|id| id.to_string()),
+        result.publication_epoch,
+    );
+    let max_response_bytes =
+        projection_response_limit(params.max_response_bytes, PROJECTION_MAX_RESPONSE_BYTES);
+    Ok(Json(contain_projection_response(
+        response,
+        max_response_bytes,
+    )))
+}
+
+async fn graph_projection_expand(
+    State(state): State<BrowserState>,
+    Query(params): Query<ProjectionExpandParams>,
+) -> Result<Json<layout::LayoutProjection>, BrowserError> {
+    let id = node_id(params.id)?;
+    let mut edge_kinds = parse_projection_edge_kinds(params.edge_kinds.as_deref())?;
+    if edge_kinds.is_empty() {
+        edge_kinds = cih_graph_store::default_projection_edge_kinds();
+    }
+    let filter = SubgraphFilter {
+        radius: 1,
+        node_limit: limit_or_default(
+            params.max_nodes,
+            PROJECTION_EXPAND_DEFAULT_NODES,
+            PROJECTION_EXPAND_MAX_NODES,
+        ),
+        edge_limit: limit_or_default(
+            params.max_edges,
+            PROJECTION_EXPAND_DEFAULT_EDGES,
+            PROJECTION_EXPAND_MAX_EDGES,
+        ),
+        transition_page_limit: cih_graph_store::TRANSITION_PAGE_MAX,
+        edge_kinds,
+    };
+    let result = state
+        .queries
+        .expand(id.clone(), filter)
+        .await
+        .map_err(BrowserError::from_app)?;
+    let graph = expansion_projection(result.graph);
+    let response = layout::compute_projection(
+        graph,
+        ProjectionScope::File,
+        Some(id.to_string()),
+        result.publication_epoch,
+    );
+    let max_response_bytes =
+        projection_response_limit(params.max_response_bytes, PROJECTION_EXPAND_DEFAULT_BYTES);
+    Ok(Json(contain_projection_response(
+        response,
+        max_response_bytes,
+    )))
+}
+
+fn expansion_projection(page: cih_graph_store::SubgraphPage) -> GraphProjection {
+    let mut degrees = HashMap::<NodeId, u64>::new();
+    let mut reduced = HashMap::<(NodeId, NodeId, EdgeKind), u64>::new();
+    for edge in page.edges {
+        *degrees.entry(edge.src.clone()).or_insert(0) += 1;
+        *degrees.entry(edge.dst.clone()).or_insert(0) += 1;
+        *reduced.entry((edge.src, edge.dst, edge.kind)).or_insert(0) += 1;
+    }
+    let nodes = page
+        .nodes
+        .into_iter()
+        .map(|entry| GraphProjectionNode {
+            degree: degrees.get(&entry.node.id).copied().unwrap_or(0),
+            id: entry.node.id,
+            kind: entry.node.kind,
+            name: entry.node.name,
+            role: ProjectionNodeRole::Entity,
+            member_count: 1,
+            expandable: entry.depth > 0,
+        })
+        .collect::<Vec<_>>();
+    let edges = reduced
+        .into_iter()
+        .map(|((source, target, kind), count)| GraphProjectionEdge {
+            source,
+            target,
+            kind,
+            count,
+        })
+        .collect::<Vec<_>>();
+    GraphProjection {
+        total_nodes: nodes.len() as u64,
+        total_edges: edges.len() as u64,
+        truncated: page.has_more || page.traversal.truncated,
+        nodes,
+        edges,
+    }
+}
+
+fn contain_projection_response(
+    mut response: layout::LayoutProjection,
+    max_response_bytes: usize,
+) -> layout::LayoutProjection {
+    for _ in 0..8 {
+        let size = serde_json::to_vec(&response)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if size <= max_response_bytes {
+            return response;
+        }
+        response.truncated = true;
+        if response.nodes.len() <= 1 && response.edges.is_empty() {
+            break;
+        }
+        let ratio = ((max_response_bytes as f64 / size as f64) * 0.9).clamp(0.05, 0.9);
+        let keep_nodes = ((response.nodes.len() as f64 * ratio) as usize).max(1);
+        let keep_edges = (response.edges.len() as f64 * ratio) as usize;
+        response.nodes.truncate(keep_nodes);
+        response.edges.truncate(keep_edges);
+        response
+            .edges
+            .retain(|edge| edge.source < keep_nodes as u32 && edge.target < keep_nodes as u32);
+    }
+    response
+}
+
+fn projection_response_limit(raw: Option<usize>, default: usize) -> usize {
+    raw.unwrap_or(default)
+        .clamp(16 * 1024, PROJECTION_MAX_RESPONSE_BYTES)
+}
+
+fn parse_projection_scope(raw: Option<&str>) -> Result<ProjectionScope, BrowserError> {
+    match raw
+        .unwrap_or("repository")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "repository" => Ok(ProjectionScope::Repository),
+        "community" => Ok(ProjectionScope::Community),
+        "file" => Ok(ProjectionScope::File),
+        other => Err(BrowserError::bad_request(format!(
+            "unknown projection scope: {other}"
+        ))),
+    }
+}
+
+fn parse_projection_edge_kinds(raw: Option<&str>) -> Result<Vec<EdgeKind>, BrowserError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    raw.split(',')
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| match value.trim().to_ascii_uppercase().as_str() {
+            "CALLS" => Ok(EdgeKind::Calls),
+            "IMPORTS" => Ok(EdgeKind::Imports),
+            "EXTENDS" => Ok(EdgeKind::Extends),
+            "IMPLEMENTS" => Ok(EdgeKind::Implements),
+            "TESTS" => Ok(EdgeKind::Tests),
+            "HANDLES_ROUTE" => Ok(EdgeKind::HandlesRoute),
+            "EXTERNAL_CALL" => Ok(EdgeKind::ExternalCall),
+            "PUBLISHES_EVENT" => Ok(EdgeKind::PublishesEvent),
+            "LISTENS_TO" => Ok(EdgeKind::ListensTo),
+            "INTEGRATION_LINK" => Ok(EdgeKind::IntegrationLink),
+            "EXECUTES_QUERY" => Ok(EdgeKind::ExecutesQuery),
+            "READS_TABLE" => Ok(EdgeKind::ReadsTable),
+            "WRITES_TABLE" => Ok(EdgeKind::WritesTable),
+            other => Err(BrowserError::bad_request(format!(
+                "unsupported projection edge kind: {other}"
+            ))),
+        })
+        .collect()
 }
 
 async fn graph_summary_handler(
@@ -596,8 +849,28 @@ impl IntoResponse for BrowserError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cih_graph_store::GraphStore;
     use cih_grouping::FeatureGroupEntry;
+    use std::sync::Arc;
+
+    use crate::domain::repository::{RepoCatalogSnapshot, RepoSelector, ResolvedRepo};
+    use crate::ports::repo_context_provider::{RepoContext, RepoContextProvider};
+
+    struct UnexpectedRepoContexts;
+
+    #[async_trait::async_trait]
+    impl RepoContextProvider for UnexpectedRepoContexts {
+        fn catalog_snapshot(&self) -> RepoCatalogSnapshot {
+            panic!("blank browser search must not inspect repository state")
+        }
+
+        fn resolve_repo(&self, _selector: RepoSelector) -> Result<ResolvedRepo, AppError> {
+            panic!("blank browser search must not resolve repository identity")
+        }
+
+        async fn resolve(&self, _selector: RepoSelector) -> Result<Arc<RepoContext>, AppError> {
+            panic!("blank browser search must not initialize repository infrastructure")
+        }
+    }
 
     fn entry(name: &str, node_id: &str, confidence: f32) -> FeatureGroupEntry {
         FeatureGroupEntry {
@@ -633,33 +906,75 @@ mod tests {
         assert!((clusters[0].avg_confidence - 0.6).abs() < 1e-6);
     }
 
+    #[test]
+    fn projection_wire_bounds_and_edge_kinds_are_strict() {
+        assert_eq!(
+            parse_projection_scope(Some("community")).unwrap(),
+            ProjectionScope::Community
+        );
+        assert!(parse_projection_scope(Some("unbounded")).is_err());
+        assert_eq!(
+            parse_projection_edge_kinds(Some("calls,imports")).unwrap(),
+            vec![EdgeKind::Calls, EdgeKind::Imports]
+        );
+        assert!(parse_projection_edge_kinds(Some("member_of")).is_err());
+        assert_eq!(
+            limit_or_default(
+                Some(usize::MAX),
+                2_000,
+                cih_graph_store::PROJECTION_NODE_LIMIT
+            ),
+            cih_graph_store::PROJECTION_NODE_LIMIT
+        );
+    }
+
+    #[test]
+    fn projection_response_is_contained_to_wire_budget() {
+        let nodes = (0..10_000)
+            .map(|index| GraphProjectionNode {
+                id: NodeId::new(format!("Function:fixture_{index}")),
+                kind: cih_core::NodeKind::Function,
+                name: format!("fixture_{index}"),
+                role: ProjectionNodeRole::Entity,
+                member_count: 1,
+                degree: 10,
+                expandable: true,
+            })
+            .collect::<Vec<_>>();
+        let edges = (0..50_000)
+            .map(|index| GraphProjectionEdge {
+                source: NodeId::new(format!("Function:fixture_{}", index % 10_000)),
+                target: NodeId::new(format!("Function:fixture_{}", (index * 17 + 23) % 10_000)),
+                kind: EdgeKind::Calls,
+                count: 1,
+            })
+            .collect::<Vec<_>>();
+        let response = layout::compute_projection(
+            GraphProjection {
+                nodes,
+                edges,
+                total_nodes: 400_000,
+                total_edges: 1_200_000,
+                truncated: true,
+            },
+            ProjectionScope::Repository,
+            None,
+            Some("epoch".into()),
+        );
+        let contained = contain_projection_response(response, PROJECTION_MAX_RESPONSE_BYTES);
+        assert!(serde_json::to_vec(&contained).unwrap().len() <= PROJECTION_MAX_RESPONSE_BYTES);
+        assert!(contained.truncated);
+        assert!(contained
+            .edges
+            .iter()
+            .all(|edge| edge.source < contained.nodes.len() as u32
+                && edge.target < contained.nodes.len() as u32));
+    }
+
     #[tokio::test]
     async fn browser_handler_maps_application_validation_to_bad_request() {
-        let (backend, url) = if cfg!(feature = "falkor") {
-            ("falkor", "redis://127.0.0.1:6380".to_string())
-        } else {
-            (
-                "ladybug",
-                std::env::temp_dir()
-                    .join("cih-browser-boundary-test")
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        };
-        let store: std::sync::Arc<dyn GraphStore> = cih_store_factory::connect_store(
-            backend,
-            &url,
-            "browser_boundary_test",
-            &cih_store_factory::StoreOptions::default(),
-        )
-        .expect("lazy graph store");
         let state = BrowserState::new(
-            GraphBrowserService::new(
-                store,
-                std::sync::Arc::new(crate::infrastructure::search_provider::SearchState::new(
-                    None, None,
-                )),
-            ),
+            GraphBrowserService::new(Arc::new(UnexpectedRepoContexts)),
             None,
         );
 

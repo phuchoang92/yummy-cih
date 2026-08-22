@@ -21,12 +21,17 @@ export async function fetchJson<T>(url: string): Promise<T> {
 
 export const api = {
   summary: () => fetchJson<GraphSummary>("/api/graph/summary"),
-  overview: (kinds?: string[]) =>
-    fetchJson<OverviewData>(
-      kinds?.length
-        ? `/api/graph/overview?kinds=${encodeURIComponent(kinds.join(","))}`
-        : "/api/graph/overview",
-    ),
+  projection: (scope: "repository" | "community" | "file" = "repository", parentId?: string, edgeKinds?: string[]) => {
+    const query = new URLSearchParams({ scope });
+    if (parentId) query.set("parent_id", parentId);
+    if (edgeKinds?.length) query.set("edge_kinds", edgeKinds.join(","));
+    return fetchJson<OverviewData>(`/api/graph/projection?${query}`);
+  },
+  expand: (id: string, edgeKinds?: string[]) => {
+    const query = new URLSearchParams({ id });
+    if (edgeKinds?.length) query.set("edge_kinds", edgeKinds.join(","));
+    return fetchJson<OverviewData>(`/api/graph/projection/expand?${query}`);
+  },
   context: (id: string) => fetchJson<SymbolContext>(`/api/graph/context?id=${encodeURIComponent(id)}`),
   search: (query: string) => fetchJson<any>(`/api/graph/search?q=${encodeURIComponent(query)}&limit=20`),
   impact: (id: string, direction: string, depth: number) => fetchJson<any>(`/api/graph/impact?id=${encodeURIComponent(id)}&direction=${direction}&depth=${depth}`),

@@ -1,9 +1,7 @@
 // Single source of truth for graph colors, shared by Overview, ClassicViews,
 // Scene, and Legend. Keep this the only place these palettes are defined.
 
-/** Node-kind accent colors — used for rail dots/chips, inspector, and the legend.
- *  Note: in the 3D overview, star color is degree-driven (see STELLAR_RAMP), not
- *  kind-driven; these colors identify kinds everywhere *outside* the star cloud. */
+/** Node-kind accent colors used by Canvas nodes, rail chips and the legend. */
 export const KIND_COLORS: Record<string, string> = {
   Community: "#a78bfa", Process: "#f59e0b", Route: "#eab308", IntegrationRoute: "#22d3ee",
   Class: "#a855f7", Interface: "#c084fc", Method: "#06b6d4", Function: "#06b6d4",
@@ -37,17 +35,3 @@ export function edgeColor(kind: string): string {
 export function edgeLabel(kind: string): string {
   return kind.replaceAll("_", " ").toLowerCase();
 }
-
-/** Degree -> star-color ramp, mirroring `stellar_color` in
- *  crates/cih-server/src/layout.rs. The server assigns each node's `color`; this
- *  copy exists only so the Legend can *describe* the ramp. Keep the stops and
- *  thresholds in sync with layout.rs if either changes. */
-export const STELLAR_RAMP: { color: string; minDegree: number }[] = [
-  { color: "#ff6050", minDegree: 0 },
-  { color: "#ff8855", minDegree: 2 },
-  { color: "#ffc070", minDegree: 4 },
-  { color: "#ffe080", minDegree: 7 },
-  { color: "#fff8e8", minDegree: 13 },
-  { color: "#c0d0ff", minDegree: 26 },
-  { color: "#80a0ff", minDegree: 51 },
-];

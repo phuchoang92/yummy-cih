@@ -1,251 +1,195 @@
-import { Check, ChevronRight, Maximize, Orbit, RefreshCw, Search, Tag, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Check, ChevronRight, Maximize, RefreshCw, Search, Tag, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
-import type { GraphSummary } from "./api";
-import { cameraTarget, GalaxyScene } from "./Scene";
+import { GraphCanvas } from "./Scene";
 import { kindColor } from "./colors";
 import { Legend } from "./Legend";
-import type { OverviewData, OverviewNode, SymbolContext } from "./types";
+import type { OverviewData, OverviewEdge, OverviewNode, SymbolContext } from "./types";
 
-// These kinds are pre-selected in the selector for large graphs.
-const STRUCTURAL_KINDS = new Set([
-  "Community", "Process", "Route", "IntegrationRoute",
-  "MessageDestination", "KafkaTopic", "ExternalEndpoint", "DbTable", "DbQuery",
-]);
-
-// Graphs with fewer nodes than this skip the selector and load immediately.
-const SMALL_GRAPH_THRESHOLD = 10_000;
-
-// Warn when a kind has more than this many nodes.
-const LARGE_KIND_WARN = 10_000;
-
-type Phase = "idle" | "selecting" | "loading" | "ready" | "error";
-
-function clusterName(file: string, kind: string): string {
-  const parts = file.split("/").filter(Boolean);
-  return parts.length ? parts.slice(0, Math.min(2, parts.length)).join("/") : `@${kind}`;
-}
+type Scope = "repository" | "community" | "file";
+type Phase = "loading" | "ready" | "error";
+interface Crumb { scope: Scope; id?: string; label: string }
 
 function ResizeHandle({ side, onDelta }: { side: "left" | "right"; onDelta: (delta: number) => void }) {
   return <div className="resize-handle" onPointerDown={(event) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     let last = event.clientX;
-    const move = (next: PointerEvent) => {
-      const raw = next.clientX - last; last = next.clientX;
-      onDelta(side === "left" ? raw : -raw);
-    };
+    const move = (next: PointerEvent) => { const raw = next.clientX - last; last = next.clientX; onDelta(side === "left" ? raw : -raw); };
     const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
   }} />;
 }
 
-function KindSelector({ summary, selected, onChange, onLoad }: {
-  summary: GraphSummary;
-  selected: Set<string>;
-  onChange: (kinds: Set<string>) => void;
-  onLoad: () => void;
-}) {
-  const toggle = (kind: string) => {
-    const next = new Set(selected);
-    next.has(kind) ? next.delete(kind) : next.add(kind);
-    onChange(next);
+function mergeExpansion(base: OverviewData, layer: OverviewData, parent: OverviewNode): OverviewData {
+  const nodes = base.nodes.map((node) => ({ ...node, pinned: true }));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const layerIndexToId = new Map(layer.nodes.map((node) => [node.index, node.id]));
+  for (const [offset, node] of layer.nodes.entries()) {
+    if (byId.has(node.id)) continue;
+    const angle = offset * 2.399963;
+    const added = {
+      ...node,
+      index: nodes.length,
+      x: parent.x + Math.cos(angle) * (36 + Math.sqrt(offset + 1) * 10),
+      y: parent.y + Math.sin(angle) * (36 + Math.sqrt(offset + 1) * 10),
+      pinned: false,
+    };
+    nodes.push(added);
+    byId.set(added.id, added);
+  }
+  const edgeKeys = new Set(base.edges.map((edge) => `${edge.source}:${edge.target}:${edge.kind}`));
+  const edges = [...base.edges];
+  for (const edge of layer.edges) {
+    const sourceId = layerIndexToId.get(edge.source); const targetId = layerIndexToId.get(edge.target);
+    const source = sourceId ? byId.get(sourceId) : undefined; const target = targetId ? byId.get(targetId) : undefined;
+    if (!source || !target) continue;
+    const next: OverviewEdge = { ...edge, source: source.index, target: target.index };
+    const key = `${next.source}:${next.target}:${next.kind}`;
+    if (!edgeKeys.has(key)) { edges.push(next); edgeKeys.add(key); }
+  }
+  return {
+    ...base,
+    nodes: nodes.slice(0, 10_000),
+    edges: edges.filter((edge) => edge.source < 10_000 && edge.target < 10_000).slice(0, 50_000),
+    total_nodes: Math.max(base.total_nodes, nodes.length),
+    total_edges: Math.max(base.total_edges, edges.length),
+    truncated: base.truncated || layer.truncated || nodes.length > 10_000 || edges.length > 50_000,
   };
-
-  return (
-    <div className="kind-selector-backdrop">
-      <div className="kind-selector">
-        <div>
-          <h2>Graph Explorer</h2>
-          <p>
-            {summary.total_nodes.toLocaleString()} nodes · {summary.total_edges.toLocaleString()} edges
-            <span> — select kinds to load</span>
-          </p>
-        </div>
-
-        <div className="kind-selector-group">
-          <div className="rail-label">
-            <span>Node kinds</span>
-            <button onClick={() => onChange(new Set(summary.kinds.map((k) => k.kind)))}>All</button>
-            <button onClick={() => onChange(new Set())}>None</button>
-          </div>
-          <div className="kind-selector-list">
-            {summary.kinds.map(({ kind, count }) => {
-              const isLarge = count > LARGE_KIND_WARN;
-              const isActive = selected.has(kind);
-              return (
-                <button key={kind} onClick={() => toggle(kind)} className={isActive ? "kind-option is-active" : "kind-option"}>
-                  <i style={{ background: kindColor(kind) }} />
-                  <span>{kind}</span>
-                  <em>{count.toLocaleString()}</em>
-                  {isLarge && <span className="kind-warn">⚠</span>}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <button className="kind-selector-load" onClick={onLoad} disabled={selected.size === 0}>
-          Load Graph →
-        </button>
-      </div>
-    </div>
-  );
 }
 
-function Inspector({ context, loading, onClose, onNavigate }: {
-  context: SymbolContext | null; loading: boolean; onClose: () => void; onNavigate: (id: string) => void;
+function Inspector({ node, context, loading, onClose, onExplore }: {
+  node: OverviewNode; context: SymbolContext | null; loading: boolean; onClose: () => void; onExplore: () => void;
 }) {
-  if (loading) return <aside className="inspector"><div className="panel-loading">Loading context…</div></aside>;
-  if (!context) return null;
-  const groups = [{ title: "Calls", items: context.callees }, { title: "Called by", items: context.callers }];
   return <aside className="inspector">
     <div className="inspector-head">
-      <div><span className="kind-dot" style={{ background: kindColor(context.node.kind) }} /><small>{context.node.kind}</small><h2>{context.node.name}</h2></div>
+      <div><span className="kind-dot" style={{ background: kindColor(node.kind) }} /><small>{node.kind} · {node.role ?? "entity"}</small><h2>{node.name}</h2></div>
       <button className="icon-button" onClick={onClose} aria-label="Close inspector"><X size={16} /></button>
     </div>
-    <p className="node-id">{context.node.qualified_name || context.node.id}</p>
-    {context.node.file && <p className="node-file">{context.node.file}</p>}
-    <div className="metric-row"><span><b>{context.callees.length}</b> outbound</span><span><b>{context.callers.length}</b> inbound</span></div>
-    {context.community && <section className="inspector-section"><h3>Community</h3><p>{context.community.name}</p><small>{context.community.symbol_count.toLocaleString()} symbols · {(context.community.cohesion * 100).toFixed(0)}% cohesion</small></section>}
-    {context.processes.length > 0 && <section className="inspector-section"><h3>Processes</h3>{context.processes.map((process) => <p key={process}>{process}</p>)}</section>}
-    {groups.map((group) => group.items.length > 0 && <section className="inspector-section" key={group.title}>
+    <p className="node-id">{node.id}</p>
+    <div className="metric-row"><span><b>{node.member_count ?? 1}</b> members</span><span><b>{node.degree}</b> degree</span></div>
+    {node.expandable !== false && <button className="kind-selector-load inspector-action" onClick={onExplore}>
+      {node.kind === "Community" || node.kind === "File" ? "Open level" : "Expand one hop"} →
+    </button>}
+    {loading && <div className="panel-loading">Loading context…</div>}
+    {context?.community && <section className="inspector-section"><h3>Community</h3><p>{context.community.name}</p><small>{context.community.symbol_count.toLocaleString()} symbols · {(context.community.cohesion * 100).toFixed(0)}% cohesion</small></section>}
+    {context && [{ title: "Calls", items: context.callees }, { title: "Called by", items: context.callers }].map((group) => group.items.length > 0 && <section className="inspector-section" key={group.title}>
       <h3>{group.title} <span>{group.items.length}</span></h3>
-      <div className="connection-list">{group.items.slice(0, 50).map((item) => <button key={item.id} onClick={() => onNavigate(item.id)}><span className="kind-dot" style={{ background: kindColor(item.kind) }} /><span><b>{item.name}</b><small>{item.kind}</small></span><ChevronRight size={13} /></button>)}</div>
+      <div className="connection-list">{group.items.slice(0, 50).map((item) => <div key={item.id} className="connection-item"><span className="kind-dot" style={{ background: kindColor(item.kind) }} /><span><b>{item.name}</b><small>{item.kind}</small></span></div>)}</div>
     </section>)}
   </aside>;
 }
 
 export function Overview({ selectedId, onSelectedId }: { selectedId: string | null; onSelectedId: (id: string | null) => void }) {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [summary, setSummary] = useState<GraphSummary | null>(null);
-  const [selectedKinds, setSelectedKinds] = useState<Set<string>>(new Set());
+  const [phase, setPhase] = useState<Phase>("loading");
   const [data, setData] = useState<OverviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [breadcrumbs, setBreadcrumbs] = useState<Crumb[]>([{ scope: "repository", label: "Repository" }]);
   const [enabledKinds, setEnabledKinds] = useState<Set<string>>(new Set());
   const [enabledEdges, setEnabledEdges] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<number> | null>(null);
+  const [selectedNode, setSelectedNode] = useState<OverviewNode | null>(null);
   const [context, setContext] = useState<SymbolContext | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [search, setSearch] = useState("");
-  const [autoRotate, setAutoRotate] = useState(false);
   const [showLabels, setShowLabels] = useState(true);
   const [resetNonce, setResetNonce] = useState(0);
   const [leftWidth, setLeftWidth] = useState(() => storedWidth("cih-left-width", 276));
   const [rightWidth, setRightWidth] = useState(() => storedWidth("cih-right-width", 310));
+  const contextGeneration = useRef(0);
 
-  const resetView = () => { setSelected(null); setContext(null); onSelectedId(null); setResetNonce((n) => n + 1); };
-
-  const loadOverview = async (kinds?: string[]) => {
-    setPhase("loading");
-    setError(null);
+  const loadProjection = async (scope: Scope, parentId?: string, label?: string, breadcrumbIndex?: number) => {
+    contextGeneration.current += 1;
+    setPhase("loading"); setError(null); setSelected(null); setSelectedNode(null); setContext(null); setContextLoading(false); onSelectedId(null);
     try {
-      const next = await api.overview(kinds);
+      const next = await api.projection(scope, parentId);
       setData(next);
       setEnabledKinds(new Set(next.nodes.map((node) => node.kind)));
       setEnabledEdges(new Set(next.edges.map((edge) => edge.kind)));
+      if (breadcrumbIndex != null) setBreadcrumbs((before) => before.slice(0, breadcrumbIndex + 1));
+      else if (scope === "repository") setBreadcrumbs([{ scope, label: "Repository" }]);
+      else setBreadcrumbs((before) => [...before, { scope, id: parentId, label: label ?? parentId ?? scope }]);
       setPhase("ready");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to load graph overview");
-      setPhase("error");
+      setError(reason instanceof Error ? reason.message : "Unable to load graph projection"); setPhase("error");
     }
   };
 
-  useEffect(() => {
-    void (async () => {
-      try {
-        const s = await api.summary();
-        setSummary(s);
-        const defaults = new Set((s.kinds ?? []).map((k) => k.kind).filter((k) => STRUCTURAL_KINDS.has(k)));
-        setSelectedKinds(defaults);
-        if (s.total_nodes < SMALL_GRAPH_THRESHOLD) {
-          await loadOverview();
-        } else {
-          setPhase("selecting");
-        }
-      } catch (reason) {
-        setError(reason instanceof Error ? reason.message : "Unable to reach graph server");
-        setPhase("error");
-      }
-    })();
-  }, []);
-
-  const handleLoadFromSelector = () => {
-    void loadOverview([...selectedKinds]);
-  };
-
-  const handleRefresh = () => {
-    if (summary && summary.total_nodes >= SMALL_GRAPH_THRESHOLD) {
-      setPhase("selecting");
-    } else {
-      void loadOverview();
-    }
-  };
+  useEffect(() => { void loadProjection("repository"); }, []);
 
   const filteredNodes = useMemo(() => data?.nodes.filter((node) => enabledKinds.has(node.kind)) ?? [], [data, enabledKinds]);
   const filteredNodeIds = useMemo(() => new Set(filteredNodes.map((node) => node.index)), [filteredNodes]);
   const filteredEdges = useMemo(() => data?.edges.filter((edge) => enabledEdges.has(edge.kind) && filteredNodeIds.has(edge.source) && filteredNodeIds.has(edge.target)) ?? [], [data, enabledEdges, filteredNodeIds]);
-  const target = useMemo(() => cameraTarget(filteredNodes, selected ?? new Set()), [filteredNodes, selected]);
+  const counts = useMemo(() => {
+    const kinds = new Map<string, number>(); const edges = new Map<string, number>();
+    for (const node of data?.nodes ?? []) kinds.set(node.kind, (kinds.get(node.kind) ?? 0) + 1);
+    for (const edge of data?.edges ?? []) edges.set(edge.kind, (edges.get(edge.kind) ?? 0) + 1);
+    return { kinds: [...kinds].sort((a, b) => b[1] - a[1]), edges: [...edges].sort((a, b) => b[1] - a[1]) };
+  }, [data]);
+  const matches = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return needle ? filteredNodes.filter((node) => `${node.name} ${node.id}`.toLowerCase().includes(needle)).slice(0, 120) : filteredNodes.slice(0, 120);
+  }, [filteredNodes, search]);
 
   const selectNode = async (node: OverviewNode) => {
+    const generation = ++contextGeneration.current;
     const connected = new Set<number>([node.index]);
     for (const edge of filteredEdges) { if (edge.source === node.index) connected.add(edge.target); if (edge.target === node.index) connected.add(edge.source); }
-    setSelected(connected); onSelectedId(node.id); setContextLoading(true);
-    try { setContext(await api.context(node.id)); } catch { setContext(null); }
-    finally { setContextLoading(false); }
+    setSelected(connected); setSelectedNode(node); onSelectedId(node.id); setContext(null); setContextLoading(false);
+    if ((node.role ?? "entity") !== "entity") return;
+    setContextLoading(true);
+    try {
+      const next = await api.context(node.id);
+      if (contextGeneration.current === generation) setContext(next);
+    } catch {
+      if (contextGeneration.current === generation) setContext(null);
+    } finally {
+      if (contextGeneration.current === generation) setContextLoading(false);
+    }
   };
-  const selectById = (id: string) => { const node = data?.nodes.find((item) => item.id === id); if (node) void selectNode(node); };
-  useEffect(() => { if (selectedId && data && context?.node.id !== selectedId) selectById(selectedId); }, [selectedId, data]);
 
-  const counts = useMemo(() => {
-    const kinds = new Map<string, number>(); const edges = new Map<string, number>(); const clusters = new Map<string, number>();
-    for (const node of data?.nodes ?? []) { kinds.set(node.kind, (kinds.get(node.kind) ?? 0) + 1); const key = clusterName(node.file, node.kind); clusters.set(key, (clusters.get(key) ?? 0) + 1); }
-    for (const edge of data?.edges ?? []) edges.set(edge.kind, (edges.get(edge.kind) ?? 0) + 1);
-    return { kinds: [...kinds].sort((a, b) => b[1] - a[1]), edges: [...edges].sort((a, b) => b[1] - a[1]), clusters: [...clusters].sort((a, b) => b[1] - a[1]) };
-  }, [data]);
-  const matches = useMemo(() => search.trim() ? filteredNodes.filter((node) => `${node.name} ${node.id} ${node.file}`.toLowerCase().includes(search.toLowerCase())).slice(0, 40) : [], [filteredNodes, search]);
+  const exploreNode = async (node: OverviewNode) => {
+    if (node.kind === "Community") { await loadProjection("community", node.id, node.name); return; }
+    if (node.kind === "File") { await loadProjection("file", node.id, node.name); return; }
+    if (!data) return;
+    try {
+      const layer = await api.expand(node.id, [...enabledEdges]);
+      setData(mergeExpansion(data, layer, node));
+      setError(null);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to expand node"); }
+  };
 
-  if (phase === "idle" || phase === "loading") {
-    return <div className="center-state"><span className="spinner" /><strong>Computing repository layout</strong><small>Preparing the graph overview</small></div>;
-  }
-  if (phase === "error") {
-    return <div className="center-state error-state"><strong>Overview unavailable</strong><span>{error}</span><button onClick={handleRefresh}>Retry</button></div>;
-  }
-  if (phase === "selecting" && summary) {
-    return <KindSelector summary={summary} selected={selectedKinds} onChange={setSelectedKinds} onLoad={handleLoadFromSelector} />;
-  }
-  if (!data || data.nodes.length === 0) {
-    return <div className="center-state"><strong>No graph data</strong><small>Index a repository, then refresh this view.</small></div>;
-  }
+  useEffect(() => {
+    if (!selectedId || !data || selectedNode?.id === selectedId) return;
+    const node = data.nodes.find((item) => item.id === selectedId);
+    if (node) void selectNode(node);
+  }, [selectedId, data]);
+
+  if (phase === "loading") return <div className="center-state"><span className="spinner" /><strong>Loading bounded projection</strong><small>Aggregating graph data on the server</small></div>;
+  if (phase === "error") return <div className="center-state error-state"><strong>Overview unavailable</strong><span>{error}</span><button onClick={() => void loadProjection(breadcrumbs.at(-1)?.scope ?? "repository", breadcrumbs.at(-1)?.id)}>Retry</button></div>;
+  if (!data || data.nodes.length === 0) return <div className="center-state"><strong>No graph data</strong><small>Index a repository, then refresh this view.</small></div>;
 
   return <div className="overview-shell">
     <aside className="filter-rail" style={{ width: leftWidth }}>
-      <div className="rail-section rail-heading"><span>Projection</span><button className="icon-button" onClick={handleRefresh} title="Change selection"><RefreshCw size={14} /></button></div>
-      <div className="projection-meta"><b>{data.nodes.length.toLocaleString()}</b> of {data.total_nodes.toLocaleString()} nodes<br/><b>{data.edges.length.toLocaleString()}</b> of {data.total_edges.toLocaleString()} edges{data.truncated && <em>bounded view</em>}</div>
-      <div className="rail-section"><div className="rail-label"><span>Node types</span><button onClick={() => setEnabledKinds(new Set(counts.kinds.map(([kind]) => kind)))}>All</button><button onClick={() => setEnabledKinds(new Set())}>None</button></div><div className="filter-chips">{counts.kinds.map(([kind, count]) => <button key={kind} className={enabledKinds.has(kind) ? "is-active" : ""} onClick={() => setEnabledKinds((before) => { const next = new Set(before); next.has(kind) ? next.delete(kind) : next.add(kind); return next; })}><i style={{ background: kindColor(kind) }} />{kind}<span>{count.toLocaleString()}</span></button>)}</div></div>
-      <div className="rail-section"><div className="rail-label"><span>Relationships</span></div><div className="filter-chips edge-chips">{counts.edges.map(([kind, count]) => <button key={kind} className={enabledEdges.has(kind) ? "is-active" : ""} onClick={() => setEnabledEdges((before) => { const next = new Set(before); next.has(kind) ? next.delete(kind) : next.add(kind); return next; })}>{enabledEdges.has(kind) && <Check size={10} />}{kind.replaceAll("_", " ").toLowerCase()}<span>{count.toLocaleString()}</span></button>)}</div></div>
-      <div className="rail-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find node or file…" />{search && <button onClick={() => setSearch("")}><X size={13}/></button>}</div>
-      <div className="tree-list">{search ? matches.map((node) => <button key={node.id} onClick={() => void selectNode(node)}><i style={{ background: node.color }} /><span><b>{node.name}</b><small>{node.file || node.kind}</small></span></button>) : counts.clusters.slice(0, 120).map(([cluster, count]) => <button key={cluster} onClick={() => { const ids = new Set(data.nodes.filter((node) => clusterName(node.file, node.kind) === cluster).map((node) => node.index)); setSelected(ids); }}><ChevronRight size={11}/><span><b>{cluster}</b></span><em>{count.toLocaleString()}</em></button>)}</div>
-      {selected && <button className="clear-selection" onClick={() => { setSelected(null); setContext(null); onSelectedId(null); }}>Clear selection</button>}
+      <div className="rail-section rail-heading"><span>Projection</span><button className="icon-button" onClick={() => { const crumb = breadcrumbs.at(-1)!; void loadProjection(crumb.scope, crumb.id, crumb.label, breadcrumbs.length - 1); }} title="Refresh"><RefreshCw size={14} /></button></div>
+      <nav className="projection-breadcrumbs">{breadcrumbs.map((crumb, index) => <button key={`${crumb.scope}:${crumb.id ?? "root"}`} onClick={() => void loadProjection(crumb.scope, crumb.id, crumb.label, index)}>{index > 0 && <ChevronRight size={11} />}{crumb.label}</button>)}</nav>
+      <div className="projection-meta"><b>{data.nodes.length.toLocaleString()}</b> of {data.total_nodes.toLocaleString()} groups/nodes<br/><b>{data.edges.length.toLocaleString()}</b> of {data.total_edges.toLocaleString()} relationships{data.truncated && <em>bounded view</em>}</div>
+      <div className="rail-section"><div className="rail-label"><span>Node types</span><button onClick={() => setEnabledKinds(new Set(counts.kinds.map(([kind]) => kind)))}>All</button><button onClick={() => setEnabledKinds(new Set())}>None</button></div><div className="filter-chips">{counts.kinds.map(([kind, count]) => <button key={kind} className={enabledKinds.has(kind) ? "is-active" : ""} onClick={() => setEnabledKinds((before) => toggle(before, kind))}><i style={{ background: kindColor(kind) }} />{kind}<span>{count.toLocaleString()}</span></button>)}</div></div>
+      <div className="rail-section"><div className="rail-label"><span>Relationships</span></div><div className="filter-chips edge-chips">{counts.edges.map(([kind, count]) => <button key={kind} className={enabledEdges.has(kind) ? "is-active" : ""} onClick={() => setEnabledEdges((before) => toggle(before, kind))}>{enabledEdges.has(kind) && <Check size={10} />}{kind.replaceAll("_", " ").toLowerCase()}<span>{count.toLocaleString()}</span></button>)}</div></div>
+      <div className="rail-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find node or group…" />{search && <button onClick={() => setSearch("")}><X size={13}/></button>}</div>
+      <div className="tree-list">{matches.map((node) => <button key={node.id} onClick={() => void selectNode(node)} onDoubleClick={() => void exploreNode(node)}><i style={{ background: kindColor(node.kind) }} /><span><b>{node.name}</b><small>{node.role ?? node.kind}</small></span><em>{(node.member_count ?? node.degree).toLocaleString()}</em></button>)}</div>
+      {selected && <button className="clear-selection" onClick={() => { setSelected(null); setSelectedNode(null); setContext(null); onSelectedId(null); }}>Clear selection</button>}
     </aside>
     <ResizeHandle side="left" onDelta={(delta) => setLeftWidth((width) => { const next = Math.max(210, Math.min(480, width + delta)); storeWidth("cih-left-width", next); return next; })} />
-    <main className="galaxy-workspace">
-      <GalaxyScene nodes={filteredNodes} edges={filteredEdges} selected={selected} target={target} autoRotate={autoRotate} showLabels={showLabels} resetNonce={resetNonce} onSelect={(node) => void selectNode(node)} />
-      <div className="canvas-hud"><span>{filteredNodes.length.toLocaleString()} stars</span><span>{filteredEdges.length.toLocaleString()} links</span>{selected && <span className="is-accent">{selected.size.toLocaleString()} focused</span>}</div>
-      <div className="hud-controls">
-        <Legend />
-        <button className="hud-button" onClick={resetView} title="Reset view"><Maximize size={13} /></button>
-        <button className={autoRotate ? "hud-button is-on" : "hud-button"} aria-pressed={autoRotate} onClick={() => setAutoRotate((v) => !v)} title="Auto-rotate"><Orbit size={13} /></button>
-        <button className={showLabels ? "hud-button is-on" : "hud-button"} aria-pressed={showLabels} onClick={() => setShowLabels((v) => !v)} title="Toggle labels"><Tag size={13} /></button>
-      </div>
+    <main className="graph-workspace">
+      <GraphCanvas nodes={filteredNodes} edges={filteredEdges} selected={selected} showLabels={showLabels} resetNonce={resetNonce} onSelect={(node) => void selectNode(node)} onExplore={(node) => void exploreNode(node)} />
+      {error && <div className="graph-error-toast">{error}<button onClick={() => setError(null)} aria-label="Dismiss error"><X size={12}/></button></div>}
+      <div className="canvas-hud"><span>{filteredNodes.length.toLocaleString()} nodes</span><span>{filteredEdges.length.toLocaleString()} relationships</span>{selected && <span className="is-accent">{selected.size.toLocaleString()} focused</span>}</div>
+      <div className="hud-controls"><Legend /><button className="hud-button" onClick={() => setResetNonce((value) => value + 1)} title="Fit graph"><Maximize size={13} /></button><button className={showLabels ? "hud-button is-on" : "hud-button"} aria-pressed={showLabels} onClick={() => setShowLabels((value) => !value)} title="Toggle labels"><Tag size={13} /></button></div>
     </main>
-    {(context || contextLoading) && <><ResizeHandle side="right" onDelta={(delta) => setRightWidth((width) => { const next = Math.max(250, Math.min(520, width + delta)); storeWidth("cih-right-width", next); return next; })} /><div style={{ width: rightWidth }} className="inspector-wrap"><Inspector context={context} loading={contextLoading} onClose={() => { setContext(null); setSelected(null); onSelectedId(null); }} onNavigate={selectById} /></div></>}
+    {selectedNode && <><ResizeHandle side="right" onDelta={(delta) => setRightWidth((width) => { const next = Math.max(250, Math.min(520, width + delta)); storeWidth("cih-right-width", next); return next; })} /><div style={{ width: rightWidth }} className="inspector-wrap"><Inspector node={selectedNode} context={context} loading={contextLoading} onClose={() => { setSelected(null); setSelectedNode(null); setContext(null); onSelectedId(null); }} onExplore={() => void exploreNode(selectedNode)} /></div></>}
   </div>;
 }
 
-function storedWidth(key: string, fallback: number): number {
-  try { return Number(window.localStorage?.getItem(key)) || fallback; } catch { return fallback; }
-}
-
-function storeWidth(key: string, value: number): void {
-  try { window.localStorage?.setItem(key, String(value)); } catch { /* storage is optional */ }
-}
+function toggle(before: Set<string>, value: string): Set<string> { const next = new Set(before); next.has(value) ? next.delete(value) : next.add(value); return next; }
+function storedWidth(key: string, fallback: number): number { try { return Number(window.localStorage?.getItem(key)) || fallback; } catch { return fallback; } }
+function storeWidth(key: string, value: number): void { try { window.localStorage?.setItem(key, String(value)); } catch { /* optional */ } }

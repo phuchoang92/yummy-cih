@@ -1,6 +1,6 @@
 import { Palette, X } from "lucide-react";
 import { useState } from "react";
-import { EDGE_COLORS, edgeLabel, KIND_COLORS, STELLAR_RAMP } from "./colors";
+import { EDGE_COLORS, edgeLabel, KIND_COLORS } from "./colors";
 
 // Kinds worth surfacing in the legend, in a sensible reading order. "Node" is a
 // generic fallback, not a real kind, so it is intentionally omitted.
@@ -13,8 +13,6 @@ const LEGEND_KINDS = [
  *  default so it never obscures the scene or collides with rail labels. */
 export function Legend() {
   const [open, setOpen] = useState(false);
-  const ramp = `linear-gradient(90deg, ${STELLAR_RAMP.map((s) => s.color).join(", ")})`;
-
   if (!open) {
     return (
       <button className="hud-button" aria-label="Show legend" onClick={() => setOpen(true)}>
@@ -31,10 +29,8 @@ export function Legend() {
       </div>
 
       <section className="legend-section">
-        <h4>Stars — degree</h4>
-        <div className="legend-ramp" style={{ background: ramp }} />
-        <div className="legend-ramp-labels"><span>leaf</span><span>hub</span></div>
-        <small>Star color encodes how connected a node is, not its kind.</small>
+        <h4>Node size</h4>
+        <small>Size reflects aggregate members or graph degree; color identifies node kind.</small>
       </section>
 
       <section className="legend-section">

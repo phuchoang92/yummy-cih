@@ -7,17 +7,19 @@
 //! kind fall out of it); result caps match the reference exactly.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cih_core::{Edge, EdgeKind, GraphArtifacts, GraphDelta, Node, NodeId, NodeKind};
 use cih_graph_store::{
-    stored_edge_token, CallSiteArgs, CommunityEdge, CommunityInfo, ContextCursorKey, ContextFilter,
-    ContextPage, ContextSection, DbEffect, Direction, ExecutionTransition, GraphOverview,
-    GraphOverviewEdge, GraphOverviewNode, GraphStore, GraphStoreError, GraphSummary, HotspotNode,
-    InterceptingAdvice, Interception, KindCount, LoadObserver, LoadStats, NoopObserver, Path,
-    Result, RouteInfo, SimilarMethod, StoredTransition, SymbolContext, TestCoveragePage,
-    TransitionBatch, TransitionQuery, EXECUTION_BATCH_SIZE,
+    default_projection_edge_kinds, stored_edge_token, CallSiteArgs, CommunityEdge, CommunityInfo,
+    ContextCursorKey, ContextFilter, ContextPage, ContextSection, DbEffect, Direction,
+    ExecutionTransition, GraphOverview, GraphOverviewEdge, GraphOverviewNode, GraphProjection,
+    GraphProjectionEdge, GraphProjectionNode, GraphProjectionQuery, GraphStore, GraphStoreError,
+    GraphSummary, HotspotNode, InterceptingAdvice, Interception, KindCount, LoadObserver,
+    LoadStats, NoopObserver, Path, ProjectionNodeRole, ProjectionScope, Result, RouteInfo,
+    SimilarMethod, StoredTransition, SymbolContext, TestCoveragePage, TransitionBatch,
+    TransitionQuery, EXECUTION_BATCH_SIZE,
 };
 use lbug::{Connection, Value};
 
@@ -48,6 +50,82 @@ fn edge_from_label(label: &str) -> EdgeKind {
         }
     }
     EdgeKind::Other
+}
+
+fn projection_kinds(query: &GraphProjectionQuery) -> Vec<EdgeKind> {
+    if query.edge_kinds.is_empty() {
+        default_projection_edge_kinds()
+    } else {
+        query.edge_kinds.clone()
+    }
+}
+
+fn projection_kind_list(kinds: &[EdgeKind]) -> String {
+    kinds
+        .iter()
+        .map(|kind| cstr(kind.cypher_label()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn path_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+async fn projection_rows(store: &LadybugStore, query: String) -> Result<Vec<Vec<Value>>> {
+    store
+        .with_read_conn(Vec::new(), move |connection| rows(connection, &query))
+        .await
+}
+
+fn finish_projection(
+    mut nodes: Vec<GraphProjectionNode>,
+    edge_counts: HashMap<(NodeId, NodeId, EdgeKind), u64>,
+    total_nodes: u64,
+    node_truncated: bool,
+    edge_limit: usize,
+) -> GraphProjection {
+    nodes.sort_by(|left, right| {
+        right
+            .member_count
+            .cmp(&left.member_count)
+            .then_with(|| right.degree.cmp(&left.degree))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    nodes.dedup_by(|left, right| left.id == right.id);
+    let selected: HashSet<&NodeId> = nodes.iter().map(|node| &node.id).collect();
+    let mut edges = edge_counts
+        .into_iter()
+        .filter(|((source, target, _), _)| {
+            selected.contains(source) && selected.contains(target) && source != target
+        })
+        .map(|((source, target, kind), count)| GraphProjectionEdge {
+            source,
+            target,
+            kind,
+            count,
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.source.as_str().cmp(right.source.as_str()))
+            .then_with(|| left.target.as_str().cmp(right.target.as_str()))
+            .then_with(|| left.kind.cypher_label().cmp(right.kind.cypher_label()))
+    });
+    let total_edges = edges.len() as u64;
+    let edge_truncated = edges.len() > edge_limit;
+    edges.truncate(edge_limit);
+    GraphProjection {
+        truncated: node_truncated
+            || edge_truncated
+            || nodes.len() < total_nodes.try_into().unwrap_or(usize::MAX),
+        nodes,
+        edges,
+        total_nodes,
+        total_edges,
+    }
 }
 
 /// Canonical column order consumed by `node_from_row`. Keep every query that
@@ -98,9 +176,10 @@ impl LadybugStore {
         Ok(ContextSection::from_node_probe(nodes, limit, after))
     }
 
-    async fn count_scalar(&self, q: &'static str) -> Result<u64> {
+    async fn count_scalar(&self, q: impl Into<String>) -> Result<u64> {
+        let q = q.into();
         let out = self
-            .with_read_conn(Vec::new(), move |conn| rows(conn, q))
+            .with_read_conn(Vec::new(), move |conn| rows(conn, &q))
             .await?;
         Ok(out
             .first()
@@ -650,6 +729,353 @@ impl GraphStore for LadybugStore {
             total_edges,
             truncated,
         })
+    }
+
+    async fn graph_projection(&self, query: &GraphProjectionQuery) -> Result<GraphProjection> {
+        query.validate()?;
+        let kinds = projection_kinds(query);
+        let kind_list = projection_kind_list(&kinds);
+        match query.scope {
+            ProjectionScope::Repository => {
+                let probe = query.node_limit.saturating_add(1);
+                let mut rows = projection_rows(
+                    self,
+                    format!(
+                        "MATCH (c:Symbol) WHERE c.kind = 'Community' \
+                         RETURN c.id, c.name, coalesce(c.symbolCount, 0) \
+                         ORDER BY coalesce(c.symbolCount, 0) DESC, c.id ASC LIMIT {probe}"
+                    ),
+                )
+                .await?;
+                let mut node_truncated = rows.len() > query.node_limit;
+                rows.truncate(query.node_limit);
+                let mut nodes = rows
+                    .iter()
+                    .filter(|row| row.len() >= 2)
+                    .map(|row| GraphProjectionNode {
+                        id: NodeId::new(cell_str(&row[0])),
+                        kind: NodeKind::Community,
+                        name: cell_str(&row[1]),
+                        role: ProjectionNodeRole::Aggregate,
+                        member_count: row.get(2).map(cell_u64).unwrap_or(0),
+                        degree: 0,
+                        expandable: true,
+                    })
+                    .collect::<Vec<_>>();
+                let mut total_nodes = self
+                    .count_scalar("MATCH (c:Symbol) WHERE c.kind = 'Community' RETURN count(c)")
+                    .await?;
+                let mut edge_counts = HashMap::new();
+
+                if nodes.is_empty() {
+                    let mut folders = projection_rows(
+                        self,
+                        format!(
+                            "MATCH (f:Symbol) WHERE f.kind = 'Folder' AND NOT f.file CONTAINS '/' \
+                             RETURN f.id, f.name ORDER BY f.id ASC LIMIT {probe}"
+                        ),
+                    )
+                    .await?;
+                    node_truncated |= folders.len() > query.node_limit;
+                    folders.truncate(query.node_limit);
+                    total_nodes = self
+                        .count_scalar(
+                            "MATCH (f:Symbol) WHERE f.kind = 'Folder' AND NOT f.file CONTAINS '/' RETURN count(f)",
+                        )
+                        .await?;
+                    nodes = folders
+                        .into_iter()
+                        .filter(|row| row.len() >= 2)
+                        .map(|row| GraphProjectionNode {
+                            id: NodeId::new(cell_str(&row[0])),
+                            kind: NodeKind::Folder,
+                            name: cell_str(&row[1]),
+                            role: ProjectionNodeRole::Aggregate,
+                            member_count: 0,
+                            degree: 0,
+                            expandable: false,
+                        })
+                        .collect();
+                } else {
+                    let edge_probe = query.edge_limit.saturating_add(1);
+                    let ids = nodes
+                        .iter()
+                        .map(|node| cstr(node.id.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let edge_rows = projection_rows(
+                        self,
+                        format!(
+                            "MATCH (a:Symbol)-[:MEMBER_OF]->(ca:Symbol), \
+                                   (b:Symbol)-[:MEMBER_OF]->(cb:Symbol), \
+                                   (a)-[r]->(b) \
+                             WHERE ca.id IN [{ids}] AND cb.id IN [{ids}] AND ca.id <> cb.id \
+                               AND label(r) IN [{kind_list}] \
+                             RETURN ca.id, cb.id, label(r), count(*) \
+                             ORDER BY count(*) DESC, ca.id ASC, cb.id ASC LIMIT {edge_probe}"
+                        ),
+                    )
+                    .await?;
+                    for row in edge_rows.iter().filter(|row| row.len() >= 4) {
+                        *edge_counts
+                            .entry((
+                                NodeId::new(cell_str(&row[0])),
+                                NodeId::new(cell_str(&row[1])),
+                                edge_from_label(&cell_str(&row[2])),
+                            ))
+                            .or_insert(0) += cell_u64(&row[3]);
+                    }
+                    let mut degree = HashMap::<NodeId, u64>::new();
+                    for ((source, target, _), count) in &edge_counts {
+                        *degree.entry(source.clone()).or_insert(0) += *count;
+                        *degree.entry(target.clone()).or_insert(0) += *count;
+                    }
+                    for node in &mut nodes {
+                        node.degree = degree.get(&node.id).copied().unwrap_or(0);
+                    }
+                }
+                Ok(finish_projection(
+                    nodes,
+                    edge_counts,
+                    total_nodes,
+                    node_truncated,
+                    query.edge_limit,
+                ))
+            }
+            ProjectionScope::Community => {
+                let parent = query
+                    .parent_id
+                    .as_ref()
+                    .expect("validated community parent");
+                let parent_node = self
+                    .get_node(parent)
+                    .await?
+                    .ok_or_else(|| GraphStoreError::NotFound(parent.to_string()))?;
+                if parent_node.kind != NodeKind::Community {
+                    return Err(GraphStoreError::InvalidInput(
+                        "community projection parent must be a Community node".into(),
+                    ));
+                }
+                let parent_lit = cstr(parent.as_str());
+                let probe = query.node_limit.saturating_add(1);
+                let mut file_rows = projection_rows(
+                    self,
+                    format!(
+                        "MATCH (n:Symbol)-[:MEMBER_OF]->(c:Symbol) \
+                         WHERE c.id = {parent_lit} AND n.file <> '' \
+                         RETURN n.file, count(n) ORDER BY count(n) DESC, n.file ASC LIMIT {probe}"
+                    ),
+                )
+                .await?;
+                let mut node_truncated = file_rows.len() > query.node_limit;
+                file_rows.truncate(query.node_limit);
+                let total_files = self
+                    .count_scalar(format!(
+                        "MATCH (n:Symbol)-[:MEMBER_OF]->(c:Symbol) \
+                         WHERE c.id = {parent_lit} AND n.file <> '' \
+                         WITH DISTINCT n.file AS file RETURN count(file)"
+                    ))
+                    .await?;
+                let mut nodes = file_rows
+                    .iter()
+                    .filter(|row| row.len() >= 2)
+                    .map(|row| {
+                        let path = cell_str(&row[0]);
+                        let members = cell_u64(&row[1]);
+                        GraphProjectionNode {
+                            id: NodeId::new(format!("File:{path}")),
+                            kind: NodeKind::File,
+                            name: path_name(&path),
+                            role: ProjectionNodeRole::Aggregate,
+                            member_count: members,
+                            degree: members,
+                            expandable: true,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let selected_files = file_rows
+                    .iter()
+                    .filter_map(|row| row.first().map(cell_str))
+                    .collect::<Vec<_>>();
+                let file_list = selected_files
+                    .iter()
+                    .map(|file| cstr(file))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut edge_counts = HashMap::new();
+                if !selected_files.is_empty() {
+                    let edge_probe = query.edge_limit.saturating_add(1);
+                    let internal = projection_rows(
+                        self,
+                        format!(
+                            "MATCH (a:Symbol)-[:MEMBER_OF]->(c:Symbol)<-[:MEMBER_OF]-(b:Symbol), \
+                                   (a)-[r]->(b) \
+                             WHERE c.id = {parent_lit} AND a.file IN [{file_list}] \
+                               AND b.file IN [{file_list}] AND a.file <> b.file \
+                               AND label(r) IN [{kind_list}] \
+                             RETURN a.file, b.file, label(r), count(*) \
+                             ORDER BY count(*) DESC, a.file ASC, b.file ASC LIMIT {edge_probe}"
+                        ),
+                    )
+                    .await?;
+                    for row in internal.iter().filter(|row| row.len() >= 4) {
+                        *edge_counts
+                            .entry((
+                                NodeId::new(format!("File:{}", cell_str(&row[0]))),
+                                NodeId::new(format!("File:{}", cell_str(&row[1]))),
+                                edge_from_label(&cell_str(&row[2])),
+                            ))
+                            .or_insert(0) += cell_u64(&row[3]);
+                    }
+
+                    let boundary_budget = query
+                        .boundary_limit
+                        .min(query.node_limit.saturating_sub(nodes.len()));
+                    let boundary_probe = boundary_budget.saturating_add(1);
+                    let outgoing = projection_rows(
+                        self,
+                        format!(
+                            "MATCH (a:Symbol)-[:MEMBER_OF]->(c:Symbol), \
+                                   (b:Symbol)-[:MEMBER_OF]->(other:Symbol), (a)-[r]->(b) \
+                             WHERE c.id = {parent_lit} AND other.id <> c.id \
+                               AND a.file IN [{file_list}] AND label(r) IN [{kind_list}] \
+                             RETURN a.file, other.id, other.name, label(r), count(*) \
+                             ORDER BY count(*) DESC, a.file ASC, other.id ASC LIMIT {boundary_probe}"
+                        ),
+                    )
+                    .await?;
+                    node_truncated |= outgoing.len() > boundary_budget;
+                    for row in outgoing.iter().take(boundary_budget) {
+                        if row.len() < 5 {
+                            continue;
+                        }
+                        let boundary = NodeId::new(cell_str(&row[1]));
+                        if !nodes.iter().any(|node| node.id == boundary)
+                            && nodes
+                                .iter()
+                                .filter(|node| node.role == ProjectionNodeRole::Boundary)
+                                .count()
+                                < boundary_budget
+                        {
+                            nodes.push(GraphProjectionNode {
+                                id: boundary.clone(),
+                                kind: NodeKind::Community,
+                                name: cell_str(&row[2]),
+                                role: ProjectionNodeRole::Boundary,
+                                member_count: 0,
+                                degree: cell_u64(&row[4]),
+                                expandable: true,
+                            });
+                        }
+                        *edge_counts
+                            .entry((
+                                NodeId::new(format!("File:{}", cell_str(&row[0]))),
+                                boundary,
+                                edge_from_label(&cell_str(&row[3])),
+                            ))
+                            .or_insert(0) += cell_u64(&row[4]);
+                    }
+                }
+                let total_nodes = total_files.saturating_add(
+                    nodes
+                        .iter()
+                        .filter(|node| node.role == ProjectionNodeRole::Boundary)
+                        .count() as u64,
+                );
+                Ok(finish_projection(
+                    nodes,
+                    edge_counts,
+                    total_nodes,
+                    node_truncated,
+                    query.edge_limit,
+                ))
+            }
+            ProjectionScope::File => {
+                let parent = query.parent_id.as_ref().expect("validated file parent");
+                let parent_node = self
+                    .get_node(parent)
+                    .await?
+                    .ok_or_else(|| GraphStoreError::NotFound(parent.to_string()))?;
+                if parent_node.kind != NodeKind::File {
+                    return Err(GraphStoreError::InvalidInput(
+                        "file projection parent must be a File node".into(),
+                    ));
+                }
+                let file = parent_node.file;
+                let file_lit = cstr(&file);
+                let probe = query.node_limit.saturating_add(1);
+                let columns = node_columns("n");
+                let mut symbol_rows = projection_rows(
+                    self,
+                    format!(
+                        "MATCH (n:Symbol) WHERE n.file = {file_lit} \
+                           AND NOT n.kind IN ['File','Folder','Community','Process'] \
+                         OPTIONAL MATCH (n)-[r]-(:Symbol) WITH n, count(r) AS degree \
+                         RETURN {columns}, degree ORDER BY degree DESC, n.id ASC LIMIT {probe}"
+                    ),
+                )
+                .await?;
+                let node_truncated = symbol_rows.len() > query.node_limit;
+                symbol_rows.truncate(query.node_limit);
+                let total_symbols = self
+                    .count_scalar(format!(
+                        "MATCH (n:Symbol) WHERE n.file = {file_lit} \
+                         AND NOT n.kind IN ['File','Folder','Community','Process'] RETURN count(n)"
+                    ))
+                    .await?;
+                let nodes = symbol_rows
+                    .iter()
+                    .filter(|row| row.len() >= 8)
+                    .map(|row| {
+                        let node = node_from_row(&row[..7]);
+                        GraphProjectionNode {
+                            id: node.id,
+                            kind: node.kind,
+                            name: node.name,
+                            role: ProjectionNodeRole::Entity,
+                            member_count: 1,
+                            degree: cell_u64(&row[7]),
+                            expandable: true,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let ids = nodes
+                    .iter()
+                    .map(|node| cstr(node.id.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut edge_counts = HashMap::new();
+                if !nodes.is_empty() {
+                    let edge_probe = query.edge_limit.saturating_add(1);
+                    let internal = projection_rows(
+                        self,
+                        format!(
+                            "MATCH (a:Symbol)-[r]->(b:Symbol) WHERE a.id IN [{ids}] \
+                               AND b.id IN [{ids}] AND label(r) IN [{kind_list}] \
+                             RETURN a.id, b.id, label(r), count(*) \
+                             ORDER BY count(*) DESC, a.id ASC, b.id ASC LIMIT {edge_probe}"
+                        ),
+                    )
+                    .await?;
+                    for row in internal.iter().filter(|row| row.len() >= 4) {
+                        *edge_counts
+                            .entry((
+                                NodeId::new(cell_str(&row[0])),
+                                NodeId::new(cell_str(&row[1])),
+                                edge_from_label(&cell_str(&row[2])),
+                            ))
+                            .or_insert(0) += cell_u64(&row[3]);
+                    }
+                }
+                Ok(finish_projection(
+                    nodes,
+                    edge_counts,
+                    total_symbols,
+                    node_truncated,
+                    query.edge_limit,
+                ))
+            }
+        }
     }
 
     async fn context(&self, id: &NodeId) -> Result<SymbolContext> {

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use cih_core::{EdgeKind, NodeKind};
-use cih_graph_store::GraphOverview;
+use cih_graph_store::{GraphOverview, GraphProjection, ProjectionNodeRole, ProjectionScope};
 use serde::Serialize;
 
 const GOLDEN_ANGLE: f32 = 2.399_963_1;
@@ -46,6 +46,106 @@ pub(crate) struct LayoutEdge {
     pub(crate) source: u32,
     pub(crate) target: u32,
     pub(crate) kind: String,
+}
+
+/// Cheap deterministic seed for the browser's incremental D3 worker. The
+/// worker improves these coordinates in short slices; the first paint never
+/// waits for a force simulation.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LayoutProjection {
+    pub(crate) scope: ProjectionScope,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) publication_epoch: Option<String>,
+    pub(crate) nodes: Vec<LayoutProjectionNode>,
+    pub(crate) edges: Vec<LayoutProjectionEdge>,
+    pub(crate) total_nodes: u64,
+    pub(crate) total_edges: u64,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LayoutProjectionNode {
+    pub(crate) index: u32,
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) role: ProjectionNodeRole,
+    pub(crate) member_count: u64,
+    pub(crate) degree: u64,
+    pub(crate) expandable: bool,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) size: f32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LayoutProjectionEdge {
+    pub(crate) source: u32,
+    pub(crate) target: u32,
+    pub(crate) kind: String,
+    pub(crate) count: u64,
+}
+
+pub(crate) fn compute_projection(
+    graph: GraphProjection,
+    scope: ProjectionScope,
+    parent_id: Option<String>,
+    publication_epoch: Option<String>,
+) -> LayoutProjection {
+    let mut id_to_index = HashMap::with_capacity(graph.nodes.len());
+    let count = graph.nodes.len().max(1);
+    let radius = (count as f32).sqrt().mul_add(22.0, 48.0);
+    let nodes = graph
+        .nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| {
+            id_to_index.insert(node.id.clone(), index as u32);
+            let hash = fnv1a(node.id.as_str());
+            let angle = GOLDEN_ANGLE * index as f32 + hash_unit(hash) * 0.35;
+            let radial = radius * ((index + 1) as f32 / count as f32).sqrt();
+            let radial = if node.role == ProjectionNodeRole::Boundary {
+                radius * 1.15
+            } else {
+                radial
+            };
+            LayoutProjectionNode {
+                index: index as u32,
+                id: node.id.to_string(),
+                kind: node.kind.label().to_string(),
+                name: node.name,
+                role: node.role,
+                member_count: node.member_count,
+                degree: node.degree,
+                expandable: node.expandable,
+                x: finite(angle.cos() * radial),
+                y: finite(angle.sin() * radial),
+                size: node_size(node.kind, node.degree.max(node.member_count)),
+            }
+        })
+        .collect::<Vec<_>>();
+    let edges = graph
+        .edges
+        .into_iter()
+        .filter_map(|edge| {
+            Some(LayoutProjectionEdge {
+                source: *id_to_index.get(&edge.source)?,
+                target: *id_to_index.get(&edge.target)?,
+                kind: edge.kind.cypher_label().to_string(),
+                count: edge.count,
+            })
+        })
+        .collect();
+    LayoutProjection {
+        scope,
+        parent_id,
+        publication_epoch,
+        nodes,
+        edges,
+        total_nodes: graph.total_nodes,
+        total_edges: graph.total_edges,
+        truncated: graph.truncated,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -311,7 +311,7 @@ async fn subgraph_with_source<S: StoredTraversalSource + ?Sized>(
             store,
             &frontier,
             Direction::Both,
-            &[],
+            &filter.edge_kinds,
             filter.transition_page_limit,
             remaining_edges,
         )
